@@ -15,17 +15,18 @@ main() {
   require_cmd apt-get
   net_guard "Installing OS packages"
 
-  export DEBIAN_FRONTEND=noninteractive
   info "Updating package lists (apt update)..."
-  if ! as_root apt-get update -y; then
-    die "apt update failed. Another apt/dpkg process may hold the lock (see docs/TROUBLESHOOTING.md) or the network is down."
+  # apt_get waits out the apt-daily/unattended-upgrades dpkg lock (common in
+  # the first minutes of a fresh boot) instead of failing the whole install.
+  if ! apt_get update -y; then
+    die "apt update failed. Another apt/dpkg process held the lock past the timeout (see docs/TROUBLESHOOTING.md) or the network is down."
   fi
 
   info "Upgrading installed packages (apt upgrade)..."
-  as_root apt-get upgrade -y
+  apt_get upgrade -y
 
   info "Installing: ${PACKAGES[*]}"
-  as_root apt-get install -y "${PACKAGES[@]}"
+  apt_get install -y "${PACKAGES[@]}"
 
   local pkg missing=0
   for pkg in "${PACKAGES[@]}"; do

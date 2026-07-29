@@ -1,10 +1,12 @@
 # FAQ.md
 
 **Is my data really private?**
-Yes. Models run on your VM; prompts and code never leave it. Aider and Open WebUI
-are configured with telemetry/analytics off, phone access rides an encrypted
-Tailscale tunnel, and `netmode.sh offline` gives you a provable guarantee: the
-stack physically cannot reach the internet, and chat still works.
+Yes. Models run on your VM; prompts and code never leave it. Aider is configured
+with telemetry/analytics off (`config/aider.conf.yml`), and Open WebUI is started
+with `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS` and `ANONYMIZED_TELEMETRY` set so it
+does not phone home either. Phone access rides an encrypted Tailscale tunnel, and
+`netmode.sh offline` gives you a provable guarantee: the stack physically cannot
+reach the internet, and chat still works.
 
 **Is this as good as Claude?**
 No — see "Honest expectations" in the [README](../README.md). A 7b/14b local

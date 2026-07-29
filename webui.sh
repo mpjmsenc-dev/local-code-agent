@@ -63,10 +63,10 @@ main() {
       local state
       state="$(as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}")"
       info "Container '${WEBUI_CONTAINER}': ${state}"
-      if curl -fsS --max-time 5 "http://127.0.0.1:${WEBUI_PORT}" >/dev/null 2>&1; then
-        ok "HTTP answering on port ${WEBUI_PORT}."
+      if webui_responds; then
+        ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else
-        warn "No HTTP answer on port ${WEBUI_PORT} (still starting? check: webui.sh logs)"
+        warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: webui.sh logs)"
         exit 1
       fi
       ;;

@@ -37,9 +37,17 @@ in this order. Copy-paste blocks are exact; button names are exact.
    SETUP COMPLETE — local-code-agent is ready.
    ```
 
+   If instead you see this line, the install finished but something essential
+   failed (usually the model download on a flaky connection) — don't continue;
+   jump to "If stuck":
+
+   ```
+   SETUP FINISHED WITH ERRORS — run /opt/local-code-agent/check-system.sh and see docs/TROUBLESHOOTING.md
+   ```
+
 4. Press `Ctrl` + `C` to stop watching the log.
 
-   (Line not appearing after 40 minutes? See "If stuck" at the bottom.)
+   (Neither line appears after 40 minutes? See "If stuck" at the bottom.)
 
 ## Step 3 — Connect Tailscale (server + phone)
 

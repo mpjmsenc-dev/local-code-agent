@@ -13,11 +13,18 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
 DONE_LINE="SETUP COMPLETE — local-code-agent is ready."
+FAIL_LINE="SETUP FINISHED WITH ERRORS — run ${SCRIPT_DIR}/check-system.sh and see docs/TROUBLESHOOTING.md"
 
 main() {
   step "local-code-agent setup starting"
   info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
   chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh
+
+  # Tracks whether every load-bearing step succeeded. A zero-terminal user
+  # watches the install log for the exact final line, so the healthy line
+  # must NOT print when something essential (the model, the final check)
+  # failed — otherwise they proceed onto a broken stack.
+  local setup_ok=true
 
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
@@ -46,6 +53,7 @@ main() {
     fi
   else
     warn "Ollama is not reachable — skipping model pull and smoke test (re-run ./setup.sh once Ollama runs)."
+    setup_ok=false
   fi
 
   if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
@@ -65,6 +73,7 @@ main() {
     ok "All system checks passed."
   else
     warn "Some system checks did not pass — review the summary above (docs/TROUBLESHOOTING.md helps)."
+    setup_ok=false
   fi
 
   # --- Next steps -----------------------------------------------------------
@@ -79,8 +88,12 @@ main() {
   info "4. Internet kill switch: sudo ${SCRIPT_DIR}/netmode.sh offline|online|status"
   info "5. Health check anytime: ${SCRIPT_DIR}/check-system.sh"
   # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
-  # install log for exactly this line.
-  printf '\n%b%s%b\n' "${C_GREEN}${C_BOLD}" "${DONE_LINE}" "${C_RESET}"
+  # install log for exactly one of these final lines.
+  if [[ "${setup_ok}" == "true" ]]; then
+    printf '\n%b%s%b\n' "${C_GREEN}${C_BOLD}" "${DONE_LINE}" "${C_RESET}"
+  else
+    printf '\n%b%s%b\n' "${C_YELLOW}${C_BOLD}" "${FAIL_LINE}" "${C_RESET}"
+  fi
 }
 
 main "$@"

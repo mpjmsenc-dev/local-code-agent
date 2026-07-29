@@ -61,6 +61,19 @@ check "http:// prefix stripped then re-added" \
   test "$(url_for http://127.0.0.1:11434)" = "http://127.0.0.1:11434"
 check "trailing slash stripped" \
   test "$(url_for 127.0.0.1:11434/)" = "http://127.0.0.1:11434"
+check "port-less 0.0.0.0 gets default 11434 (not port 80)" \
+  test "$(url_for 0.0.0.0)" = "http://127.0.0.1:11434"
+check "port-less host gets default 11434" \
+  test "$(url_for 127.0.0.1)" = "http://127.0.0.1:11434"
+
+echo "# ollama_bind_is_public() flags non-loopback binds"
+# Subshells inherit the sourced functions, so scope OLLAMA_HOST per check.
+is_public()  { ( OLLAMA_HOST="$1" ollama_bind_is_public ); }
+not_public() { ! ( OLLAMA_HOST="$1" ollama_bind_is_public ); }
+check "0.0.0.0:11434 bind is public"      is_public  "0.0.0.0:11434"
+check "0.0.0.0 bare bind is public"       is_public  "0.0.0.0"
+check "127.0.0.1:11434 is not public"     not_public "127.0.0.1:11434"
+check "localhost:11434 is not public"     not_public "localhost:11434"
 
 echo "# detect_ram_gib() returns a sane positive integer"
 RAM="$(detect_ram_gib)"

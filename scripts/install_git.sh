@@ -13,8 +13,7 @@ main() {
   step "Checking git"
   if ! have git; then
     net_guard "Installing git"
-    export DEBIAN_FRONTEND=noninteractive
-    as_root apt-get install -y git
+    apt_get install -y git
   fi
   require_cmd git
   ok "git $(git --version | awk '{print $3}') installed."

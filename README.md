@@ -138,8 +138,9 @@ local-code-agent/
 ## Honest expectations vs Claude
 
 Local 3b–14b models are **not** frontier models. Expect useful but simpler code
-edits, more misfires on complex refactors, and slower responses (CPU inference:
-roughly 5–10 tokens/s for 7b on a 4 vCPU / 8 GB droplet). What you get in
+edits, more misfires on complex refactors, and slower responses (CPU inference is
+a comfortable reading pace, not instant; the base 4 vCPU / 8 GB droplet auto-tunes
+to the 3b model, with 7b from ~12 GB and 14b from 16 GB). What you get in
 exchange: total privacy, zero per-token cost, no quotas, and offline operation.
 The stack scales with hardware — resize to more RAM and auto-tune upgrades the
 model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.

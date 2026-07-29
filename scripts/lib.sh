@@ -11,6 +11,16 @@ if [[ -n "${LCA_LIB_LOADED:-}" ]]; then
 fi
 LCA_LIB_LOADED=1
 
+# Debian gives non-root users a PATH without /usr/sbin and /sbin, where nft
+# (and other admin tools this project relies on) live; Ubuntu includes them.
+# Add them so have()/require_cmd() and as_root find those tools on every
+# supported distro, for root and non-root callers alike.
+case ":${PATH}:" in
+  *:/usr/sbin:*) ;;
+  *) PATH="${PATH}:/usr/sbin:/sbin" ;;
+esac
+export PATH
+
 LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
@@ -66,6 +76,25 @@ as_root() {
     have sudo || die "Root privileges needed for: $* — but 'sudo' is not installed and you are not root. Re-run as root or install sudo."
     sudo "$@"
   fi
+}
+
+# can_root — true if we could obtain root (already root, or sudo is present).
+# Unlike as_root this never exits, so callers that must keep running even
+# without a way to escalate (check-system.sh) can degrade gracefully instead
+# of dying silently inside a redirected probe.
+can_root() {
+  [[ "${EUID}" -eq 0 ]] || have sudo
+}
+
+# apt_get ARGS... — apt-get as root, non-interactive, and tolerant of the
+# dpkg lock that apt-daily / unattended-upgrades routinely hold during the
+# first minutes of a fresh boot (waits up to 10 min instead of failing hard).
+# Every apt-get call in the project goes through this so an unattended
+# cloud-init install never aborts on a transient lock. (DPkg::Lock::Timeout
+# is supported on apt >= 1.9.11, i.e. Ubuntu 20.04+ / Debian 11+.)
+apt_get() {
+  as_root env DEBIAN_FRONTEND=noninteractive \
+    apt-get -o DPkg::Lock::Timeout=600 "$@"
 }
 
 # confirm PROMPT — ask yes/no. Auto-answers YES when non-interactive so
@@ -152,19 +181,32 @@ aider_bin() { printf '%s/bin/aider\n' "$(venv_dir)"; }
 # ---------------------------------------------------------------------------
 
 # ollama_url — the base URL clients should use to reach the local Ollama
-# API. OLLAMA_HOST may be 0.0.0.0:PORT (a listen address); clients need a
-# connectable address, so that is rewritten to 127.0.0.1.
+# API. OLLAMA_HOST may be a listen address (0.0.0.0[:PORT]); clients need a
+# connectable address, so 0.0.0.0 is rewritten to 127.0.0.1, and a missing
+# port is filled with Ollama's default 11434 (ollama itself defaults the
+# port, so a port-less OLLAMA_HOST is valid and must not become port 80).
 ollama_url() {
   local host="${OLLAMA_HOST:-127.0.0.1:11434}"
   host="${host#http://}"
   host="${host#https://}"
   host="${host%/}"
-  if [[ "${host}" == 0.0.0.0:* ]]; then
-    host="127.0.0.1:${host#0.0.0.0:}"
-  elif [[ "${host}" == "0.0.0.0" ]]; then
-    host="127.0.0.1"
-  fi
+  host="${host/#0.0.0.0/127.0.0.1}"
+  [[ "${host}" == *:* ]] || host="${host}:11434"
   printf 'http://%s\n' "${host}"
+}
+
+# ollama_bind_is_public — true when OLLAMA_HOST binds beyond loopback. The
+# Ollama API is unauthenticated, so a non-loopback bind exposes it to anyone
+# who can reach the host; callers warn loudly rather than fail open silently.
+ollama_bind_is_public() {
+  local host="${OLLAMA_HOST:-127.0.0.1:11434}"
+  host="${host#http://}"
+  host="${host#https://}"
+  host="${host%%:*}"
+  case "${host}" in
+    127.0.0.1|localhost|::1|"") return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # wait_for_ollama [TIMEOUT_SECONDS] — poll /api/version until it answers.
@@ -218,25 +260,38 @@ detect_ram_gib() {
   awk '/^MemTotal:/ {printf "%d\n", ($2 + 524288) / 1048576}' /proc/meminfo
 }
 
+# render_ollama_dropin_content — print the drop-in the current .env implies,
+# to stdout (no writes). Kept separate so callers can diff it against the
+# installed file to detect drift.
+render_ollama_dropin_content() {
+  local extra_env="${REPO_ROOT}/config/ollama.env"
+  echo "# Managed by local-code-agent (scripts/install_ollama.sh and scripts/tune.sh)."
+  echo "# Manual edits will be overwritten on the next install or tune run."
+  echo "[Service]"
+  echo "Environment=OLLAMA_HOST=${OLLAMA_HOST}"
+  echo "Environment=OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
+  echo "Environment=OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"
+  if [[ -f "${extra_env}" ]]; then
+    { grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true; } \
+      | sed 's/^/Environment=/'
+  fi
+}
+
 # render_ollama_dropin — (re)write the ollama systemd drop-in from the
 # current .env values plus any extra KEY=VALUE lines in config/ollama.env.
 # Used by install_ollama.sh at install time and tune.sh on every re-tune.
 render_ollama_dropin() {
-  local extra_env="${REPO_ROOT}/config/ollama.env"
   as_root mkdir -p "${OLLAMA_DROPIN_DIR}"
-  {
-    echo "# Managed by local-code-agent (scripts/install_ollama.sh and scripts/tune.sh)."
-    echo "# Manual edits will be overwritten on the next install or tune run."
-    echo "[Service]"
-    echo "Environment=OLLAMA_HOST=${OLLAMA_HOST}"
-    echo "Environment=OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
-    echo "Environment=OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"
-    if [[ -f "${extra_env}" ]]; then
-      { grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true; } \
-        | sed 's/^/Environment=/'
-    fi
-  } | as_root tee "${OLLAMA_DROPIN}" >/dev/null
+  render_ollama_dropin_content | as_root tee "${OLLAMA_DROPIN}" >/dev/null
   ok "Wrote ${OLLAMA_DROPIN}"
+}
+
+# ollama_dropin_matches — true if the installed drop-in already equals what
+# the current .env would render. A mismatch means an earlier tune wrote .env
+# but was interrupted before re-rendering/restarting (config drift).
+ollama_dropin_matches() {
+  [[ -f "${OLLAMA_DROPIN}" ]] || return 1
+  diff -q <(render_ollama_dropin_content) "${OLLAMA_DROPIN}" >/dev/null 2>&1
 }
 
 # restart_ollama — reload systemd and restart the ollama service, then wait
@@ -246,6 +301,12 @@ restart_ollama() {
     as_root systemctl daemon-reload
     as_root systemctl restart ollama
     if wait_for_ollama 90; then
+      # The API answering is not proof OUR service is healthy: a stray
+      # 'ollama serve' holding the port answers too while the unit crash-loops
+      # on the bind error, silently discarding the drop-in we just rendered.
+      if ! systemctl is-active --quiet ollama 2>/dev/null; then
+        die "The Ollama API answers but the ollama systemd service is not active — another process may hold port 11434. See docs/TROUBLESHOOTING.md (Port 11434 already in use)."
+      fi
       ok "Ollama restarted and answering at $(ollama_url)"
     else
       die "Ollama did not answer after restart. Inspect it with: sudo systemctl status ollama"
@@ -255,12 +316,22 @@ restart_ollama() {
   fi
 }
 
-# wait_for_webui [TIMEOUT_SECONDS] — poll Open WebUI's HTTP port until it
+# webui_url — loopback URL for the local Open WebUI.
+webui_url() { printf 'http://127.0.0.1:%s\n' "${WEBUI_PORT:-3000}"; }
+
+# webui_responds — true only if Open WebUI's own /health endpoint answers.
+# Probing /health (not '/') means another service squatting the port cannot
+# masquerade as a healthy WebUI.
+webui_responds() {
+  curl -fsS --max-time 3 "$(webui_url)/health" >/dev/null 2>&1
+}
+
+# wait_for_webui [TIMEOUT_SECONDS] — poll Open WebUI's /health until it
 # answers. A cold container start takes noticeably longer than 'docker
 # start' returning, so start/restart/install all wait through this.
 wait_for_webui() {
   local timeout="${1:-120}" waited=0
-  while ! curl -fsS --max-time 3 "http://127.0.0.1:${WEBUI_PORT:-3000}" >/dev/null 2>&1; do
+  while ! webui_responds; do
     if (( waited >= timeout )); then
       return 1
     fi

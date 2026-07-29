@@ -24,6 +24,25 @@ source "${SCRIPT_DIR}/lib.sh"
 
 TUNE_SERVICE=/etc/systemd/system/local-code-agent-tune.service
 
+# largest_present_within TARGET — echo the largest already-downloaded
+# qwen2.5-coder ladder model no larger than TARGET, or nothing (exit 1).
+# Used to downgrade safely when a pull is impossible (offline / no network).
+largest_present_within() {
+  local target="$1" m order=""
+  case "${target}" in
+    *:14b) order="qwen2.5-coder:14b qwen2.5-coder:7b qwen2.5-coder:3b" ;;
+    *:7b)  order="qwen2.5-coder:7b qwen2.5-coder:3b" ;;
+    *)     order="qwen2.5-coder:3b" ;;
+  esac
+  for m in ${order}; do
+    if model_present "${m}"; then
+      printf '%s\n' "${m}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # choose_for_ram RAM_GIB — sets TUNE_MODEL and TUNE_CTX per the ladder.
 choose_for_ram() {
   local ram="$1"
@@ -110,6 +129,17 @@ main() {
   fi
 
   if [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+    # .env already matches the ladder — but an earlier run may have written
+    # .env and then been interrupted before re-rendering the drop-in, leaving
+    # the running service on stale settings that the .env-only check can't
+    # see. Re-converge the applied state if it drifted, then finish.
+    if have ollama && systemd_available && ! ollama_dropin_matches; then
+      warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
+      render_ollama_dropin
+      restart_ollama
+      ok "Re-synced Ollama to ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH})."
+      exit 0
+    fi
     ok "Already tuned for this machine (${MODEL_NAME}, ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
     exit 0
   fi
@@ -132,32 +162,58 @@ main() {
     wait_for_ollama 60 || die "Ollama API is not reachable at $(ollama_url). Start it (sudo systemctl start ollama) and re-run tune.sh."
   fi
 
-  local old_model="${MODEL_NAME}"
+  # The context length needs no download — apply it first so a DOWNGRADE
+  # (RAM shrank) shrinks the KV cache immediately even if the model step
+  # cannot complete (e.g. offline). This is the OOM-avoidance path.
+  set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+  OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
+
+  local old_model="${MODEL_NAME}" chosen_model="${TUNE_MODEL}" validate=false
   if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
     info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
-    if ! model_present "${TUNE_MODEL}"; then
-      net_guard "Downloading ${TUNE_MODEL}"
-      pull_model "${TUNE_MODEL}" || die "Could not pull ${TUNE_MODEL}; keeping ${MODEL_NAME} unchanged."
+    if model_present "${TUNE_MODEL}"; then
+      validate=true
+    elif [[ "$(netmode_state)" == "offline" ]]; then
+      # Can't download while the kill switch is engaged. On a downgrade we
+      # must NOT keep a too-big model live (it will OOM), so fall back to the
+      # largest model already on disk that fits this RAM tier.
+      if chosen_model="$(largest_present_within "${TUNE_MODEL}")"; then
+        warn "netmode is OFFLINE — cannot pull ${TUNE_MODEL}; using already-downloaded ${chosen_model} for this RAM tier."
+      else
+        chosen_model="${MODEL_NAME}"
+        warn "netmode is OFFLINE and no fitting model is downloaded — lowered context to ${TUNE_CTX} but kept ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then tune.sh to finish."
+      fi
+    else
+      if pull_model "${TUNE_MODEL}"; then
+        validate=true
+      else
+        warn "Could not pull ${TUNE_MODEL} — falling back to the best already-downloaded model."
+        chosen_model="$(largest_present_within "${TUNE_MODEL}" || true)"
+        [[ -n "${chosen_model}" ]] || chosen_model="${MODEL_NAME}"
+      fi
     fi
-    info "Validating ${TUNE_MODEL} with a real generation (first load can take a minute)..."
-    if ! model_responds "${TUNE_MODEL}"; then
-      die "${TUNE_MODEL} did not produce a response — keeping ${MODEL_NAME} unchanged. Check RAM headroom with: free -h"
-    fi
-    ok "${TUNE_MODEL} validated."
   fi
 
-  # Commit the decision: .env first, then the systemd drop-in, then restart.
-  set_env_var MODEL_NAME "${TUNE_MODEL}"
-  set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
-  MODEL_NAME="${TUNE_MODEL}"
-  OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
+  if [[ "${validate}" == "true" ]]; then
+    info "Validating ${chosen_model} with a real generation (first load can take a minute)..."
+    if ! model_responds "${chosen_model}"; then
+      die "${chosen_model} did not produce a response — keeping ${MODEL_NAME} unchanged. Check RAM headroom with: free -h"
+    fi
+    ok "${chosen_model} validated."
+  fi
+
+  # Commit: .env, then the systemd drop-in, then restart.
+  set_env_var MODEL_NAME "${chosen_model}"
+  MODEL_NAME="${chosen_model}"
   render_ollama_dropin
   restart_ollama
 
-  if [[ "${old_model}" != "${TUNE_MODEL}" ]]; then
+  if [[ "${old_model}" != "${chosen_model}" ]]; then
     info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
+    ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
+  else
+    ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."
   fi
-  ok "Auto-tune applied: ${TUNE_MODEL} with a ${TUNE_CTX}-token context."
 }
 
 # Run main only when executed, so tests can source this file and unit-test
