@@ -160,4 +160,8 @@ main() {
   ok "Auto-tune applied: ${TUNE_MODEL} with a ${TUNE_CTX}-token context."
 }
 
-main "$@"
+# Run main only when executed, so tests can source this file and unit-test
+# choose_for_ram() directly.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

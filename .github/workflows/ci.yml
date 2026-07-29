@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint:
+    name: ShellCheck + syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: bash -n (syntax) on every script
+        run: |
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh; do
+            bash -n "$f"
+          done
+      - name: shellcheck (zero findings required)
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh
+
+  test:
+    name: Unit tests + tune dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Library + tune-ladder unit tests
+        run: bash tests/test-lib.sh
+      - name: tune.sh --dry-run exits 0 and changes nothing
+        run: |
+          bash scripts/tune.sh --dry-run
+          test -f .env && diff .env .env.example
+
+  system:
+    name: System artifacts (nft ruleset + systemd units)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: Netmode ruleset tests (content + kernel-side nft --check)
+        run: sudo bash tests/test-netmode.sh
+      - name: Install boot services and verify the units
+        run: |
+          sudo scripts/tune.sh --install-service
+          sudo ./netmode.sh --install-service
+          systemd-analyze verify \
+            /etc/systemd/system/local-code-agent-tune.service \
+            /etc/systemd/system/local-code-agent-netmode.service
+          systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
+      - name: Render the ollama drop-in and verify its contents
+        run: |
+          sudo bash -c 'source scripts/lib.sh && load_env && render_ollama_dropin'
+          for key in OLLAMA_HOST OLLAMA_CONTEXT_LENGTH OLLAMA_KEEP_ALIVE OLLAMA_MAX_LOADED_MODELS; do
+            grep "^Environment=${key}=" /etc/systemd/system/ollama.service.d/local-code-agent.conf
+          done
+
+  e2e:
+    name: E2E — real Ollama install + real generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
+        run: |
+          cp .env.example .env
+          sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
+          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:0.5b/' .env
+      - name: install_ollama.sh for real (installer, drop-in, service, API)
+        run: sudo scripts/install_ollama.sh
+      - name: Drop-in is live in the running service
+        run: |
+          systemctl show ollama -p Environment | tee /dev/stderr | grep -q 'OLLAMA_MAX_LOADED_MODELS=1'
+      - name: Pull the model and require a real generation
+        run: |
+          source scripts/lib.sh
+          load_env
+          pull_model "${MODEL_NAME}"
+          model_responds "${MODEL_NAME}" 300
+          echo "real generation OK from ${MODEL_NAME}"
+      - name: update-model.sh end-to-end (pull -> validate -> pin)
+        run: |
+          ./update-model.sh qwen2.5-coder:0.5b
+          grep -q '^MODEL_NAME=qwen2.5-coder:0.5b' .env
+          grep -q '^AUTO_TUNE=false' .env
+      - name: Idempotency — re-running the installer must be safe
+        run: |
+          sudo scripts/install_ollama.sh
+          source scripts/lib.sh && load_env && wait_for_ollama 60

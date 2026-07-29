@@ -1,0 +1,7 @@
+# Keep GitHub Actions versions current (monthly, low-noise).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
