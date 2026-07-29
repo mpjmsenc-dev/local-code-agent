@@ -129,8 +129,8 @@ local-code-agent/
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env
-├── tests/test-lib.sh           # unit tests (lib helpers + tune ladder)
-├── .github/workflows/ci.yml    # CI: shellcheck + syntax + unit tests
+├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
+├── .github/workflows/ci.yml    # CI: shellcheck · unit tests · nft/systemd checks
 └── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
 ```
 

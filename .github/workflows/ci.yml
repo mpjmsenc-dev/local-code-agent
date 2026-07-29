@@ -32,3 +32,27 @@ jobs:
         run: |
           bash scripts/tune.sh --dry-run
           test -f .env && diff .env .env.example
+
+  system:
+    name: System artifacts (nft ruleset + systemd units)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: Netmode ruleset tests (content + kernel-side nft --check)
+        run: sudo bash tests/test-netmode.sh
+      - name: Install boot services and verify the units
+        run: |
+          sudo scripts/tune.sh --install-service
+          sudo ./netmode.sh --install-service
+          systemd-analyze verify \
+            /etc/systemd/system/local-code-agent-tune.service \
+            /etc/systemd/system/local-code-agent-netmode.service
+          systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
+      - name: Render the ollama drop-in and verify its contents
+        run: |
+          sudo bash -c 'source scripts/lib.sh && load_env && render_ollama_dropin'
+          for key in OLLAMA_HOST OLLAMA_CONTEXT_LENGTH OLLAMA_KEEP_ALIVE OLLAMA_MAX_LOADED_MODELS; do
+            grep "^Environment=${key}=" /etc/systemd/system/ollama.service.d/local-code-agent.conf
+          done

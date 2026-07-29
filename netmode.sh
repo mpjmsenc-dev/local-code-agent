@@ -29,8 +29,10 @@ NFT_TABLE="lca_netmode"
 NFT_RULES_FILE="${NETMODE_DIR}/netmode.nft"
 NETMODE_SERVICE=/etc/systemd/system/local-code-agent-netmode.service
 
-write_rules_file() {
-  as_root mkdir -p "${NETMODE_DIR}"
+# render_rules — print the OFFLINE ruleset to stdout. Kept separate from
+# write_rules_file so tests can validate it (nft --check) without root
+# writes or touching the live ruleset.
+render_rules() {
   # The create-then-delete preamble makes 'nft -f' idempotent: it works
   # whether or not the table already exists.
   {
@@ -72,7 +74,12 @@ write_rules_file() {
     echo "    ct state new counter drop"
     echo "  }"
     echo "}"
-  } | as_root tee "${NFT_RULES_FILE}" >/dev/null
+  }
+}
+
+write_rules_file() {
+  as_root mkdir -p "${NETMODE_DIR}"
+  render_rules | as_root tee "${NFT_RULES_FILE}" >/dev/null
 }
 
 save_state() {
@@ -189,6 +196,7 @@ main() {
     online)           go_online ;;
     status)           show_status ;;
     apply-saved)      apply_saved ;;
+    render-rules)     render_rules ;;  # print the offline ruleset (used by tests)
     --install-service) install_service ;;
     *)
       cat <<EOF
