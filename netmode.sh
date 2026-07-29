@@ -23,7 +23,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
-load_env
+# No load_env here on purpose: netmode uses no .env values, render-rules must
+# keep stdout to pure nft syntax, and running under sudo must not create a
+# root-owned .env as a side effect.
 
 NFT_TABLE="lca_netmode"
 NFT_RULES_FILE="${NETMODE_DIR}/netmode.nft"

@@ -97,7 +97,9 @@ load_env() {
   if [[ ! -f "${ENV_FILE}" ]]; then
     if [[ -f "${ENV_EXAMPLE}" ]]; then
       cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-      info "Created ${ENV_FILE} from .env.example (edit it to customize)."
+      # Notice goes to stderr: load_env may run inside commands whose stdout
+      # is data (a message on stdout would corrupt it).
+      info "Created ${ENV_FILE} from .env.example (edit it to customize)." >&2
     else
       warn "Neither .env nor .env.example found in ${REPO_ROOT}; using built-in defaults."
     fi

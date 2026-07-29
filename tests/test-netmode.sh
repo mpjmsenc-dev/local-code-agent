@@ -18,6 +18,15 @@ RULES="$(mktemp)"
 trap 'rm -rf "${RULES}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 
+echo "# stdout purity: render-rules must emit nft syntax and nothing else"
+# (CI caught load_env's '[info] Created .env' notice leaking into the rules
+# on a fresh checkout — this guards against any such stdout contamination.)
+if [[ "$(head -1 "${RULES}")" == "#!/usr/sbin/nft -f" ]]; then
+  t_ok "first line is the nft shebang"
+else
+  t_fail "unexpected first line: $(head -1 "${RULES}")"
+fi
+
 echo "# safety-critical rules are present (the Tailscale path must never be cut)"
 must_contain() {
   local desc="$1" needle="$2"
