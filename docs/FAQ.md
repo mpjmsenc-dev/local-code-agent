@@ -1,0 +1,52 @@
+# FAQ.md
+
+**Is my data really private?**
+Yes. Models run on your VM; prompts and code never leave it. Aider and Open WebUI
+are configured with telemetry/analytics off, phone access rides an encrypted
+Tailscale tunnel, and `netmode.sh offline` gives you a provable guarantee: the
+stack physically cannot reach the internet, and chat still works.
+
+**Is this as good as Claude?**
+No — see "Honest expectations" in the [README](../README.md). A 7b/14b local
+model is a capable junior assistant, not a frontier model. It shines on
+boilerplate, small edits, explanations, and privacy-critical work.
+
+**What does it cost?**
+Only the server. A 4 vCPU / 8 GB DO Basic droplet runs at DO's standard monthly
+price (per-second billing; powered-off droplets still bill — see
+[DO.md](DO.md)). There are no per-token or per-seat costs — no AI API is involved.
+
+**Can I use a different model than qwen2.5-coder?**
+Yes: `./update-model.sh <any-ollama-model>` (browse ollama.com/library). It
+pulls, validates with a real generation, and only then makes it the default —
+and pins it (`AUTO_TUNE=false`) so a reboot won't override your choice.
+
+**Why is the first answer after a pause slow?**
+The model is loaded into RAM on demand and unloaded after `OLLAMA_KEEP_ALIVE`
+(default 30m) of idleness. The first request pays the load time.
+
+**Can several people use it?**
+Open WebUI supports multiple accounts (as admin, create them — keep public
+signups locked). They share one model server, so heavy simultaneous use queues.
+
+**Does offline mode break chat from my phone?**
+No — that's the point. The phone reaches WebUI over Tailscale, which stays open;
+inference is local. Only outbound internet (updates, model pulls, any telemetry)
+is cut.
+
+**Do I need a GPU?**
+No, everything here is CPU-tuned. With an NVIDIA GPU, Ollama uses it
+automatically — the rest of the stack is unchanged.
+
+**How do I update the software?**
+`git -C /opt/local-code-agent pull` then re-run `./setup.sh` (idempotent —
+it upgrades OS packages, aider, and recreates the WebUI container from the
+latest image). Models update with `ollama pull <model>`.
+
+**Can I run this on the free Oracle Cloud / other clouds / my own hardware?**
+Any Ubuntu 24.04 / Debian VM with systemd works, x86_64 or arm64 — see
+[INSTALL.md](INSTALL.md). On arm64 the same scripts run unchanged.
+
+**Where is my data if I want to move or leave?**
+`./backup.sh` produces one tarball with your chats, config, and model list;
+[MIGRATE.md](MIGRATE.md) walks the move. No lock-in anywhere in the stack.
