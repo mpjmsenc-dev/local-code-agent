@@ -16,10 +16,12 @@ BACKUP_DIR="${REPO_ROOT}/backups"
 
 main() {
   step "Creating backup"
-  local stamp workdir tarball
+  local stamp tarball
   stamp="$(date +%Y%m%d-%H%M%S)"
+  # workdir stays global: the EXIT trap runs after main() returns, where a
+  # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
-  trap 'rm -rf "${workdir}"' EXIT
+  trap 'rm -rf "${workdir:-}"' EXIT
   mkdir -p "${BACKUP_DIR}"
   tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
 

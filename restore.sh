@@ -22,9 +22,10 @@ main() {
   fi
   [[ -f "${tarball}" ]] || die "Backup file not found: ${tarball}"
 
-  local workdir
+  # workdir stays global: the EXIT trap runs after main() returns, where a
+  # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
-  trap 'rm -rf "${workdir}"' EXIT
+  trap 'rm -rf "${workdir:-}"' EXIT
   tar xzf "${tarball}" -C "${workdir}"
 
   # 1. .env
