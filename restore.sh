@@ -55,9 +55,9 @@ main() {
         as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
       fi
       as_root docker volume create open-webui >/dev/null
-      as_root docker run --rm -v open-webui:/to -v "${workdir}":/from:ro \
+      as_root docker run --rm --entrypoint sh -v open-webui:/to -v "${workdir}":/from:ro \
         ghcr.io/open-webui/open-webui:main \
-        sh -c 'rm -rf /to/* && tar xzf /from/open-webui-volume.tar.gz -C /to'
+        -c 'rm -rf /to/* && tar xzf /from/open-webui-volume.tar.gz -C /to'
       ok "WebUI data restored."
       if [[ "${ENABLE_WEBUI}" == "true" ]]; then
         "${SCRIPT_DIR}/scripts/install_webui.sh"

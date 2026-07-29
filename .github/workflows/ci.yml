@@ -113,3 +113,52 @@ jobs:
         run: |
           sudo apt-get install -y nftables
           ./check-system.sh
+      - name: uninstall.sh removes the stack (and refuses without --yes)
+        run: |
+          if ./uninstall.sh </dev/null; then
+            echo "uninstall must refuse non-interactive runs without --yes"; exit 1
+          fi
+          command -v ollama
+          sudo ./uninstall.sh --yes
+          if command -v ollama; then echo "ollama binary still present"; exit 1; fi
+          test ! -e /etc/systemd/system/ollama.service.d
+          test ! -e /etc/systemd/system/local-code-agent-tune.service
+          test ! -e /etc/local-code-agent
+          test ! -d .venv
+          echo "uninstall verified"
+
+  webui:
+    name: E2E — Open WebUI container + volume backup/restore
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Prepare .env
+        run: cp .env.example .env
+      - name: install_webui.sh for real (docker preinstalled on runners)
+        run: scripts/install_webui.sh
+      - name: webui.sh status must pass
+        run: ./webui.sh status
+      - name: Recreation from edited .env (port change) must take effect
+        run: |
+          sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env
+          scripts/install_webui.sh
+          curl -fsS --max-time 5 http://127.0.0.1:3210 >/dev/null
+      - name: Volume-inclusive backup, destroy, restore — data must survive
+        run: |
+          sudo docker run --rm --entrypoint sh -v open-webui:/d \
+            ghcr.io/open-webui/open-webui:main -c 'echo hello-backup > /d/ci-marker.txt'
+          ./backup.sh
+          tar tzf backups/local-code-agent-backup-*.tar.gz | grep -q 'open-webui-volume.tar.gz'
+          sudo docker rm -f open-webui
+          sudo docker volume rm open-webui
+          ./restore.sh
+          marker="$(sudo docker run --rm --entrypoint cat -v open-webui:/d \
+            ghcr.io/open-webui/open-webui:main /d/ci-marker.txt)"
+          test "${marker}" = "hello-backup"
+          ./webui.sh status
+      - name: webui.sh stop/start cycle
+        run: |
+          ./webui.sh stop
+          ./webui.sh start
+          sleep 5
+          ./webui.sh status

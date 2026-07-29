@@ -93,6 +93,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
 | `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |
+| `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 
 ## `.env` reference
@@ -121,7 +122,7 @@ Created from `.env.example` on first run. All keys:
 local-code-agent/
 ├── README.md · LICENSE · .env.example · .gitignore
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
-├── backup.sh · restore.sh · check-system.sh · update-model.sh
+├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
 │   ├── lib.sh · tune.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
