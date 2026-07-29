@@ -1,8 +1,11 @@
 # PHONE.md — using your private AI from a phone
 
-Your server is never exposed to the public internet. Instead, Tailscale creates a
-private encrypted network between the server and your phone. Nothing to port-forward,
-no firewall rules to open — **never expose ports 3000 or 11434 publicly**.
+You reach your server privately over Tailscale — an encrypted network between the
+server and your phone, nothing to port-forward. The WebUI port is kept private by
+an always-on nftables inbound guard (installed by `setup.sh`) that blocks ports
+3000 and 11434 on every interface except loopback and Tailscale, while leaving SSH
+open. **Never add a firewall rule that exposes ports 3000 or 11434 publicly** —
+that would defeat the guard. (Verify with `sudo ./netmode.sh status`.)
 
 ## 1. Connect the server to Tailscale (once)
 

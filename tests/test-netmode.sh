@@ -15,42 +15,67 @@ t_ok()   { printf '%s\n' "ok   - $*"; }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
 
 RULES="$(mktemp)"
-trap 'rm -rf "${RULES}"' EXIT
+INBOUND="$(mktemp)"
+trap 'rm -rf "${RULES}" "${INBOUND}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
+"${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 
-echo "# stdout purity: render-rules must emit nft syntax and nothing else"
+contains() {  # desc file needle
+  if grep -qF "$3" "$2"; then t_ok "$1"; else t_fail "$1 — missing: $3"; fi
+}
+absent() {    # desc file pattern
+  if grep -qE "$3" "$2"; then t_fail "$1 — unexpectedly present: $3"; else t_ok "$1"; fi
+}
+
+echo "# stdout purity: render-* must emit nft syntax and nothing else"
 # (CI caught load_env's '[info] Created .env' notice leaking into the rules
 # on a fresh checkout — this guards against any such stdout contamination.)
-if [[ "$(head -1 "${RULES}")" == "#!/usr/sbin/nft -f" ]]; then
-  t_ok "first line is the nft shebang"
-else
-  t_fail "unexpected first line: $(head -1 "${RULES}")"
-fi
-
-echo "# safety-critical rules are present (the Tailscale path must never be cut)"
-must_contain() {
-  local desc="$1" needle="$2"
-  if grep -qF "${needle}" "${RULES}"; then
-    t_ok "${desc}"
+shebang_ok() {  # desc file
+  if [[ "$(head -1 "$2")" == "#!/usr/sbin/nft -f" ]]; then
+    t_ok "$1"
   else
-    t_fail "${desc} — missing: ${needle}"
+    t_fail "$1 (got: $(head -1 "$2"))"
   fi
 }
-must_contain "loopback always allowed"          'oifname "lo" accept'
-must_contain "tailscale0 always allowed"        'oifname "tailscale0" accept'
-must_contain "tailscaled fwmark traffic allowed" 'meta mark & 0x00ff0000 == 0x00080000 accept'
-must_contain "WireGuard port allowed"           'udp dport 41641 accept'
-must_contain "established replies allowed"      'ct state established,related accept'
-must_contain "new outbound connections dropped" 'ct state new counter drop'
+shebang_ok "offline ruleset first line is the nft shebang" "${RULES}"
+shebang_ok "inbound ruleset first line is the nft shebang" "${INBOUND}"
 
-echo "# rule ORDER: every accept must come before the final drop"
-drop_line="$(grep -n 'ct state new counter drop' "${RULES}" | cut -d: -f1 | head -1)"
-last_accept="$(grep -n ' accept$' "${RULES}" | cut -d: -f1 | sort -n | tail -1)"
-if [[ -n "${drop_line}" && -n "${last_accept}" ]] && (( last_accept < drop_line )); then
-  t_ok "all accepts precede the drop"
-else
-  t_fail "an accept rule appears after the drop (would be dead)"
-fi
+echo "# OFFLINE egress: the Tailscale path must never be cut"
+contains "loopback egress allowed"          "${RULES}" 'oifname "lo" accept'
+contains "tailscale0 egress allowed"        "${RULES}" 'oifname "tailscale0" accept'
+contains "tailscaled fwmark allowed"        "${RULES}" 'meta mark & 0x00ff0000 == 0x00080000 accept'
+contains "WireGuard port allowed"           "${RULES}" 'udp dport 41641 accept'
+contains "established replies allowed"       "${RULES}" 'ct state established,related accept'
+contains "new outbound connections dropped" "${RULES}" 'ct state new counter drop'
+
+echo "# OFFLINE also covers forwarded (docker-bridge) traffic"
+contains "forward hook present"             "${RULES}" 'hook forward'
+contains "forward allows tailscale0"        "${RULES}" 'oifname "tailscale0" accept'
+
+echo "# INBOUND guard: private-only services, SSH untouched"
+contains "inbound input hook present"       "${INBOUND}" 'type filter hook input'
+contains "inbound allows loopback"          "${INBOUND}" 'iifname "lo" accept'
+contains "inbound allows tailscale0"        "${INBOUND}" 'iifname "tailscale0" accept'
+contains "inbound drops the service ports"  "${INBOUND}" 'ct state new counter drop'
+contains "inbound targets tcp dport set"    "${INBOUND}" 'tcp dport {'
+# SSH (22) must never appear in the inbound guard — proves it can't lock you out.
+absent  "inbound never filters SSH (22)"    "${INBOUND}" '(\{|[[:space:],]|dport )22([[:space:],]|\})'
+
+echo "# rule ORDER: in every chain the drop is the last rule (no dead accepts after it)"
+order_ok() {  # desc file
+  if awk '
+    /ct state new counter drop/ { dropped=1; next }
+    dropped && /accept/         { bad=1 }
+    dropped && /}/              { dropped=0 }
+    END { exit bad?1:0 }
+  ' "$2"; then
+    t_ok "$1"
+  else
+    t_fail "$1 (an accept follows a drop — dead rule)"
+  fi
+}
+order_ok "offline: drop is the last rule in every chain" "${RULES}"
+order_ok "inbound: drop is the last rule in every chain" "${INBOUND}"
 
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
@@ -61,12 +86,14 @@ if command -v nft >/dev/null 2>&1; then
     NFT=(sudo -n nft)
   fi
 fi
+nft_check() {  # desc file
+  if "${NFT[@]}" --check -f "$2"; then t_ok "$1"; else t_fail "$1"; fi
+}
 if [[ "${#NFT[@]}" -eq 0 ]]; then
   echo "skip - nft (as root) not available; content checks above still ran"
-elif "${NFT[@]}" --check -f "${RULES}"; then
-  t_ok "nft --check accepts the ruleset"
 else
-  t_fail "nft --check rejected the ruleset"
+  nft_check "nft --check accepts the offline ruleset" "${RULES}"
+  nft_check "nft --check accepts the inbound ruleset" "${INBOUND}"
 fi
 
 echo

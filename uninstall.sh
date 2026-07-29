@@ -44,10 +44,16 @@ main() {
       || die "Uninstall cancelled — nothing was changed."
   fi
 
-  # 1. Lift the netmode egress lockdown so nothing stays firewalled.
-  if have nft && as_root nft list table inet lca_netmode >/dev/null 2>&1; then
-    as_root nft delete table inet lca_netmode
-    ok "Netmode egress lockdown removed."
+  # 1. Lift the netmode nftables tables so nothing stays firewalled.
+  if have nft; then
+    if as_root nft list table inet lca_netmode >/dev/null 2>&1; then
+      as_root nft delete table inet lca_netmode
+      ok "Netmode egress lockdown removed."
+    fi
+    if as_root nft list table inet lca_inbound >/dev/null 2>&1; then
+      as_root nft delete table inet lca_inbound
+      ok "Inbound guard removed."
+    fi
   fi
 
   # 2. Boot services + persisted netmode state.

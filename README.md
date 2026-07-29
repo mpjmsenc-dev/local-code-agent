@@ -65,11 +65,16 @@ sudo ./netmode.sh status    # shows mode + proves it with a live probe
 sudo ./netmode.sh online    # back to normal
 ```
 
-Offline mode drops every **new** outbound connection except loopback and the
-Tailscale path, and it persists across reboots. Inference works fully offline —
-the models are on your disk. Honest caveat: the encrypted Tailscale tunnel still
-uses the network as transport; "offline" means the AI stack can't reach the
-internet, not that the NIC is dead.
+Offline mode drops every **new** outbound connection (locally-generated and
+docker-forwarded) except loopback and the Tailscale path, and it persists across
+reboots. Inference works fully offline — the models are on your disk. Honest
+caveat: the encrypted Tailscale tunnel still uses the network as transport;
+"offline" means the AI stack can't reach the internet, not that the NIC is dead.
+
+Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
+every boot) keeps the WebUI and Ollama ports reachable only over loopback and
+Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
+with `sudo ./netmode.sh harden` / `status`.
 
 ## Daily usage: aider (the coding agent)
 
@@ -89,7 +94,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|logs` for Open WebUI |
-| `netmode.sh` | `offline\|online\|status` internet kill switch |
+| `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
 | `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |

@@ -67,6 +67,9 @@ main() {
   step "Installing boot services (auto-tune + netmode persistence)"
   "${SCRIPT_DIR}/scripts/tune.sh" --install-service
   "${SCRIPT_DIR}/netmode.sh" --install-service
+  # Apply the always-on inbound guard now so the WebUI/Ollama ports are not
+  # publicly reachable even before the first reboot.
+  "${SCRIPT_DIR}/netmode.sh" harden || warn "Could not apply the inbound guard now — it will be applied on the next boot."
 
   step "Final system check"
   if "${SCRIPT_DIR}/check-system.sh"; then

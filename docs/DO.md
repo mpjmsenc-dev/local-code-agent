@@ -69,10 +69,21 @@ sudo /opt/local-code-agent/netmode.sh online
 
 ## Firewall
 
-When using Tailscale there is **nothing to open**: WebUI (3000) and Ollama (11434)
-are reached only over the private Tailscale network / loopback. **Never** create
-DO firewall rules or cloud firewall exceptions exposing 3000 or 11434 to the
-internet — that would make your private AI public.
+Open WebUI runs with Docker host networking and so binds port 3000 on **all**
+interfaces, including the droplet's public IP (Ollama's 11434 stays on
+loopback). To make the "reached only over Tailscale/loopback" promise real,
+`setup.sh` installs an **always-on nftables inbound guard** (managed by
+`netmode.sh`, re-applied every boot) that **drops new inbound connections to
+3000 and 11434 on every interface except loopback and `tailscale0`**. SSH
+(port 22) and all other ports are untouched, so the guard can never lock you
+out. Check it any time with `sudo ./netmode.sh status` (look for "inbound
+guard ... LOADED"); re-apply with `sudo ./netmode.sh harden`.
+
+With that guard in place there is **nothing to open**: reach WebUI over
+Tailscale. **Never** add a DO cloud firewall rule (or any other rule)
+exposing 3000 or 11434 to the internet — that would defeat the guard and make
+your private AI public. A DO cloud firewall that *only* allows inbound 22 (and
+nothing else from the public internet) is a fine optional extra layer.
 
 ## Snapshots and migration
 

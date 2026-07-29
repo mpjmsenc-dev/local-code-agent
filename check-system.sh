@@ -191,6 +191,20 @@ else
   p_warn "tailscale not installed (run scripts/install_tailscale.sh for phone access)"
 fi
 
+# --- Inbound guard ----------------------------------------------------------
+step "Inbound guard"
+if [[ "${ENABLE_WEBUI}" != "true" ]] && ! ollama_bind_is_public; then
+  info "WebUI disabled and Ollama on loopback — no public service ports to guard."
+elif ! have nft; then
+  p_warn "nft not installed — the inbound guard is not enforced (WebUI/Ollama ports may be publicly reachable)"
+elif ! can_root; then
+  p_warn "cannot inspect nftables without root/sudo — re-run as root to verify the inbound guard"
+elif as_root nft list table inet lca_inbound >/dev/null 2>&1; then
+  p_pass "inbound guard active — WebUI/Ollama ports reachable only via loopback and Tailscale"
+else
+  p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ./netmode.sh harden)"
+fi
+
 # --- Netmode + internet -----------------------------------------------------
 step "Netmode + internet"
 NETMODE="$(netmode_state)"
