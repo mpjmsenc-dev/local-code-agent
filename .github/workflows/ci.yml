@@ -160,5 +160,4 @@ jobs:
         run: |
           ./webui.sh stop
           ./webui.sh start
-          sleep 5
           ./webui.sh status

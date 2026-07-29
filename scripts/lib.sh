@@ -255,6 +255,21 @@ restart_ollama() {
   fi
 }
 
+# wait_for_webui [TIMEOUT_SECONDS] — poll Open WebUI's HTTP port until it
+# answers. A cold container start takes noticeably longer than 'docker
+# start' returning, so start/restart/install all wait through this.
+wait_for_webui() {
+  local timeout="${1:-120}" waited=0
+  while ! curl -fsS --max-time 3 "http://127.0.0.1:${WEBUI_PORT:-3000}" >/dev/null 2>&1; do
+    if (( waited >= timeout )); then
+      return 1
+    fi
+    sleep 3
+    waited=$((waited+3))
+  done
+  return 0
+}
+
 # netmode_state — current persisted netmode ('online' when never toggled).
 netmode_state() {
   if [[ -f "${NETMODE_STATE_FILE}" ]]; then
