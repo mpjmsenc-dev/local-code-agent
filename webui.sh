@@ -35,6 +35,8 @@ main() {
     start)
       if container_exists; then
         as_root docker start "${WEBUI_CONTAINER}" >/dev/null
+        info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
+        wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ./webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
       else
         info "Container '${WEBUI_CONTAINER}' does not exist yet — creating it..."
@@ -49,6 +51,8 @@ main() {
     restart)
       container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh first."
       as_root docker restart "${WEBUI_CONTAINER}" >/dev/null
+      info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
+      wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ./webui.sh logs"
       ok "Open WebUI restarted."
       ;;
     status)

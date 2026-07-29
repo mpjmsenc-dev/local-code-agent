@@ -50,14 +50,8 @@ main() {
   [[ "${running}" == "true" ]] || die "Container '${WEBUI_CONTAINER}' is not running. Logs: sudo docker logs ${WEBUI_CONTAINER}"
 
   info "Waiting for Open WebUI to answer on http://127.0.0.1:${WEBUI_PORT} (first start can take ~1 minute)..."
-  local waited=0
-  while ! curl -fsS --max-time 3 "http://127.0.0.1:${WEBUI_PORT}" >/dev/null 2>&1; do
-    if (( waited >= 180 )); then
-      die "Open WebUI did not answer after ${waited}s. Logs: sudo docker logs ${WEBUI_CONTAINER}"
-    fi
-    sleep 5
-    waited=$((waited+5))
-  done
+  wait_for_webui 180 \
+    || die "Open WebUI did not answer after 180s. Logs: sudo docker logs ${WEBUI_CONTAINER}"
   ok "Open WebUI is up on port ${WEBUI_PORT}."
   info "From your phone (with Tailscale connected): http://<tailscale-ip>:${WEBUI_PORT} — see docs/PHONE.md"
 }

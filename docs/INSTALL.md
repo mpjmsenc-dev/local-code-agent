@@ -76,21 +76,21 @@ directory. Health: `./check-system.sh`.
 
 ```bash
 cd /opt/local-code-agent            # or wherever you cloned it
-sudo ./netmode.sh online            # remove any egress lockdown
-sudo systemctl disable --now local-code-agent-tune.service local-code-agent-netmode.service || true
-sudo rm -f /etc/systemd/system/local-code-agent-{tune,netmode}.service
-sudo rm -rf /etc/local-code-agent
+sudo ./uninstall.sh                 # asks once, then removes the stack
+```
 
-sudo docker rm -f open-webui        # WebUI container
-sudo docker volume rm open-webui    #   ... and its data (chats!) — skip to keep
-sudo systemctl disable --now ollama
-sudo rm -rf /etc/systemd/system/ollama.service.d
-sudo rm -f /etc/systemd/system/ollama.service /usr/local/bin/ollama
-sudo rm -rf /usr/share/ollama       # includes all downloaded models
-sudo userdel ollama 2>/dev/null; sudo groupdel ollama 2>/dev/null
+`uninstall.sh` removes Ollama (including **all downloaded models**), the Open
+WebUI container and its data volume (pass `--keep-data` to keep your chats),
+the boot services, any netmode lockdown, and the project virtualenv. It
+deliberately keeps Docker Engine, Tailscale, git, this repository and your
+`.env`. Non-interactive runs must pass `--yes` explicitly — this is the one
+script that never auto-confirms.
 
-sudo tailscale logout; sudo apt-get remove -y tailscale   # optional
-sudo apt-get remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin  # optional
-sudo systemctl daemon-reload
+To remove the kept pieces too:
+
+```bash
+sudo tailscale logout && sudo apt-get remove -y tailscale                 # optional
+sudo apt-get remove -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin                              # optional
 cd .. && sudo rm -rf local-code-agent
 ```

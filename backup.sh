@@ -16,19 +16,21 @@ BACKUP_DIR="${REPO_ROOT}/backups"
 
 main() {
   step "Creating backup"
-  local stamp workdir tarball
+  local stamp tarball
   stamp="$(date +%Y%m%d-%H%M%S)"
+  # workdir stays global: the EXIT trap runs after main() returns, where a
+  # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
-  trap 'rm -rf "${workdir}"' EXIT
+  trap 'rm -rf "${workdir:-}"' EXIT
   mkdir -p "${BACKUP_DIR}"
   tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
 
   # 1. Open WebUI docker volume (accounts + chat history).
   if have docker && as_root docker volume inspect open-webui >/dev/null 2>&1; then
     info "Archiving the 'open-webui' docker volume..."
-    if as_root docker run --rm -v open-webui:/from:ro -v "${workdir}":/to \
+    if as_root docker run --rm --entrypoint tar -v open-webui:/from:ro -v "${workdir}":/to \
         ghcr.io/open-webui/open-webui:main \
-        tar czf /to/open-webui-volume.tar.gz -C /from .; then
+        czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
     else
       warn "Could not archive the WebUI volume — continuing without it."
