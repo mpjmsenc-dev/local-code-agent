@@ -1,0 +1,17 @@
+# Local configuration (contains machine-specific values; never commit)
+.env
+
+# Python virtualenv
+.venv/
+
+# Aider state (history, cache, per-repo settings)
+.aider*
+
+# Logs
+*.log
+
+# Python bytecode
+__pycache__/
+
+# Local backups created by backup.sh
+backups/

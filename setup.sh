@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# setup.sh — one-shot installer for the whole local-code-agent stack:
+# Ollama (local LLM) + aider (terminal coding agent) + Open WebUI (phone
+# chat) + Tailscale (private access) + auto-tune + netmode kill switch.
+#
+# Fully unattended when non-interactive (this is how deploy/do-user-data.sh
+# calls it on a fresh DigitalOcean droplet). Safe to re-run at any time.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+source "${SCRIPT_DIR}/scripts/lib.sh"
+load_env
+
+DONE_LINE="SETUP COMPLETE — local-code-agent is ready."
+
+main() {
+  step "local-code-agent setup starting"
+  info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
+  chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh
+
+  "${SCRIPT_DIR}/scripts/install_dependencies.sh"
+  "${SCRIPT_DIR}/scripts/install_git.sh"
+  "${SCRIPT_DIR}/scripts/install_docker.sh"
+  "${SCRIPT_DIR}/scripts/install_python.sh"
+  "${SCRIPT_DIR}/scripts/install_ollama.sh"
+
+  # Auto-tune BEFORE the model pull so we download the right model for this
+  # machine's RAM straight away.
+  "${SCRIPT_DIR}/scripts/tune.sh"
+  load_env  # tune.sh may have rewritten MODEL_NAME / OLLAMA_CONTEXT_LENGTH
+
+  step "Ensuring model '${MODEL_NAME}' is available"
+  if have ollama && wait_for_ollama 30; then
+    if model_present "${MODEL_NAME}"; then
+      ok "Model '${MODEL_NAME}' already downloaded."
+    else
+      net_guard "Downloading ${MODEL_NAME}"
+      pull_model "${MODEL_NAME}" || die "Model pull failed — cannot continue without a model."
+    fi
+    info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
+    if model_responds "${MODEL_NAME}"; then
+      ok "Model '${MODEL_NAME}' generates text — inference works."
+    else
+      die "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
+    fi
+  else
+    warn "Ollama is not reachable — skipping model pull and smoke test (re-run ./setup.sh once Ollama runs)."
+  fi
+
+  if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+    "${SCRIPT_DIR}/scripts/install_webui.sh"
+  else
+    info "Open WebUI disabled (ENABLE_WEBUI=${ENABLE_WEBUI}, SKIP_DOCKER=${SKIP_DOCKER}) — skipping."
+  fi
+
+  "${SCRIPT_DIR}/scripts/install_tailscale.sh"
+
+  step "Installing boot services (auto-tune + netmode persistence)"
+  "${SCRIPT_DIR}/scripts/tune.sh" --install-service
+  "${SCRIPT_DIR}/netmode.sh" --install-service
+
+  step "Final system check"
+  if "${SCRIPT_DIR}/check-system.sh"; then
+    ok "All system checks passed."
+  else
+    warn "Some system checks did not pass — review the summary above (docs/TROUBLESHOOTING.md helps)."
+  fi
+
+  # --- Next steps -----------------------------------------------------------
+  local ts_ip="<tailscale-ip>"
+  if have tailscale && tailscale status >/dev/null 2>&1; then
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -1 || echo '<tailscale-ip>')"
+  fi
+  step "Next steps"
+  info "1. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
+  info "2. Chat from your phone: http://${ts_ip}:${WEBUI_PORT}  (install the Tailscale app on the phone first — docs/PHONE.md)"
+  info "3. Code in the terminal: cd <your-project> && ${SCRIPT_DIR}/run-agent.sh"
+  info "4. Internet kill switch: sudo ${SCRIPT_DIR}/netmode.sh offline|online|status"
+  info "5. Health check anytime: ${SCRIPT_DIR}/check-system.sh"
+  # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
+  # install log for exactly this line.
+  printf '\n%b%s%b\n' "${C_GREEN}${C_BOLD}" "${DONE_LINE}" "${C_RESET}"
+}
+
+main "$@"

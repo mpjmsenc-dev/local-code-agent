@@ -1,0 +1,13 @@
+# Aider configuration for local-code-agent.
+# The model is NOT pinned here — run-agent.sh passes --model from .env
+# (MODEL_NAME) so auto-tune stays in charge of model selection.
+
+# Fully local & private: no update phone-home, no analytics.
+check-update: false
+analytics: false
+
+# Let aider commit its own edits with descriptive messages.
+auto-commits: true
+
+# Stream responses token-by-token, like the Claude apps.
+stream: true

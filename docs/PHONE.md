@@ -1,0 +1,98 @@
+# PHONE.md — using your private AI from a phone
+
+Your server is never exposed to the public internet. Instead, Tailscale creates a
+private encrypted network between the server and your phone. Nothing to port-forward,
+no firewall rules to open — **never expose ports 3000 or 11434 publicly**.
+
+## 1. Connect the server to Tailscale (once)
+
+On the server (SSH or the DigitalOcean web console):
+
+```bash
+sudo tailscale up
+```
+
+It prints a login URL. Open it (on any device), sign in (Google/GitHub/etc. work),
+and the server joins your private network. Get its private IP:
+
+```bash
+tailscale ip -4
+```
+
+That `100.x.y.z` address is your permanent phone URL base.
+
+## 2. Install the Tailscale app on the phone (once)
+
+1. Install **Tailscale** from the App Store / Play Store.
+2. Log in with the **same account** you used for the server.
+3. Flip the VPN toggle on. You should see your server in the machine list.
+
+## 3. Open the chat app and create YOUR account
+
+On the phone browser, go to:
+
+```
+http://<tailscale-ip>:3000
+```
+
+(e.g. `http://100.101.102.103:3000` — use your own `tailscale ip -4` result.)
+
+Tap **Sign up** and create the **FIRST** account — the first account automatically
+becomes the **admin**.
+
+## 4. Lock signups (important)
+
+After your account exists, close the door behind you. On the server:
+
+```bash
+cd /opt/local-code-agent
+sed -i 's/^WEBUI_ENABLE_SIGNUP=.*/WEBUI_ENABLE_SIGNUP=false/' .env
+./scripts/install_webui.sh
+```
+
+(The install script recreates the container with the new setting; your account and
+chats live in a docker volume and survive.)
+
+## 5. Make it feel like an app
+
+In the phone browser menu choose **Add to Home Screen**. Open WebUI is a PWA —
+launched from the home screen icon it looks and feels like the Claude app:
+full-screen chat, streaming responses, chat history, model picker.
+
+## Running the coding agent from the phone
+
+The terminal agent (aider) runs over SSH:
+
+- **iOS/Android SSH app** (Termius, Blink, JuiceSSH...): connect to the server's
+  Tailscale IP as usual, then:
+
+  ```bash
+  cd ~/your-project
+  /opt/local-code-agent/run-agent.sh
+  ```
+
+- **No SSH app?** The DigitalOcean web console (Droplet → Access → Launch Droplet
+  Console) works from a phone browser too.
+
+The internet kill switch is also phone-friendly — over that same SSH session:
+
+```bash
+sudo /opt/local-code-agent/netmode.sh offline    # or online / status
+```
+
+(Tailscale SSH keeps working in offline mode by design.)
+
+## Speed expectations
+
+- On the base 4 vCPU / 8 GB droplet, a 7b model streams roughly **5–10 tokens/s** —
+  a comfortable reading pace, slower than Claude.
+- Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
+  automatically (smarter, slower per token). No reconfiguration needed.
+- The first message after a quiet period is slower — the model reloads into RAM
+  (`OLLAMA_KEEP_ALIVE` controls how long it stays warm).
+
+## If the page won't load
+
+In order: is the phone's Tailscale toggle on? → does `./check-system.sh` on the
+server pass the WebUI checks? → `./webui.sh status` → see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
