@@ -67,6 +67,7 @@ jobs:
           cp .env.example .env
           sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
           sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:0.5b/' .env
+          sed -i 's/^ENABLE_WEBUI=.*/ENABLE_WEBUI=false/' .env
       - name: install_ollama.sh for real (installer, drop-in, service, API)
         run: sudo scripts/install_ollama.sh
       - name: Drop-in is live in the running service
@@ -88,3 +89,27 @@ jobs:
         run: |
           sudo scripts/install_ollama.sh
           source scripts/lib.sh && load_env && wait_for_ollama 60
+      - name: Install aider (scripts/install_python.sh for real)
+        run: scripts/install_python.sh
+      - name: Full stack — run-agent.sh -> aider -> litellm -> Ollama
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+          mkdir -p /tmp/e2e-project
+          cd /tmp/e2e-project
+          git init -q
+          # run-agent.sh never cd's — running it from a scratch project also
+          # proves aider starts in the caller's directory.
+          "${GITHUB_WORKSPACE}/run-agent.sh" --message "Reply with the single word: ready" --yes-always --no-stream | tee /tmp/aider-out.txt
+          test -s /tmp/aider-out.txt
+      - name: backup.sh / restore.sh round-trip
+        run: |
+          ./backup.sh
+          tar tzf backups/local-code-agent-backup-*.tar.gz
+          tar tzf backups/local-code-agent-backup-*.tar.gz | grep -q 'env'
+          tar tzf backups/local-code-agent-backup-*.tar.gz | grep -q 'models.txt'
+          ./restore.sh
+      - name: check-system.sh must exit 0 on this real install (webui disabled)
+        run: |
+          sudo apt-get install -y nftables
+          ./check-system.sh
