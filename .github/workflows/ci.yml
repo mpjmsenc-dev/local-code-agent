@@ -97,6 +97,10 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
           python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
           exit "${missing}"
+
+  e2e:
+    name: E2E — real Ollama install + real generation
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
