@@ -135,6 +135,19 @@ OLLAMA_CONTEXT_LENGTH="8192"
 rm -f "${DROP}"
 check "missing drop-in counts as a mismatch" dropin_drifted
 
+echo "# lib.sh defines HOME when unset (cloud-init / systemd oneshots — else ollama panics)"
+home_set_when_unset() {
+  (
+    # Clear the double-source guard so the HOME logic re-runs, and unset HOME
+    # to simulate the cloud-init / root-oneshot environment.
+    unset HOME LCA_LIB_LOADED
+    # shellcheck disable=SC1090
+    source "${REPO}/scripts/lib.sh"
+    [[ -n "${HOME:-}" ]]
+  )
+}
+check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

@@ -21,6 +21,18 @@ case ":${PATH}:" in
 esac
 export PATH
 
+# Some non-login contexts run with $HOME unset — notably cloud-init user-data
+# (how deploy/do-user-data.sh invokes setup.sh on a fresh droplet) and root
+# systemd oneshots (the on-boot tune service). The ollama CLI PANICS with
+# "$HOME is not defined" when it is unset, so every pull/show/generate would
+# crash. Set HOME to the invoking user's home (root's /root under cloud-init
+# and the boot services) so ollama always initializes.
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+  [[ -n "${HOME}" ]] || HOME=/root
+  export HOME
+fi
+
 LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"

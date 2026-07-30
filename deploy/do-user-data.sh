@@ -22,6 +22,9 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "=== local-code-agent first-boot install started: $(date) ==="
 export DEBIAN_FRONTEND=noninteractive
+# cloud-init runs this without a login environment, so $HOME is unset — and
+# the ollama CLI panics ("$HOME is not defined") without it. Set it for root.
+export HOME="${HOME:-/root}"
 
 echo "--- Installing git (needed to clone the repository) ---"
 # DPkg::Lock::Timeout waits out the apt-daily / unattended-upgrades lock that
