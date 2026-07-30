@@ -146,9 +146,32 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port
+  local webui_port ollama_port p q seen port_list=""
+  local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
+  # ENFORCE the "can never lock you out" invariant below instead of merely
+  # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
+  # or someone fronting a service on the SSH port), the drop rule would
+  # blackhole every NEW public SSH connection, and the boot service re-applies
+  # the guard after each reboot: the box would then be reachable only from the
+  # provider's recovery console. Refuse to guard 22, and say so on stderr so
+  # the ruleset on stdout stays byte-clean for nft.
+  for p in "${webui_port}" "${ollama_port}"; do
+    [[ "${p}" =~ ^[0-9]+$ ]] || continue
+    if (( p == 22 )); then
+      warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
+      continue
+    fi
+    seen=false
+    for q in ${ports[@]+"${ports[@]}"}; do
+      [[ "${q}" == "${p}" ]] && seen=true
+    done
+    [[ "${seen}" == "true" ]] || ports+=( "${p}" )
+  done
+  for p in ${ports[@]+"${ports[@]}"}; do
+    port_list="${port_list:+${port_list}, }${p}"
+  done
   {
     echo "#!/usr/sbin/nft -f"
     echo "# local-code-agent inbound guard (managed by netmode.sh) — ALWAYS on,"
@@ -167,9 +190,13 @@ render_inbound_rules() {
     echo "    ct state established,related accept"
     echo ""
     echo "    # Drop NEW inbound to the private-only services on any OTHER"
-    echo "    # interface (e.g. a public IP). SSH and every other port are"
-    echo "    # untouched — this guard can never lock you out."
-    echo "    tcp dport { ${webui_port}, ${ollama_port} } ct state new counter drop"
+    echo "    # interface (e.g. a public IP). SSH (22) is filtered out of the"
+    echo "    # set above before rendering, so this guard can never lock you out."
+    if [[ -n "${port_list}" ]]; then
+      echo "    tcp dport { ${port_list} } ct state new counter drop"
+    else
+      echo "    # No guardable ports configured (port 22 is never guarded)."
+    fi
     echo "  }"
     echo "}"
   }

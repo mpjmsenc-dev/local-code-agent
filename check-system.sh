@@ -206,10 +206,26 @@ else
   # the drop set. A config change without a re-harden, or a parser mismatch,
   # would otherwise show green while the real port stays exposed.
   INBOUND_DUMP="$(as_root nft list table inet lca_inbound 2>/dev/null)"
-  if [[ "${ENABLE_WEBUI}" == "true" ]] && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
-    p_fail "inbound guard is loaded but does NOT cover WebUI port ${WEBUI_PORT} — re-run: sudo ./netmode.sh harden"
+  # Check the OLLAMA port too, not just the WebUI one. The Ollama API is
+  # unauthenticated, and changing OLLAMA_HOST (documented in
+  # docs/TROUBLESHOOTING.md) leaves the guard baked with the OLD port — so the
+  # asymmetric check used to print a green "covers the configured port(s)"
+  # while a public Ollama bind was live. Name the ports so the claim can be
+  # checked by eye instead of taken on trust.
+  OLLAMA_GUARD_PORT="$(ollama_url)"; OLLAMA_GUARD_PORT="${OLLAMA_GUARD_PORT##*:}"
+  GUARD_MISSING=()
+  if [[ "${ENABLE_WEBUI}" == "true" ]] \
+     && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    GUARD_MISSING+=("WebUI ${WEBUI_PORT}")
+  fi
+  if [[ "${OLLAMA_GUARD_PORT}" =~ ^[0-9]+$ ]] && [[ "${OLLAMA_GUARD_PORT}" != "22" ]] \
+     && ! grep -qE "dport \{[^}]*\b${OLLAMA_GUARD_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    GUARD_MISSING+=("Ollama ${OLLAMA_GUARD_PORT}")
+  fi
+  if (( ${#GUARD_MISSING[@]} )); then
+    p_fail "inbound guard is loaded but does NOT cover: ${GUARD_MISSING[*]} — it went stale after a config change; re-run: sudo ./netmode.sh harden"
   else
-    p_pass "inbound guard active and covers the configured port(s) — reachable only via loopback and Tailscale"
+    p_pass "inbound guard active and covers WebUI ${WEBUI_PORT} + Ollama ${OLLAMA_GUARD_PORT} — reachable only via loopback and Tailscale"
   fi
 fi
 

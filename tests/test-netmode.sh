@@ -16,7 +16,7 @@ t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
 
 RULES="$(mktemp)"
 INBOUND="$(mktemp)"
-trap 'rm -rf "${RULES}" "${INBOUND}"' EXIT
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 "${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 
@@ -91,6 +91,45 @@ else
   if grep -qE 'dport \{[^}]*\b3000\b' <<<"${QG}"; then t_fail "stale default 3000 guarded despite WEBUI_PORT=8080"; else t_ok "no stale default port when WEBUI_PORT is set"; fi
 fi
 
+echo "# SSH invariant: port 22 must NEVER reach the inbound drop set"
+# The guard's whole promise is that it cannot lock you out. A WEBUI_PORT (or
+# OLLAMA_HOST port) of 22 — a typo, or a service deliberately fronted on the
+# SSH port — would otherwise blackhole every NEW public SSH connection, and the
+# boot service re-applies the guard after each reboot, leaving only the
+# provider's recovery console. This asserts the invariant is ENFORCED, not just
+# claimed in a comment.
+if [[ -f "${REPO}/.env" ]]; then
+  echo "skip - ${REPO}/.env exists; not overwriting it for the SSH-invariant test"
+else
+  printf 'WEBUI_PORT=22\nOLLAMA_HOST="127.0.0.1:11434"\n' > "${REPO}/.env"
+  SSH_ONE="$("${REPO}/netmode.sh" render-inbound 2>/dev/null)"
+  rm -f "${REPO}/.env"
+  if grep -qE 'dport \{[^}]*\b22\b' <<<"${SSH_ONE}"; then
+    t_fail "WEBUI_PORT=22 reached the drop set — this would lock SSH out"
+  else
+    t_ok "WEBUI_PORT=22 is refused (SSH is never guarded)"
+  fi
+  if grep -qE 'dport \{[^}]*\b11434\b' <<<"${SSH_ONE}"; then
+    t_ok "the other configured port is still guarded when one is 22"
+  else
+    t_fail "dropping port 22 also lost the legitimate port"
+  fi
+
+  # Every configured port = 22 -> no drop rule at all, and the ruleset must
+  # still be syntactically valid (an empty '{ }' set would break nft).
+  printf 'WEBUI_PORT=22\nOLLAMA_HOST="127.0.0.1:22"\n' > "${REPO}/.env"
+  SSH_ALL="$("${REPO}/netmode.sh" render-inbound 2>/dev/null)"
+  rm -f "${REPO}/.env"
+  if grep -q 'tcp dport' <<<"${SSH_ALL}"; then
+    t_fail "a drop rule was emitted when every configured port was 22"
+  else
+    t_ok "no drop rule emitted when every configured port is 22"
+  fi
+  # Kept for the kernel check below, where the NFT array is defined.
+  SSH_ALL_FILE="$(mktemp)"
+  printf '%s\n' "${SSH_ALL}" > "${SSH_ALL_FILE}"
+fi
+
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
 if command -v nft >/dev/null 2>&1; then
@@ -108,6 +147,11 @@ if [[ "${#NFT[@]}" -eq 0 ]]; then
 else
   nft_check "nft --check accepts the offline ruleset" "${RULES}"
   nft_check "nft --check accepts the inbound ruleset" "${INBOUND}"
+  # An all-22 config yields a guard with NO drop rule; an empty '{ }' set would
+  # be a syntax error, so prove the rendered ruleset still parses.
+  if [[ -n "${SSH_ALL_FILE:-}" && -f "${SSH_ALL_FILE:-}" ]]; then
+    nft_check "nft --check accepts the guard when every configured port is 22" "${SSH_ALL_FILE}"
+  fi
 fi
 
 echo

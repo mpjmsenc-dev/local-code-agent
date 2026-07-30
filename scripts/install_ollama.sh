@@ -83,6 +83,16 @@ main() {
   version="$(curl -fsS --max-time 5 "$(ollama_url)/api/version" 2>/dev/null | jq -r '.version // empty' || true)"
   [[ -n "${version}" ]] || die "Ollama API answered but returned no version — something is wrong; check: journalctl -u ollama"
   ok "Ollama ${version} is running at $(ollama_url)"
+
+  # OLLAMA_HOST may have changed the bound port (docs/TROUBLESHOOTING.md tells
+  # users to do exactly that when 11434 is taken). The inbound guard bakes the
+  # port in, so without re-applying it here the guard keeps protecting the OLD
+  # port while the unauthenticated API listens on the new one. install_webui.sh
+  # re-hardens for the same reason; this closes the matching gap.
+  if [[ -x "${REPO_ROOT}/netmode.sh" ]]; then
+    "${REPO_ROOT}/netmode.sh" harden \
+      || warn "Could not re-apply the inbound guard — $(ollama_url) may be publicly reachable if OLLAMA_HOST is not loopback. Run: sudo ${REPO_ROOT}/netmode.sh harden"
+  fi
 }
 
 main "$@"
