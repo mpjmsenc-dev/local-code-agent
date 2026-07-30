@@ -9,7 +9,8 @@
 #
 # Usage:
 #   backup.sh                 create a backup now (and prune old ones)
-#   backup.sh --install-timer install a systemd timer that runs this daily
+#   backup.sh --install-timer install a systemd timer (BACKUP_SCHEDULE in .env;
+#                             default: daily at 03:30)
 #   backup.sh --uninstall-timer  remove that timer
 set -euo pipefail
 
@@ -212,7 +213,12 @@ uninstall_timer() {
   ok "Scheduled backup timer removed."
 }
 
-usage() { sed -n '10,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# Print the header's Usage block. Anchored to '# Usage:' .. the first non-comment
+# line rather than fixed line numbers, which silently drift (and truncate the
+# help) whenever the header above gains or loses a line.
+usage() {
+  sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
 
 main() {
   case "${1:-}" in

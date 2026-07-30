@@ -1,7 +1,9 @@
 # Coding conventions
 
-aider loads this read-only every session (run-agent.sh `--read`) to steer the
-local model. Kept short on purpose — every line here spends context window.
+aider loads this read-only at the start of each session (`run-agent.sh --read`)
+to steer the local model — unless you set `AIDER_CONVENTIONS=false` in `.env`,
+which skips it to reclaim the context it costs. Kept short on purpose: every
+line here spends part of the model's context window.
 
 - Make the smallest change that satisfies the request. Don't refactor or
   reformat code you weren't asked to touch.
