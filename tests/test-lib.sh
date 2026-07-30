@@ -192,6 +192,22 @@ check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
+echo "# aider output quality: edit format per model size, repo map scaled to the window"
+ef() { aider_edit_format "$1"; }
+check "0.5b -> whole (tiny models cannot do diffs)" test "$(ef qwen2.5-coder:0.5b)" = "whole"
+check "3b   -> whole"                               test "$(ef qwen2.5-coder:3b)"   = "whole"
+check "4b   -> whole (boundary)"                    test "$(ef qwen3:4b)"           = "whole"
+check "7b   -> diff (boundary+1)"                   test "$(ef qwen2.5-coder:7b)"   = "diff"
+check "14b  -> diff"                                test "$(ef qwen2.5-coder:14b)"  = "diff"
+check "unparseable tag falls back to diff"          test "$(ef weird-model)"        = "diff"
+# The repo map must never crowd out the code being edited.
+check "ctx 4096  -> 384 map tokens"  test "$(aider_map_tokens 4096)"  = "384"
+check "ctx 8192  -> 768 map tokens"  test "$(aider_map_tokens 8192)"  = "768"
+check "ctx 16384 -> 1536 map tokens" test "$(aider_map_tokens 16384)" = "1536"
+map_under_prompt() { local in out; read -r in out < <(aider_token_budget "$1"); [[ "$(aider_map_tokens "$1")" -lt $(( in / 2 )) ]]; }
+check "map stays well under the prompt budget (4096)"  map_under_prompt 4096
+check "map stays well under the prompt budget (16384)" map_under_prompt 16384
+
 echo "# MODEL_FAMILY: the ladder follows the configured family, with a safe fallback"
 # shellcheck source=../scripts/tune.sh
 source "${REPO}/scripts/tune.sh"

@@ -64,10 +64,22 @@ main() {
 }
 EOF
 
+  # Edit format and repo-map size make a large difference to output quality on
+  # small local models — see aider_edit_format()/aider_map_tokens(). AUTO picks
+  # per model/window; set AIDER_EDIT_FORMAT in .env to force one.
+  local edit_format map_tokens
+  edit_format="${AIDER_EDIT_FORMAT:-auto}"
+  if [[ "${edit_format}" == "auto" ]]; then
+    edit_format="$(aider_edit_format "${MODEL_NAME}")"
+  fi
+  map_tokens="$(aider_map_tokens "${OLLAMA_CONTEXT_LENGTH:-8192}")"
+
   local -a aider_args=(
     --config "${REPO_ROOT}/config/aider.conf.yml"
     --model-metadata-file "${meta_file}"
     --model "ollama_chat/${MODEL_NAME}"
+    --edit-format "${edit_format}"
+    --map-tokens "${map_tokens}"
   )
   # Prime the model with concise coding conventions (read-only) so a small
   # local model makes tighter, in-style edits. Costs a little context, so it is
@@ -80,6 +92,7 @@ EOF
 
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
   info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${window}-token window"
+  info "Edit format: ${edit_format} · repo map: ${map_tokens} tokens (AIDER_EDIT_FORMAT=auto picks per model)"
   # aider talks to Ollama through litellm, which needs OLLAMA_API_BASE and
   # the ollama_chat/ model prefix.
   export OLLAMA_API_BASE
