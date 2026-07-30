@@ -216,7 +216,11 @@ apply_inbound_guard() {
   ok "Inbound guard active: WebUI (port $(webui_port_from_env)) and Ollama (port $(ollama_port_from_env)) reachable only via loopback and Tailscale."
 }
 
+# Returns 0 loaded, 1 not loaded, 2 cannot tell (no root/sudo). as_root would
+# die() and abort `status` mid-run, leaving the operator with no answer at all
+# about whether their ports are guarded — worse than an explicit "unknown".
 inbound_loaded() {
+  can_root || return 2
   as_root nft list table inet "${INBOUND_TABLE}" >/dev/null 2>&1
 }
 
@@ -245,7 +249,7 @@ install_service() {
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
-    echo "ExecStart=${SCRIPT_DIR}/netmode.sh apply-saved"
+    echo "ExecStart=\"${SCRIPT_DIR}/netmode.sh\" apply-saved"
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
@@ -289,7 +293,7 @@ go_online() {
 apply_saved() {
   # Called by systemd at boot: the inbound guard is ALWAYS on; the egress
   # lockdown depends on the last chosen mode.
-  local state
+  local state inbound_rc
   state="$(netmode_state)"
   info "Re-applying persisted netmode: ${state}"
   apply_inbound_guard
@@ -308,7 +312,7 @@ apply_saved() {
 
 show_status() {
   step "Netmode status"
-  local state
+  local state inbound_rc
   state="$(netmode_state)"
   info "Persisted mode: ${state}"
   if have nft; then
@@ -317,11 +321,12 @@ show_status() {
     else
       info "nftables: no egress lockdown table loaded (egress unrestricted)."
     fi
-    if inbound_loaded; then
-      info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)."
-    else
-      warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden"
-    fi
+    inbound_loaded; inbound_rc=$?
+    case "${inbound_rc}" in
+      0) info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)." ;;
+      2) warn "Cannot inspect nftables without root or sudo — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      *) warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden" ;;
+    esac
   else
     warn "nft is not installed — cannot inspect the ruleset."
   fi

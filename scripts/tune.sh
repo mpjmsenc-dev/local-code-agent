@@ -75,7 +75,7 @@ install_service() {
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
-    echo "ExecStart=${SCRIPT_DIR}/tune.sh"
+    echo "ExecStart=\"${SCRIPT_DIR}/tune.sh\""
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"

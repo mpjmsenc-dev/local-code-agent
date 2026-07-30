@@ -109,6 +109,15 @@ offline because the models are local.
 - The inbound guard is targeted (it blocks the two sensitive ports on
   non-private interfaces), not a full default-drop firewall; it assumes you do
   not expose other services.
+- **Offline mode still permits DNS (UDP/TCP port 53) and STUN (UDP 3478) to any
+  host, plus the WireGuard port 41641.** Tailscale needs them: without DNS,
+  `tailscaled` cannot re-resolve its coordination server after a reboot, and
+  you would lose the private access that this mode exists to preserve. So
+  "offline" means *the AI stack cannot reach the web* (HTTP/HTTPS and
+  everything else is dropped), not that literally every packet is blocked — a
+  process that deliberately spoke over port 53 could still get data out. These
+  exceptions are deliberate; they are not scoped further precisely because a
+  narrower rule risks cutting Tailscale and stranding you on a remote VM.
 - Trust is single-VM: anyone with a shell (or root) on the box has full access.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))

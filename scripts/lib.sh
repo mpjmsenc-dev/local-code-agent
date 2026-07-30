@@ -260,6 +260,13 @@ ollama_bind_is_public() {
     "::"|"[::]"|"[::]:"*|"0:0:0:0:0:0:0:0"*) return 0 ;;  # IPv6 any -> public
     "[::1]"|"[::1]:"*|"::1") return 1 ;;                   # IPv6 loopback
   esac
+  # A bare ':PORT' (empty host part) binds ALL interfaces, exactly like
+  # 0.0.0.0 — Ollama's own default when the host is omitted. The '%%:*' strip
+  # below would leave an empty string, which the "" case then misread as
+  # loopback-private, so a publicly-bound unauthenticated API looked safe.
+  case "${host}" in
+    :*) return 0 ;;
+  esac
   host="${host%%:*}"
   case "${host}" in
     127.0.0.1|localhost|"") return 1 ;;

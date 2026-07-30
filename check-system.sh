@@ -227,6 +227,16 @@ else
   else
     p_pass "inbound guard active and covers WebUI ${WEBUI_PORT} + Ollama ${OLLAMA_GUARD_PORT} — reachable only via loopback and Tailscale"
   fi
+  # A guard that is loaded now but will not come back after a reboot is a
+  # trap: the ports silently become public at the next restart and nothing
+  # says so. The boot unit is the only thing that re-applies it.
+  if systemd_available; then
+    if systemctl is-enabled --quiet local-code-agent-netmode.service 2>/dev/null; then
+      p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
+    else
+      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh --install-service"
+    fi
+  fi
 fi
 
 # --- Netmode + internet -----------------------------------------------------

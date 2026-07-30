@@ -138,6 +138,16 @@ fallbacks_apply() {
 }
 check "load_env fallbacks apply when .env omits the keys" fallbacks_apply
 
+echo "# ollama_bind_is_public(): a bare ':PORT' binds ALL interfaces, not loopback"
+bind_public()  { OLLAMA_HOST="$1" ollama_bind_is_public; }
+bind_private() { ! OLLAMA_HOST="$1" ollama_bind_is_public; }
+check "bare ':11434' is PUBLIC (all interfaces)" bind_public ":11434"
+check "'0.0.0.0:11434' is public"                bind_public "0.0.0.0:11434"
+check "'::' is public"                           bind_public "::"
+check "'127.0.0.1:11434' stays private"          bind_private "127.0.0.1:11434"
+check "'localhost:11434' stays private"          bind_private "localhost:11434"
+check "'[::1]:11434' stays private"              bind_private "[::1]:11434"
+
 echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
 # backup.sh only runs main() when executed, so sourcing it here just defines
 # its functions. Guards the "disk filled up mid-tar" case: the archive must read

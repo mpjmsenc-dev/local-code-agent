@@ -225,7 +225,7 @@ install_timer() {
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
-    echo "ExecStart=${SCRIPT_DIR}/backup.sh"
+    echo "ExecStart=\"${SCRIPT_DIR}/backup.sh\""
   } | as_root tee "${BACKUP_SERVICE}" >/dev/null
   {
     echo "[Unit]"
