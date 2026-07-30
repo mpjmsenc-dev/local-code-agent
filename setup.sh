@@ -69,6 +69,19 @@ main() {
 
   "${SCRIPT_DIR}/scripts/install_tailscale.sh"
 
+  step "Installing the 'lca' command"
+  # Daily use should be 'cd ~/project && lca', not the full path to a script in
+  # /opt. Symlink rather than copy, so it always tracks this checkout.
+  if can_root; then
+    if as_root ln -sfn "${SCRIPT_DIR}/bin/lca" /usr/local/bin/lca 2>/dev/null; then
+      ok "'lca' is on your PATH — try: lca help"
+    else
+      warn "Could not create /usr/local/bin/lca — use ${SCRIPT_DIR}/bin/lca directly."
+    fi
+  else
+    info "No root available — skipping the 'lca' symlink; use ${SCRIPT_DIR}/bin/lca."
+  fi
+
   step "Installing boot services (auto-tune + netmode persistence)"
   "${SCRIPT_DIR}/scripts/tune.sh" --install-service
   "${SCRIPT_DIR}/netmode.sh" --install-service

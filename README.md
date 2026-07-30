@@ -181,9 +181,24 @@ offline because the models are local.
 ## Daily usage: aider (the coding agent)
 
 ```bash
-cd ~/my-project                          # YOUR project, any git repo
-/opt/local-code-agent/run-agent.sh       # starts aider on the local model
+cd ~/my-project     # YOUR project, any git repo
+lca                 # starts aider on the local model, right here
 ```
+
+`setup.sh` puts `lca` on your PATH. It is one short front door to everything:
+
+| Command | Does |
+|---|---|
+| `lca` | start the coding agent in the current directory |
+| `lca chat` | print the address for the chat app on your phone |
+| `lca check` / `lca test` | health check / live end-to-end self-test |
+| `lca update` | back up, update, re-run setup, verify |
+| `lca offline` / `lca online` | internet kill switch (needs sudo) |
+| `lca model <name>` | switch models |
+
+`lca help` lists them all. Everything after the command is passed through, so
+`lca --no-auto-commits` reaches aider and `lca model X --remove-old` reaches
+update-model.sh. The full script paths still work if you prefer them.
 
 Inside aider: `/add file.py` to add files, then ask for changes in plain English —
 it edits and auto-commits. `/undo` reverts, `/help` lists commands. Extra
@@ -245,6 +260,7 @@ local-code-agent/
 ├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
 ├── install.sh                  # one-command installer (curl | bash)
 ├── Makefile                    # make gates/lint/test/hooks — the local dev loop
+├── bin/lca                     # the short command installed on PATH
 ├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/

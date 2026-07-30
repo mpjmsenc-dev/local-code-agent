@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# bin/lca — one short command for everyday use, installed on PATH as 'lca'.
+#
+# Typing /opt/local-code-agent/run-agent.sh every time is the kind of friction
+# that stops people using their own tools. Every subcommand just forwards to the
+# script that already does the work, with all arguments passed through.
+#
+# IMPORTANT: this never cd's. 'lca' with no arguments starts the coding agent in
+# YOUR current directory, which is the whole point — aider must see your project.
+set -euo pipefail
+
+# Resolve through the /usr/local/bin/lca symlink to the real checkout, so the
+# install location is wherever the user actually put it.
+SELF="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  SELF="$(readlink -f "${SELF}" 2>/dev/null || printf '%s' "${SELF}")"
+fi
+REPO="$(cd "$(dirname "${SELF}")/.." && pwd)"
+
+usage() {
+  cat <<EOF
+local-code-agent — private AI stack
+
+Usage: lca [command] [args...]
+
+  lca                     start the coding agent here (aider, in \$PWD)
+  lca chat                print the address to open the chat app on your phone
+  lca check               full health check
+  lca test                live end-to-end self-test (proves it really works)
+  lca update [--check]    back up, update, re-run setup, verify
+  lca backup              take a backup now
+  lca restore [file]      restore from a backup
+  lca model <name>        switch the model (or 'lca model --list')
+  lca offline|online      internet kill switch  (needs sudo)
+  lca status              kill-switch + guard status (needs sudo)
+  lca webui <cmd>         start|stop|restart|status|url|logs
+  lca help                this text
+
+Anything after the command is passed straight through, e.g.
+  lca --no-auto-commits          (arguments for aider)
+  lca model qwen2.5-coder:14b --remove-old
+EOF
+}
+
+cmd="${1:-}"
+# Drop the subcommand so "$@" is exactly the arguments to forward. Guarded with
+# if/fi rather than 'A && B || C', which is not if-then-else: with no arguments
+# the shift would fail and the || branch would mask it.
+if (( $# > 0 )); then
+  shift
+fi
+
+case "${cmd}" in
+  ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
+  chat)            exec "${REPO}/webui.sh" url ;;
+  check)           exec "${REPO}/check-system.sh" "$@" ;;
+  test|selftest)   exec "${REPO}/scripts/selftest.sh" "$@" ;;
+  update)          exec "${REPO}/update.sh" "$@" ;;
+  backup)          exec "${REPO}/backup.sh" "$@" ;;
+  restore)         exec "${REPO}/restore.sh" "$@" ;;
+  model)           exec "${REPO}/update-model.sh" "$@" ;;
+  offline|online|status|harden)
+                   exec "${REPO}/netmode.sh" "${cmd}" "$@" ;;
+  webui)           exec "${REPO}/webui.sh" "$@" ;;
+  tune)            exec "${REPO}/scripts/tune.sh" "$@" ;;
+  help|-h|--help)  usage ;;
+  *)
+    usage
+    printf '\nUnknown command: %s\n' "${cmd}" >&2
+    exit 1
+    ;;
+esac

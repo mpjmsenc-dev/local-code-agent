@@ -15,11 +15,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
         run: |
-          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh; do
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*; do
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)
-        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*
 
   test:
     name: Unit tests + tune dry-run

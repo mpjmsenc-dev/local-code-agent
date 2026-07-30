@@ -109,7 +109,20 @@ main() {
     ok "Virtualenv ${venv} removed."
   fi
 
-  # 6. Generated state outside the repo: run-agent.sh writes an aider
+  # 6. The 'lca' command on PATH — but only if it points at THIS checkout, so a
+  # second install elsewhere is never silently disarmed by this uninstall.
+  if [[ -L /usr/local/bin/lca ]]; then
+    local lca_target
+    lca_target="$(readlink -f /usr/local/bin/lca 2>/dev/null || true)"
+    if [[ "${lca_target}" == "${SCRIPT_DIR}/bin/lca" ]]; then
+      as_root rm -f /usr/local/bin/lca
+      ok "'lca' command removed."
+    else
+      info "/usr/local/bin/lca points elsewhere (${lca_target:-unknown}) — leaving it alone."
+    fi
+  fi
+
+  # 7. Generated state outside the repo: run-agent.sh writes an aider
   # model-metadata file under ~/.cache. Under sudo, $HOME is root's, while the
   # file was written by the human's own run — clean up both.
   local cache_dirs=( "${HOME}/.cache/local-code-agent" ) sudo_home d
