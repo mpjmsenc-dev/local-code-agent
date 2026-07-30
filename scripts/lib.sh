@@ -395,6 +395,73 @@ gpu_hardware_present() {
   lspci 2>/dev/null | grep -qi 'nvidia'
 }
 
+# vram_mib_from_smi — read `nvidia-smi --query-gpu=memory.total ...` output on
+# stdin and echo the LARGEST card's VRAM in MiB. Largest, not first: with a
+# display adapter alongside a compute card, the first line can be the small one
+# and every recommendation built on it would be wrong.
+vram_mib_from_smi() {
+  local best=0 line
+  while read -r line; do
+    line="${line//[^0-9]/}"
+    [[ -n "${line}" ]] || continue
+    (( line > best )) && best="${line}"
+  done
+  (( best > 0 )) || return 1
+  printf '%s\n' "${best}"
+}
+
+# gpu_vram_mib — VRAM of the largest NVIDIA card, or nonzero when it cannot be
+# determined (no driver, no card).
+gpu_vram_mib() {
+  have nvidia-smi || return 1
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | vram_mib_from_smi
+}
+
+# classify_gpu HAS_CARD HAS_DRIVER PLACEMENT — pure classifier for the GPU
+# situation, echoing one of:
+#   none        no NVIDIA card in the machine
+#   no-driver   card present but no driver — the silent case, where everything
+#               works and is simply 10x slower with no explanation given
+#   idle        driver works, but the model is running on the CPU anyway
+#               (usually too little VRAM, or Ollama needs the container toolkit)
+#   split       partially offloaded — runs at close to CPU speed, the trap
+#   active      fully on the GPU, which is the point
+#   unknown     the model is not resident, so placement cannot be read
+# Kept pure so every branch is unit-testable on a machine with no GPU at all.
+classify_gpu() {
+  local has_card="$1" has_driver="$2" placement="$3"
+  if [[ "${has_card}" != "true" && "${has_driver}" != "true" ]]; then
+    printf 'none\n'; return 0
+  fi
+  if [[ "${has_driver}" != "true" ]]; then
+    printf 'no-driver\n'; return 0
+  fi
+  case "${placement}" in
+    "")        printf 'unknown\n' ;;
+    *"/"*)     printf 'split\n' ;;
+    *GPU*)     printf 'active\n' ;;
+    *)         printf 'idle\n' ;;
+  esac
+}
+
+# gpu_state — classify_gpu against this machine.
+gpu_state() {
+  local card=false driver=false
+  gpu_hardware_present && card=true
+  have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && driver=true
+  classify_gpu "${card}" "${driver}" "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
+}
+
+# largest_model_for_vram VRAM_MIB — the biggest parameter count that fits
+# entirely in VRAM at q4 (~0.6 GB per billion, plus ~1.5 GB for context and
+# CUDA overhead). Fitting COMPLETELY is the point: a model that spills is not
+# "most of the speed", it runs at close to CPU speed.
+largest_model_for_vram() {
+  local mib="$1"
+  [[ "${mib}" =~ ^[0-9]+$ ]] || return 1
+  awk -v m="${mib}" 'BEGIN { p = (m / 1024 - 1.5) / 0.6; if (p < 1) exit 1; printf "%d\n", p }'
+}
+
 # processor_from_ps MODEL — read `ollama ps` output on stdin and echo how MODEL
 # is actually running: "100% GPU", "100% CPU", or a split like "38%/62% CPU/GPU".
 # This is the only authoritative answer to "is my GPU being used?" — a driver

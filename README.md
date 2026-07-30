@@ -300,10 +300,12 @@ Inference speed depends on hardware:
   hypervisor with **GPU passthrough**. `check-system.sh` reports whether a GPU
   was detected.
 
-`check-system.sh` and `lca test` report whether your model is actually running
-on the GPU or the CPU (`ollama ps`'s PROCESSOR column) — a driver can be present
-and Ollama still fall back to CPU. See **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**
-for what actually moves the needle, in order, and how to measure it.
+`lca speed` measures tokens/second, reports whether your model is actually on
+the GPU or the CPU (`ollama ps`'s PROCESSOR column), and names what is limiting
+it — a driver can be present and Ollama still fall back to CPU. See
+**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** for what moves the needle in
+order, and **[docs/GPU.md](docs/GPU.md)** for adding a card, choosing a model
+that fits its VRAM, and proving it is really being used.
 
 Note: CI exercises the CPU path on standard runners (there are no GPU runners),
 so the GPU path is documented and detected but not automatically E2E-tested —
@@ -324,7 +326,7 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[PERFORMANCE](docs/PERFORMANCE.md) · [BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[PERFORMANCE](docs/PERFORMANCE.md) · [GPU](docs/GPU.md) · [BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 

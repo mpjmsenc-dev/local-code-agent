@@ -190,7 +190,13 @@ main() {
   elif [[ "${where}" == "split" ]]; then
     warn "The model is split across CPU and GPU (${placement})."
     info "A partly-offloaded model runs close to CPU speed — the CPU half sets the pace."
-    info "A model that fits your VRAM completely will be several times faster:"
+    local vram fits
+    if vram="$(gpu_vram_mib)" && fits="$(largest_model_for_vram "${vram}")"; then
+      info "Your card has $(( vram / 1024 )) GB of VRAM, which fits a model up to about ${fits}B entirely."
+      info "Pick one at or below that and expect several times this speed:"
+    else
+      info "A model that fits your VRAM completely will be several times faster:"
+    fi
     info "  lca model --list-recommended"
   elif [[ "${where}" == "gpu" ]]; then
     if awk -v t="${tps}" 'BEGIN { exit !(t < 15) }'; then
@@ -214,12 +220,19 @@ main() {
       info "Want it faster today? A smaller model is the only big CPU-side lever:"
       info "  lca model --list-recommended"
     fi
-    if gpu_hardware_present; then
-      warn "An NVIDIA card is present but the model is running on the CPU — the driver"
-      warn "or container toolkit is probably missing. Fixing that is worth ~10x."
-    else
-      info "The one change that beats everything else is a GPU — see docs/PERFORMANCE.md."
-    fi
+    case "$(gpu_state "${MODEL_NAME}")" in
+      no-driver)
+        warn "An NVIDIA card is in this machine but no working driver was found."
+        warn "That is why you are on the CPU. Fixing it is worth roughly 10x — see docs/GPU.md."
+        ;;
+      idle)
+        warn "The NVIDIA driver works, but Ollama is still using the CPU."
+        warn "Usually the model is too big for VRAM, or Ollama cannot see the card. See docs/GPU.md."
+        ;;
+      *)
+        info "The one change that beats everything else is a GPU — see docs/GPU.md."
+        ;;
+    esac
   fi
 }
 

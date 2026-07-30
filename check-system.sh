@@ -272,7 +272,7 @@ if has_nvidia_gpu; then
 elif gpu_hardware_present; then
   # The worst case to leave unexplained: the card is there, so the user expects
   # speed, but without a driver Ollama silently runs on the CPU.
-  p_warn "an NVIDIA card is present but no working driver was found (nvidia-smi missing/failing) — Ollama is running on the CPU. Install the driver (e.g. sudo ubuntu-drivers install) and restart ollama."
+  p_warn "an NVIDIA card is present but no working driver was found (nvidia-smi missing/failing) — Ollama is running on the CPU. Install the driver (e.g. sudo ubuntu-drivers install) and restart ollama. See docs/GPU.md."
 else
   info "no NVIDIA GPU — CPU inference (a reading pace); Ollama auto-uses a GPU if you move to a GPU host (see README 'Performance')"
 fi
@@ -290,7 +290,16 @@ if [[ -n "${GPU_PROC}" ]]; then
         info "model '${MODEL_NAME}' is running on the CPU (${GPU_PROC}) — expected without a GPU"
       fi
       ;;
-    *) p_pass "model '${MODEL_NAME}' is split across CPU and GPU (${GPU_PROC}) — partially offloaded" ;;
+    *)
+      # A split is NOT "most of the speed" — the CPU share sets the pace, so
+      # this can be slower than a smaller model that fits VRAM entirely. It
+      # looks like success, which is exactly why it needs to be a warning.
+      VRAM_FIT=""
+      if VRAM_MIB="$(gpu_vram_mib)" && VRAM_FIT="$(largest_model_for_vram "${VRAM_MIB}")"; then
+        VRAM_FIT=" This card holds a model up to about ${VRAM_FIT}B entirely."
+      fi
+      p_warn "model '${MODEL_NAME}' is only partially on the GPU (${GPU_PROC}) — a split runs at close to CPU speed.${VRAM_FIT} Pick a model that fits VRAM completely: lca model --list-recommended (see docs/GPU.md)."
+      ;;
   esac
 else
   info "model '${MODEL_NAME}' is not loaded right now — run a query, then re-check to see CPU/GPU placement"

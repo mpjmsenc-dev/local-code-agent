@@ -341,6 +341,42 @@ home_set_when_unset() {
 }
 check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
 
+echo "# classify_gpu() — every GPU situation, testable on a machine with no GPU"
+gpu_is() { test "$(classify_gpu "$2" "$3" "$4")" = "$1"; }
+check "no card, no driver -> none"        gpu_is none      false false ""
+# The silent case: the card is there, everything works, and it is 10x slower
+# with no explanation offered anywhere.
+check "card but no driver -> no-driver"   gpu_is no-driver true  false ""
+check "driver but model on CPU -> idle"   gpu_is idle      true  true  "100% CPU"
+check "partial offload -> split"          gpu_is split     true  true  "38%/62% CPU/GPU"
+check "fully offloaded -> active"         gpu_is active    true  true  "100% GPU"
+check "model not resident -> unknown"     gpu_is unknown   true  true  ""
+# A driver can be present in a VM whose card is passed through and therefore
+# invisible to lspci; trusting lspci alone would report 'none' with the GPU
+# plainly working.
+check "driver works though lspci sees nothing -> classified by placement" \
+  gpu_is active false true "100% GPU"
+
+echo "# vram_mib_from_smi() — picks the LARGEST card, not the first"
+smi_gives() { test "$(printf '%s\n' "$2" | vram_mib_from_smi)" = "$1"; }
+check "single 3090 -> 24576" smi_gives 24576 "24576"
+# A small display adapter listed first would otherwise set every recommendation.
+check "display adapter first, compute card second -> the big one" \
+  smi_gives 24576 "2048
+24576"
+check "strips units if present" smi_gives 24576 "24576 MiB"
+no_vram() { ! printf '%s\n' "$1" | vram_mib_from_smi >/dev/null 2>&1; }
+check "no output (no driver) -> nonzero exit" no_vram ""
+check "non-numeric output -> nonzero exit" no_vram "N/A"
+
+echo "# largest_model_for_vram() — must fit COMPLETELY, spilling is the trap"
+check "24 GB (RTX 3090) -> 37B" test "$(largest_model_for_vram 24576)" = "37"
+check "12 GB -> 17B"            test "$(largest_model_for_vram 12288)" = "17"
+check "8 GB -> 10B"             test "$(largest_model_for_vram 8192)" = "10"
+no_fit() { ! largest_model_for_vram "$1" >/dev/null 2>&1; }
+check "a 1 GB adapter fits nothing -> nonzero exit" no_fit 1024
+check "non-numeric -> nonzero exit" no_fit abc
+
 echo "# model_params_b() — parameter count read off the Ollama tag"
 check "qwen2.5-coder:7b -> 7"   test "$(model_params_b qwen2.5-coder:7b)" = "7"
 check "qwen2.5-coder:14b -> 14" test "$(model_params_b qwen2.5-coder:14b)" = "14"
