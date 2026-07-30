@@ -39,7 +39,26 @@ main() {
       apt_get install -y zstd || warn "Could not install zstd — the Ollama installer may fail to unpack."
     fi
     info "Running the official Ollama installer..."
-    curl -fsSL https://ollama.com/install.sh | as_root sh
+    # The installer streams a large tarball straight into tar, so a transient
+    # reset ("curl: (35) Recv failure: Connection reset by peer") yields
+    # "gzip: stdin: unexpected end of file" and aborts the whole setup. That is
+    # a real failure on a fresh droplet, not just in CI — one bad connection
+    # should not cost the user the entire install. Retry with backoff; the
+    # official installer is itself idempotent, so a partial attempt is safe to
+    # repeat.
+    local attempt ollama_ok=false
+    for attempt in 1 2 3; do
+      if curl -fsSL https://ollama.com/install.sh | as_root sh; then
+        ollama_ok=true
+        break
+      fi
+      if (( attempt < 3 )); then
+        warn "Ollama download/install attempt ${attempt}/3 failed (transient network?) — retrying in $((attempt * 5))s..."
+        sleep "$((attempt * 5))"
+      fi
+    done
+    [[ "${ollama_ok}" == "true" ]] \
+      || die "The Ollama installer failed 3 times — check connectivity (curl -I https://ollama.com) and whether netmode is offline: ${REPO_ROOT}/netmode.sh status"
     require_cmd ollama
     ok "Ollama installed."
   else
