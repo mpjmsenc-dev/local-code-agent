@@ -17,6 +17,26 @@ Droplet (4 vCPU / 8 GB), and equally at home on arm64 or any VMware/Proxmox/KVM 
 
 ## Quick start (server)
 
+One command on a fresh Ubuntu 24.04 box:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash
+```
+
+It installs git, clones to `/opt/local-code-agent`, and runs `setup.sh`. Piping
+into a shell means running code you have not read, so if you would rather look
+first (it is short, and this is the better habit):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh -o install.sh
+less install.sh && bash install.sh
+```
+
+Overrides: `LCA_DIR` (install location), `LCA_BRANCH`, `LCA_REPO_URL` (your
+fork), `LCA_RUN_SETUP=false` (clone only). Re-running updates the checkout.
+
+Or do it by hand:
+
 ```bash
 git clone https://github.com/mpjmsenc-dev/local-code-agent.git
 cd local-code-agent
@@ -164,6 +184,7 @@ edited. Override with `AIDER_EDIT_FORMAT` in `.env`.
 
 | Script | Purpose |
 |---|---|
+| `install.sh` | One-command bootstrap: installs git, clones, runs `setup.sh` |
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|logs` for Open WebUI |
@@ -205,6 +226,7 @@ Created from `.env.example` on first run. All keys:
 ```
 local-code-agent/
 ├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
+├── install.sh                  # one-command installer (curl | bash)
 ├── Makefile                    # make gates/lint/test/hooks — the local dev loop
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh

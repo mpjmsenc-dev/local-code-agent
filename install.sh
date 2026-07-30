@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# install.sh — one-command installer for local-code-agent on a fresh machine.
+#
+#   curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash
+#
+# Piping anything into a shell means running code you have not read. If you
+# would rather look first (recommended, and it is short):
+#
+#   curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh -o install.sh
+#   less install.sh          # read it
+#   bash install.sh          # then run it
+#
+# All this script does is install git, clone the repository, and hand over to
+# setup.sh — which is the same thing docs/INSTALL.md asks you to do by hand.
+#
+# Environment overrides:
+#   LCA_DIR=/opt/local-code-agent   where to install
+#   LCA_BRANCH=main                 branch to check out
+#   LCA_REPO_URL=<git url>          fork/mirror to clone from
+#   LCA_RUN_SETUP=false             clone only, do not run setup.sh
+set -euo pipefail
+
+REPO_URL="${LCA_REPO_URL:-https://github.com/mpjmsenc-dev/local-code-agent.git}"
+INSTALL_DIR="${LCA_DIR:-/opt/local-code-agent}"
+BRANCH="${LCA_BRANCH:-main}"
+RUN_SETUP="${LCA_RUN_SETUP:-true}"
+
+say()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+fail() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Root without assuming sudo exists (containers often lack it) and without
+# assuming we are not already root (cloud-init, Docker).
+if [[ "${EUID}" -eq 0 ]]; then
+  SUDO=()
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO=(sudo)
+else
+  fail "This installer needs root to write ${INSTALL_DIR} and install packages, but you are not root and 'sudo' is not installed. Re-run as root."
+fi
+
+say "local-code-agent installer"
+info "repository : ${REPO_URL} (branch ${BRANCH})"
+info "install to : ${INSTALL_DIR}"
+
+# --- 1. git ------------------------------------------------------------------
+if ! command -v git >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    say "Installing git"
+    # DPkg::Lock::Timeout waits out apt-daily/unattended-upgrades, which
+    # routinely holds the dpkg lock in the first minutes of a fresh boot.
+    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
+      apt-get -o DPkg::Lock::Timeout=600 update -y
+    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
+      apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates curl
+  else
+    fail "git is not installed and this system has no apt-get. Install git, then re-run."
+  fi
+fi
+
+# --- 2. clone (or update an existing checkout) --------------------------------
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+  say "Updating the existing checkout in ${INSTALL_DIR}"
+  "${SUDO[@]}" git -C "${INSTALL_DIR}" fetch --depth 1 origin "${BRANCH}" \
+    || fail "Could not fetch ${BRANCH} from origin. Check connectivity, or that ${INSTALL_DIR} points at the right remote."
+  # Hard reset rather than pull: a half-applied local edit must never leave the
+  # installer wedged on a merge conflict during an unattended run.
+  "${SUDO[@]}" git -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+else
+  say "Cloning into ${INSTALL_DIR}"
+  "${SUDO[@]}" mkdir -p "$(dirname "${INSTALL_DIR}")"
+  "${SUDO[@]}" git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${INSTALL_DIR}" \
+    || fail "Clone failed. Check connectivity and that ${REPO_URL} is reachable."
+fi
+
+"${SUDO[@]}" chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh 2>/dev/null || true
+
+if [[ "${RUN_SETUP}" != "true" ]]; then
+  say "Clone complete (LCA_RUN_SETUP=${RUN_SETUP} — setup was NOT run)"
+  info "Run it yourself with: sudo ${INSTALL_DIR}/setup.sh"
+  exit 0
+fi
+
+# --- 3. setup ----------------------------------------------------------------
+say "Running setup (first install downloads a model — expect 20-30 minutes)"
+# </dev/null matters: when this script is itself piped into bash, stdin is the
+# script text, and setup.sh's prompts would otherwise eat it.
+"${SUDO[@]}" "${INSTALL_DIR}/setup.sh" </dev/null
+
+say "Done"
+info "Health check   : ${INSTALL_DIR}/check-system.sh"
+info "Prove it works : ${INSTALL_DIR}/scripts/selftest.sh"
+info "Code with it   : cd <your-project> && ${INSTALL_DIR}/run-agent.sh"
+info "Phone access   : sudo tailscale up   (then see ${INSTALL_DIR}/docs/PHONE.md)"

@@ -131,6 +131,27 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
           python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
           exit "${missing}"
+      - name: install.sh bootstraps on a bare image (clone only, no setup)
+        # The one-command installer's whole job is to work on a machine with
+        # nothing on it. Proving it here means it cannot rot into "works only
+        # where git already happens to be installed".
+        run: |
+          set -euo pipefail
+          apt-get purge -y git >/dev/null 2>&1 || true
+          if command -v git >/dev/null 2>&1; then
+            echo "note: git still present after purge; the apt path below is still exercised"
+          fi
+          # A PR build checks out a DETACHED merge commit, so the head branch
+          # name does not exist locally and '--branch <name>' would fail. Make a
+          # local branch at HEAD and clone that instead.
+          git config --global --add safe.directory "$(pwd)"
+          git branch -f ci-bootstrap-test HEAD
+          LCA_REPO_URL="$(pwd)" LCA_DIR=/tmp/lca-bootstrap \
+            LCA_BRANCH=ci-bootstrap-test \
+            LCA_RUN_SETUP=false bash install.sh
+          test -x /tmp/lca-bootstrap/setup.sh
+          test -x /tmp/lca-bootstrap/scripts/selftest.sh
+          echo "install.sh bootstrapped a working checkout on a bare image"
 
   e2e:
     name: E2E — real Ollama install + real generation
