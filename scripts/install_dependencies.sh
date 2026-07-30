@@ -8,7 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_env
 
-PACKAGES=(curl wget git python3 python3-venv python3-pip build-essential jq unzip zip htop tree nftables)
+# zstd is required by the official Ollama installer to unpack its release
+# tarball; it is preinstalled on some cloud images but not on minimal ones,
+# so install it explicitly (install_dependencies runs before install_ollama).
+PACKAGES=(curl wget git python3 python3-venv python3-pip build-essential jq unzip zip zstd htop tree nftables)
 
 main() {
   step "Installing base dependencies"

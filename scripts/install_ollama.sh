@@ -28,6 +28,13 @@ main() {
 
   if [[ "${need_install}" == "true" ]]; then
     net_guard "Installing Ollama"
+    # The official installer unpacks a zstd-compressed tarball; without the
+    # zstd CLI it aborts with "requires zstd for extraction". setup.sh installs
+    # it via dependencies, but guard standalone runs on minimal systems too.
+    if ! have zstd && have apt-get; then
+      info "Installing zstd (required to unpack the Ollama release)..."
+      apt_get install -y zstd || warn "Could not install zstd — the Ollama installer may fail to unpack."
+    fi
     info "Running the official Ollama installer..."
     curl -fsSL https://ollama.com/install.sh | as_root sh
     require_cmd ollama
