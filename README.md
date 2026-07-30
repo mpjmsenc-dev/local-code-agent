@@ -158,6 +158,7 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | Context window in tokens |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
+| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
@@ -181,7 +182,7 @@ local-code-agent/
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
-├── config/aider.conf.yml · config/ollama.env
+├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui

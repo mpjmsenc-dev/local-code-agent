@@ -62,17 +62,27 @@ main() {
 }
 EOF
 
+  local -a aider_args=(
+    --config "${REPO_ROOT}/config/aider.conf.yml"
+    --model-metadata-file "${meta_file}"
+    --model "ollama_chat/${MODEL_NAME}"
+  )
+  # Prime the model with concise coding conventions (read-only) so a small
+  # local model makes tighter, in-style edits. Costs a little context, so it is
+  # skippable via AIDER_CONVENTIONS=false for the smallest (4096) windows.
+  local conventions="${REPO_ROOT}/config/CONVENTIONS.md"
+  if [[ "${AIDER_CONVENTIONS:-true}" == "true" && -f "${conventions}" ]]; then
+    aider_args+=( --read "${conventions}" )
+    info "Priming with coding conventions (config/CONVENTIONS.md; AIDER_CONVENTIONS=false to skip)"
+  fi
+
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
   info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${window}-token window"
   # aider talks to Ollama through litellm, which needs OLLAMA_API_BASE and
   # the ollama_chat/ model prefix.
   export OLLAMA_API_BASE
   OLLAMA_API_BASE="$(ollama_url)"
-  exec "${aider}" \
-    --config "${REPO_ROOT}/config/aider.conf.yml" \
-    --model-metadata-file "${meta_file}" \
-    --model "ollama_chat/${MODEL_NAME}" \
-    "$@"
+  exec "${aider}" "${aider_args[@]}" "$@"
 }
 
 main "$@"

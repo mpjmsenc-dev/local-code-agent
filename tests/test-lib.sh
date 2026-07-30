@@ -34,6 +34,7 @@ check "default MODEL_NAME" test "${MODEL_NAME}" = "qwen2.5-coder:7b"
 check "default OLLAMA_CONTEXT_LENGTH" test "${OLLAMA_CONTEXT_LENGTH}" = "8192"
 check "default AUTO_TUNE" test "${AUTO_TUNE}" = "true"
 check "default BACKUP_KEEP" test "${BACKUP_KEEP}" = "7"
+check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
 
 echo "# set_env_var -> load_env round-trip (update + append, no duplicates)"
 set_env_var MODEL_NAME "qwen2.5-coder:14b"
