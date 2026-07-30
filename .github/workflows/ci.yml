@@ -10,7 +10,7 @@ jobs:
     name: ShellCheck + syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
@@ -25,7 +25,7 @@ jobs:
     name: Unit tests + tune dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Library + tune-ladder unit tests
         run: bash tests/test-lib.sh
       - name: tune.sh --dry-run exits 0 and changes nothing
@@ -37,7 +37,7 @@ jobs:
     name: System artifacts (nft ruleset + systemd units)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
       - name: Netmode ruleset tests (content + kernel-side nft --check)
@@ -84,7 +84,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git ca-certificates
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Run install_dependencies.sh on a minimal base
         run: bash scripts/install_dependencies.sh
       - name: Every tool the stack relies on must now resolve
@@ -102,7 +102,7 @@ jobs:
     name: E2E — real Ollama install + real generation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
         run: |
           cp .env.example .env
@@ -172,7 +172,7 @@ jobs:
     name: E2E — Open WebUI container + volume backup/restore
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Prepare .env
         run: cp .env.example .env
       - name: install_webui.sh for real (docker preinstalled on runners)
