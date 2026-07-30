@@ -206,10 +206,36 @@ else
   # the drop set. A config change without a re-harden, or a parser mismatch,
   # would otherwise show green while the real port stays exposed.
   INBOUND_DUMP="$(as_root nft list table inet lca_inbound 2>/dev/null)"
-  if [[ "${ENABLE_WEBUI}" == "true" ]] && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
-    p_fail "inbound guard is loaded but does NOT cover WebUI port ${WEBUI_PORT} — re-run: sudo ./netmode.sh harden"
+  # Check the OLLAMA port too, not just the WebUI one. The Ollama API is
+  # unauthenticated, and changing OLLAMA_HOST (documented in
+  # docs/TROUBLESHOOTING.md) leaves the guard baked with the OLD port — so the
+  # asymmetric check used to print a green "covers the configured port(s)"
+  # while a public Ollama bind was live. Name the ports so the claim can be
+  # checked by eye instead of taken on trust.
+  OLLAMA_GUARD_PORT="$(ollama_url)"; OLLAMA_GUARD_PORT="${OLLAMA_GUARD_PORT##*:}"
+  GUARD_MISSING=()
+  if [[ "${ENABLE_WEBUI}" == "true" ]] \
+     && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    GUARD_MISSING+=("WebUI ${WEBUI_PORT}")
+  fi
+  if [[ "${OLLAMA_GUARD_PORT}" =~ ^[0-9]+$ ]] && [[ "${OLLAMA_GUARD_PORT}" != "22" ]] \
+     && ! grep -qE "dport \{[^}]*\b${OLLAMA_GUARD_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    GUARD_MISSING+=("Ollama ${OLLAMA_GUARD_PORT}")
+  fi
+  if (( ${#GUARD_MISSING[@]} )); then
+    p_fail "inbound guard is loaded but does NOT cover: ${GUARD_MISSING[*]} — it went stale after a config change; re-run: sudo ./netmode.sh harden"
   else
-    p_pass "inbound guard active and covers the configured port(s) — reachable only via loopback and Tailscale"
+    p_pass "inbound guard active and covers WebUI ${WEBUI_PORT} + Ollama ${OLLAMA_GUARD_PORT} — reachable only via loopback and Tailscale"
+  fi
+  # A guard that is loaded now but will not come back after a reboot is a
+  # trap: the ports silently become public at the next restart and nothing
+  # says so. The boot unit is the only thing that re-applies it.
+  if systemd_available; then
+    if systemctl is-enabled --quiet local-code-agent-netmode.service 2>/dev/null; then
+      p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
+    else
+      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh --install-service"
+    fi
   fi
 fi
 
@@ -257,6 +283,52 @@ elif (( FREE_GB >= 15 )); then
   p_pass "free disk at ${MODELS_DIR}: ${FREE_GB} GB (>= 15 GB)"
 else
   p_fail "only ${FREE_GB} GB free at ${MODELS_DIR} — models need headroom (>= 15 GB); clean up with: ollama rm <model>"
+fi
+
+# --- Backups (warn-only: backups are optional) ------------------------------
+step "Backups"
+if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.timer 2>/dev/null; then
+  # Report the REAL schedule the timer runs on (BACKUP_SCHEDULE is configurable),
+  # and describe retention honestly — BACKUP_KEEP=0 means "keep everything",
+  # not "keep newest 0".
+  KEEP_DESC="keeping newest ${BACKUP_KEEP}"
+  if ! [[ "${BACKUP_KEEP}" =~ ^[0-9]+$ ]]; then
+    KEEP_DESC="retention disabled (BACKUP_KEEP='${BACKUP_KEEP}' is not a number)"
+  elif [[ "${BACKUP_KEEP}" == "0" ]]; then
+    KEEP_DESC="retention disabled (keeping all)"
+  fi
+  # systemd renders this property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
+  # so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
+  # next_elapse tail and reports a garbled schedule.
+  TIMER_SCHED="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
+    | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
+  [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
+  p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
+  TIMER_ON=true
+else
+  info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"
+  TIMER_ON=false
+  TIMER_SCHED=""
+fi
+shopt -s nullglob
+BKS=( "${REPO_ROOT}"/backups/local-code-agent-backup-*.tar.gz )
+shopt -u nullglob
+if (( ${#BKS[@]} )); then
+  mapfile -t BKS_SORTED < <(printf '%s\n' "${BKS[@]}" | sort)
+  NEWEST="${BKS_SORTED[-1]}"
+  NEWEST_AGE_DAYS=$(( ( $(date +%s) - $(stat -c %Y "${NEWEST}" 2>/dev/null || echo 0) ) / 86400 ))
+  if (( NEWEST_AGE_DAYS <= 7 )); then
+    p_pass "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old ($(basename "${NEWEST}"))"
+  elif [[ "${TIMER_ON}" == "true" ]]; then
+    # A slower-than-weekly OnCalendar is a legitimate choice; systemd owns the
+    # cadence, so an older backup is not a fault and "enable the timer" would
+    # be wrong advice — it is already enabled.
+    info "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old — the timer is enabled (${TIMER_SCHED}), so this follows your schedule"
+  else
+    p_warn "${#BKS[@]} backup(s) present but the newest is ${NEWEST_AGE_DAYS} days old — run ${REPO_ROOT}/backup.sh or enable the timer"
+  fi
+else
+  info "no backups yet — create one with: ${REPO_ROOT}/backup.sh"
 fi
 
 # --- Summary ----------------------------------------------------------------

@@ -108,6 +108,10 @@ can't reach the internet at all. `status` proves it with a live probe.
 - [ ] `netmode.sh status` showed "Internet reachable — as expected in online mode."
 - [ ] Bonus: in the console, `cd /opt/local-code-agent && ./check-system.sh` ends
       green ("All hard checks passed" or better).
+- [ ] Bonus: prove it end-to-end with `./scripts/selftest.sh` (or `make smoke`) —
+      it asks your model for a real answer and runs a real aider round-trip, then
+      prints `SELF-TEST PASSED`. This is the "does it actually work on MY box?"
+      check, and it changes nothing.
 
 **If stuck:**
 

@@ -33,6 +33,9 @@ check ".env auto-created" test -f "${SANDBOX}/.env"
 check "default MODEL_NAME" test "${MODEL_NAME}" = "qwen2.5-coder:7b"
 check "default OLLAMA_CONTEXT_LENGTH" test "${OLLAMA_CONTEXT_LENGTH}" = "8192"
 check "default AUTO_TUNE" test "${AUTO_TUNE}" = "true"
+check "default BACKUP_KEEP" test "${BACKUP_KEEP}" = "7"
+check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
+check "default BACKUP_SCHEDULE" test "${BACKUP_SCHEDULE}" = "*-*-* 03:30:00"
 
 echo "# set_env_var -> load_env round-trip (update + append, no duplicates)"
 set_env_var MODEL_NAME "qwen2.5-coder:14b"
@@ -104,6 +107,103 @@ check "budget sums to 16384" budget_sums_to 16384
 check "empty ctx -> 8192 default"     test "$(aider_token_budget '')"    = "6144 2048"
 check "non-numeric ctx -> 8192"       test "$(aider_token_budget abc)"   = "6144 2048"
 check "absurdly small ctx -> 8192"    test "$(aider_token_budget 16)"    = "6144 2048"
+
+echo "# load_env's \${VAR:-default} fallbacks apply when .env omits the keys"
+# The checks above read a .env copied from .env.example, so they only prove the
+# EXAMPLE's literals. These prove the fallbacks in lib.sh itself — load-bearing
+# under 'set -u' when a user hand-trims .env (a supported degraded case).
+TRIMMED="${SANDBOX}/trimmed"
+mkdir -p "${TRIMMED}/scripts"
+cp "${REPO}/scripts/lib.sh" "${TRIMMED}/scripts/"
+# A .env with none of the newer keys, as an older/hand-edited install would have.
+printf 'MODEL_NAME=qwen2.5-coder:7b\n' > "${TRIMMED}/.env"
+# This MUST run in a separate bash process, with the keys cleared from the
+# environment. lib.sh guards against double-sourcing (LCA_LIB_LOADED), so
+# re-sourcing it in a subshell is a no-op and would keep THIS script's load_env
+# (bound to a .env that does define the keys) — the assertion would then pass no
+# matter what the fallbacks say. load_env also exports .env values (set -a), so
+# they must be stripped with 'env -u' or the child would inherit them.
+fallbacks_apply() {
+  # SC2016 is intentional here: the ${...} must be expanded by the CHILD bash
+  # (after it sources lib.sh), not by this script — hence the single quotes.
+  # shellcheck disable=SC2016
+  env -u BACKUP_KEEP -u BACKUP_SCHEDULE -u AIDER_CONVENTIONS bash -c '
+    set -euo pipefail
+    source "$1/scripts/lib.sh"
+    load_env
+    [[ "${BACKUP_KEEP}"      == "7" ]]              || { echo "BACKUP_KEEP=${BACKUP_KEEP}" >&2; exit 1; }
+    [[ "${BACKUP_SCHEDULE}"  == "*-*-* 03:30:00" ]] || { echo "BACKUP_SCHEDULE=${BACKUP_SCHEDULE}" >&2; exit 1; }
+    [[ "${AIDER_CONVENTIONS}" == "true" ]]          || { echo "AIDER_CONVENTIONS=${AIDER_CONVENTIONS}" >&2; exit 1; }
+  ' _ "${TRIMMED}"
+}
+check "load_env fallbacks apply when .env omits the keys" fallbacks_apply
+
+echo "# ollama_bind_is_public(): a bare ':PORT' binds ALL interfaces, not loopback"
+bind_public()  { OLLAMA_HOST="$1" ollama_bind_is_public; }
+bind_private() { ! OLLAMA_HOST="$1" ollama_bind_is_public; }
+check "bare ':11434' is PUBLIC (all interfaces)" bind_public ":11434"
+check "'0.0.0.0:11434' is public"                bind_public "0.0.0.0:11434"
+check "'::' is public"                           bind_public "::"
+check "'127.0.0.1:11434' stays private"          bind_private "127.0.0.1:11434"
+check "'localhost:11434' stays private"          bind_private "localhost:11434"
+check "'[::1]:11434' stays private"              bind_private "[::1]:11434"
+
+echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
+# backup.sh only runs main() when executed, so sourcing it here just defines
+# its functions. Guards the "disk filled up mid-tar" case: the archive must read
+# back AND contain every staged file, or retention would delete good backups on
+# the strength of a broken one and restore.sh would later pick it (newest wins).
+# shellcheck source=../backup.sh
+source "${REPO}/backup.sh"
+VB_STAGE="${SANDBOX}/vbstage"
+mkdir -p "${VB_STAGE}"
+printf 'env-contents\n'    > "${VB_STAGE}/env"
+printf 'model-list\n'      > "${VB_STAGE}/models.txt"
+VB_GOOD="${SANDBOX}/good.tar.gz"
+tar czf "${VB_GOOD}" -C "${VB_STAGE}" .
+# '!' is a shell keyword, so it cannot be passed through check's "$@" — negate
+# inside a real function instead.
+vb_rejects() { ! verify_backup "$1" "$2" 2>/dev/null; }
+check "intact archive verifies"            verify_backup "${VB_GOOD}" "${VB_STAGE}"
+VB_TRUNC="${SANDBOX}/truncated.tar.gz"
+head -c 40 "${VB_GOOD}" > "${VB_TRUNC}"
+check "truncated archive is rejected"      vb_rejects "${VB_TRUNC}" "${VB_STAGE}"
+VB_PARTIAL="${SANDBOX}/partial.tar.gz"
+tar czf "${VB_PARTIAL}" -C "${VB_STAGE}" ./env          # models.txt missing
+check "archive missing a staged file is rejected" vb_rejects "${VB_PARTIAL}" "${VB_STAGE}"
+: > "${SANDBOX}/empty.tar.gz"
+check "empty file is rejected"             vb_rejects "${SANDBOX}/empty.tar.gz" "${VB_STAGE}"
+
+echo "# backups_to_prune() keeps the newest KEEP; prints the older ones to delete"
+# Timestamped names sort chronologically; the helper sorts internally, so the
+# order they are fed in must not matter.
+B1="backups/local-code-agent-backup-20250101-000000.tar.gz"
+B2="backups/local-code-agent-backup-20250102-000000.tar.gz"
+B3="backups/local-code-agent-backup-20250103-000000.tar.gz"
+B4="backups/local-code-agent-backup-20250104-000000.tar.gz"
+B5="backups/local-code-agent-backup-20250105-000000.tar.gz"
+prune_sel() { local k="$1"; shift; printf '%s\n' "$@" | backups_to_prune "${k}"; }
+check "keep 2 of 5 -> delete the oldest 3 (feed order irrelevant)" \
+  test "$(prune_sel 2 "${B3}" "${B1}" "${B5}" "${B2}" "${B4}")" = "$(printf '%s\n%s\n%s' "${B1}" "${B2}" "${B3}")"
+check "keep 1 of 3 -> delete the oldest 2" \
+  test "$(prune_sel 1 "${B2}" "${B3}" "${B1}")" = "$(printf '%s\n%s' "${B1}" "${B2}")"
+check "keep == count -> delete none" test -z "$(prune_sel 3 "${B1}" "${B2}" "${B3}")"
+check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B3}")"
+check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
+check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
+
+echo "# MODEL_FAMILY: the ladder follows the configured family, with a safe fallback"
+# shellcheck source=../scripts/tune.sh
+source "${REPO}/scripts/tune.sh"
+fam_pick() { MODEL_FAMILY="$1" choose_for_ram "$2"; printf '%s' "${TUNE_MODEL}"; }
+check "default family, 16 GiB -> qwen2.5-coder:14b" test "$(fam_pick qwen2.5-coder 16)" = "qwen2.5-coder:14b"
+check "qwen3 family, 12 GiB -> qwen3:8b"            test "$(fam_pick qwen3 12)"         = "qwen3:8b"
+check "qwen3 family, 4 GiB -> qwen3:4b"             test "$(fam_pick qwen3 4)"          = "qwen3:4b"
+check "codellama family, 24 GiB -> codellama:34b"   test "$(fam_pick codellama 24)"     = "codellama:34b"
+check "deepseek-coder-v2 has one size at any rung"  test "$(fam_pick deepseek-coder-v2 8)" = "deepseek-coder-v2:16b"
+# An unknown family must NOT be used verbatim — that would make tune.sh try to
+# pull a tag that does not exist and fail every boot.
+check "unknown family falls back to the default"    test "$(fam_pick not-a-real-model 16)" = "qwen2.5-coder:14b"
 
 echo "# tune ladder boundaries (spec: 8, 9, 15, 16, 23, 24 GiB)"
 # tune.sh only runs main when executed; sourcing it exposes choose_for_ram().

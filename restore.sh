@@ -30,6 +30,12 @@ main() {
   # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
   trap 'rm -rf "${workdir:-}"' EXIT
+  # Read the archive back before extracting anything. A truncated/corrupt
+  # tarball (classically: the disk filled during backup) would otherwise extract
+  # partially and then abort part-way through the restore. Fail here, with a
+  # clear cause, while nothing on the system has been touched yet.
+  tar tzf "${tarball}" >/dev/null 2>&1 \
+    || die "'${tarball}' is not a readable gzip archive — it is corrupt or truncated. Nothing was changed. Try an older backup in ${BACKUP_DIR}, or a copy you moved off-box."
   tar xzf "${tarball}" -C "${workdir}"
 
   # 1. .env
@@ -67,15 +73,20 @@ main() {
         as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
       fi
       as_root docker volume create open-webui >/dev/null
+      # 'tar tzf' FIRST, inside the same shell: the extraction wipes the live
+      # volume ('rm -rf /to/*') before unpacking, so a corrupt inner archive
+      # would destroy the existing accounts and chat history and then fail to
+      # replace them. Validating first means a bad archive aborts while the
+      # current data is still intact.
       if as_root docker run --rm --entrypoint sh -v open-webui:/to -v "${workdir}":/from:ro \
           ghcr.io/open-webui/open-webui:main \
-          -c 'rm -rf /to/* && tar xzf /from/open-webui-volume.tar.gz -C /to'; then
+          -c 'tar tzf /from/open-webui-volume.tar.gz >/dev/null && rm -rf /to/* && tar xzf /from/open-webui-volume.tar.gz -C /to'; then
         ok "WebUI data restored."
         if [[ "${ENABLE_WEBUI}" == "true" ]]; then
           "${SCRIPT_DIR}/scripts/install_webui.sh"
         fi
       else
-        warn "WebUI volume restore failed (image unavailable offline?). Fix connectivity and re-run ./restore.sh; continuing with the model restore."
+        warn "WebUI volume restore failed — either the image is unavailable (offline?) or the archived volume is corrupt. Your existing WebUI data was NOT wiped (the archive is validated before the volume is replaced). Fix connectivity or use another backup, then re-run ./restore.sh; continuing with the model restore."
       fi
     else
       warn "Docker not installed — cannot restore the WebUI volume. Run ./setup.sh first, then re-run restore.sh."

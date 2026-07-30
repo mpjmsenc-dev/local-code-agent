@@ -9,13 +9,14 @@
 #   make test     both unit suites (lib + netmode ruleset)
 #   make dry-run  scripts/tune.sh --dry-run (detection only, changes nothing)
 #   make check    ./check-system.sh (full health check; degrades gracefully)
+#   make smoke    scripts/selftest.sh (live end-to-end round-trip on this box)
 #   make hooks    install the pre-push git hook (runs `make gates` before push)
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
 SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh)
 
-.PHONY: gates lint syntax test dry-run check hooks help
+.PHONY: gates lint syntax test dry-run check smoke hooks help
 .DEFAULT_GOAL := help
 
 gates: syntax lint test ## Everything CI gates on, locally
@@ -39,6 +40,9 @@ dry-run: ## Preview the auto-tune decision without changing anything
 
 check: ## Full system health check
 	./check-system.sh
+
+smoke: ## Live end-to-end acceptance test on this machine (Ollama + model + aider + WebUI)
+	./scripts/selftest.sh
 
 hooks: ## Install the pre-push gate hook (git runs `make gates` before every push)
 	git config core.hooksPath .githooks

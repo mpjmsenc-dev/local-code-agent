@@ -146,9 +146,32 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port
+  local webui_port ollama_port p q seen port_list=""
+  local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
+  # ENFORCE the "can never lock you out" invariant below instead of merely
+  # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
+  # or someone fronting a service on the SSH port), the drop rule would
+  # blackhole every NEW public SSH connection, and the boot service re-applies
+  # the guard after each reboot: the box would then be reachable only from the
+  # provider's recovery console. Refuse to guard 22, and say so on stderr so
+  # the ruleset on stdout stays byte-clean for nft.
+  for p in "${webui_port}" "${ollama_port}"; do
+    [[ "${p}" =~ ^[0-9]+$ ]] || continue
+    if (( p == 22 )); then
+      warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
+      continue
+    fi
+    seen=false
+    for q in ${ports[@]+"${ports[@]}"}; do
+      [[ "${q}" == "${p}" ]] && seen=true
+    done
+    [[ "${seen}" == "true" ]] || ports+=( "${p}" )
+  done
+  for p in ${ports[@]+"${ports[@]}"}; do
+    port_list="${port_list:+${port_list}, }${p}"
+  done
   {
     echo "#!/usr/sbin/nft -f"
     echo "# local-code-agent inbound guard (managed by netmode.sh) — ALWAYS on,"
@@ -167,9 +190,13 @@ render_inbound_rules() {
     echo "    ct state established,related accept"
     echo ""
     echo "    # Drop NEW inbound to the private-only services on any OTHER"
-    echo "    # interface (e.g. a public IP). SSH and every other port are"
-    echo "    # untouched — this guard can never lock you out."
-    echo "    tcp dport { ${webui_port}, ${ollama_port} } ct state new counter drop"
+    echo "    # interface (e.g. a public IP). SSH (22) is filtered out of the"
+    echo "    # set above before rendering, so this guard can never lock you out."
+    if [[ -n "${port_list}" ]]; then
+      echo "    tcp dport { ${port_list} } ct state new counter drop"
+    else
+      echo "    # No guardable ports configured (port 22 is never guarded)."
+    fi
     echo "  }"
     echo "}"
   }
@@ -189,7 +216,11 @@ apply_inbound_guard() {
   ok "Inbound guard active: WebUI (port $(webui_port_from_env)) and Ollama (port $(ollama_port_from_env)) reachable only via loopback and Tailscale."
 }
 
+# Returns 0 loaded, 1 not loaded, 2 cannot tell (no root/sudo). as_root would
+# die() and abort `status` mid-run, leaving the operator with no answer at all
+# about whether their ports are guarded — worse than an explicit "unknown".
 inbound_loaded() {
+  can_root || return 2
   as_root nft list table inet "${INBOUND_TABLE}" >/dev/null 2>&1
 }
 
@@ -218,7 +249,7 @@ install_service() {
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
-    echo "ExecStart=${SCRIPT_DIR}/netmode.sh apply-saved"
+    echo "ExecStart=\"${SCRIPT_DIR}/netmode.sh\" apply-saved"
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
@@ -262,7 +293,7 @@ go_online() {
 apply_saved() {
   # Called by systemd at boot: the inbound guard is ALWAYS on; the egress
   # lockdown depends on the last chosen mode.
-  local state
+  local state inbound_rc
   state="$(netmode_state)"
   info "Re-applying persisted netmode: ${state}"
   apply_inbound_guard
@@ -281,7 +312,7 @@ apply_saved() {
 
 show_status() {
   step "Netmode status"
-  local state
+  local state inbound_rc
   state="$(netmode_state)"
   info "Persisted mode: ${state}"
   if have nft; then
@@ -290,11 +321,12 @@ show_status() {
     else
       info "nftables: no egress lockdown table loaded (egress unrestricted)."
     fi
-    if inbound_loaded; then
-      info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)."
-    else
-      warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden"
-    fi
+    inbound_loaded; inbound_rc=$?
+    case "${inbound_rc}" in
+      0) info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)." ;;
+      2) warn "Cannot inspect nftables without root or sudo — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      *) warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden" ;;
+    esac
   else
     warn "nft is not installed — cannot inspect the ruleset."
   fi

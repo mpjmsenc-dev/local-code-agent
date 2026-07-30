@@ -4,7 +4,14 @@
 #   - your .env
 #   - the list of installed Ollama models (models re-pull on restore;
 #     the multi-GB blobs are deliberately NOT tarred)
-# Restore on a fresh install with: ./restore.sh <tarball>
+# Then prune old backups, keeping the newest BACKUP_KEEP (.env; default 7) so
+# they can't slowly fill the disk. Restore with: ./restore.sh <tarball>
+#
+# Usage:
+#   backup.sh                 create a backup now (and prune old ones)
+#   backup.sh --install-timer install a systemd timer (BACKUP_SCHEDULE in .env;
+#                             default: daily at 03:30)
+#   backup.sh --uninstall-timer  remove that timer
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,8 +20,10 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
 BACKUP_DIR="${REPO_ROOT}/backups"
+BACKUP_SERVICE=/etc/systemd/system/local-code-agent-backup.service
+BACKUP_TIMER=/etc/systemd/system/local-code-agent-backup.timer
 
-main() {
+do_backup() {
   step "Creating backup"
   local stamp tarball
   stamp="$(date +%Y%m%d-%H%M%S)"
@@ -22,11 +31,30 @@ main() {
   # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
   trap 'rm -rf "${workdir:-}"' EXIT
-  mkdir -p "${BACKUP_DIR}"
+  mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
+  # The timer runs backup.sh as root. If root created backups/ first, a later
+  # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
+  # and set -e would abort with no explanation — say what's wrong instead.
+  [[ -w "${BACKUP_DIR}" ]] || die "Cannot write to ${BACKUP_DIR} (owned by $(stat -c %U "${BACKUP_DIR}" 2>/dev/null || echo 'another user')). Re-run with sudo, or: sudo chown -R $(id -un) ${BACKUP_DIR}"
   tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
 
+  # Retention below must never evict an older COMPLETE backup because this run
+  # captured less than it should have. Three distinct states — conflating the
+  # last two either destroys data or disables retention forever:
+  #   none      no WebUI data exists on this machine  -> nothing to lose, prune
+  #   captured  the volume exists and we archived it  -> complete, prune
+  #   missed    the volume exists (or docker is down so we cannot tell) and we
+  #             did NOT archive it                    -> keep older backups
+  local webui_state="none"
+  local docker_ok=false
+  if have docker && { docker info >/dev/null 2>&1 \
+      || { can_root && as_root docker info >/dev/null 2>&1; }; }; then
+    docker_ok=true
+  fi
+
   # 1. Open WebUI docker volume (accounts + chat history).
-  if have docker && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+  if [[ "${docker_ok}" == "true" ]] && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    webui_state="missed"   # promoted to "captured" only if the archive succeeds
     info "Archiving the 'open-webui' docker volume..."
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
     # while the container is writing yields a torn, possibly-corrupt snapshot
@@ -47,6 +75,7 @@ main() {
         ghcr.io/open-webui/open-webui:main \
         czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
+      webui_state="captured"
     else
       warn "Could not archive the WebUI volume — continuing without it."
     fi
@@ -61,6 +90,11 @@ main() {
         warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
       fi
     fi
+  elif [[ "${docker_ok}" != "true" && "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+    # Docker is unusable, so we cannot tell whether a WebUI volume with real
+    # data exists. Assume it might: keep older backups rather than risk them.
+    webui_state="missed"
+    warn "Docker is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
   else
     warn "No 'open-webui' docker volume found — skipping WebUI data."
   fi
@@ -84,10 +118,163 @@ main() {
     warn "Ollama not installed — skipping the model list."
   fi
 
-  tar czf "${tarball}" -C "${workdir}" .
-  as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
-  ok "Backup written: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+  # A failed tar (classically: the disk filled up) still leaves a PARTIAL file
+  # behind, and set -e would abort before anything cleaned it up. That partial
+  # file then becomes the newest tarball in backups/ — which is precisely what
+  # restore.sh picks by default. Remove it so a broken archive can never be
+  # restored over good data.
+  if ! tar czf "${tarball}" -C "${workdir}" .; then
+    rm -f "${tarball}"
+    die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
+  fi
+  # Only needed when root created the file (the timer runs as root). Guard with
+  # can_root: for an unprivileged user without sudo the file is already theirs,
+  # and an unguarded as_root would die() here — aborting a backup that had
+  # already been written and verified.
+  if can_root; then
+    as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
+  fi
+
+  # A backup you cannot restore is not a backup. Read the archive back and
+  # confirm every file we staged is really in it, BEFORE retention is allowed to
+  # delete older (good) backups on the strength of this one.
+  if ! verify_backup "${tarball}" "${workdir}"; then
+    rm -f "${tarball}"
+    die "The backup archive failed verification and was deleted (older backups were kept untouched). Check free space with 'df -h' and re-run ${SCRIPT_DIR}/backup.sh."
+  fi
+  ok "Backup written and verified: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+
+  # Only prune when this backup is as complete as it was supposed to be.
+  # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
+  # nights, silently delete every backup that still had the WebUI accounts and
+  # chat history — the exact data this feature exists to protect.
+  if [[ "${webui_state}" == "missed" ]]; then
+    warn "WebUI data was NOT captured in this backup — skipping retention so older, complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
+  else
+    prune_old_backups
+  fi
+
   info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
 }
 
-main "$@"
+# verify_backup TARBALL STAGING_DIR — true when the archive reads back cleanly
+# and contains every file that was staged for it. Catches truncated/corrupt
+# archives (the usual cause is a full disk) at the moment they are created,
+# instead of months later during a restore that was supposed to save you.
+# Comparing against the staging directory means new contents are covered
+# automatically, with no list to keep in sync.
+verify_backup() {
+  local tarball="$1" staging="$2" listing staged missing=()
+  # tar tzf decompresses the whole stream, so a truncated gzip fails here.
+  listing="$(tar tzf "${tarball}" 2>/dev/null)" || return 1
+  [[ -n "${listing}" ]] || return 1
+  while IFS= read -r staged; do
+    grep -qxF "./${staged}" <<<"${listing}" || missing+=( "${staged}" )
+  done < <(cd "${staging}" && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null)
+  if (( ${#missing[@]} )); then
+    err "Archive is missing staged file(s): ${missing[*]}"
+    return 1
+  fi
+  return 0
+}
+
+# Keep only the newest BACKUP_KEEP tarballs; delete older ones so a daily/cron
+# backup can never silently fill the disk. BACKUP_KEEP=0 disables pruning.
+prune_old_backups() {
+  local keep="${BACKUP_KEEP:-7}" stale=() f
+  shopt -s nullglob
+  local files=( "${BACKUP_DIR}"/local-code-agent-backup-*.tar.gz )
+  shopt -u nullglob
+  (( ${#files[@]} )) || return 0
+  mapfile -t stale < <(printf '%s\n' "${files[@]}" | backups_to_prune "${keep}")
+  (( ${#stale[@]} )) || return 0
+  info "Retention: keeping the newest ${keep}; removing $(( ${#stale[@]} )) older backup(s)."
+  for f in "${stale[@]}"; do
+    if rm -f "${f}"; then
+      info "  pruned $(basename "${f}")"
+    else
+      warn "  could not remove ${f}"
+    fi
+  done
+}
+
+# install_timer — schedule do_backup daily via systemd. The timer owns the
+# schedule; the oneshot service just runs backup.sh (no [Install] on it, so it
+# only ever fires from the timer, never at boot). Persistent=true catches up a
+# run missed while the box was off.
+install_timer() {
+  if ! systemd_available; then
+    warn "systemd is not available here — cannot install the backup timer. Run '${SCRIPT_DIR}/backup.sh' from cron instead."
+    return 0
+  fi
+  # Catch a bad BACKUP_SCHEDULE now (a clear error) rather than writing a timer
+  # that systemd silently never fires.
+  if have systemd-analyze && ! systemd-analyze calendar "${BACKUP_SCHEDULE}" >/dev/null 2>&1; then
+    die "BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' is not a valid systemd OnCalendar expression. Examples: daily | weekly | '*-*-* 03:30:00'."
+  fi
+  info "Installing the backup timer (${BACKUP_TIMER}) — schedule: ${BACKUP_SCHEDULE}"
+  # Create backups/ now, owned by the human running sudo. If the root timer
+  # created it first it would be root-owned, and every later non-root
+  # './backup.sh' would fail on tar with a permission error.
+  as_root mkdir -p "${BACKUP_DIR}"
+  as_root chown "${SUDO_USER:-$(id -un)}" "${BACKUP_DIR}" 2>/dev/null || true
+  {
+    echo "[Unit]"
+    echo "Description=local-code-agent backup (WebUI data + .env + model list)"
+    echo "After=docker.service"
+    echo ""
+    echo "[Service]"
+    echo "Type=oneshot"
+    echo "ExecStart=\"${SCRIPT_DIR}/backup.sh\""
+  } | as_root tee "${BACKUP_SERVICE}" >/dev/null
+  {
+    echo "[Unit]"
+    echo "Description=Run the local-code-agent backup on a schedule"
+    echo ""
+    echo "[Timer]"
+    echo "OnCalendar=${BACKUP_SCHEDULE}"
+    echo "Persistent=true"
+    echo ""
+    echo "[Install]"
+    echo "WantedBy=timers.target"
+  } | as_root tee "${BACKUP_TIMER}" >/dev/null
+  as_root systemctl daemon-reload
+  as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
+    || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"
+  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
+}
+
+# uninstall_timer — remove the timer + service (used by uninstall.sh too).
+uninstall_timer() {
+  if systemd_available; then
+    as_root systemctl disable --now local-code-agent-backup.timer >/dev/null 2>&1 || true
+  fi
+  as_root rm -f "${BACKUP_TIMER}" "${BACKUP_SERVICE}"
+  if systemd_available; then
+    as_root systemctl daemon-reload
+  fi
+  ok "Scheduled backup timer removed."
+}
+
+# Print the header's Usage block. Anchored to '# Usage:' .. the first non-comment
+# line rather than fixed line numbers, which silently drift (and truncate the
+# help) whenever the header above gains or loses a line.
+usage() {
+  sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+  case "${1:-}" in
+    "")                 do_backup ;;
+    --install-timer)    install_timer ;;
+    --uninstall-timer)  uninstall_timer ;;
+    -h|--help)          usage; exit 0 ;;
+    *)                  usage; die "Unknown option: ${1}" ;;
+  esac
+}
+
+# Run main only when executed, so tests can source this file and unit-test
+# verify_backup() without taking a real backup (same pattern as scripts/tune.sh).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

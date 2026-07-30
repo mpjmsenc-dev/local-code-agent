@@ -53,6 +53,20 @@ uses every core.
 | 16–23 | `qwen2.5-coder:14b` | 8192 |
 | ≥ 24 | `qwen2.5-coder:14b` | 16384 |
 
+**Want a different model?** Set `MODEL_FAMILY` in `.env` and auto-tune picks the
+largest size of *that* family your RAM allows — one line changes the model
+everywhere, and a resize still re-tunes it:
+
+| `MODEL_FAMILY` | small / mid / big |
+|---|---|
+| `qwen2.5-coder` *(default)* | 3b / 7b / 14b |
+| `qwen3` | 4b / 8b / 14b |
+| `deepseek-coder-v2` | 16b |
+| `llama3.1` | 8b / 8b / 70b |
+| `codellama` | 7b / 13b / 34b |
+
+An unrecognised value falls back to the default instead of failing a pull.
+
 `qwen2.5-coder:32b` is deliberately a manual choice for big machines (≥ 32 GB):
 `./update-model.sh qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
 reboot won't override you. Preview what tune would do: `scripts/tune.sh --dry-run`.
@@ -109,6 +123,15 @@ offline because the models are local.
 - The inbound guard is targeted (it blocks the two sensitive ports on
   non-private interfaces), not a full default-drop firewall; it assumes you do
   not expose other services.
+- **Offline mode still permits DNS (UDP/TCP port 53) and STUN (UDP 3478) to any
+  host, plus the WireGuard port 41641.** Tailscale needs them: without DNS,
+  `tailscaled` cannot re-resolve its coordination server after a reboot, and
+  you would lose the private access that this mode exists to preserve. So
+  "offline" means *the AI stack cannot reach the web* (HTTP/HTTPS and
+  everything else is dropped), not that literally every packet is blocked — a
+  process that deliberately spoke over port 53 could still get data out. These
+  exceptions are deliberate; they are not scoped further precisely because a
+  narrower rule risks cutting Tailscale and stranding you on a remote VM.
 - Trust is single-VM: anyone with a shell (or root) on the box has full access.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
@@ -141,9 +164,10 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
-| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |
+| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list (keeps newest `BACKUP_KEEP`; `--install-timer` for daily) |
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
+| `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 
 ## `.env` reference
 
@@ -153,10 +177,12 @@ Created from `.env.example` on first run. All keys:
 |---|---|---|
 | `AUTO_TUNE` | `true` | Re-tune model/context to RAM on every boot; `false` = manual pin |
 | `MODEL_NAME` | `qwen2.5-coder:7b` | Model used by aider + WebUI (managed by auto-tune) |
+| `MODEL_FAMILY` | `qwen2.5-coder` | Family auto-tune picks from: `qwen3`, `deepseek-coder-v2`, `llama3.1`, `codellama` |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | Ollama listen address (keep loopback-only) |
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | Context window in tokens |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
+| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
@@ -164,6 +190,8 @@ Created from `.env.example` on first run. All keys:
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
+| `BACKUP_KEEP` | `7` | How many backups `backup.sh` keeps; older ones are pruned (`0` = keep all) |
+| `BACKUP_SCHEDULE` | `"*-*-* 03:30:00"` | When the backup timer fires (systemd `OnCalendar`) — **keep the quotes**; e.g. `"daily"`, `"weekly"` |
 
 ## Repository tree
 
@@ -174,16 +202,16 @@ local-code-agent/
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
-│   ├── lib.sh · tune.sh
+│   ├── lib.sh · tune.sh · selftest.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
-├── config/aider.conf.yml · config/ollama.env
+├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
-└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
+└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ · BACKUPS
 ```
 
 ## Performance & GPU
@@ -217,7 +245,7 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 

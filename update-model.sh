@@ -52,7 +52,10 @@ main() {
   step "Switching default model to '${new_model}'"
 
   if ! wait_for_ollama 5; then
-    if systemd_available; then
+    # can_root guard: as_root die()s (exits) with neither root nor sudo, and
+    # '|| true' cannot catch an exit — the script would abort here instead of
+    # falling through to the clear "API not reachable" message below.
+    if systemd_available && can_root; then
       info "Ollama is not answering — starting the service..."
       as_root systemctl start ollama || true
     fi

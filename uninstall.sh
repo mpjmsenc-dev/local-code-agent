@@ -60,9 +60,12 @@ main() {
   if systemd_available; then
     as_root systemctl disable --now local-code-agent-tune.service >/dev/null 2>&1 || true
     as_root systemctl disable --now local-code-agent-netmode.service >/dev/null 2>&1 || true
+    as_root systemctl disable --now local-code-agent-backup.timer >/dev/null 2>&1 || true
   fi
   as_root rm -f /etc/systemd/system/local-code-agent-tune.service \
-                /etc/systemd/system/local-code-agent-netmode.service
+                /etc/systemd/system/local-code-agent-netmode.service \
+                /etc/systemd/system/local-code-agent-backup.timer \
+                /etc/systemd/system/local-code-agent-backup.service
   as_root rm -rf "${NETMODE_DIR}"
   ok "Boot services and netmode state removed."
 
@@ -105,6 +108,21 @@ main() {
     rm -rf "${venv}"
     ok "Virtualenv ${venv} removed."
   fi
+
+  # 6. Generated state outside the repo: run-agent.sh writes an aider
+  # model-metadata file under ~/.cache. Under sudo, $HOME is root's, while the
+  # file was written by the human's own run — clean up both.
+  local cache_dirs=( "${HOME}/.cache/local-code-agent" ) sudo_home d
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    sudo_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "${sudo_home:-}" ]] && cache_dirs+=( "${sudo_home}/.cache/local-code-agent" )
+  fi
+  for d in "${cache_dirs[@]}"; do
+    if [[ -d "${d}" ]]; then
+      rm -rf "${d}"
+      ok "Removed generated cache ${d}."
+    fi
+  done
 
   step "Uninstall complete"
   info "Kept on purpose: Docker Engine, Tailscale, git, this repository and .env."

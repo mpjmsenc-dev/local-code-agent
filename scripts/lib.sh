@@ -155,17 +155,21 @@ load_env() {
   fi
   AUTO_TUNE="${AUTO_TUNE:-true}"
   MODEL_NAME="${MODEL_NAME:-qwen2.5-coder:7b}"
+  MODEL_FAMILY="${MODEL_FAMILY:-qwen2.5-coder}"
   OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
   OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
   OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
   AIDER_VERSION="${AIDER_VERSION:-}"
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
+  AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
   SKIP_DOCKER="${SKIP_DOCKER:-false}"
   ENABLE_WEBUI="${ENABLE_WEBUI:-true}"
   WEBUI_PORT="${WEBUI_PORT:-3000}"
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
+  BACKUP_KEEP="${BACKUP_KEEP:-7}"
+  BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
 
 # set_env_var KEY VALUE — update KEY in .env in place, or append it. The
@@ -210,6 +214,20 @@ aider_token_budget() {
   printf '%s %s\n' "$(( ctx - out ))" "${out}"
 }
 
+# backups_to_prune KEEP — read backup file paths on stdin (one per line) and
+# print the ones that should be DELETED to retain only the newest KEEP. Backup
+# filenames embed a sortable YYYYMMDD-HHMMSS stamp, so lexical order equals
+# chronological order; we sort and print all but the last KEEP. KEEP that is
+# empty, zero, or non-numeric prints nothing — retention disabled means keep
+# everything, so a bad value can never delete a backup. Pure (stdin->stdout),
+# so backup.sh's retention is unit-tested without ever touching the disk.
+backups_to_prune() {
+  local keep="${1:-}"
+  [[ "${keep}" =~ ^[0-9]+$ ]] || return 0
+  (( keep > 0 )) || return 0
+  sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
+}
+
 # ---------------------------------------------------------------------------
 # Ollama helpers
 # ---------------------------------------------------------------------------
@@ -242,6 +260,13 @@ ollama_bind_is_public() {
   case "${host}" in
     "::"|"[::]"|"[::]:"*|"0:0:0:0:0:0:0:0"*) return 0 ;;  # IPv6 any -> public
     "[::1]"|"[::1]:"*|"::1") return 1 ;;                   # IPv6 loopback
+  esac
+  # A bare ':PORT' (empty host part) binds ALL interfaces, exactly like
+  # 0.0.0.0 — Ollama's own default when the host is omitted. The '%%:*' strip
+  # below would leave an empty string, which the "" case then misread as
+  # loopback-private, so a publicly-bound unauthenticated API looked safe.
+  case "${host}" in
+    :*) return 0 ;;
   esac
   host="${host%%:*}"
   case "${host}" in
@@ -382,7 +407,13 @@ ensure_ollama_up() {
   wait_for_ollama 3 && return 0
   have ollama || return 1
   if systemd_available; then
-    as_root systemctl start ollama >/dev/null 2>&1 || true
+    # Never call as_root unguarded here: with neither root nor sudo it die()s,
+    # and that exit kills the CALLER mid-run — '|| true' cannot catch an exit,
+    # and the redirect below would swallow the explanation. can_root() returns
+    # false instead, so callers (selftest.sh, tune.sh) degrade gracefully.
+    if can_root; then
+      as_root systemctl start ollama >/dev/null 2>&1 || true
+    fi
     wait_for_ollama "${timeout}"
   else
     start_ollama_bg
