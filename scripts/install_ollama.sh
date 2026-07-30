@@ -11,7 +11,10 @@ load_env
 
 main() {
   step "Installing Ollama"
-  require_cmd curl
+  # jq is used below to read the API version; require it up front with a clear
+  # message (setup.sh installs it via dependencies; this guards standalone runs
+  # on minimal boxes where jq isn't preinstalled).
+  require_cmd curl jq
 
   # Reuse an existing binary only if it came with the systemd unit the rest
   # of this script configures. A binary without ollama.service (interrupted
@@ -44,8 +47,17 @@ main() {
   fi
 
   if ! systemd_available; then
-    warn "systemd not available — cannot configure the ollama service here."
-    warn "Start Ollama manually with: OLLAMA_HOST=${OLLAMA_HOST} ollama serve"
+    warn "systemd not available — starting Ollama directly instead of as a managed service."
+    # Start it ourselves so the rest of setup (model pull, tune, aider) works
+    # on systemd-less hosts (containers, WSL) rather than silently having no
+    # server. Not boot-persistent — documented as the no-systemd tradeoff.
+    if start_ollama_bg; then
+      local version
+      version="$(curl -fsS --max-time 5 "$(ollama_url)/api/version" 2>/dev/null | jq -r '.version // empty' || true)"
+      ok "Ollama ${version:-} is running at $(ollama_url) (background serve; restart it yourself after a reboot)."
+    else
+      warn "Could not start 'ollama serve' automatically — start it manually: OLLAMA_HOST=${OLLAMA_HOST} ollama serve"
+    fi
     exit 0
   fi
 

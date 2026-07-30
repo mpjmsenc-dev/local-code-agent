@@ -275,10 +275,25 @@ model_responds() {
   [[ -n "${response}" ]]
 }
 
-# detect_ram_gib — total system RAM in GiB, rounded to the nearest GiB so a
-# nominal 16 GB machine (whose kernel reports ~15.6 GiB usable) lands on 16.
+# detect_ram_gib — usable RAM in GiB, rounded to the nearest GiB (a nominal
+# 16 GB machine reports ~15.6 GiB usable and lands on 16). Inside a
+# memory-limited container /proc/meminfo shows the HOST's RAM, which would
+# make auto-tune pick a model that OOMs; so prefer a smaller cgroup limit.
 detect_ram_gib() {
-  awk '/^MemTotal:/ {printf "%d\n", ($2 + 524288) / 1048576}' /proc/meminfo
+  local mem_kb mem_bytes cg=""
+  mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  mem_bytes=$(( mem_kb * 1024 ))
+  if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    cg="$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"                    # cgroup v2
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    cg="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"  # cgroup v1
+  fi
+  # Use the cgroup limit only when it is a real, smaller-than-host value
+  # ("max" or an unlimited sentinel is ignored).
+  if [[ "${cg}" =~ ^[0-9]+$ ]] && (( cg > 0 )) && (( cg < mem_bytes )); then
+    mem_bytes="${cg}"
+  fi
+  awk -v b="${mem_bytes}" 'BEGIN { printf "%d\n", (b + 536870912) / 1073741824 }'
 }
 
 # has_nvidia_gpu — true if an NVIDIA GPU Ollama can use is present. Ollama
@@ -320,6 +335,38 @@ render_ollama_dropin() {
 ollama_dropin_matches() {
   [[ -f "${OLLAMA_DROPIN}" ]] || return 1
   diff -q <(render_ollama_dropin_content) "${OLLAMA_DROPIN}" >/dev/null 2>&1
+}
+
+# start_ollama_bg — start `ollama serve` detached, for hosts WITHOUT systemd
+# (containers, WSL), with the same environment the systemd drop-in would
+# apply. Not boot-persistent — that's the honest cost of having no service
+# manager. No-op if the API already answers.
+start_ollama_bg() {
+  wait_for_ollama 2 && return 0
+  have ollama || return 1
+  local logf="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+  warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
+  OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
+  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
+  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
+  OLLAMA_MAX_LOADED_MODELS=1 \
+    nohup ollama serve >"${logf}" 2>&1 &
+  wait_for_ollama 30
+}
+
+# ensure_ollama_up [TIMEOUT] — guarantee the API is reachable: return 0 if
+# already up, else start it (systemd service, or a detached serve on hosts
+# without systemd) and wait. Nonzero if it cannot be brought up.
+ensure_ollama_up() {
+  local timeout="${1:-60}"
+  wait_for_ollama 3 && return 0
+  have ollama || return 1
+  if systemd_available; then
+    as_root systemctl start ollama >/dev/null 2>&1 || true
+    wait_for_ollama "${timeout}"
+  else
+    start_ollama_bg
+  fi
 }
 
 # restart_ollama — reload systemd and restart the ollama service, then wait

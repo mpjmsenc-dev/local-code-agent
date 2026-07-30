@@ -57,7 +57,12 @@ main() {
   fi
 
   if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
-    "${SCRIPT_DIR}/scripts/install_webui.sh"
+    # A WebUI failure (e.g. the Docker daemon isn't running on a no-systemd
+    # host) must NOT abort the rest of setup — the terminal stack still works.
+    if ! "${SCRIPT_DIR}/scripts/install_webui.sh"; then
+      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run scripts/install_webui.sh once Docker is running."
+      setup_ok=false
+    fi
   else
     info "Open WebUI disabled (ENABLE_WEBUI=${ENABLE_WEBUI}, SKIP_DOCKER=${SKIP_DOCKER}) — skipping."
   fi
