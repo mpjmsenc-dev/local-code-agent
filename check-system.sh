@@ -268,9 +268,32 @@ info "RAM: ${RAM_GIB} GiB · resizing the VM re-tunes the model on next boot (se
 # GPU is optional — Ollama uses a supported one automatically; CPU is the
 # fully-supported default. Report it so slow CPU inference is never a mystery.
 if has_nvidia_gpu; then
-  p_pass "NVIDIA GPU detected ($(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)) — Ollama will use it (fast inference)"
+  p_pass "NVIDIA GPU detected ($(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1))"
+elif gpu_hardware_present; then
+  # The worst case to leave unexplained: the card is there, so the user expects
+  # speed, but without a driver Ollama silently runs on the CPU.
+  p_warn "an NVIDIA card is present but no working driver was found (nvidia-smi missing/failing) — Ollama is running on the CPU. Install the driver (e.g. sudo ubuntu-drivers install) and restart ollama."
 else
   info "no NVIDIA GPU — CPU inference (a reading pace); Ollama auto-uses a GPU if you move to a GPU host (see README 'Performance')"
+fi
+# Whether a GPU is actually being USED is a separate question from whether one
+# exists: a driver can be present and Ollama still fall back to CPU (not enough
+# VRAM for this model, runner mismatch). Report what is really happening.
+GPU_PROC="$(ollama_processor "${MODEL_NAME}" 2>/dev/null || true)"
+if [[ -n "${GPU_PROC}" ]]; then
+  case "${GPU_PROC}" in
+    *"100% GPU") p_pass "model '${MODEL_NAME}' is running on the GPU (${GPU_PROC})" ;;
+    *"100% CPU")
+      if has_nvidia_gpu; then
+        p_warn "a GPU driver is present but '${MODEL_NAME}' is running 100% on the CPU — usually not enough free VRAM for this model. Try a smaller MODEL_FAMILY size, or check: nvidia-smi"
+      else
+        info "model '${MODEL_NAME}' is running on the CPU (${GPU_PROC}) — expected without a GPU"
+      fi
+      ;;
+    *) p_pass "model '${MODEL_NAME}' is split across CPU and GPU (${GPU_PROC}) — partially offloaded" ;;
+  esac
+else
+  info "model '${MODEL_NAME}' is not loaded right now — run a query, then re-check to see CPU/GPU placement"
 fi
 
 # Free disk where Ollama keeps its models (>= 15 GB wanted).

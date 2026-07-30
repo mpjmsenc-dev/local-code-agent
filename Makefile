@@ -14,7 +14,7 @@
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
-SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh)
+SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*)
 
 .PHONY: gates lint syntax test dry-run check smoke hooks help
 .DEFAULT_GOAL := help

@@ -61,20 +61,46 @@ model_family() {
 # the three RAM rungs. Adding a family here is all it takes to support it.
 # Sizes are the Ollama tags; each must exist for that family.
 family_sizes() {
+  # Every size here must RUN on the rung that selects it. The ladder's top rung
+  # starts at 16 GiB, so "big" has to fit in ~16 GiB of RAM at q4 — roughly
+  # 0.6 GB per billion parameters plus the context. Anything larger (llama3.1
+  # 70b needs ~40 GB, codellama 34b ~19 GB) stays a MANUAL choice via
+  # update-model.sh, because auto-tune pulling tens of GB and then OOMing on
+  # first use is far worse than picking a smaller model that works.
   case "$1" in
     qwen2.5-coder)     printf '3b 7b 14b\n' ;;
     qwen3)             printf '4b 8b 14b\n' ;;
     deepseek-coder-v2) printf '16b 16b 16b\n' ;;   # only one practical size
-    llama3.1)          printf '8b 8b 70b\n' ;;
-    codellama)         printf '7b 13b 34b\n' ;;
+    llama3.1)          printf '8b 8b 8b\n' ;;      # 70b/405b: manual only
+    codellama)         printf '7b 13b 13b\n' ;;    # 34b: manual only
     *) return 1 ;;
   esac
+}
+
+# model_fits_ram TAG RAM_GIB — rough q4 sizing: ~0.6 GB per billion parameters
+# plus ~1 GB for context and overhead. Deliberately approximate; its only job is
+# to stop the ladder selecting something that cannot possibly load. An
+# unparseable tag returns true, so an unusual naming scheme is never blocked.
+model_fits_ram() {
+  local tag="${1##*:}" ram="$2" params
+  params="${tag%[bB]}"
+  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
+  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
 }
 
 choose_for_ram() {
   local ram="$1" fam small mid big
   fam="$(model_family)"
   read -r small mid big <<<"$(family_sizes "${fam}")"
+  # Some families have no small size at all (deepseek-coder-v2 ships only 16b).
+  # On a machine that cannot hold it, silently pulling ~10 GB and then OOMing on
+  # first use is the worst outcome; fall back to a family that does fit and say
+  # so, rather than honouring MODEL_FAMILY into a wall.
+  if ! model_fits_ram "${fam}:${small}" "${ram}"; then
+    warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with update-model.sh if you have the RAM."
+    fam="qwen2.5-coder"
+    read -r small mid big <<<"$(family_sizes "${fam}")"
+  fi
   if (( ram < 9 )); then
     TUNE_MODEL="${fam}:${small}"
     TUNE_CTX=4096

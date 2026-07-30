@@ -15,11 +15,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
         run: |
-          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh; do
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*; do
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)
-        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*
 
   test:
     name: Unit tests + tune dry-run
@@ -131,6 +131,39 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
           python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
           exit "${missing}"
+      - name: install.sh bootstraps on a bare image (clone only, no setup)
+        # The one-command installer's whole job is to work on a machine with
+        # nothing on it. Proving it here means it cannot rot into "works only
+        # where git already happens to be installed".
+        #
+        # shell: bash is REQUIRED. This job runs in container: ubuntu:24.04,
+        # where the runner falls back to 'sh -e' (dash) — which has no
+        # 'pipefail', so 'set -euo pipefail' below dies with
+        # "Illegal option -o pipefail". The other steps in this job only survive
+        # the default because they happen to be sh-compatible.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ORDER MATTERS. Everything needing git must happen BEFORE git is
+          # removed: a PR build checks out a DETACHED merge commit, so the head
+          # branch name does not exist locally and '--branch <name>' would not
+          # resolve — we make a local branch at HEAD to clone from.
+          git config --global --add safe.directory "$(pwd)"
+          git branch -f ci-bootstrap-test HEAD
+          SRC="$(pwd)"
+          # NOW remove git, so install.sh has to install it itself. That is the
+          # whole point of this step: the installer must work on a machine that
+          # has nothing, not merely where git happens to be present already.
+          apt-get purge -y git >/dev/null 2>&1 || true
+          command -v git >/dev/null 2>&1 \
+            && echo "note: git survived the purge; install.sh's apt path is not exercised this run" \
+            || echo "git removed — install.sh must reinstall it"
+          LCA_REPO_URL="${SRC}" LCA_DIR=/tmp/lca-bootstrap \
+            LCA_BRANCH=ci-bootstrap-test \
+            LCA_RUN_SETUP=false bash install.sh
+          test -x /tmp/lca-bootstrap/setup.sh
+          test -x /tmp/lca-bootstrap/scripts/selftest.sh
+          echo "install.sh bootstrapped a working checkout on a bare image"
 
   e2e:
     name: E2E — real Ollama install + real generation

@@ -28,6 +28,7 @@ PASS=0
 FAIL=0
 p_pass() { ok "$*";  PASS=$((PASS+1)); }
 p_fail() { err "$*"; FAIL=$((FAIL+1)); }
+gpu_proc=""
 
 step "local-code-agent self-test (live end-to-end round-trip)"
 info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · model ${MODEL_NAME} · ctx ${OLLAMA_CONTEXT_LENGTH}"
@@ -54,6 +55,12 @@ else
   if model_responds "${MODEL_NAME}" 300; then
     p_pass "model '${MODEL_NAME}' generated text — inference works on this hardware"
     model_ready=true
+    # The model is loaded right now, so this is the moment its CPU/GPU
+    # placement is visible — the honest answer to "why is this fast/slow?".
+    gpu_proc="$(ollama_processor "${MODEL_NAME}" 2>/dev/null || true)"
+    if [[ -n "${gpu_proc}" ]]; then
+      info "Running on: ${gpu_proc}"
+    fi
   else
     p_fail "model '${MODEL_NAME}' did not respond — check RAM headroom (free -h) and: journalctl -u ollama"
   fi

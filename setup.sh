@@ -69,6 +69,19 @@ main() {
 
   "${SCRIPT_DIR}/scripts/install_tailscale.sh"
 
+  step "Installing the 'lca' command"
+  # Daily use should be 'cd ~/project && lca', not the full path to a script in
+  # /opt. Symlink rather than copy, so it always tracks this checkout.
+  if can_root; then
+    if as_root ln -sfn "${SCRIPT_DIR}/bin/lca" /usr/local/bin/lca 2>/dev/null; then
+      ok "'lca' is on your PATH — try: lca help"
+    else
+      warn "Could not create /usr/local/bin/lca — use ${SCRIPT_DIR}/bin/lca directly."
+    fi
+  else
+    info "No root available — skipping the 'lca' symlink; use ${SCRIPT_DIR}/bin/lca."
+  fi
+
   step "Installing boot services (auto-tune + netmode persistence)"
   "${SCRIPT_DIR}/scripts/tune.sh" --install-service
   "${SCRIPT_DIR}/netmode.sh" --install-service
@@ -90,13 +103,19 @@ main() {
     ts_ip="$(tailscale ip -4 2>/dev/null | head -1 || echo '<tailscale-ip>')"
   fi
   step "Next steps"
+  # Teach the short command, not the long paths — 'lca' is the intended
+  # interface now, and a next-steps list that contradicts it is how a tool ends
+  # up with two half-remembered ways to do everything.
   info "1. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
-  info "2. Chat from your phone: http://${ts_ip}:${WEBUI_PORT}  (install the Tailscale app on the phone first — docs/PHONE.md)"
-  info "3. Code in the terminal: cd <your-project> && ${SCRIPT_DIR}/run-agent.sh"
-  info "4. Internet kill switch: sudo ${SCRIPT_DIR}/netmode.sh offline|online|status"
-  info "5. Health check anytime: ${SCRIPT_DIR}/check-system.sh"
-  info "6. Prove it end-to-end:  ${SCRIPT_DIR}/scripts/selftest.sh   (a.k.a. make smoke)"
-  info "7. Automatic daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
+  info "2. Chat from your phone: http://${ts_ip}:${WEBUI_PORT}   (or: lca chat)"
+  info "   Install the Tailscale app on the phone first — docs/PHONE.md"
+  info "3. Code in the terminal: cd <your-project> && lca"
+  info "4. Prove it end-to-end:  lca test"
+  info "5. Health check anytime: lca check"
+  info "6. Internet kill switch: sudo lca offline | sudo lca online | sudo lca status"
+  info "7. Update the stack:     lca update      (backs up first)"
+  info "8. Daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
+  info "All commands: lca help"
   # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
   # install log for exactly one of these final lines.
   if [[ "${setup_ok}" == "true" ]]; then

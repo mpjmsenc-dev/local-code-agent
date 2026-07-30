@@ -16,6 +16,7 @@ Commands:
   stop      Stop it (chat history is kept in the docker volume)
   restart   Restart it
   status    Container state + HTTP health on port ${WEBUI_PORT}
+  url       Print the address to open on your phone
   logs      Follow the container logs (Ctrl-C to stop)
 
 To (re)create the container after editing .env, run: scripts/install_webui.sh
@@ -46,6 +47,25 @@ container_exists() {
 main() {
   local cmd="${1:-}"
   [[ -n "${cmd}" ]] || { usage; exit 1; }
+  # 'url' only reads .env and Tailscale — it must keep working when Docker is
+  # down or the container was never created, since that is exactly when someone
+  # is trying to work out where their chat app lives.
+  if [[ "${cmd}" == "url" ]]; then
+    local ts_ip=""
+    if have tailscale; then
+      ts_ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "${ts_ip}" ]]; then
+      ok "Open this on your phone:  http://${ts_ip}:${WEBUI_PORT}"
+      info "(the phone must be signed in to the same Tailscale account — docs/PHONE.md)"
+    else
+      warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
+      info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+    fi
+    info "On this machine:  http://127.0.0.1:${WEBUI_PORT}"
+    exit 0
+  fi
+
   have docker || die "Docker is not installed. Run scripts/install_docker.sh first."
   select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it (sudo systemctl start docker), or add yourself to the docker group (scripts/install_docker.sh) and log out/in, or re-run this as root."
 
@@ -89,6 +109,15 @@ main() {
         "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^PORT=//p' | head -1)"
       if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
         warn "Port drift: the container listens on ${live_port}, but .env says WEBUI_PORT=${WEBUI_PORT}. Apply the new port with: scripts/install_webui.sh"
+      fi
+      # The preselected model is baked into the container at creation, so
+      # auto-tune switching MODEL_NAME leaves the phone defaulting to a model
+      # that may no longer be installed — the same drift class as the port.
+      local live_model
+      live_model="$("${DOCKER[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+        "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^DEFAULT_MODELS=//p' | head -1)"
+      if [[ -n "${live_model}" && "${live_model}" != "${MODEL_NAME}" ]]; then
+        warn "Model drift: the chat app preselects '${live_model}', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Refresh with: scripts/install_webui.sh"
       fi
       if webui_responds; then
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."

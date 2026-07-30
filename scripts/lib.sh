@@ -163,10 +163,13 @@ load_env() {
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  LCA_EDIT_FORMAT="${LCA_EDIT_FORMAT:-auto}"
+  LCA_ASK_TOKENS="${LCA_ASK_TOKENS:-512}"
   SKIP_DOCKER="${SKIP_DOCKER:-false}"
   ENABLE_WEBUI="${ENABLE_WEBUI:-true}"
   WEBUI_PORT="${WEBUI_PORT:-3000}"
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
+  WEBUI_NAME="${WEBUI_NAME:-local-code-agent}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
@@ -212,6 +215,41 @@ aider_token_budget() {
   if (( out < 1024 )); then out=1024; fi
   if (( out >= ctx )); then out=$(( ctx / 2 )); fi
   printf '%s %s\n' "$(( ctx - out ))" "${out}"
+}
+
+# aider_edit_format MODEL — how aider should ask MODEL to express edits.
+# Small models routinely emit malformed search/replace blocks, and every
+# malformed block is a wasted round trip on a machine doing a few tokens a
+# second. Rewriting the whole file ("whole") is far more reliable for them, at
+# the cost of tokens. From roughly 7B upward the "diff" format works well and is
+# much cheaper, which matters when the context window is only 4-16k.
+# Unknown/odd tags fall back to "diff" (aider's own default behaviour).
+aider_edit_format() {
+  local model="${1:-}" size num
+  size="${model##*:}"          # qwen2.5-coder:7b -> 7b
+  num="${size%[bB]}"
+  if [[ "${num}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    # Decimal tags exist (0.5b), so compare as a float.
+    if awk -v n="${num}" 'BEGIN{exit !(n <= 4)}'; then
+      printf 'whole\n'
+      return 0
+    fi
+  fi
+  printf 'diff\n'
+}
+
+# aider_map_tokens CTX — repo-map budget for a context window of CTX tokens.
+# aider's default (1024) is a third of the usable prompt on a 4096 window, which
+# crowds out the code being edited. Scale it with the window instead, clamped so
+# it stays useful but never dominates.
+aider_map_tokens() {
+  local ctx="${1:-8192}" in out map
+  read -r in out <<<"$(aider_token_budget "${ctx}")"
+  : "${out}"                   # out is unused here; budget returns both
+  map=$(( in / 8 ))
+  if (( map < 256 )); then map=256; fi
+  if (( map > 4096 )); then map=4096; fi
+  printf '%s\n' "${map}"
 }
 
 # backups_to_prune KEEP — read backup file paths on stdin (one per line) and
@@ -346,6 +384,38 @@ detect_ram_gib() {
 # reporting/observability, so CPU-only stays the fully-supported default.
 has_nvidia_gpu() {
   have nvidia-smi && nvidia-smi -L >/dev/null 2>&1
+}
+
+# gpu_hardware_present — an NVIDIA card is physically present, whether or not a
+# driver is installed. The difference matters: with the card but no driver the
+# user gets slow CPU inference and no explanation, and "no GPU detected" would
+# be actively misleading.
+gpu_hardware_present() {
+  have lspci || return 1
+  lspci 2>/dev/null | grep -qi 'nvidia'
+}
+
+# processor_from_ps MODEL — read `ollama ps` output on stdin and echo how MODEL
+# is actually running: "100% GPU", "100% CPU", or a split like "38%/62% CPU/GPU".
+# This is the only authoritative answer to "is my GPU being used?" — a driver
+# can be installed and Ollama still fall back to CPU (too little VRAM for the
+# model, or a runner mismatch). Parsed by pattern, not column index: the
+# PROCESSOR field itself contains a space, so $4 would only ever capture "100%".
+processor_from_ps() {
+  local model="$1" line
+  line="$(grep -F -- "${model}" || true)"
+  [[ -n "${line}" ]] || return 1
+  local proc
+  proc="$(grep -oE '[0-9]+%/[0-9]+% [A-Z]+/[A-Z]+|[0-9]+% (GPU|CPU)' <<<"${line}" | head -1)"
+  [[ -n "${proc}" ]] || return 1
+  printf '%s\n' "${proc}"
+}
+
+# ollama_processor MODEL — processor_from_ps against the live server. Empty when
+# the model is not currently loaded (nothing has used it recently).
+ollama_processor() {
+  have ollama || return 1
+  ollama ps 2>/dev/null | processor_from_ps "$1"
 }
 
 # render_ollama_dropin_content — print the drop-in the current .env implies,

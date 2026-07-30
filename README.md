@@ -17,6 +17,26 @@ Droplet (4 vCPU / 8 GB), and equally at home on arm64 or any VMware/Proxmox/KVM 
 
 ## Quick start (server)
 
+One command on a fresh Ubuntu 24.04 box:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash
+```
+
+It installs git, clones to `/opt/local-code-agent`, and runs `setup.sh`. Piping
+into a shell means running code you have not read, so if you would rather look
+first (it is short, and this is the better habit):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh -o install.sh
+less install.sh && bash install.sh
+```
+
+Overrides: `LCA_DIR` (install location), `LCA_BRANCH`, `LCA_REPO_URL` (your
+fork), `LCA_RUN_SETUP=false` (clone only). Re-running updates the checkout.
+
+Or do it by hand:
+
 ```bash
 git clone https://github.com/mpjmsenc-dev/local-code-agent.git
 cd local-code-agent
@@ -32,7 +52,9 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 
 1. `sudo tailscale up` on the server, log in via the printed URL.
 2. Install the Tailscale app on your phone, log in to the same account.
-3. Open `http://<tailscale-ip>:3000`, create the **first** account (it becomes admin).
+3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
+   print the exact address. Create the **first** account (it becomes admin).
+   Your model is already selected, so you can just start typing.
 4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, re-run `scripts/install_webui.sh`.
 
 Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
@@ -90,6 +112,19 @@ every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
 with `sudo ./netmode.sh harden` / `status`.
 
+## Updating
+
+```bash
+cd /opt/local-code-agent
+./update.sh --check     # what would change? (touches nothing)
+./update.sh             # back up → pull → re-run setup → self-test
+```
+
+The backup happens **first**, on purpose: the update refreshes OS packages,
+aider, Ollama and possibly the model, so the restore point has to predate all of
+it. If the self-test fails afterwards, `./restore.sh` puts you back. Your `.env`
+is untracked, so your settings survive updates untouched.
+
 ## Security model
 
 What "private" means here, precisely — and what it doesn't.
@@ -146,21 +181,54 @@ offline because the models are local.
 ## Daily usage: aider (the coding agent)
 
 ```bash
-cd ~/my-project                          # YOUR project, any git repo
-/opt/local-code-agent/run-agent.sh       # starts aider on the local model
+cd ~/my-project     # YOUR project, any git repo
+lca                 # starts aider on the local model, right here
 ```
+
+`setup.sh` puts `lca` on your PATH. It is one short front door to everything:
+
+| Command | Does |
+|---|---|
+| `lca` | start the coding agent in the current directory |
+| `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
+| `lca chat` | print the address for the chat app on your phone |
+| `lca check` / `lca test` | health check / live end-to-end self-test |
+| `lca update` | back up, update, re-run setup, verify |
+| `lca offline` / `lca online` | internet kill switch (needs sudo) |
+| `lca model <name>` | switch models |
+
+Quick answers without leaving what you are doing:
+
+```bash
+lca ask "how do I find the 10 largest files under /var?"
+lca ask "why is setup.sh failing?"        # names a local file -> it is included
+lca ask -f netmode.sh "what does this script do?"
+journalctl -u ollama -n 50 | lca ask "why did this fail?"
+```
+
+`lca help` lists them all. Everything after the command is passed through, so
+`lca --no-auto-commits` reaches aider and `lca model X --remove-old` reaches
+update-model.sh. The full script paths still work if you prefer them.
 
 Inside aider: `/add file.py` to add files, then ask for changes in plain English —
 it edits and auto-commits. `/undo` reverts, `/help` lists commands. Extra
 arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 
+**Output quality is tuned for you.** `run-agent.sh` picks the edit format from
+the model size (models ≤4B rewrite whole files, which they get right far more
+often than search/replace diffs; bigger models use cheaper diffs) and scales
+aider's repo map to your context window so it never crowds out the code being
+edited. Override with `LCA_EDIT_FORMAT` in `.env`.
+
 ## Scripts
 
 | Script | Purpose |
 |---|---|
+| `install.sh` | One-command bootstrap: installs git, clones, runs `setup.sh` |
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
+| `update.sh` | Update safely: backup → new code → re-run setup → self-test (`--check` previews) |
 | `run-agent.sh` | Start aider in the current directory |
-| `webui.sh` | `start\|stop\|restart\|status\|logs` for Open WebUI |
+| `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
@@ -183,12 +251,14 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
+| `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
 | `ENABLE_WEBUI` | `true` | Install/run Open WebUI |
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
+| `WEBUI_NAME` | `local-code-agent` | Title shown in the chat app on your phone |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
 | `BACKUP_KEEP` | `7` | How many backups `backup.sh` keeps; older ones are pruned (`0` = keep all) |
 | `BACKUP_SCHEDULE` | `"*-*-* 03:30:00"` | When the backup timer fires (systemd `OnCalendar`) — **keep the quotes**; e.g. `"daily"`, `"weekly"` |
@@ -198,8 +268,10 @@ Created from `.env.example` on first run. All keys:
 ```
 local-code-agent/
 ├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
+├── install.sh                  # one-command installer (curl | bash)
 ├── Makefile                    # make gates/lint/test/hooks — the local dev loop
-├── setup.sh · run-agent.sh · webui.sh · netmode.sh
+├── bin/lca                     # the short command installed on PATH
+├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
 │   ├── lib.sh · tune.sh · selftest.sh
@@ -211,7 +283,8 @@ local-code-agent/
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
-└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ · BACKUPS
+└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ ·
+            BACKUPS · PERFORMANCE
 ```
 
 ## Performance & GPU
@@ -225,6 +298,11 @@ Inference speed depends on hardware:
   Options: a DigitalOcean **GPU droplet**, a cloud GPU instance, or a local
   hypervisor with **GPU passthrough**. `check-system.sh` reports whether a GPU
   was detected.
+
+`check-system.sh` and `lca test` report whether your model is actually running
+on the GPU or the CPU (`ollama ps`'s PROCESSOR column) — a driver can be present
+and Ollama still fall back to CPU. See **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**
+for what actually moves the needle, in order, and how to measure it.
 
 Note: CI exercises the CPU path on standard runners (there are no GPU runners),
 so the GPU path is documented and detected but not automatically E2E-tested —
@@ -245,7 +323,7 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[PERFORMANCE](docs/PERFORMANCE.md) · [BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 

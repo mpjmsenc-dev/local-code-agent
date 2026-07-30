@@ -19,12 +19,36 @@ load_env
 usage() {
   cat <<EOF
 Usage: update-model.sh <model> [--remove-old]
-       update-model.sh --list
+       update-model.sh --list               models already downloaded
+       update-model.sh --list-recommended   what fits THIS machine's RAM
 
 Examples:
   update-model.sh qwen2.5-coder:14b
   update-model.sh qwen2.5-coder:32b --remove-old
 EOF
+}
+
+# list_recommended — print each supported family's rung for this machine's RAM,
+# marking what is already downloaded. Uses tune.sh's ladder so this can never
+# disagree with what auto-tune would actually choose.
+list_recommended() {
+  local ram fam small mid big pick note
+  ram="$(detect_ram_gib)"
+  step "Models that fit this machine (${ram} GiB RAM detected)"
+  # shellcheck source=scripts/tune.sh
+  source "${SCRIPT_DIR}/scripts/tune.sh"
+  for fam in qwen2.5-coder qwen3 deepseek-coder-v2 llama3.1 codellama; do
+    read -r small mid big <<<"$(family_sizes "${fam}")"
+    if   (( ram < 9 ));  then pick="${fam}:${small}"
+    elif (( ram <= 15 )); then pick="${fam}:${mid}"
+    else                      pick="${fam}:${big}"
+    fi
+    note=""
+    if have ollama && model_present "${pick}"; then note="  (already downloaded)"; fi
+    printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
+  done
+  info "Switch with:  update-model.sh <model>   (pins it, disables auto-tune)"
+  info "Or keep auto-tune and set MODEL_FAMILY=<family> in .env, then: scripts/tune.sh"
 }
 
 main() {
@@ -35,6 +59,13 @@ main() {
         require_cmd ollama
         info "Installed models:"
         ollama list
+        exit 0
+        ;;
+      --list-recommended)
+        # Pulling a model is several GB and many minutes; knowing beforehand
+        # which sizes actually fit this machine is cheaper than finding out
+        # when it OOMs or thrashes.
+        list_recommended
         exit 0
         ;;
       --remove-old) remove_old=true ;;
