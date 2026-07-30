@@ -114,8 +114,14 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   Expect a comfortable reading pace on CPU, slower than Claude.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
-- The first message after a quiet period is slower — the model reloads into RAM
-  (`OLLAMA_KEEP_ALIVE` controls how long it stays warm).
+- The first message after a quiet period is slower — the model reloads into RAM,
+  about 20 seconds on a droplet. If that is the thing that annoys you most (it
+  usually is, because you hit it every time you pick up your phone), set
+  `OLLAMA_KEEP_ALIVE=-1` in `.env` and re-run `scripts/install_ollama.sh`: the
+  model then stays resident permanently and the first message is as fast as the
+  rest. The cost is that its RAM is never released.
+- `lca speed` on the server measures all of this and tells you what is limiting
+  it.
 
 ## If the page won't load
 

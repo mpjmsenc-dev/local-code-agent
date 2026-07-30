@@ -123,9 +123,11 @@ main() {
   if [[ "${prompt_count}" =~ ^[0-9]+$ ]] && (( prompt_count > 0 )) && (( prompt_ns > 0 )); then
     printf '  reading input   %s tokens/second\n' "$(tokens_per_second "${prompt_count}" "${prompt_ns}")"
   fi
+  local load_s=""
   if [[ "${load_ns}" =~ ^[0-9]+$ ]] && (( load_ns > 1000000000 )); then
+    load_s="$(awk -v n="${load_ns}" 'BEGIN { printf "%.1f", n / 1000000000 }')"
     printf '  first message   %ss extra to load the model (only after it goes idle — OLLAMA_KEEP_ALIVE=%s)\n' \
-      "$(awk -v n="${load_ns}" 'BEGIN { printf "%.1f", n / 1000000000 }')" "${OLLAMA_KEEP_ALIVE:-30m}"
+      "${load_s}" "${OLLAMA_KEEP_ALIVE:-30m}"
   fi
   printf '  running on      %s\n' "${placement:-unknown (model not resident — run again)}"
 
@@ -169,6 +171,17 @@ main() {
   step "What this means"
   local swap_mb=""
   swap_mb="$(swap_in_use_mb || true)"
+
+  # A long load is felt on EVERY first message of a session, so it is worth
+  # naming even when generation speed is fine — and unlike generation speed it
+  # can be removed outright. Verified against Ollama: keep_alive=-1 shows
+  # "Forever" in the UNTIL column of 'ollama ps'.
+  if [[ -n "${load_s}" ]] && awk -v s="${load_s}" 'BEGIN { exit !(s > 5) }' \
+     && [[ "${OLLAMA_KEEP_ALIVE:-30m}" != -* ]]; then
+    info "Every first message after ${OLLAMA_KEEP_ALIVE:-30m} idle waits ${load_s}s for this load."
+    info "To pay it once and never again, set OLLAMA_KEEP_ALIVE=-1 in .env and re-run"
+    info "scripts/install_ollama.sh — the model then stays in RAM permanently."
+  fi
 
   if [[ "${swap_mb}" =~ ^[0-9]+$ ]] && (( swap_mb > 256 )); then
     warn "Ollama has ${swap_mb} MiB swapped out — the model does not fit in RAM."
