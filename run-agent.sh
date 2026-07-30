@@ -19,7 +19,9 @@ main() {
 
   # Make sure Ollama is up (start the service if it is down).
   if ! wait_for_ollama 3; then
-    if systemd_available; then
+    # can_root guard: as_root die()s without root/sudo, which would abort
+    # run-agent.sh here instead of falling through to the clear message below.
+    if systemd_available && can_root; then
       info "Ollama is not answering — starting the service..."
       as_root systemctl start ollama || true
     fi

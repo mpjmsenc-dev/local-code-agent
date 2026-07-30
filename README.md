@@ -167,7 +167,7 @@ Created from `.env.example` on first run. All keys:
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
 | `BACKUP_KEEP` | `7` | How many backups `backup.sh` keeps; older ones are pruned (`0` = keep all) |
-| `BACKUP_SCHEDULE` | `*-*-* 03:30:00` | When the backup timer fires (systemd `OnCalendar`); e.g. `daily`, `weekly` |
+| `BACKUP_SCHEDULE` | `"*-*-* 03:30:00"` | When the backup timer fires (systemd `OnCalendar`) — **keep the quotes**; e.g. `"daily"`, `"weekly"` |
 
 ## Repository tree
 

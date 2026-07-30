@@ -56,9 +56,18 @@ sudo ./backup.sh --install-timer     # enable
 sudo ./backup.sh --uninstall-timer   # disable
 ```
 
-- Schedule: `BACKUP_SCHEDULE` in `.env` (systemd `OnCalendar` syntax — e.g.
-  `daily`, `weekly`, `*-*-* 03:30:00`). The default is 03:30 daily. `install-timer`
-  validates it and refuses a malformed value. Re-run `install-timer` after changing it.
+- Schedule: `BACKUP_SCHEDULE` in `.env` (systemd `OnCalendar` syntax). **Quote the
+  value** — `.env` is sourced by every script, so an unquoted value containing
+  spaces breaks them all:
+
+  ```bash
+  BACKUP_SCHEDULE="*-*-* 03:30:00"   # default: 03:30 daily
+  BACKUP_SCHEDULE="daily"
+  BACKUP_SCHEDULE="Mon *-*-* 02:00:00"
+  ```
+
+  `install-timer` validates the value with `systemd-analyze calendar` and refuses a
+  malformed one. Re-run `install-timer` after changing it.
 - `Persistent=true`, so a run missed while the box was off happens at next boot.
 - Check it: `systemctl list-timers local-code-agent-backup.timer`, or
   `./check-system.sh` (the Backups section shows the timer state and the age of

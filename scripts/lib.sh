@@ -399,7 +399,13 @@ ensure_ollama_up() {
   wait_for_ollama 3 && return 0
   have ollama || return 1
   if systemd_available; then
-    as_root systemctl start ollama >/dev/null 2>&1 || true
+    # Never call as_root unguarded here: with neither root nor sudo it die()s,
+    # and that exit kills the CALLER mid-run — '|| true' cannot catch an exit,
+    # and the redirect below would swallow the explanation. can_root() returns
+    # false instead, so callers (selftest.sh, tune.sh) degrade gracefully.
+    if can_root; then
+      as_root systemctl start ollama >/dev/null 2>&1 || true
+    fi
     wait_for_ollama "${timeout}"
   else
     start_ollama_bg

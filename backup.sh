@@ -30,8 +30,20 @@ do_backup() {
   # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
   trap 'rm -rf "${workdir:-}"' EXIT
-  mkdir -p "${BACKUP_DIR}"
+  mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
+  # The timer runs backup.sh as root. If root created backups/ first, a later
+  # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
+  # and set -e would abort with no explanation — say what's wrong instead.
+  [[ -w "${BACKUP_DIR}" ]] || die "Cannot write to ${BACKUP_DIR} (owned by $(stat -c %U "${BACKUP_DIR}" 2>/dev/null || echo 'another user')). Re-run with sudo, or: sudo chown -R $(id -un) ${BACKUP_DIR}"
   tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
+
+  # Retention below must never evict an older COMPLETE backup because this run
+  # captured less than it should have (e.g. the docker daemon was down). Track
+  # whether WebUI data was expected, and whether it actually made it in.
+  local webui_expected=false webui_captured=false
+  if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+    webui_expected=true
+  fi
 
   # 1. Open WebUI docker volume (accounts + chat history).
   if have docker && as_root docker volume inspect open-webui >/dev/null 2>&1; then
@@ -55,6 +67,7 @@ do_backup() {
         ghcr.io/open-webui/open-webui:main \
         czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
+      webui_captured=true
     else
       warn "Could not archive the WebUI volume — continuing without it."
     fi
@@ -96,7 +109,15 @@ do_backup() {
   as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
   ok "Backup written: ${tarball} ($(du -h "${tarball}" | cut -f1))"
 
-  prune_old_backups
+  # Only prune when this backup is as complete as it was supposed to be.
+  # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
+  # nights, silently delete every backup that still had the WebUI accounts and
+  # chat history — the exact data this feature exists to protect.
+  if [[ "${webui_expected}" == "true" && "${webui_captured}" != "true" ]]; then
+    warn "WebUI data was NOT captured in this backup — skipping retention so older, complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
+  else
+    prune_old_backups
+  fi
 
   info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
 }
@@ -136,6 +157,11 @@ install_timer() {
     die "BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' is not a valid systemd OnCalendar expression. Examples: daily | weekly | '*-*-* 03:30:00'."
   fi
   info "Installing the backup timer (${BACKUP_TIMER}) — schedule: ${BACKUP_SCHEDULE}"
+  # Create backups/ now, owned by the human running sudo. If the root timer
+  # created it first it would be root-owned, and every later non-root
+  # './backup.sh' would fail on tar with a permission error.
+  as_root mkdir -p "${BACKUP_DIR}"
+  as_root chown "${SUDO_USER:-$(id -un)}" "${BACKUP_DIR}" 2>/dev/null || true
   {
     echo "[Unit]"
     echo "Description=local-code-agent backup (WebUI data + .env + model list)"

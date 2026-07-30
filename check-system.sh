@@ -262,7 +262,19 @@ fi
 # --- Backups (warn-only: backups are optional) ------------------------------
 step "Backups"
 if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.timer 2>/dev/null; then
-  p_pass "scheduled backup timer enabled (daily; keeps newest ${BACKUP_KEEP})"
+  # Report the REAL schedule the timer runs on (BACKUP_SCHEDULE is configurable),
+  # and describe retention honestly — BACKUP_KEEP=0 means "keep everything",
+  # not "keep newest 0".
+  KEEP_DESC="keeping newest ${BACKUP_KEEP}"
+  if ! [[ "${BACKUP_KEEP}" =~ ^[0-9]+$ ]]; then
+    KEEP_DESC="retention disabled (BACKUP_KEEP='${BACKUP_KEEP}' is not a number)"
+  elif [[ "${BACKUP_KEEP}" == "0" ]]; then
+    KEEP_DESC="retention disabled (keeping all)"
+  fi
+  TIMER_SCHED="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
+    | sed -n 's/.*OnCalendar=\([^}]*\).*/\1/p' | head -1)"
+  [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
+  p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
 else
   info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"
 fi
