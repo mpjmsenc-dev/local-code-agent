@@ -192,6 +192,25 @@ check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
+echo "# processor_from_ps(): is the GPU actually being used? (parsed by pattern, not column)"
+PS_GPU="NAME                ID              SIZE      PROCESSOR    CONTEXT    UNTIL
+qwen2.5-coder:7b    dae161e27b0e    5.5 GB    100% GPU     4096       4 minutes from now"
+PS_CPU="NAME                ID              SIZE      PROCESSOR    CONTEXT    UNTIL
+qwen2.5-coder:7b    dae161e27b0e    5.5 GB    100% CPU     4096       4 minutes from now"
+PS_SPLIT="NAME                 ID              SIZE     PROCESSOR          CONTEXT   UNTIL
+qwen2.5-coder:14b    9ec8897f747e    10 GB    38%/62% CPU/GPU    8192      5 minutes from now"
+PS_EMPTY="NAME    ID    SIZE    PROCESSOR    CONTEXT    UNTIL"
+pfp() { printf '%s\n' "$1" | processor_from_ps "$2"; }
+check "100% GPU parsed"  test "$(pfp "${PS_GPU}" qwen2.5-coder:7b)"    = "100% GPU"
+check "100% CPU parsed"  test "$(pfp "${PS_CPU}" qwen2.5-coder:7b)"    = "100% CPU"
+# The PROCESSOR field contains a space, so a column-index parser would return
+# just "38%/62%" here — this pins the pattern-based behaviour.
+check "CPU/GPU split parsed" test "$(pfp "${PS_SPLIT}" qwen2.5-coder:14b)" = "38%/62% CPU/GPU"
+not_loaded() { ! printf '%s\n' "${PS_EMPTY}" | processor_from_ps qwen2.5-coder:7b 2>/dev/null; }
+check "unloaded model reports nothing" not_loaded
+wrong_model() { ! printf '%s\n' "${PS_GPU}" | processor_from_ps some-other-model 2>/dev/null; }
+check "a different model is not matched" wrong_model
+
 echo "# aider output quality: edit format per model size, repo map scaled to the window"
 ef() { aider_edit_format "$1"; }
 check "0.5b -> whole (tiny models cannot do diffs)" test "$(ef qwen2.5-coder:0.5b)" = "whole"

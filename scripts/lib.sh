@@ -385,6 +385,38 @@ has_nvidia_gpu() {
   have nvidia-smi && nvidia-smi -L >/dev/null 2>&1
 }
 
+# gpu_hardware_present — an NVIDIA card is physically present, whether or not a
+# driver is installed. The difference matters: with the card but no driver the
+# user gets slow CPU inference and no explanation, and "no GPU detected" would
+# be actively misleading.
+gpu_hardware_present() {
+  have lspci || return 1
+  lspci 2>/dev/null | grep -qi 'nvidia'
+}
+
+# processor_from_ps MODEL — read `ollama ps` output on stdin and echo how MODEL
+# is actually running: "100% GPU", "100% CPU", or a split like "38%/62% CPU/GPU".
+# This is the only authoritative answer to "is my GPU being used?" — a driver
+# can be installed and Ollama still fall back to CPU (too little VRAM for the
+# model, or a runner mismatch). Parsed by pattern, not column index: the
+# PROCESSOR field itself contains a space, so $4 would only ever capture "100%".
+processor_from_ps() {
+  local model="$1" line
+  line="$(grep -F -- "${model}" || true)"
+  [[ -n "${line}" ]] || return 1
+  local proc
+  proc="$(grep -oE '[0-9]+%/[0-9]+% [A-Z]+/[A-Z]+|[0-9]+% (GPU|CPU)' <<<"${line}" | head -1)"
+  [[ -n "${proc}" ]] || return 1
+  printf '%s\n' "${proc}"
+}
+
+# ollama_processor MODEL — processor_from_ps against the live server. Empty when
+# the model is not currently loaded (nothing has used it recently).
+ollama_processor() {
+  have ollama || return 1
+  ollama ps 2>/dev/null | processor_from_ps "$1"
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.
