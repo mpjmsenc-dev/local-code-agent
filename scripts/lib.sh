@@ -281,6 +281,13 @@ detect_ram_gib() {
   awk '/^MemTotal:/ {printf "%d\n", ($2 + 524288) / 1048576}' /proc/meminfo
 }
 
+# has_nvidia_gpu — true if an NVIDIA GPU Ollama can use is present. Ollama
+# uses a supported GPU automatically (no config needed); this is only for
+# reporting/observability, so CPU-only stays the fully-supported default.
+has_nvidia_gpu() {
+  have nvidia-smi && nvidia-smi -L >/dev/null 2>&1
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.

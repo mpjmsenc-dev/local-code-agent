@@ -184,6 +184,22 @@ local-code-agent/
 └── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
 ```
 
+## Performance & GPU
+
+Inference speed depends on hardware:
+- **CPU (default, e.g. a Basic droplet):** works everywhere, but it's a reading
+  pace, not instant — expect a few tokens/second, slower for bigger models. This
+  is the fully-supported, tested path.
+- **GPU (optional, much faster):** if the host has a supported NVIDIA GPU with
+  drivers installed, **Ollama uses it automatically — no config change needed.**
+  Options: a DigitalOcean **GPU droplet**, a cloud GPU instance, or a local
+  hypervisor with **GPU passthrough**. `check-system.sh` reports whether a GPU
+  was detected.
+
+Note: CI exercises the CPU path on standard runners (there are no GPU runners),
+so the GPU path is documented and detected but not automatically E2E-tested —
+verify it on your GPU host with `./check-system.sh` after setup.
+
 ## Honest expectations vs Claude
 
 Local 3b–14b models are **not** frontier models. Expect useful but simpler code

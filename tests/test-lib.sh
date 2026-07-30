@@ -82,6 +82,10 @@ echo "# detect_ram_gib() returns a sane positive integer"
 RAM="$(detect_ram_gib)"
 check "RAM is numeric and > 0" test "${RAM}" -gt 0
 
+echo "# has_nvidia_gpu() runs cleanly and returns a boolean (no crash on CPU-only)"
+gpu_ok() { has_nvidia_gpu; rc=$?; [[ "${rc}" -eq 0 || "${rc}" -eq 1 ]]; }
+check "has_nvidia_gpu exits 0 or 1" gpu_ok
+
 echo "# venv path helpers build paths inside the repo"
 check "venv_dir under REPO_ROOT" test "$(venv_dir)" = "${SANDBOX}/${VENV_NAME}"
 check "aider_bin under venv" test "$(aider_bin)" = "${SANDBOX}/${VENV_NAME}/bin/aider"
