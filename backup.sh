@@ -127,7 +127,13 @@ do_backup() {
     rm -f "${tarball}"
     die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
   fi
-  as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
+  # Only needed when root created the file (the timer runs as root). Guard with
+  # can_root: for an unprivileged user without sudo the file is already theirs,
+  # and an unguarded as_root would die() here — aborting a backup that had
+  # already been written and verified.
+  if can_root; then
+    as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
+  fi
 
   # A backup you cannot restore is not a backup. Read the archive back and
   # confirm every file we staged is really in it, BEFORE retention is allowed to
