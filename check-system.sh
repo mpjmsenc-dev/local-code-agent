@@ -271,12 +271,18 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   elif [[ "${BACKUP_KEEP}" == "0" ]]; then
     KEEP_DESC="retention disabled (keeping all)"
   fi
+  # systemd renders this property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
+  # so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
+  # next_elapse tail and reports a garbled schedule.
   TIMER_SCHED="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
-    | sed -n 's/.*OnCalendar=\([^}]*\).*/\1/p' | head -1)"
+    | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
   [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
   p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
+  TIMER_ON=true
 else
   info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"
+  TIMER_ON=false
+  TIMER_SCHED=""
 fi
 shopt -s nullglob
 BKS=( "${REPO_ROOT}"/backups/local-code-agent-backup-*.tar.gz )
@@ -287,6 +293,11 @@ if (( ${#BKS[@]} )); then
   NEWEST_AGE_DAYS=$(( ( $(date +%s) - $(stat -c %Y "${NEWEST}" 2>/dev/null || echo 0) ) / 86400 ))
   if (( NEWEST_AGE_DAYS <= 7 )); then
     p_pass "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old ($(basename "${NEWEST}"))"
+  elif [[ "${TIMER_ON}" == "true" ]]; then
+    # A slower-than-weekly OnCalendar is a legitimate choice; systemd owns the
+    # cadence, so an older backup is not a fault and "enable the timer" would
+    # be wrong advice — it is already enabled.
+    info "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old — the timer is enabled (${TIMER_SCHED}), so this follows your schedule"
   else
     p_warn "${#BKS[@]} backup(s) present but the newest is ${NEWEST_AGE_DAYS} days old — run ${REPO_ROOT}/backup.sh or enable the timer"
   fi

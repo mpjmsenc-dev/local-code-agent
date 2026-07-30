@@ -42,10 +42,19 @@ in the backup.
 
 ## Retention
 
-Every run keeps the newest `BACKUP_KEEP` backups (default `7`) and prunes older
+Each run keeps the newest `BACKUP_KEEP` backups (default `7`) and prunes older
 ones so they can't slowly fill the disk — the same disk headroom
 `check-system.sh` guards (models want ≥15 GB free). Set `BACKUP_KEEP=0` in `.env`
 to keep every backup instead.
+
+Pruning is deliberately **skipped** when a run could not capture WebUI data it
+believes exists — the volume is there but the archive failed, or Docker is down
+so its contents can't be verified. Without that guard, a week of unattended runs
+with Docker broken would quietly delete every backup that still held your
+accounts and chat history. When that happens the run warns and keeps the older
+backups; fix Docker and re-run `./backup.sh`. A machine with no WebUI data at all
+(`ENABLE_WEBUI=false`, or Docker running with no `open-webui` volume) prunes
+normally — there is nothing to lose.
 
 ## Automatic (scheduled) backups
 

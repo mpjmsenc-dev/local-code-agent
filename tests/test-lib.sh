@@ -108,6 +108,36 @@ check "empty ctx -> 8192 default"     test "$(aider_token_budget '')"    = "6144
 check "non-numeric ctx -> 8192"       test "$(aider_token_budget abc)"   = "6144 2048"
 check "absurdly small ctx -> 8192"    test "$(aider_token_budget 16)"    = "6144 2048"
 
+echo "# load_env's \${VAR:-default} fallbacks apply when .env omits the keys"
+# The checks above read a .env copied from .env.example, so they only prove the
+# EXAMPLE's literals. These prove the fallbacks in lib.sh itself — load-bearing
+# under 'set -u' when a user hand-trims .env (a supported degraded case).
+TRIMMED="${SANDBOX}/trimmed"
+mkdir -p "${TRIMMED}/scripts"
+cp "${REPO}/scripts/lib.sh" "${TRIMMED}/scripts/"
+# A .env with none of the newer keys, as an older/hand-edited install would have.
+printf 'MODEL_NAME=qwen2.5-coder:7b\n' > "${TRIMMED}/.env"
+# This MUST run in a separate bash process, with the keys cleared from the
+# environment. lib.sh guards against double-sourcing (LCA_LIB_LOADED), so
+# re-sourcing it in a subshell is a no-op and would keep THIS script's load_env
+# (bound to a .env that does define the keys) — the assertion would then pass no
+# matter what the fallbacks say. load_env also exports .env values (set -a), so
+# they must be stripped with 'env -u' or the child would inherit them.
+fallbacks_apply() {
+  # SC2016 is intentional here: the ${...} must be expanded by the CHILD bash
+  # (after it sources lib.sh), not by this script — hence the single quotes.
+  # shellcheck disable=SC2016
+  env -u BACKUP_KEEP -u BACKUP_SCHEDULE -u AIDER_CONVENTIONS bash -c '
+    set -euo pipefail
+    source "$1/scripts/lib.sh"
+    load_env
+    [[ "${BACKUP_KEEP}"      == "7" ]]              || { echo "BACKUP_KEEP=${BACKUP_KEEP}" >&2; exit 1; }
+    [[ "${BACKUP_SCHEDULE}"  == "*-*-* 03:30:00" ]] || { echo "BACKUP_SCHEDULE=${BACKUP_SCHEDULE}" >&2; exit 1; }
+    [[ "${AIDER_CONVENTIONS}" == "true" ]]          || { echo "AIDER_CONVENTIONS=${AIDER_CONVENTIONS}" >&2; exit 1; }
+  ' _ "${TRIMMED}"
+}
+check "load_env fallbacks apply when .env omits the keys" fallbacks_apply
+
 echo "# backups_to_prune() keeps the newest KEEP; prints the older ones to delete"
 # Timestamped names sort chronologically; the helper sorts internally, so the
 # order they are fed in must not matter.

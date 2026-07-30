@@ -38,15 +38,22 @@ do_backup() {
   tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
 
   # Retention below must never evict an older COMPLETE backup because this run
-  # captured less than it should have (e.g. the docker daemon was down). Track
-  # whether WebUI data was expected, and whether it actually made it in.
-  local webui_expected=false webui_captured=false
-  if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
-    webui_expected=true
+  # captured less than it should have. Three distinct states — conflating the
+  # last two either destroys data or disables retention forever:
+  #   none      no WebUI data exists on this machine  -> nothing to lose, prune
+  #   captured  the volume exists and we archived it  -> complete, prune
+  #   missed    the volume exists (or docker is down so we cannot tell) and we
+  #             did NOT archive it                    -> keep older backups
+  local webui_state="none"
+  local docker_ok=false
+  if have docker && { docker info >/dev/null 2>&1 \
+      || { can_root && as_root docker info >/dev/null 2>&1; }; }; then
+    docker_ok=true
   fi
 
   # 1. Open WebUI docker volume (accounts + chat history).
-  if have docker && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+  if [[ "${docker_ok}" == "true" ]] && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    webui_state="missed"   # promoted to "captured" only if the archive succeeds
     info "Archiving the 'open-webui' docker volume..."
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
     # while the container is writing yields a torn, possibly-corrupt snapshot
@@ -67,7 +74,7 @@ do_backup() {
         ghcr.io/open-webui/open-webui:main \
         czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
-      webui_captured=true
+      webui_state="captured"
     else
       warn "Could not archive the WebUI volume — continuing without it."
     fi
@@ -82,6 +89,11 @@ do_backup() {
         warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
       fi
     fi
+  elif [[ "${docker_ok}" != "true" && "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+    # Docker is unusable, so we cannot tell whether a WebUI volume with real
+    # data exists. Assume it might: keep older backups rather than risk them.
+    webui_state="missed"
+    warn "Docker is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
   else
     warn "No 'open-webui' docker volume found — skipping WebUI data."
   fi
@@ -113,7 +125,7 @@ do_backup() {
   # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
   # nights, silently delete every backup that still had the WebUI accounts and
   # chat history — the exact data this feature exists to protect.
-  if [[ "${webui_expected}" == "true" && "${webui_captured}" != "true" ]]; then
+  if [[ "${webui_state}" == "missed" ]]; then
     warn "WebUI data was NOT captured in this backup — skipping retention so older, complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
   else
     prune_old_backups
