@@ -130,7 +130,12 @@ install_timer() {
     warn "systemd is not available here — cannot install the backup timer. Run '${SCRIPT_DIR}/backup.sh' from cron instead."
     return 0
   fi
-  info "Installing the daily backup timer (${BACKUP_TIMER})..."
+  # Catch a bad BACKUP_SCHEDULE now (a clear error) rather than writing a timer
+  # that systemd silently never fires.
+  if have systemd-analyze && ! systemd-analyze calendar "${BACKUP_SCHEDULE}" >/dev/null 2>&1; then
+    die "BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' is not a valid systemd OnCalendar expression. Examples: daily | weekly | '*-*-* 03:30:00'."
+  fi
+  info "Installing the backup timer (${BACKUP_TIMER}) — schedule: ${BACKUP_SCHEDULE}"
   {
     echo "[Unit]"
     echo "Description=local-code-agent backup (WebUI data + .env + model list)"
@@ -142,10 +147,10 @@ install_timer() {
   } | as_root tee "${BACKUP_SERVICE}" >/dev/null
   {
     echo "[Unit]"
-    echo "Description=Run the local-code-agent backup on a daily schedule"
+    echo "Description=Run the local-code-agent backup on a schedule"
     echo ""
     echo "[Timer]"
-    echo "OnCalendar=*-*-* 03:30:00"
+    echo "OnCalendar=${BACKUP_SCHEDULE}"
     echo "Persistent=true"
     echo ""
     echo "[Install]"
@@ -154,7 +159,7 @@ install_timer() {
   as_root systemctl daemon-reload
   as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"
-  ok "Scheduled backups on: daily at 03:30, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
+  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
 }
 
 # uninstall_timer — remove the timer + service (used by uninstall.sh too).

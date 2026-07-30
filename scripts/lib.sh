@@ -168,6 +168,7 @@ load_env() {
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
+  BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
 
 # set_env_var KEY VALUE — update KEY in .env in place, or append it. The
