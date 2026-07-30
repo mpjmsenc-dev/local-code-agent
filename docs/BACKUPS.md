@@ -1,0 +1,69 @@
+# Backups
+
+`backup.sh` captures the state that isn't trivially re-createable, and
+`restore.sh` puts it back on a fresh install.
+
+## What's in a backup
+
+| Included | Not included (by design) |
+|---|---|
+| Open WebUI data volume — accounts, chat history, settings | The model blobs (multi-GB) — they re-pull on restore |
+| Your `.env` | Ollama itself, Docker, Tailscale — reinstalled by `setup.sh` |
+| The list of installed model names (`models.txt`) | |
+
+Backups are gzipped tarballs in `backups/`, named
+`local-code-agent-backup-YYYYMMDD-HHMMSS.tar.gz`. The WebUI container is briefly
+paused around the volume archive so its SQLite database is captured consistently.
+
+## Make one now
+
+```bash
+./backup.sh
+```
+
+Then copy it **off the machine** — a backup on the same disk won't survive a disk
+loss:
+
+```bash
+scp user@host:/path/to/local-code-agent/backups/local-code-agent-backup-*.tar.gz .
+```
+
+## Restore
+
+On a fresh install (after `setup.sh`):
+
+```bash
+./restore.sh                 # newest backup in backups/
+./restore.sh path/to/backup.tar.gz
+```
+
+Restore brings back the WebUI volume and `.env`, then re-pulls the models listed
+in the backup.
+
+## Retention
+
+Every run keeps the newest `BACKUP_KEEP` backups (default `7`) and prunes older
+ones so they can't slowly fill the disk — the same disk headroom
+`check-system.sh` guards (models want ≥15 GB free). Set `BACKUP_KEEP=0` in `.env`
+to keep every backup instead.
+
+## Automatic (scheduled) backups
+
+Opt in to a systemd timer that runs the backup for you:
+
+```bash
+sudo ./backup.sh --install-timer     # enable
+sudo ./backup.sh --uninstall-timer   # disable
+```
+
+- Schedule: `BACKUP_SCHEDULE` in `.env` (systemd `OnCalendar` syntax — e.g.
+  `daily`, `weekly`, `*-*-* 03:30:00`). The default is 03:30 daily. `install-timer`
+  validates it and refuses a malformed value. Re-run `install-timer` after changing it.
+- `Persistent=true`, so a run missed while the box was off happens at next boot.
+- Check it: `systemctl list-timers local-code-agent-backup.timer`, or
+  `./check-system.sh` (the Backups section shows the timer state and the age of
+  the newest backup).
+
+Scheduled backups still write to the same local disk, so they protect against
+app-level data loss (accidental deletion, WebUI DB corruption), not disk failure —
+keep copying important ones off-box.

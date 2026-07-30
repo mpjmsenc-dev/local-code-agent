@@ -187,7 +187,7 @@ local-code-agent/
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
-└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
+└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ · BACKUPS
 ```
 
 ## Performance & GPU
@@ -221,7 +221,7 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 
