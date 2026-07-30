@@ -61,6 +61,22 @@ check "http:// prefix stripped then re-added" \
   test "$(url_for http://127.0.0.1:11434)" = "http://127.0.0.1:11434"
 check "trailing slash stripped" \
   test "$(url_for 127.0.0.1:11434/)" = "http://127.0.0.1:11434"
+check "port-less 0.0.0.0 gets default 11434 (not port 80)" \
+  test "$(url_for 0.0.0.0)" = "http://127.0.0.1:11434"
+check "port-less host gets default 11434" \
+  test "$(url_for 127.0.0.1)" = "http://127.0.0.1:11434"
+
+echo "# ollama_bind_is_public() flags non-loopback binds"
+# Subshells inherit the sourced functions, so scope OLLAMA_HOST per check.
+is_public()  { ( OLLAMA_HOST="$1" ollama_bind_is_public ); }
+not_public() { ! ( OLLAMA_HOST="$1" ollama_bind_is_public ); }
+check "0.0.0.0:11434 bind is public"      is_public  "0.0.0.0:11434"
+check "0.0.0.0 bare bind is public"       is_public  "0.0.0.0"
+check "127.0.0.1:11434 is not public"     not_public "127.0.0.1:11434"
+check "localhost:11434 is not public"     not_public "localhost:11434"
+check "IPv6 :: wildcard is public"        is_public  "::"
+check "IPv6 [::]:11434 is public"         is_public  "[::]:11434"
+check "IPv6 [::1] loopback is not public" not_public "[::1]:11434"
 
 echo "# detect_ram_gib() returns a sane positive integer"
 RAM="$(detect_ram_gib)"
@@ -87,6 +103,37 @@ check "16 GiB -> 14b/8192"  ladder_is 16 qwen2.5-coder:14b 8192
 check "23 GiB -> 14b/8192"  ladder_is 23 qwen2.5-coder:14b 8192
 check "24 GiB -> 14b/16384" ladder_is 24 qwen2.5-coder:14b 16384
 check "64 GiB -> 14b/16384" ladder_is 64 qwen2.5-coder:14b 16384
+
+echo "# largest_present_within() — offline-downgrade fallback picks the largest model <= target"
+# Stub model_present against a PRESENT list so we can unit-test the selection
+# without a real ollama. (This override is intentional and only affects the
+# checks below, which are the last in the file.)
+PRESENT=""
+model_present() { case " ${PRESENT} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+lpw() { PRESENT="$1" largest_present_within "$2"; }
+check "target 14b, only 3b present -> 3b"       test "$(lpw 'qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:3b"
+check "target 14b, 7b+3b present -> 7b"         test "$(lpw 'qwen2.5-coder:7b qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:7b"
+check "target 14b, all present -> 14b"          test "$(lpw 'qwen2.5-coder:14b qwen2.5-coder:7b qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:14b"
+check "target 7b, only 14b present -> none"     test -z "$(lpw 'qwen2.5-coder:14b' qwen2.5-coder:7b)"
+check "target 7b, nothing present -> none"      test -z "$(lpw '' qwen2.5-coder:7b)"
+lpw_fails() { ! ( PRESENT="$1" largest_present_within "$2" >/dev/null ); }
+check "returns nonzero exit when nothing fits"  lpw_fails 'qwen2.5-coder:14b' qwen2.5-coder:7b
+
+echo "# ollama_dropin_matches() — no false drift (else tune restarts Ollama every boot)"
+# Render to a temp path (no root needed) and confirm the detector agrees the
+# freshly-written drop-in matches, flags a real change, and treats a missing
+# file as a mismatch.
+dropin_drifted() { ! ollama_dropin_matches; }
+DROP="$(mktemp)"
+OLLAMA_DROPIN="${DROP}"
+OLLAMA_HOST="127.0.0.1:11434"; OLLAMA_CONTEXT_LENGTH="8192"; OLLAMA_KEEP_ALIVE="30m"
+render_ollama_dropin_content > "${DROP}"
+check "freshly-rendered drop-in matches (no false drift)" ollama_dropin_matches
+OLLAMA_CONTEXT_LENGTH="4096"   # simulate a tune decision that changed the context
+check "a changed context is detected as drift" dropin_drifted
+OLLAMA_CONTEXT_LENGTH="8192"
+rm -f "${DROP}"
+check "missing drop-in counts as a mismatch" dropin_drifted
 
 echo
 if (( FAILED > 0 )); then

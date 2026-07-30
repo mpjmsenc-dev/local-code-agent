@@ -12,7 +12,6 @@ load_env
 
 install_docker_repo_and_engine() {
   net_guard "Installing Docker"
-  export DEBIAN_FRONTEND=noninteractive
 
   info "Setting up the official Docker apt repository..."
   as_root install -m 0755 -d /etc/apt/keyrings
@@ -33,8 +32,13 @@ install_docker_repo_and_engine() {
   echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro_id} ${codename} stable" \
     | as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-  as_root apt-get update -y
-  as_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_get update -y
+  apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+# docker_daemon_up — true if a docker daemon is reachable (root or not).
+docker_daemon_up() {
+  docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1
 }
 
 main() {
@@ -52,11 +56,16 @@ main() {
   fi
   require_cmd docker
 
-  if systemd_available; then
+  if systemd_available && systemctl cat docker >/dev/null 2>&1; then
     as_root systemctl enable --now docker
     ok "Docker service enabled and running."
-  else
+  elif ! systemd_available; then
     warn "systemd not available — cannot enable the Docker service; start dockerd yourself."
+  else
+    # docker present but no docker.service unit — e.g. snap-packaged Docker
+    # (snap.docker.dockerd.service) or a rootless install. Don't try to
+    # enable a unit that doesn't exist; just confirm the daemon answers.
+    warn "No 'docker.service' systemd unit (externally managed Docker, e.g. snap/rootless) — reusing it as-is."
   fi
 
   # Let the invoking (non-root) user run docker without sudo.
@@ -70,6 +79,14 @@ main() {
     fi
   fi
 
+  # The smoke test needs a running daemon. If none is reachable (e.g. no
+  # init system started dockerd), warn and continue rather than crash the
+  # whole setup — the rest of the stack (Ollama, aider) does not need Docker.
+  if ! docker_daemon_up; then
+    warn "Docker daemon is not running (no init system started it?) — start it, then re-run scripts/install_webui.sh. Skipping the smoke test."
+    return 0
+  fi
+
   info "Running the hello-world smoke test..."
   if as_root docker run --rm hello-world >/dev/null 2>&1; then
     ok "Docker can run containers."
@@ -77,7 +94,7 @@ main() {
     if [[ "$(netmode_state)" == "offline" ]]; then
       warn "Smoke test skipped/failed — netmode is offline, so the hello-world image cannot be pulled. Docker itself looks installed."
     else
-      die "Docker hello-world failed. Inspect the daemon with: sudo systemctl status docker"
+      die "Docker hello-world failed. Inspect the daemon with: sudo systemctl status docker (or 'docker info')"
     fi
   fi
 }

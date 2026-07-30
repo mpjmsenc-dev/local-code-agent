@@ -27,6 +27,22 @@ kill the manual one (`sudo pkill -f "ollama serve"`) and
 `sudo systemctl restart ollama`. Alternatively change `OLLAMA_HOST` in `.env`
 to another port and re-run `scripts/install_ollama.sh`.
 
+## Port 3000 (WebUI) already in use
+
+`scripts/install_webui.sh` now refuses to start if another process already
+holds `WEBUI_PORT` — it would otherwise crash-loop while the squatter answered
+the port, looking deceptively healthy. See what's on it:
+
+```bash
+sudo ss -tlnp | grep :3000
+```
+
+Then either stop that service, or pick a free port: set `WEBUI_PORT` in `.env`
+to something else and re-run `scripts/install_webui.sh`. If `./webui.sh status`
+or `check-system.sh` reports the container "CRASH-LOOPING (restarting)", this
+port conflict (or a bad `.env` value) is the usual cause — check
+`./webui.sh logs`.
+
 ## Out of memory / model gets killed / responses never finish
 
 The model + context don't fit in RAM. In order:
@@ -39,10 +55,11 @@ The model + context don't fit in RAM. In order:
 
 ## "It's so slow"
 
-CPU inference at 5–10 tokens/s (7b on 4 vCPU) is **normal** — there is no GPU.
-First response after idle is slower (model loads into RAM; `OLLAMA_KEEP_ALIVE`
-controls how long it stays warm). Want faster/smarter? Resize to more RAM/CPU —
-auto-tune handles the rest.
+CPU inference (no GPU) is a reading pace, not instant — the base 8 GB droplet
+auto-tunes to the small 3b model; 7b (from ~12 GB) and 14b (from 16 GB) are
+smarter but slower per token. First response after idle is slower (model loads
+into RAM; `OLLAMA_KEEP_ALIVE` controls how long it stays warm). Want
+faster/smarter? Resize to more RAM/CPU — auto-tune handles the rest.
 
 ## aider: "model not found" or connection errors
 
@@ -67,6 +84,21 @@ Check in this order:
    Using the right IP (`tailscale ip -4`) and port (3000)?
 3. Netmode: `sudo ./netmode.sh status` — offline mode does NOT block Tailscale,
    but a half-applied experiment might; `sudo ./netmode.sh online` to reset.
+4. Inbound guard: `sudo ./netmode.sh status` also shows the always-on inbound
+   guard. **By design it allows the WebUI port only over loopback and
+   `tailscale0`** — so reaching WebUI by the server's public or LAN IP
+   (without Tailscale) is *supposed* to fail. Always go through the Tailscale
+   IP. If `status` reports the guard is NOT loaded, re-apply it with
+   `sudo ./netmode.sh harden`.
+
+### I actually want direct LAN access (advanced, reduces privacy)
+
+The guard blocks the WebUI/Ollama ports on every interface except loopback and
+Tailscale on purpose. If you deliberately want to reach WebUI over a trusted
+LAN without Tailscale, the guard is what's stopping you — that is the private-
+only guarantee working. Only lift it if you understand the exposure (and never
+on a host with a public IP): `sudo nft delete table inet lca_inbound` (returns
+on the next boot/`harden` unless you also stop running `harden`).
 
 ## "No internet" on the server
 

@@ -24,8 +24,12 @@ echo "=== local-code-agent first-boot install started: $(date) ==="
 export DEBIAN_FRONTEND=noninteractive
 
 echo "--- Installing git (needed to clone the repository) ---"
-apt-get update -y
-apt-get install -y git ca-certificates curl
+# DPkg::Lock::Timeout waits out the apt-daily / unattended-upgrades lock that
+# routinely holds dpkg during the first minutes of a fresh boot — cloud-init
+# runs this exactly once, so failing here would leave a permanently
+# half-installed droplet. (apt on Ubuntu 20.04+/Debian 11+ supports it.)
+apt-get -o DPkg::Lock::Timeout=600 update -y
+apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates curl
 
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
   echo "--- Repository already cloned, updating it ---"

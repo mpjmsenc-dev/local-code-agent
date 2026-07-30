@@ -37,8 +37,13 @@ if [[ "${SKIP_DOCKER}" == "true" ]]; then
 else
   if have docker; then
     p_pass "docker client installed"
-    if docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1; then
+    # Never call as_root directly here: without root or sudo it die()s, and
+    # that exit would kill the whole health check mid-run even under set +e.
+    # can_root() returns false instead, so we degrade to a warning.
+    if docker info >/dev/null 2>&1 || { can_root && as_root docker info >/dev/null 2>&1; }; then
       p_pass "docker daemon responding"
+    elif ! can_root; then
+      p_warn "cannot query the docker daemon as a non-root user without sudo — re-run as root to check it"
     else
       p_fail "docker daemon not responding (sudo systemctl start docker)"
     fi
@@ -99,6 +104,11 @@ if [[ -n "${ollama_version}" ]]; then
 else
   p_fail "ollama API not answering at $(ollama_url)"
 fi
+# The Ollama API is unauthenticated — a non-loopback bind is a real exposure
+# that the loopback health probe above would otherwise hide.
+if ollama_bind_is_public; then
+  p_warn "OLLAMA_HOST=${OLLAMA_HOST} binds Ollama beyond loopback — the unauthenticated API may be reachable off-box. Set OLLAMA_HOST=127.0.0.1:11434 in .env unless you intend this."
+fi
 
 # --- Model ------------------------------------------------------------------
 step "Model (${MODEL_NAME})"
@@ -111,6 +121,8 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
     else
       p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and journalctl -u ollama)"
     fi
+  elif [[ "$(netmode_state)" == "offline" ]]; then
+    p_fail "model '${MODEL_NAME}' not downloaded, and netmode is OFFLINE — run 'sudo ./netmode.sh online' then 'ollama pull ${MODEL_NAME}'"
   else
     p_fail "model '${MODEL_NAME}' not downloaded (ollama pull ${MODEL_NAME})"
   fi
@@ -147,17 +159,23 @@ elif [[ "${SKIP_DOCKER}" == "true" ]]; then
   info "SKIP_DOCKER=true — WebUI checks skipped."
 elif ! have docker; then
   p_fail "WebUI enabled but docker is missing"
+elif ! can_root && ! docker info >/dev/null 2>&1; then
+  p_warn "cannot inspect the WebUI container as a non-root user without sudo — re-run as root to check it"
 else
-  webui_running="$(as_root docker inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null)"
-  if [[ "${webui_running}" == "true" ]]; then
-    p_pass "container '${WEBUI_CONTAINER}' is running"
+  webui_status="$(docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { can_root && as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
+  case "${webui_status}" in
+    running)    p_pass "container '${WEBUI_CONTAINER}' is running" ;;
+    restarting) p_fail "container '${WEBUI_CONTAINER}' is CRASH-LOOPING (restarting) — often port ${WEBUI_PORT} taken or a bad .env; see: ./webui.sh logs" ;;
+    "")         p_fail "container '${WEBUI_CONTAINER}' does not exist (./webui.sh start)" ;;
+    *)          p_fail "container '${WEBUI_CONTAINER}' is '${webui_status}', not running (./webui.sh start)" ;;
+  esac
+  # Probe /health (Open WebUI-specific) so a different service squatting the
+  # port cannot masquerade as a healthy WebUI.
+  if webui_responds; then
+    p_pass "Open WebUI /health answering on port ${WEBUI_PORT}"
   else
-    p_fail "container '${WEBUI_CONTAINER}' is not running (./webui.sh start)"
-  fi
-  if curl -fsS --max-time 5 "http://127.0.0.1:${WEBUI_PORT}" >/dev/null 2>&1; then
-    p_pass "WebUI answering on http://127.0.0.1:${WEBUI_PORT}"
-  else
-    p_fail "WebUI not answering on port ${WEBUI_PORT} (./webui.sh logs)"
+    p_fail "Open WebUI /health not answering on port ${WEBUI_PORT} (./webui.sh logs)"
   fi
 fi
 
@@ -171,6 +189,28 @@ if have tailscale; then
   fi
 else
   p_warn "tailscale not installed (run scripts/install_tailscale.sh for phone access)"
+fi
+
+# --- Inbound guard ----------------------------------------------------------
+step "Inbound guard"
+if [[ "${ENABLE_WEBUI}" != "true" ]] && ! ollama_bind_is_public; then
+  info "WebUI disabled and Ollama on loopback — no public service ports to guard."
+elif ! have nft; then
+  p_warn "nft not installed — the inbound guard is not enforced (WebUI/Ollama ports may be publicly reachable)"
+elif ! can_root; then
+  p_warn "cannot inspect nftables without root/sudo — re-run as root to verify the inbound guard"
+elif ! as_root nft list table inet lca_inbound >/dev/null 2>&1; then
+  p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ./netmode.sh harden)"
+else
+  # Existence is not enough: confirm the port the WebUI actually binds is in
+  # the drop set. A config change without a re-harden, or a parser mismatch,
+  # would otherwise show green while the real port stays exposed.
+  INBOUND_DUMP="$(as_root nft list table inet lca_inbound 2>/dev/null)"
+  if [[ "${ENABLE_WEBUI}" == "true" ]] && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    p_fail "inbound guard is loaded but does NOT cover WebUI port ${WEBUI_PORT} — re-run: sudo ./netmode.sh harden"
+  else
+    p_pass "inbound guard active and covers the configured port(s) — reachable only via loopback and Tailscale"
+  fi
 fi
 
 # --- Netmode + internet -----------------------------------------------------

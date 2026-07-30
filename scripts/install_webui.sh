@@ -32,15 +32,29 @@ main() {
     as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
   fi
 
+  # With --network=host the container binds ${WEBUI_PORT} directly. If another
+  # process already holds it, Open WebUI's backend can't bind and crash-loops
+  # under --restart unless-stopped — but a squatter answering the port would
+  # still make our health probe pass and print a false success. Refuse up
+  # front with a clear message. (Our own old container was removed just above.)
+  if have ss && ss -ltn 2>/dev/null | grep -qE ":${WEBUI_PORT}[[:space:]]"; then
+    die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+  fi
+
   local base_url
   base_url="$(ollama_url)"
   info "Starting Open WebUI on port ${WEBUI_PORT} (Ollama at ${base_url}, signup=${WEBUI_ENABLE_SIGNUP})..."
+  # Telemetry opt-outs so the container does not phone home (matches the
+  # privacy claim in docs/FAQ.md); host networking reaches loopback Ollama.
   as_root docker run -d \
     --name "${WEBUI_CONTAINER}" \
     --network=host \
     -e OLLAMA_BASE_URL="${base_url}" \
     -e PORT="${WEBUI_PORT}" \
     -e ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP}" \
+    -e DO_NOT_TRACK=true \
+    -e SCARF_NO_ANALYTICS=true \
+    -e ANONYMIZED_TELEMETRY=false \
     -v open-webui:/app/backend/data \
     --restart unless-stopped \
     "${WEBUI_IMAGE}" >/dev/null
@@ -53,6 +67,15 @@ main() {
   wait_for_webui 180 \
     || die "Open WebUI did not answer after 180s. Logs: sudo docker logs ${WEBUI_CONTAINER}"
   ok "Open WebUI is up on port ${WEBUI_PORT}."
+
+  # Open WebUI binds all interfaces (host networking). Apply the always-on
+  # inbound guard so ${WEBUI_PORT} is reachable only over loopback and
+  # Tailscale, never from a public IP — this is what makes the "never
+  # exposed" guarantee in the docs actually true. Warn-only: a box without
+  # nftables should still finish the install.
+  "${REPO_ROOT}/netmode.sh" harden \
+    || warn "Could not apply the inbound guard — ${WEBUI_PORT} may be publicly reachable. Run: sudo ${REPO_ROOT}/netmode.sh harden (needs nftables)."
+
   info "From your phone (with Tailscale connected): http://<tailscale-ip>:${WEBUI_PORT} — see docs/PHONE.md"
 }
 

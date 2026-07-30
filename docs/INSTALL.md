@@ -9,7 +9,7 @@ hypervisor VM (VMware / Proxmox / KVM), or a spare machine.
 | RAM | What you get (auto-tuned) |
 |---|---|
 | 4–8 GB | `qwen2.5-coder:3b`, ctx 4096 — fast, basic |
-| 9–15 GB | `qwen2.5-coder:7b`, ctx 8192 — the sweet spot for 8–12 GB VMs |
+| 9–15 GB | `qwen2.5-coder:7b`, ctx 8192 — the sweet spot for 12–16 GB VMs |
 | 16–23 GB | `qwen2.5-coder:14b`, ctx 8192 — noticeably smarter |
 | 24+ GB | `qwen2.5-coder:14b`, ctx 16384 (32 GB+: pin `32b` manually) |
 

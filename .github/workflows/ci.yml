@@ -42,6 +42,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y nftables
       - name: Netmode ruleset tests (content + kernel-side nft --check)
         run: sudo bash tests/test-netmode.sh
+      - name: Inbound guard applies for real and never filters SSH
+        run: |
+          sudo ./netmode.sh harden
+          sudo nft list table inet lca_inbound | tee /dev/stderr | grep -q 'hook input'
+          # SSH (22) must not appear anywhere in the guard — proves no lockout.
+          if sudo nft list table inet lca_inbound | grep -qw 22; then
+            echo "inbound guard unexpectedly references port 22"; exit 1
+          fi
+          # Loopback stays reachable (guard only drops on non-lo/-tailscale).
+          python3 -m http.server 3000 >/dev/null 2>&1 &
+          sleep 1
+          curl -fsS --max-time 5 http://127.0.0.1:3000/ >/dev/null && echo "loopback:3000 reachable through the guard (correct)"
+          kill %1 2>/dev/null || true
       - name: Install boot services and verify the units
         run: |
           sudo scripts/tune.sh --install-service

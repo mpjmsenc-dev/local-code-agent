@@ -65,11 +65,60 @@ sudo ./netmode.sh status    # shows mode + proves it with a live probe
 sudo ./netmode.sh online    # back to normal
 ```
 
-Offline mode drops every **new** outbound connection except loopback and the
-Tailscale path, and it persists across reboots. Inference works fully offline —
-the models are on your disk. Honest caveat: the encrypted Tailscale tunnel still
-uses the network as transport; "offline" means the AI stack can't reach the
-internet, not that the NIC is dead.
+Offline mode drops every **new** outbound connection (locally-generated and
+docker-forwarded) except loopback and the Tailscale path, and it persists across
+reboots. Inference works fully offline — the models are on your disk. Honest
+caveat: the encrypted Tailscale tunnel still uses the network as transport;
+"offline" means the AI stack can't reach the internet, not that the NIC is dead.
+
+Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
+every boot) keeps the WebUI and Ollama ports reachable only over loopback and
+Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
+with `sudo ./netmode.sh harden` / `status`.
+
+## Security model
+
+What "private" means here, precisely — and what it doesn't.
+
+**How your services are kept private**
+- **Ollama** binds loopback only (`127.0.0.1:11434` by default). Its API is
+  **unauthenticated**, so a non-loopback bind would expose model access to
+  anyone who can reach the host — `check-system.sh` warns if you set one.
+- **Open WebUI** binds all interfaces (it runs with Docker host networking so
+  it can reach loopback Ollama). It is kept private by the **inbound guard**:
+  an always-on nftables table (`lca_inbound`) that drops new inbound to the
+  WebUI and Ollama ports on every interface **except loopback and
+  `tailscale0`**. SSH (22) and all other ports are untouched, so the guard can
+  never lock you out. It is re-applied on every boot and whenever WebUI is
+  (re)created.
+- **Phone access** rides Tailscale — an encrypted, private WireGuard network.
+  Nothing is port-forwarded; you reach WebUI at `http://<tailscale-ip>:3000`.
+- **No telemetry**: aider has analytics/update checks off; Open WebUI runs with
+  `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS`, `ANONYMIZED_TELEMETRY` set.
+
+**The kill switch** (`netmode.sh offline`) adds an egress lockdown: new
+outbound connections — locally-generated *and* docker-forwarded — are dropped
+except loopback and the Tailscale path. It persists across reboots and is
+fail-closed (state is saved before rules apply). Inference keeps working
+offline because the models are local.
+
+**Honest limitations**
+- The encrypted Tailscale tunnel still uses the network as transport —
+  "offline" means the AI stack can't reach the internet, not that the NIC is
+  dead.
+- The inbound guard is targeted (it blocks the two sensitive ports on
+  non-private interfaces), not a full default-drop firewall; it assumes you do
+  not expose other services.
+- Trust is single-VM: anyone with a shell (or root) on the box has full access.
+
+**Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
+- Create the **first** WebUI account promptly, then set
+  `WEBUI_ENABLE_SIGNUP=false` and re-run `scripts/install_webui.sh`.
+- **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
+  internet, and keep `OLLAMA_HOST` on loopback.
+- Verify the posture any time with `./check-system.sh` and
+  `sudo ./netmode.sh status`. On DigitalOcean, the **Recovery Console** is the
+  unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
 
 ## Daily usage: aider (the coding agent)
 
@@ -89,7 +138,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|logs` for Open WebUI |
-| `netmode.sh` | `offline\|online\|status` internet kill switch |
+| `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
 | `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |
@@ -138,8 +187,9 @@ local-code-agent/
 ## Honest expectations vs Claude
 
 Local 3b–14b models are **not** frontier models. Expect useful but simpler code
-edits, more misfires on complex refactors, and slower responses (CPU inference:
-roughly 5–10 tokens/s for 7b on a 4 vCPU / 8 GB droplet). What you get in
+edits, more misfires on complex refactors, and slower responses (CPU inference is
+a comfortable reading pace, not instant; the base 4 vCPU / 8 GB droplet auto-tunes
+to the 3b model, with 7b from ~12 GB and 14b from 16 GB). What you get in
 exchange: total privacy, zero per-token cost, no quotas, and offline operation.
 The stack scales with hardware — resize to more RAM and auto-tune upgrades the
 model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
