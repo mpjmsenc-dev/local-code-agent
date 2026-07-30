@@ -119,6 +119,22 @@ check "target 7b, nothing present -> none"      test -z "$(lpw '' qwen2.5-coder:
 lpw_fails() { ! ( PRESENT="$1" largest_present_within "$2" >/dev/null ); }
 check "returns nonzero exit when nothing fits"  lpw_fails 'qwen2.5-coder:14b' qwen2.5-coder:7b
 
+echo "# ollama_dropin_matches() — no false drift (else tune restarts Ollama every boot)"
+# Render to a temp path (no root needed) and confirm the detector agrees the
+# freshly-written drop-in matches, flags a real change, and treats a missing
+# file as a mismatch.
+dropin_drifted() { ! ollama_dropin_matches; }
+DROP="$(mktemp)"
+OLLAMA_DROPIN="${DROP}"
+OLLAMA_HOST="127.0.0.1:11434"; OLLAMA_CONTEXT_LENGTH="8192"; OLLAMA_KEEP_ALIVE="30m"
+render_ollama_dropin_content > "${DROP}"
+check "freshly-rendered drop-in matches (no false drift)" ollama_dropin_matches
+OLLAMA_CONTEXT_LENGTH="4096"   # simulate a tune decision that changed the context
+check "a changed context is detected as drift" dropin_drifted
+OLLAMA_CONTEXT_LENGTH="8192"
+rm -f "${DROP}"
+check "missing drop-in counts as a mismatch" dropin_drifted
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
