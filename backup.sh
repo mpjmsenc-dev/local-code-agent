@@ -4,7 +4,8 @@
 #   - your .env
 #   - the list of installed Ollama models (models re-pull on restore;
 #     the multi-GB blobs are deliberately NOT tarred)
-# Restore on a fresh install with: ./restore.sh <tarball>
+# Then prune old backups, keeping the newest BACKUP_KEEP (.env; default 7) so
+# they can't slowly fill the disk. Restore with: ./restore.sh <tarball>
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,7 +88,30 @@ main() {
   tar czf "${tarball}" -C "${workdir}" .
   as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
   ok "Backup written: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+
+  prune_old_backups
+
   info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
+}
+
+# Keep only the newest BACKUP_KEEP tarballs; delete older ones so a daily/cron
+# backup can never silently fill the disk. BACKUP_KEEP=0 disables pruning.
+prune_old_backups() {
+  local keep="${BACKUP_KEEP:-7}" stale=() f
+  shopt -s nullglob
+  local files=( "${BACKUP_DIR}"/local-code-agent-backup-*.tar.gz )
+  shopt -u nullglob
+  (( ${#files[@]} )) || return 0
+  mapfile -t stale < <(printf '%s\n' "${files[@]}" | backups_to_prune "${keep}")
+  (( ${#stale[@]} )) || return 0
+  info "Retention: keeping the newest ${keep}; removing $(( ${#stale[@]} )) older backup(s)."
+  for f in "${stale[@]}"; do
+    if rm -f "${f}"; then
+      info "  pruned $(basename "${f}")"
+    else
+      warn "  could not remove ${f}"
+    fi
+  done
 }
 
 main "$@"

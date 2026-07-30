@@ -33,6 +33,7 @@ check ".env auto-created" test -f "${SANDBOX}/.env"
 check "default MODEL_NAME" test "${MODEL_NAME}" = "qwen2.5-coder:7b"
 check "default OLLAMA_CONTEXT_LENGTH" test "${OLLAMA_CONTEXT_LENGTH}" = "8192"
 check "default AUTO_TUNE" test "${AUTO_TUNE}" = "true"
+check "default BACKUP_KEEP" test "${BACKUP_KEEP}" = "7"
 
 echo "# set_env_var -> load_env round-trip (update + append, no duplicates)"
 set_env_var MODEL_NAME "qwen2.5-coder:14b"
@@ -104,6 +105,24 @@ check "budget sums to 16384" budget_sums_to 16384
 check "empty ctx -> 8192 default"     test "$(aider_token_budget '')"    = "6144 2048"
 check "non-numeric ctx -> 8192"       test "$(aider_token_budget abc)"   = "6144 2048"
 check "absurdly small ctx -> 8192"    test "$(aider_token_budget 16)"    = "6144 2048"
+
+echo "# backups_to_prune() keeps the newest KEEP; prints the older ones to delete"
+# Timestamped names sort chronologically; the helper sorts internally, so the
+# order they are fed in must not matter.
+B1="backups/local-code-agent-backup-20250101-000000.tar.gz"
+B2="backups/local-code-agent-backup-20250102-000000.tar.gz"
+B3="backups/local-code-agent-backup-20250103-000000.tar.gz"
+B4="backups/local-code-agent-backup-20250104-000000.tar.gz"
+B5="backups/local-code-agent-backup-20250105-000000.tar.gz"
+prune_sel() { local k="$1"; shift; printf '%s\n' "$@" | backups_to_prune "${k}"; }
+check "keep 2 of 5 -> delete the oldest 3 (feed order irrelevant)" \
+  test "$(prune_sel 2 "${B3}" "${B1}" "${B5}" "${B2}" "${B4}")" = "$(printf '%s\n%s\n%s' "${B1}" "${B2}" "${B3}")"
+check "keep 1 of 3 -> delete the oldest 2" \
+  test "$(prune_sel 1 "${B2}" "${B3}" "${B1}")" = "$(printf '%s\n%s' "${B1}" "${B2}")"
+check "keep == count -> delete none" test -z "$(prune_sel 3 "${B1}" "${B2}" "${B3}")"
+check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B3}")"
+check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
+check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
 echo "# tune ladder boundaries (spec: 8, 9, 15, 16, 23, 24 GiB)"
 # tune.sh only runs main when executed; sourcing it exposes choose_for_ram().

@@ -166,6 +166,7 @@ load_env() {
   WEBUI_PORT="${WEBUI_PORT:-3000}"
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
+  BACKUP_KEEP="${BACKUP_KEEP:-7}"
 }
 
 # set_env_var KEY VALUE — update KEY in .env in place, or append it. The
@@ -208,6 +209,20 @@ aider_token_budget() {
   if (( out < 1024 )); then out=1024; fi
   if (( out >= ctx )); then out=$(( ctx / 2 )); fi
   printf '%s %s\n' "$(( ctx - out ))" "${out}"
+}
+
+# backups_to_prune KEEP — read backup file paths on stdin (one per line) and
+# print the ones that should be DELETED to retain only the newest KEEP. Backup
+# filenames embed a sortable YYYYMMDD-HHMMSS stamp, so lexical order equals
+# chronological order; we sort and print all but the last KEEP. KEEP that is
+# empty, zero, or non-numeric prints nothing — retention disabled means keep
+# everything, so a bad value can never delete a backup. Pure (stdin->stdout),
+# so backup.sh's retention is unit-tested without ever touching the disk.
+backups_to_prune() {
+  local keep="${1:-}"
+  [[ "${keep}" =~ ^[0-9]+$ ]] || return 0
+  (( keep > 0 )) || return 0
+  sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
 }
 
 # ---------------------------------------------------------------------------

@@ -141,7 +141,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
-| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |
+| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list (keeps newest `BACKUP_KEEP`) |
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
@@ -165,6 +165,7 @@ Created from `.env.example` on first run. All keys:
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
+| `BACKUP_KEEP` | `7` | How many backups `backup.sh` keeps; older ones are pruned (`0` = keep all) |
 
 ## Repository tree
 
