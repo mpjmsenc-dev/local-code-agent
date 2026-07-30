@@ -40,6 +40,10 @@ http://<tailscale-ip>:3000
 
 (e.g. `http://100.101.102.103:3000` — use your own `tailscale ip -4` result.)
 
+Or skip the typing: run `lca chat` on the server and it prints the address as a
+**QR code**. Point your phone's camera at it and tap the link. The address is
+printed above the code too, in case your scanner dislikes a terminal QR.
+
 Tap **Sign up** and create the **FIRST** account — the first account automatically
 becomes the **admin**.
 

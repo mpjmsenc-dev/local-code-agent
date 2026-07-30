@@ -15,7 +15,9 @@ load_env
 #   zstd            — the official Ollama installer needs it to unpack
 #   iproute2 (ss)   — install_webui's port-collision safety check needs it
 #   python3-dev     — source builds of aider deps on arch's without wheels (arm64)
-PACKAGES=(ca-certificates curl wget git python3 python3-venv python3-pip python3-dev build-essential jq unzip zip zstd iproute2 htop tree nftables)
+#   qrencode        — 'lca chat' prints a QR of the phone URL, so nobody has to
+#                     type a Tailscale IP into a phone browser by hand
+PACKAGES=(ca-certificates curl wget git python3 python3-venv python3-pip python3-dev build-essential jq unzip zip zstd iproute2 htop tree nftables qrencode)
 
 main() {
   step "Installing base dependencies"

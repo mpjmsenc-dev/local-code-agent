@@ -73,6 +73,9 @@ in this order. Copy-paste blocks are exact; button names are exact.
 ## Step 4 — Create your chat account, then lock the door
 
 1. On your phone's browser open: `http://100.x.y.z:3000` (your number from step 3).
+
+   Easier: type `lca chat` in the droplet console. It prints a QR code — point
+   your phone's camera at the screen and tap the link, no typing.
 2. Tap **Sign up**, enter a name/email/password — this **first account becomes the
    admin**. You're now chatting with your private AI.
 3. Lock signups so nobody else can register. Back in the droplet console:
