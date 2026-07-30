@@ -341,6 +341,31 @@ home_set_when_unset() {
 }
 check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
 
+echo "# model_params_b() — parameter count read off the Ollama tag"
+check "qwen2.5-coder:7b -> 7"   test "$(model_params_b qwen2.5-coder:7b)" = "7"
+check "qwen2.5-coder:14b -> 14" test "$(model_params_b qwen2.5-coder:14b)" = "14"
+check "deepseek-coder-v2:16b -> 16" test "$(model_params_b deepseek-coder-v2:16b)" = "16"
+check "a fractional 1.5b rounds to a usable 2" test "$(model_params_b qwen2.5:1.5b)" = "2"
+# A tag with no size must FAIL rather than return a wrong number: speed.sh
+# multiplies this by 0.6 GB to report memory bandwidth, so a silent 0 or 1
+# would print a confidently wrong figure.
+# Negative cases go through a local helper, never 'bash -c': a child shell has
+# not sourced lib.sh, so the function would be "command not found" (exit 127)
+# and '!' would turn that into a pass — a test that cannot fail.
+no_params_b() { ! model_params_b "$1" >/dev/null 2>&1; }
+check "':latest' has no size -> nonzero exit" no_params_b qwen2.5-coder:latest
+check "a bare name has no size -> nonzero exit" no_params_b mistral
+check "'7b' inside the name is not a size tag" no_params_b llama3.1-7bfoo:latest
+
+echo "# tokens_per_second() — rate from Ollama's own nanosecond counters"
+check "19 tokens in 3.4987s -> 5.4/s" test "$(tokens_per_second 19 3498679000)" = "5.4"
+check "100 tokens in exactly 1s -> 100.0/s" test "$(tokens_per_second 100 1000000000)" = "100.0"
+# A zero duration would divide by zero; a divide-by-zero in awk prints 'inf'
+# and the verdict would then read "inf tokens/second — working as intended".
+no_tps() { ! tokens_per_second "$1" "$2" >/dev/null 2>&1; }
+check "zero duration -> nonzero exit" no_tps 10 0
+check "non-numeric duration -> nonzero exit" no_tps 10 abc
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has

@@ -418,6 +418,29 @@ ollama_processor() {
   ollama ps 2>/dev/null | processor_from_ps "$1"
 }
 
+# model_params_b MODEL — billions of parameters implied by an Ollama tag
+# ('qwen2.5-coder:14b' -> 14). Returns nonzero when the tag carries no size, so
+# callers can fall back rather than silently compute from a wrong number.
+model_params_b() {
+  local tag="${1##*:}" n
+  n="$(grep -oiE '^[0-9]+(\.[0-9]+)?b$' <<<"${tag}" || true)"
+  [[ -n "${n}" ]] || return 1
+  n="${n%[bB]}"
+  # Round to a whole number; sizes like 1.5b exist and integer maths is enough
+  # for the bandwidth estimate this feeds.
+  awk -v v="${n}" 'BEGIN { printf "%.0f\n", (v < 1 ? 1 : v) }'
+}
+
+# tokens_per_second COUNT DURATION_NS — throughput to one decimal place.
+# Ollama reports both counters per request, which is far more accurate than
+# wall-clock timing: it excludes model load time and connection overhead.
+tokens_per_second() {
+  local count="$1" ns="$2"
+  [[ "${count}" =~ ^[0-9]+$ && "${ns}" =~ ^[0-9]+$ ]] || return 1
+  (( ns > 0 )) || return 1
+  awk -v c="${count}" -v n="${ns}" 'BEGIN { printf "%.1f\n", c / (n / 1000000000) }'
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.
@@ -543,6 +566,7 @@ The server manages itself through one command, 'lca':
   lca            start the coding agent (aider) in the current directory
   lca ask "..."  one-shot question in the terminal
   lca check      full health check
+  lca speed      measure tokens/second and what limits it
   lca test       live end-to-end self-test
   lca update     update and re-verify the stack
   lca backup     take a backup now

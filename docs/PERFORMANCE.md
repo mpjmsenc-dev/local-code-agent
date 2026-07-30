@@ -4,16 +4,31 @@ Local inference on a CPU is a reading pace, not instant. This page explains what
 actually controls the speed, in the order that matters, so you can spend effort
 where it pays.
 
-## First: find out what you are actually running on
+## First: measure, don't guess
 
 ```bash
-./check-system.sh          # reports CPU vs GPU placement for your model
-lca test                   # same, as part of the end-to-end self-test
+lca speed
 ```
 
-Look for a line like `model 'qwen2.5-coder:7b' is running on the GPU (100% GPU)`
-or `... on the CPU (100% CPU)`. Everything below depends on which one you see —
-guessing here wastes the most time.
+That is the whole first step. It generates a fixed number of tokens, reads the
+timings out of Ollama's own counters, and tells you four things: your
+tokens/second, whether the model is on the CPU or the GPU, how much of a delay
+the first message after an idle period costs, and what is actually limiting you.
+It remembers the last run, so after any change you can see whether it helped.
+
+On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures about
+**5.5 tokens/second**. That is the baseline to compare against; if you are far
+below it, something else is wrong and `lca speed` will usually say what.
+
+It also reports **memory traffic** in GB/s. On CPU that is the number that
+really matters: generating one token means reading the entire model out of RAM,
+so speed is set by memory bandwidth, not by how many cores you have. A 7B model
+at ~4 GB per pass and 23 GB/s of bandwidth gives ~5.5 tokens/second, and that
+arithmetic is most of the story. It is also comparable across model sizes in a
+way that tokens/second is not.
+
+`./check-system.sh` and `lca test` report CPU vs GPU placement too, as part of
+their wider checks.
 
 ## The one change that matters most: a GPU
 
@@ -91,17 +106,18 @@ next boot. If you resized for RAM and it got slower, that is why.
 ## Measuring, not guessing
 
 ```bash
-ollama ps    # PROCESSOR column: 100% GPU / 100% CPU / a split
+lca speed                  # the answer, with a verdict
+lca speed --tokens 200     # longer sample, steadier number
+ollama ps                  # raw PROCESSOR column, if you want to see it yourself
 ```
 
-For a rough tokens/second number, time a fixed prompt:
+Run `lca speed` before and after a change. It prints the delta against your
+last run, and ignores swings under 10% because back-to-back runs on the same
+machine vary by a few percent anyway. A change you cannot measure is not an
+improvement.
 
-```bash
-time curl -s http://127.0.0.1:11434/api/generate \
-  -d '{"model":"'"$(grep ^MODEL_NAME= .env | cut -d= -f2)"'","prompt":"Write a haiku about disks.","stream":false}' \
-  | jq -r '.eval_count, .eval_duration' 
-# tokens/second ≈ eval_count / (eval_duration / 1e9)
-```
-
-Compare that number before and after a change. A change you cannot measure is
-not an improvement.
+One caveat worth knowing: measure a **warm** model. The first request after an
+idle period pays the load cost (20 seconds is normal on a droplet, and it is
+reported separately), and its prompt-reading rate is dominated by warm-up —
+around 10× slower than the real figure. `lca speed` loads the model first for
+exactly this reason.
