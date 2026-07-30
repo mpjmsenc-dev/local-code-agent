@@ -91,9 +91,9 @@ in this order. Copy-paste blocks are exact; button names are exact.
 In the droplet console (or an SSH app), type each line and read what it says:
 
 ```bash
-sudo /opt/local-code-agent/netmode.sh offline
-sudo /opt/local-code-agent/netmode.sh status
-sudo /opt/local-code-agent/netmode.sh online
+sudo lca offline
+sudo lca status
+sudo lca online
 ```
 
 While offline: chat on your phone keeps working (the AI is local!), but the server
@@ -105,10 +105,10 @@ can't reach the internet at all. `status` proves it with a live probe.
 - [ ] Your phone's Tailscale app shows the server in its machine list.
 - [ ] `http://100.x.y.z:3000` opens the chat and you can send a message and get a reply.
 - [ ] Signups are locked (step 4.3 ran without errors).
-- [ ] `netmode.sh status` showed "Internet reachable — as expected in online mode."
-- [ ] Bonus: in the console, `cd /opt/local-code-agent && ./check-system.sh` ends
-      green ("All hard checks passed" or better).
-- [ ] Bonus: prove it end-to-end with `./scripts/selftest.sh` (or `make smoke`) —
+- [ ] `sudo lca status` showed "Internet reachable — as expected in online mode."
+- [ ] Bonus: in the console, run `lca check` — it ends green ("All hard checks
+      passed" or better). `lca help` lists everything else.
+- [ ] Bonus: prove it end-to-end with `lca test` —
       it asks your model for a real answer and runs a real aider round-trip, then
       prints `SELF-TEST PASSED`. This is the "does it actually work on MY box?"
       check, and it changes nothing.
@@ -118,5 +118,6 @@ can't reach the internet at all. `status` proves it with a live probe.
 - Install log problems → [TROUBLESHOOTING.md](TROUBLESHOOTING.md) ("user-data" section).
 - Phone can't open the chat → [PHONE.md](PHONE.md) bottom section.
 - Locked yourself out with netmode → [DO.md](DO.md) "Recovery Console".
-- Anything else → run `./check-system.sh` in `/opt/local-code-agent` and read its
-  messages; each failure names the fix.
+- Anything else → run `lca check` and read its messages; each failure names the
+  fix. (`lca` is installed by setup; the full paths under `/opt/local-code-agent`
+  still work if you prefer them.)
