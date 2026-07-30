@@ -40,6 +40,10 @@ http://<tailscale-ip>:3000
 
 (e.g. `http://100.101.102.103:3000` — use your own `tailscale ip -4` result.)
 
+Or skip the typing: run `lca chat` on the server and it prints the address as a
+**QR code**. Point your phone's camera at it and tap the link. The address is
+printed above the code too, in case your scanner dislikes a terminal QR.
+
 Tap **Sign up** and create the **FIRST** account — the first account automatically
 becomes the **admin**.
 
@@ -61,6 +65,28 @@ chats live in a docker volume and survive.)
 In the phone browser menu choose **Add to Home Screen**. Open WebUI is a PWA —
 launched from the home screen icon it looks and feels like the Claude app:
 full-screen chat, streaming responses, chat history, model picker.
+
+## What the chat already knows about your server
+
+`setup.sh` gives the chat a system prompt so it answers as *your* assistant
+rather than a generic model: keep it short (you are reading on a phone, at a few
+tokens per second), prefer real commands, say "I don't know" instead of inventing
+a flag, and know that this box is driven by the `lca` command. Ask *"how do I
+take a backup right now?"* and you get `lca backup`, not a lecture about `tar`.
+The empty-chat screen also offers four starter questions aimed at code and
+servers, in place of Open WebUI's stock ones about vocabulary exams and the
+Roman Empire.
+
+The same prompt is used by `lca ask` in the terminal, so both doors lead to the
+same assistant.
+
+**Changing it later:** these two settings come from the environment, so editing
+the repo and re-running `scripts/install_webui.sh` takes effect. The one
+exception is a setting you have already changed **inside the WebUI**: Open WebUI
+stores that in its own database, and a stored value always wins over the
+environment. So if you edit the assistant's system prompt in **Admin Panel →
+Settings**, that is where it lives from then on, and re-running the installer
+will not overwrite it.
 
 ## Running the coding agent from the phone
 
@@ -93,8 +119,14 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   Expect a comfortable reading pace on CPU, slower than Claude.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
-- The first message after a quiet period is slower — the model reloads into RAM
-  (`OLLAMA_KEEP_ALIVE` controls how long it stays warm).
+- The first message after a quiet period is slower — the model reloads into RAM,
+  about 20 seconds on a droplet. If that is the thing that annoys you most (it
+  usually is, because you hit it every time you pick up your phone), set
+  `OLLAMA_KEEP_ALIVE=-1` in `.env` and re-run `scripts/install_ollama.sh`: the
+  model then stays resident permanently and the first message is as fast as the
+  rest. The cost is that its RAM is never released.
+- `lca speed` on the server measures all of this and tells you what is limiting
+  it.
 
 ## If the page won't load
 

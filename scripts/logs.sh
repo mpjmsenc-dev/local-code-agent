@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# scripts/logs.sh — show the logs that matter, without needing to know where
+# any of them live.
+#
+# The docs suggest `journalctl -u ollama -n 50 | lca ask "why did this fail?"`,
+# which is a good loop but assumes you already know the unit name, that the
+# WebUI's logs are somewhere else entirely, and that the install log is a third
+# place again. This is that loop without the prerequisites:
+#
+#   lca logs                     recent logs from everything
+#   lca logs ollama              just the model server
+#   lca logs -f webui            follow the chat app
+#   lca logs | lca ask "why did this fail?"
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+load_env
+
+SETUP_LOG="/var/log/local-code-agent-setup.log"
+
+usage() {
+  cat <<EOF
+Usage: lca logs [-n LINES] [-f] [SOURCE]
+
+  SOURCE   ollama | webui | setup | all   (default: all)
+  -n N     how many lines per source (default 50)
+  -f       follow live; needs a single SOURCE, not 'all'
+
+Pipe it straight into the model when something is broken:
+  lca logs | lca ask "why did this fail?"
+EOF
+}
+
+# heading NAME — a plain, greppable separator. Kept free of colour and symbols
+# because this output is routinely piped into the model, where decoration is
+# just tokens that cost time on CPU.
+heading() { printf '\n===== %s =====\n' "$1"; }
+
+logs_ollama() {
+  local lines="$1" follow="$2"
+  heading "ollama (the model server)"
+  if ! systemd_available; then
+    info "No systemd on this machine, so there is no service journal."
+    info "Ollama's output goes wherever you started 'ollama serve' — check that terminal."
+    return 0
+  fi
+  local -a cmd=(journalctl -u ollama --no-pager -n "${lines}")
+  [[ "${follow}" == "true" ]] && cmd+=( -f )
+  run_reader journalctl -u ollama --no-pager -n 0 -- "${cmd[@]}" \
+    || warn "Could not read the journal for ollama. Try: sudo journalctl -u ollama -n ${lines}"
+}
+
+logs_webui() {
+  local lines="$1" follow="$2"
+  heading "open webui (the chat app)"
+  if ! have docker; then
+    info "Docker is not installed, so the chat app is not running here."
+    return 0
+  fi
+  local -a cmd=(docker logs --tail "${lines}" "${WEBUI_CONTAINER}")
+  [[ "${follow}" == "true" ]] && cmd+=( -f )
+  run_reader docker container inspect "${WEBUI_CONTAINER}" -- "${cmd[@]}" \
+    || warn "Could not read logs for container '${WEBUI_CONTAINER}' (is it created? try: lca webui status)."
+}
+
+logs_setup() {
+  local lines="$1" follow="$2"
+  heading "install log"
+  if [[ ! -r "${SETUP_LOG}" ]]; then
+    info "No install log at ${SETUP_LOG} — normal unless this machine was built from deploy/do-user-data.sh."
+    return 0
+  fi
+  if [[ "${follow}" == "true" ]]; then
+    tail -n "${lines}" -f "${SETUP_LOG}"
+  else
+    tail -n "${lines}" "${SETUP_LOG}"
+  fi
+}
+
+main() {
+  local lines=50 follow=false source="all" arg
+  while [[ $# -gt 0 ]]; do
+    case "${1}" in
+      -n|--lines) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "-n needs a number"; lines="$2"; shift 2 ;;
+      -f|--follow) follow=true; shift ;;
+      -h|--help) usage; exit 0 ;;
+      ollama|webui|setup|all) source="$1"; shift ;;
+      *) arg="$1"; usage; die "Unknown argument: ${arg}" ;;
+    esac
+  done
+
+  # Following several sources at once would interleave two live streams with no
+  # way to tell them apart, and Ctrl-C would leave one running.
+  if [[ "${follow}" == "true" && "${source}" == "all" ]]; then
+    die "-f needs a single source: lca logs -f ollama   (or webui / setup)"
+  fi
+
+  case "${source}" in
+    ollama) logs_ollama "${lines}" "${follow}" ;;
+    webui)  logs_webui  "${lines}" "${follow}" ;;
+    setup)  logs_setup  "${lines}" "${follow}" ;;
+    all)
+      logs_ollama "${lines}" false
+      logs_webui  "${lines}" false
+      logs_setup  "${lines}" false
+      printf '\n'
+      info "Ask the model about it:  lca logs | lca ask \"why did this fail?\""
+      ;;
+  esac
+}
+
+main "$@"

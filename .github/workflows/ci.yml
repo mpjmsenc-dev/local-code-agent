@@ -255,6 +255,42 @@ jobs:
         run: scripts/install_webui.sh
       - name: webui.sh status must pass
         run: ./webui.sh status
+      - name: The chat really receives our system prompt and starter questions
+        # Reading Open WebUI's source says DEFAULT_MODEL_PARAMS and
+        # DEFAULT_PROMPT_SUGGESTIONS are seeded into its config table; this is
+        # what proves they actually are. It also fails loudly if a future image
+        # stops honouring them, which would otherwise be invisible — the chat
+        # would just quietly go back to answering like a stock model.
+        run: |
+          set -euo pipefail
+          command -v sqlite3 >/dev/null || sudo apt-get install -y -qq sqlite3
+
+          # 1. OUR side of the contract: the container must actually carry the
+          #    values. This is what regresses if someone edits install_webui.sh,
+          #    and it is true regardless of how Open WebUI stores config.
+          env_json="$(sudo docker inspect -f '{{json .Config.Env}}' open-webui)"
+          printf '%s' "${env_json}" | jq -e 'map(select(startswith("DEFAULT_MODEL_PARAMS="))) | length == 1' >/dev/null \
+            || { echo "FAIL: DEFAULT_MODEL_PARAMS was never passed to the container"; printf '%s' "${env_json}" | jq -r '.[]' | cut -c1-80; exit 1; }
+          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
+            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -e '.system | test("local-code-agent")' >/dev/null \
+            || { echo "FAIL: DEFAULT_MODEL_PARAMS does not carry our system prompt"; exit 1; }
+          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_PROMPT_SUGGESTIONS="))' \
+            | sed 's/^DEFAULT_PROMPT_SUGGESTIONS=//' | jq -e 'length > 0' >/dev/null \
+            || { echo "FAIL: DEFAULT_PROMPT_SUGGESTIONS is missing or empty"; exit 1; }
+          echo "OK: the container carries our system prompt and starter questions"
+
+          # 2. Open WebUI must have PARSED them. It logs and swallows bad JSON,
+          #    which would otherwise leave the stock suggestions in place with
+          #    nothing failing anywhere.
+          if sudo docker logs open-webui 2>&1 | grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS'; then
+            echo "FAIL: Open WebUI could not parse our starter questions"; exit 1
+          fi
+
+          # 3. And Open WebUI must actually SERVE them. This asks the running
+          #    server what a signed-in user would receive, which is the only
+          #    thing that matters — and is stable regardless of whether upstream
+          #    persists the value or serves it from its in-memory defaults.
+          tests/webui-config-gate.sh "http://127.0.0.1:${WEBUI_PORT:-3000}"
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env

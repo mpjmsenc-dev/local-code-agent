@@ -83,8 +83,10 @@ main() {
   done
   [[ -z "${piped}" ]] || context+="--- piped input ---"$'\n'"$(printf '%s' "${piped}" | head -c 12000)"$'\n\n'
 
-  local system="You are a concise expert assistant on a Linux machine. Answer directly and briefly. Prefer concrete commands and short code. If you are unsure, say so instead of inventing flags or APIs."
-  local prompt="${context}${question}"
+  # Same system prompt as the phone chat — one assistant, two doors.
+  local system prompt
+  system="$(lca_system_prompt)"
+  prompt="${context}${question}"
 
   local payload
   # Cap the reply. On CPU (a few tokens/second) an unbounded answer can run for

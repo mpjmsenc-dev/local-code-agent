@@ -28,6 +28,8 @@ Usage: lca [command] [args...]
   lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
   lca chat                print the address to open the chat app on your phone
   lca check               full health check
+  lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
+  lca speed               measure tokens/second and explain what limits it
   lca test                live end-to-end self-test (proves it really works)
   lca update [--check]    back up, update, re-run setup, verify
   lca backup              take a backup now
@@ -57,6 +59,8 @@ case "${cmd}" in
   ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
   chat)            exec "${REPO}/webui.sh" url ;;
   check)           exec "${REPO}/check-system.sh" "$@" ;;
+  speed)           exec "${REPO}/scripts/speed.sh" "$@" ;;
+  logs)            exec "${REPO}/scripts/logs.sh" "$@" ;;
   test|selftest)   exec "${REPO}/scripts/selftest.sh" "$@" ;;
   update)          exec "${REPO}/update.sh" "$@" ;;
   backup)          exec "${REPO}/backup.sh" "$@" ;;

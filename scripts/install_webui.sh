@@ -41,6 +41,32 @@ main() {
     die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
   fi
 
+  # These two settings are read from the environment on every start. Open WebUI
+  # registers them as its in-memory defaults and only prefers a database row if
+  # one exists — which happens when the value is edited inside the WebUI. So a
+  # change here applies on re-run, EXCEPT for a setting the user has since
+  # changed in Admin Settings, which stays theirs.
+  local volume_existed=false
+  if as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    volume_existed=true
+  fi
+
+  # Give the chat a system prompt and suggestions that fit a private coding
+  # assistant. Stock Open WebUI ships neither: no system prompt at all, and
+  # starter prompts about vocabulary exams and the Roman Empire.
+  local params_env=() suggestions_env=()
+  if have jq; then
+    # -c keeps it on one line: an env value with embedded newlines is legal but
+    # awkward to inspect with 'docker inspect' and easy to mangle in a log.
+    params_env=( -e "DEFAULT_MODEL_PARAMS=$(lca_system_prompt | jq -Rsc '{system: .}')" )
+    if [[ -r "${REPO_ROOT}/config/prompt-suggestions.json" ]] \
+       && jq -e . "${REPO_ROOT}/config/prompt-suggestions.json" >/dev/null 2>&1; then
+      suggestions_env=( -e "DEFAULT_PROMPT_SUGGESTIONS=$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json")" )
+    fi
+  else
+    warn "jq is not installed — the chat will start without our system prompt and starter questions."
+  fi
+
   local base_url
   base_url="$(ollama_url)"
   info "Starting Open WebUI on port ${WEBUI_PORT} (Ollama at ${base_url}, signup=${WEBUI_ENABLE_SIGNUP})..."
@@ -54,6 +80,8 @@ main() {
     -e ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP}" \
     -e DEFAULT_MODELS="${MODEL_NAME}" \
     -e WEBUI_NAME="${WEBUI_NAME}" \
+    ${params_env[@]+"${params_env[@]}"} \
+    ${suggestions_env[@]+"${suggestions_env[@]}"} \
     -e DO_NOT_TRACK=true \
     -e SCARF_NO_ANALYTICS=true \
     -e ANONYMIZED_TELEMETRY=false \
@@ -69,6 +97,11 @@ main() {
   wait_for_webui 180 \
     || die "Open WebUI did not answer after 180s. Logs: sudo docker logs ${WEBUI_CONTAINER}"
   ok "Open WebUI is up on port ${WEBUI_PORT}."
+
+  if [[ "${volume_existed}" == "true" && ${#params_env[@]} -gt 0 ]]; then
+    info "Existing chat data kept. The assistant's system prompt and starter questions come from here,"
+    info "unless you have changed them in the WebUI (Admin Panel → Settings) — a value edited there wins."
+  fi
 
   # Open WebUI binds all interfaces (host networking). Apply the always-on
   # inbound guard so ${WEBUI_PORT} is reachable only over loopback and

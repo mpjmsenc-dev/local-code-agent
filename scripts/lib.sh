@@ -395,6 +395,73 @@ gpu_hardware_present() {
   lspci 2>/dev/null | grep -qi 'nvidia'
 }
 
+# vram_mib_from_smi — read `nvidia-smi --query-gpu=memory.total ...` output on
+# stdin and echo the LARGEST card's VRAM in MiB. Largest, not first: with a
+# display adapter alongside a compute card, the first line can be the small one
+# and every recommendation built on it would be wrong.
+vram_mib_from_smi() {
+  local best=0 line
+  while read -r line; do
+    line="${line//[^0-9]/}"
+    [[ -n "${line}" ]] || continue
+    (( line > best )) && best="${line}"
+  done
+  (( best > 0 )) || return 1
+  printf '%s\n' "${best}"
+}
+
+# gpu_vram_mib — VRAM of the largest NVIDIA card, or nonzero when it cannot be
+# determined (no driver, no card).
+gpu_vram_mib() {
+  have nvidia-smi || return 1
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | vram_mib_from_smi
+}
+
+# classify_gpu HAS_CARD HAS_DRIVER PLACEMENT — pure classifier for the GPU
+# situation, echoing one of:
+#   none        no NVIDIA card in the machine
+#   no-driver   card present but no driver — the silent case, where everything
+#               works and is simply 10x slower with no explanation given
+#   idle        driver works, but the model is running on the CPU anyway
+#               (usually too little VRAM, or Ollama needs the container toolkit)
+#   split       partially offloaded — runs at close to CPU speed, the trap
+#   active      fully on the GPU, which is the point
+#   unknown     the model is not resident, so placement cannot be read
+# Kept pure so every branch is unit-testable on a machine with no GPU at all.
+classify_gpu() {
+  local has_card="$1" has_driver="$2" placement="$3"
+  if [[ "${has_card}" != "true" && "${has_driver}" != "true" ]]; then
+    printf 'none\n'; return 0
+  fi
+  if [[ "${has_driver}" != "true" ]]; then
+    printf 'no-driver\n'; return 0
+  fi
+  case "${placement}" in
+    "")        printf 'unknown\n' ;;
+    *"/"*)     printf 'split\n' ;;
+    *GPU*)     printf 'active\n' ;;
+    *)         printf 'idle\n' ;;
+  esac
+}
+
+# gpu_state — classify_gpu against this machine.
+gpu_state() {
+  local card=false driver=false
+  gpu_hardware_present && card=true
+  have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && driver=true
+  classify_gpu "${card}" "${driver}" "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
+}
+
+# largest_model_for_vram VRAM_MIB — the biggest parameter count that fits
+# entirely in VRAM at q4 (~0.6 GB per billion, plus ~1.5 GB for context and
+# CUDA overhead). Fitting COMPLETELY is the point: a model that spills is not
+# "most of the speed", it runs at close to CPU speed.
+largest_model_for_vram() {
+  local mib="$1"
+  [[ "${mib}" =~ ^[0-9]+$ ]] || return 1
+  awk -v m="${mib}" 'BEGIN { p = (m / 1024 - 1.5) / 0.6; if (p < 1) exit 1; printf "%d\n", p }'
+}
+
 # processor_from_ps MODEL — read `ollama ps` output on stdin and echo how MODEL
 # is actually running: "100% GPU", "100% CPU", or a split like "38%/62% CPU/GPU".
 # This is the only authoritative answer to "is my GPU being used?" — a driver
@@ -416,6 +483,29 @@ processor_from_ps() {
 ollama_processor() {
   have ollama || return 1
   ollama ps 2>/dev/null | processor_from_ps "$1"
+}
+
+# model_params_b MODEL — billions of parameters implied by an Ollama tag
+# ('qwen2.5-coder:14b' -> 14). Returns nonzero when the tag carries no size, so
+# callers can fall back rather than silently compute from a wrong number.
+model_params_b() {
+  local tag="${1##*:}" n
+  n="$(grep -oiE '^[0-9]+(\.[0-9]+)?b$' <<<"${tag}" || true)"
+  [[ -n "${n}" ]] || return 1
+  n="${n%[bB]}"
+  # Round to a whole number; sizes like 1.5b exist and integer maths is enough
+  # for the bandwidth estimate this feeds.
+  awk -v v="${n}" 'BEGIN { printf "%.0f\n", (v < 1 ? 1 : v) }'
+}
+
+# tokens_per_second COUNT DURATION_NS — throughput to one decimal place.
+# Ollama reports both counters per request, which is far more accurate than
+# wall-clock timing: it excludes model load time and connection overhead.
+tokens_per_second() {
+  local count="$1" ns="$2"
+  [[ "${count}" =~ ^[0-9]+$ && "${ns}" =~ ^[0-9]+$ ]] || return 1
+  (( ns > 0 )) || return 1
+  awk -v c="${count}" -v n="${ns}" 'BEGIN { printf "%.1f\n", c / (n / 1000000000) }'
 }
 
 # render_ollama_dropin_content — print the drop-in the current .env implies,
@@ -510,6 +600,76 @@ restart_ollama() {
   else
     warn "systemd not available — restart Ollama manually for new settings to apply (e.g. 'ollama serve')."
   fi
+}
+
+# ---------------------------------------------------------------------------
+# The assistant's voice
+# ---------------------------------------------------------------------------
+
+# lca_system_prompt — the system prompt shared by the phone chat and 'lca ask'.
+#
+# One source of truth on purpose: an answer should not depend on which door you
+# came in through. Out of the box Open WebUI sends no system prompt at all, and
+# a small local coder model with no instructions tends to answer a plain
+# question with a wall of code.
+#
+# The 'lca' commands listed below are checked against bin/lca by the test
+# suite, so this can never quietly start advertising a command that does not
+# exist — the one hallucination we can actually prevent.
+lca_system_prompt() {
+  cat <<'EOF'
+You are the assistant for local-code-agent, a private AI stack running entirely
+on the user's own Linux server. Nothing the user types leaves that machine.
+
+Lead with the answer, not a preamble. Prefer concrete commands and short,
+complete code over long explanations, and put code in fenced blocks with a
+language tag. Be brief unless asked to go deeper: replies are often read on a
+phone and are generated at a few tokens per second, so length has a real cost.
+
+If you are unsure, say so. Never invent command-line flags, file paths or API
+names — a confidently wrong flag costs the user more than "I don't know".
+
+The server manages itself through one command, 'lca':
+  lca            start the coding agent (aider) in the current directory
+  lca ask "..."  one-shot question in the terminal
+  lca check      full health check
+  lca logs       recent logs from Ollama, the chat app and the installer
+  lca speed      measure tokens/second and what limits it
+  lca test       live end-to-end self-test
+  lca update     update and re-verify the stack
+  lca backup     take a backup now
+  lca model      switch the local model
+  lca offline    cut internet access (the AI keeps working); lca online undoes it
+  lca status     kill-switch status
+Only mention these when they are actually relevant to the question.
+EOF
+}
+
+# run_reader PROBE_CMD... -- REAL_CMD... — decide once, with a cheap probe,
+# whether a log reader needs root, then run the real command directly.
+#
+# The obvious shape ("run it; if that fails, retry under sudo") is wrong for a
+# follow: `journalctl -f` only ends when the user presses Ctrl-C, which exits
+# non-zero, so the retry would silently restart the follow under sudo. Probing
+# first also avoids a sudo password prompt on the many setups where reading the
+# journal or Docker already works unprivileged (journal/docker group).
+run_reader() {
+  local -a probe=() real=()
+  local seen=false arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "--" && "${seen}" == "false" ]]; then seen=true; continue; fi
+    if [[ "${seen}" == "false" ]]; then probe+=( "${arg}" ); else real+=( "${arg}" ); fi
+  done
+  (( ${#probe[@]} > 0 && ${#real[@]} > 0 )) || return 2
+  if "${probe[@]}" >/dev/null 2>&1; then
+    "${real[@]}"
+    return 0
+  fi
+  if can_root && as_root "${probe[@]}" >/dev/null 2>&1; then
+    as_root "${real[@]}"
+    return 0
+  fi
+  return 1
 }
 
 # webui_url — loopback URL for the local Open WebUI.

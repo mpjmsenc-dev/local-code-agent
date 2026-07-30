@@ -341,6 +341,134 @@ home_set_when_unset() {
 }
 check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
 
+echo "# run_reader() — probe once, then run; never retry a follow under sudo"
+reader_ran() { test "$(run_reader true -- printf ran)" = "ran"; }
+check "probe succeeds -> the real command runs" reader_ran
+# The bug this replaced: 'run it, and on failure retry under sudo' restarts a
+# 'logs -f' as root the moment the user presses Ctrl-C, because quitting a
+# follow exits non-zero. Probing separately is what makes that impossible.
+reader_skips() {
+  local out
+  out="$(run_reader false -- printf SHOULD-NOT-RUN 2>/dev/null || true)"
+  [[ "${out}" != *SHOULD-NOT-RUN* ]]
+}
+check "probe fails -> the real command never runs" reader_skips
+reader_status() { run_reader false -- true; }
+not_ok() { ! "$@" >/dev/null 2>&1; }
+check "probe fails -> nonzero exit" not_ok reader_status
+# A malformed call must be loud, not silently run the wrong half.
+check "no '--' separator -> usage error (2)" not_ok run_reader true echo hi
+check "nothing after '--' -> usage error (2)" not_ok run_reader true --
+# Arguments containing spaces must survive the split intact.
+reader_keeps_spaces() { test "$(run_reader true -- printf '%s' 'two words')" = "two words"; }
+check "arguments with spaces survive the split" reader_keeps_spaces
+
+echo "# classify_gpu() — every GPU situation, testable on a machine with no GPU"
+gpu_is() { test "$(classify_gpu "$2" "$3" "$4")" = "$1"; }
+check "no card, no driver -> none"        gpu_is none      false false ""
+# The silent case: the card is there, everything works, and it is 10x slower
+# with no explanation offered anywhere.
+check "card but no driver -> no-driver"   gpu_is no-driver true  false ""
+check "driver but model on CPU -> idle"   gpu_is idle      true  true  "100% CPU"
+check "partial offload -> split"          gpu_is split     true  true  "38%/62% CPU/GPU"
+check "fully offloaded -> active"         gpu_is active    true  true  "100% GPU"
+check "model not resident -> unknown"     gpu_is unknown   true  true  ""
+# A driver can be present in a VM whose card is passed through and therefore
+# invisible to lspci; trusting lspci alone would report 'none' with the GPU
+# plainly working.
+check "driver works though lspci sees nothing -> classified by placement" \
+  gpu_is active false true "100% GPU"
+
+echo "# vram_mib_from_smi() — picks the LARGEST card, not the first"
+smi_gives() { test "$(printf '%s\n' "$2" | vram_mib_from_smi)" = "$1"; }
+check "single 3090 -> 24576" smi_gives 24576 "24576"
+# A small display adapter listed first would otherwise set every recommendation.
+check "display adapter first, compute card second -> the big one" \
+  smi_gives 24576 "2048
+24576"
+check "strips units if present" smi_gives 24576 "24576 MiB"
+no_vram() { ! printf '%s\n' "$1" | vram_mib_from_smi >/dev/null 2>&1; }
+check "no output (no driver) -> nonzero exit" no_vram ""
+check "non-numeric output -> nonzero exit" no_vram "N/A"
+
+echo "# largest_model_for_vram() — must fit COMPLETELY, spilling is the trap"
+check "24 GB (RTX 3090) -> 37B" test "$(largest_model_for_vram 24576)" = "37"
+check "12 GB -> 17B"            test "$(largest_model_for_vram 12288)" = "17"
+check "8 GB -> 10B"             test "$(largest_model_for_vram 8192)" = "10"
+no_fit() { ! largest_model_for_vram "$1" >/dev/null 2>&1; }
+check "a 1 GB adapter fits nothing -> nonzero exit" no_fit 1024
+check "non-numeric -> nonzero exit" no_fit abc
+
+echo "# model_params_b() — parameter count read off the Ollama tag"
+check "qwen2.5-coder:7b -> 7"   test "$(model_params_b qwen2.5-coder:7b)" = "7"
+check "qwen2.5-coder:14b -> 14" test "$(model_params_b qwen2.5-coder:14b)" = "14"
+check "deepseek-coder-v2:16b -> 16" test "$(model_params_b deepseek-coder-v2:16b)" = "16"
+check "a fractional 1.5b rounds to a usable 2" test "$(model_params_b qwen2.5:1.5b)" = "2"
+# A tag with no size must FAIL rather than return a wrong number: speed.sh
+# multiplies this by 0.6 GB to report memory bandwidth, so a silent 0 or 1
+# would print a confidently wrong figure.
+# Negative cases go through a local helper, never 'bash -c': a child shell has
+# not sourced lib.sh, so the function would be "command not found" (exit 127)
+# and '!' would turn that into a pass — a test that cannot fail.
+no_params_b() { ! model_params_b "$1" >/dev/null 2>&1; }
+check "':latest' has no size -> nonzero exit" no_params_b qwen2.5-coder:latest
+check "a bare name has no size -> nonzero exit" no_params_b mistral
+check "'7b' inside the name is not a size tag" no_params_b llama3.1-7bfoo:latest
+
+echo "# tokens_per_second() — rate from Ollama's own nanosecond counters"
+check "19 tokens in 3.4987s -> 5.4/s" test "$(tokens_per_second 19 3498679000)" = "5.4"
+check "100 tokens in exactly 1s -> 100.0/s" test "$(tokens_per_second 100 1000000000)" = "100.0"
+# A zero duration would divide by zero; a divide-by-zero in awk prints 'inf'
+# and the verdict would then read "inf tokens/second — working as intended".
+no_tps() { ! tokens_per_second "$1" "$2" >/dev/null 2>&1; }
+check "zero duration -> nonzero exit" no_tps 10 0
+check "non-numeric duration -> nonzero exit" no_tps 10 abc
+
+echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
+check "system prompt is non-empty" test -n "$(lca_system_prompt)"
+# Run greps through a helper: 'bash -c' would start a child shell that has
+# never sourced lib.sh, so lca_system_prompt would be missing there.
+prompt_says() { lca_system_prompt | grep -qi -- "$1"; }
+check "system prompt tells the model it is private" prompt_says "leaves that machine"
+check "system prompt forbids inventing flags" prompt_says "never invent"
+
+# The prompt advertises 'lca' subcommands to the model. If one of them is
+# renamed in bin/lca and not here, the assistant confidently teaches a command
+# that does not exist — the exact failure the prompt itself warns against.
+# Extract every "  lca <word>" line and require bin/lca to actually dispatch it.
+prompt_commands_all_real() {
+  local sub bad=0
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    # bin/lca dispatches via a case statement: 'ask)' or 'offline|online|...)'.
+    grep -qE "^[[:space:]]*[a-z|\"]*\b${sub}\b[a-z|]*\)" "${REPO}/bin/lca" || {
+      printf 'system prompt advertises unknown command: lca %s\n' "${sub}" >&2
+      bad=1
+    }
+  done < <(lca_system_prompt | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p')
+  return "${bad}"
+}
+check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
+
+echo "# starter questions for the phone chat match Open WebUI's expected shape"
+SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
+check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
+# Wrapper so jq's own stdout is discarded without redirecting check()'s "ok"
+# line into /dev/null along with it.
+json_ok() { jq -e "$1" "$2" >/dev/null 2>&1; }
+not_stock() { ! grep -qi "roman empire\|kids' art" "${SUGGESTIONS}"; }
+if have jq; then
+  check "prompt-suggestions.json is valid JSON" json_ok . "${SUGGESTIONS}"
+  # Open WebUI reads a list of {title: [line1, line2], content: str}. A wrong
+  # shape still parses as JSON and then renders as an empty start screen, so
+  # validating the shape is the only thing that actually catches it.
+  check "every suggestion has a 2-line title and content" json_ok \
+    'type == "array" and length > 0 and all(
+       (.title | type == "array" and length == 2 and all(type == "string"))
+       and (.content | type == "string" and length > 0))' "${SUGGESTIONS}"
+  check "suggestions are not Open WebUI's stock ones" not_stock
+fi
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

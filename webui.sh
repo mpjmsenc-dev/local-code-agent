@@ -57,6 +57,15 @@ main() {
     fi
     if [[ -n "${ts_ip}" ]]; then
       ok "Open this on your phone:  http://${ts_ip}:${WEBUI_PORT}"
+      # Point the phone's camera at this instead of typing an IP by hand. The
+      # URL is always printed above as well: a terminal QR renders light
+      # modules on a dark background, which almost every scanner reads but not
+      # quite all, so this is a shortcut and never the only way in.
+      # -m 2 keeps the quiet zone; without a margin many scanners refuse.
+      if have qrencode; then
+        echo
+        qrencode -t ANSIUTF8 -m 2 "http://${ts_ip}:${WEBUI_PORT}" 2>/dev/null || true
+      fi
       info "(the phone must be signed in to the same Tailscale account — docs/PHONE.md)"
     else
       warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
