@@ -162,13 +162,11 @@ main() {
     wait_for_ollama 60 || die "Ollama API is not reachable at $(ollama_url). Start it (sudo systemctl start ollama) and re-run tune.sh."
   fi
 
-  # The context length needs no download — apply it first so a DOWNGRADE
-  # (RAM shrank) shrinks the KV cache immediately even if the model step
-  # cannot complete (e.g. offline). This is the OOM-avoidance path.
-  set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
-  OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
-
-  local old_model="${MODEL_NAME}" chosen_model="${TUNE_MODEL}" validate=false
+  # Nothing is persisted to .env or applied to the service until AFTER the
+  # (optional) model validation below, so a validation failure leaves .env,
+  # the drop-in and the running service consistent — never a phantom context.
+  local old_model="${MODEL_NAME}" old_ctx="${OLLAMA_CONTEXT_LENGTH}"
+  local chosen_model="${TUNE_MODEL}" validate=false
   if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
     info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
     if model_present "${TUNE_MODEL}"; then
@@ -181,9 +179,11 @@ main() {
         warn "netmode is OFFLINE — cannot pull ${TUNE_MODEL}; using already-downloaded ${chosen_model} for this RAM tier."
       else
         chosen_model="${MODEL_NAME}"
-        warn "netmode is OFFLINE and no fitting model is downloaded — lowered context to ${TUNE_CTX} but kept ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then tune.sh to finish."
+        warn "netmode is OFFLINE and no fitting model is downloaded — will lower context to ${TUNE_CTX} but keep ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then tune.sh to finish."
       fi
     else
+      # Online: try for the ideal model. A persistent failure falls back to
+      # the best already-present model; the next boot re-attempts the pull.
       if pull_model "${TUNE_MODEL}"; then
         validate=true
       else
@@ -197,22 +197,31 @@ main() {
   if [[ "${validate}" == "true" ]]; then
     info "Validating ${chosen_model} with a real generation (first load can take a minute)..."
     if ! model_responds "${chosen_model}"; then
-      die "${chosen_model} did not produce a response — keeping ${MODEL_NAME} unchanged. Check RAM headroom with: free -h"
+      die "${chosen_model} did not produce a response — nothing changed (still ${old_model}, ctx ${old_ctx}). Check RAM headroom with: free -h"
     fi
     ok "${chosen_model} validated."
   fi
 
-  # Commit: .env, then the systemd drop-in, then restart.
-  set_env_var MODEL_NAME "${chosen_model}"
+  # Apply only if something actually changed. When the ladder's target model
+  # is unobtainable (offline with no fallback, or a persistently failing
+  # pull) chosen_model stays == old_model; without this guard the on-boot
+  # oneshot would re-render the identical drop-in and restart Ollama every
+  # boot (dropping the loaded model + a ~90s wait) for zero config change.
   MODEL_NAME="${chosen_model}"
-  render_ollama_dropin
-  restart_ollama
-
-  if [[ "${old_model}" != "${chosen_model}" ]]; then
-    info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
-    ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
+  OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
+  if [[ "${chosen_model}" != "${old_model}" || "${old_ctx}" != "${TUNE_CTX}" ]] || ! ollama_dropin_matches; then
+    set_env_var MODEL_NAME "${chosen_model}"
+    set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+    render_ollama_dropin
+    restart_ollama
+    if [[ "${old_model}" != "${chosen_model}" ]]; then
+      info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
+      ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
+    else
+      ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."
+    fi
   else
-    ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."
+    ok "Already at the best-available config (${chosen_model}, ctx ${TUNE_CTX}); nothing to apply."
   fi
 }
 

@@ -199,10 +199,18 @@ elif ! have nft; then
   p_warn "nft not installed — the inbound guard is not enforced (WebUI/Ollama ports may be publicly reachable)"
 elif ! can_root; then
   p_warn "cannot inspect nftables without root/sudo — re-run as root to verify the inbound guard"
-elif as_root nft list table inet lca_inbound >/dev/null 2>&1; then
-  p_pass "inbound guard active — WebUI/Ollama ports reachable only via loopback and Tailscale"
-else
+elif ! as_root nft list table inet lca_inbound >/dev/null 2>&1; then
   p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ./netmode.sh harden)"
+else
+  # Existence is not enough: confirm the port the WebUI actually binds is in
+  # the drop set. A config change without a re-harden, or a parser mismatch,
+  # would otherwise show green while the real port stays exposed.
+  INBOUND_DUMP="$(as_root nft list table inet lca_inbound 2>/dev/null)"
+  if [[ "${ENABLE_WEBUI}" == "true" ]] && ! grep -qE "dport \{[^}]*\b${WEBUI_PORT}\b" <<<"${INBOUND_DUMP}"; then
+    p_fail "inbound guard is loaded but does NOT cover WebUI port ${WEBUI_PORT} — re-run: sudo ./netmode.sh harden"
+  else
+    p_pass "inbound guard active and covers the configured port(s) — reachable only via loopback and Tailscale"
+  fi
 fi
 
 # --- Netmode + internet -----------------------------------------------------

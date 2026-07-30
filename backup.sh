@@ -51,8 +51,15 @@ main() {
       warn "Could not archive the WebUI volume — continuing without it."
     fi
     if [[ "${paused}" == "true" ]]; then
-      as_root docker unpause "${WEBUI_CONTAINER}" >/dev/null 2>&1 || true
-      trap 'rm -rf "${workdir:-}"' EXIT
+      # Only tear down the unpause-guaranteeing trap once the unpause has
+      # actually succeeded; otherwise leave the trap in place (it will retry
+      # the unpause on exit) and warn, so the container can never be left
+      # paused and unreachable from the phone.
+      if as_root docker unpause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
+        trap 'rm -rf "${workdir:-}"' EXIT
+      else
+        warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
+      fi
     fi
   else
     warn "No 'open-webui' docker volume found — skipping WebUI data."

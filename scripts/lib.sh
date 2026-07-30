@@ -135,8 +135,10 @@ load_env() {
   fi
   if [[ -f "${ENV_FILE}" ]]; then
     set -a
+    # Strip CR first so a CRLF (Windows-edited) .env never leaves a trailing
+    # '\r' in values — which would break numeric checks, ports and URLs.
     # shellcheck disable=SC1090
-    source "${ENV_FILE}"
+    source <(tr -d '\r' < "${ENV_FILE}")
     set +a
   fi
   AUTO_TUNE="${AUTO_TUNE:-true}"
@@ -202,9 +204,16 @@ ollama_bind_is_public() {
   local host="${OLLAMA_HOST:-127.0.0.1:11434}"
   host="${host#http://}"
   host="${host#https://}"
+  host="${host%/}"
+  # IPv6 wildcard / loopback forms first — a greedy ':' strip would collapse
+  # '::' or '[::]:port' to empty and misread an all-interfaces bind as safe.
+  case "${host}" in
+    "::"|"[::]"|"[::]:"*|"0:0:0:0:0:0:0:0"*) return 0 ;;  # IPv6 any -> public
+    "[::1]"|"[::1]:"*|"::1") return 1 ;;                   # IPv6 loopback
+  esac
   host="${host%%:*}"
   case "${host}" in
-    127.0.0.1|localhost|::1|"") return 1 ;;
+    127.0.0.1|localhost|"") return 1 ;;
     *) return 0 ;;
   esac
 }

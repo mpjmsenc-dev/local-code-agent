@@ -112,21 +112,31 @@ write_rules_file() {
 
 # --- Always-on inbound guard -----------------------------------------------
 
-# webui_port_from_env / ollama_port_from_env — read the ports the guard must
-# protect straight from .env (without creating it). Values are validated to
-# be numeric so a malformed .env can never inject into the ruleset.
+# The guard must protect the EXACT ports the services actually bind. The rest
+# of the stack derives those by sourcing .env (via load_env), which is quote-
+# and inline-comment-tolerant. A bespoke sed parser here would disagree for
+# ordinary .env styles (WEBUI_PORT="8080", trailing comments, CRLF) and could
+# silently guard the wrong port — leaving the real one publicly exposed. So we
+# source .env the same way, in a subshell (no writes, never creates .env, and
+# stdout of the source is suppressed so render-* stays pure nft syntax).
 webui_port_from_env() {
   local port=""
-  [[ -f "${ENV_FILE}" ]] && port="$(sed -n 's/^WEBUI_PORT=//p' "${ENV_FILE}" | tail -1)"
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${WEBUI_PORT:-}" )"
+  fi
   [[ "${port}" =~ ^[0-9]+$ ]] || port=3000
   printf '%s\n' "${port}"
 }
 ollama_port_from_env() {
-  local host="" port=""
-  [[ -f "${ENV_FILE}" ]] && host="$(sed -n 's/^OLLAMA_HOST=//p' "${ENV_FILE}" | tail -1)"
-  case "${host}" in
-    *:*) port="${host##*:}" ;;
-  esac
+  local url="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # Reuse ollama_url's normalization (scheme/slash/0.0.0.0/default-port) so
+    # the guarded port matches exactly what clients connect to.
+    # shellcheck disable=SC1090
+    url="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; ollama_url )"
+  fi
+  port="${url##*:}"
   [[ "${port}" =~ ^[0-9]+$ ]] || port=11434
   printf '%s\n' "${port}"
 }

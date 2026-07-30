@@ -77,6 +77,20 @@ order_ok() {  # desc file
 order_ok "offline: drop is the last rule in every chain" "${RULES}"
 order_ok "inbound: drop is the last rule in every chain" "${INBOUND}"
 
+echo "# inbound guard reads quoted/annotated .env ports like load_env (not a sed parser)"
+# Black-box: a quoted WEBUI_PORT with an inline comment must still be the port
+# the guard drops — otherwise the real public port would be left exposed.
+if [[ -f "${REPO}/.env" ]]; then
+  echo "skip - ${REPO}/.env exists; not overwriting it for the quoted-port test"
+else
+  printf 'WEBUI_PORT="8080" # avoid clash\nOLLAMA_HOST="0.0.0.0:11500"\n' > "${REPO}/.env"
+  QG="$("${REPO}/netmode.sh" render-inbound)"
+  rm -f "${REPO}/.env"
+  if grep -qE 'dport \{[^}]*\b8080\b' <<<"${QG}"; then t_ok "quoted WEBUI_PORT 8080 is guarded"; else t_fail "quoted WEBUI_PORT 8080 NOT guarded ($(grep -o 'tcp dport [^}]*}' <<<"${QG}"))"; fi
+  if grep -qE 'dport \{[^}]*\b11500\b' <<<"${QG}"; then t_ok "quoted OLLAMA_HOST port 11500 is guarded"; else t_fail "quoted OLLAMA_HOST port 11500 NOT guarded"; fi
+  if grep -qE 'dport \{[^}]*\b3000\b' <<<"${QG}"; then t_fail "stale default 3000 guarded despite WEBUI_PORT=8080"; else t_ok "no stale default port when WEBUI_PORT is set"; fi
+fi
+
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
 if command -v nft >/dev/null 2>&1; then
