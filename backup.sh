@@ -118,9 +118,25 @@ do_backup() {
     warn "Ollama not installed — skipping the model list."
   fi
 
-  tar czf "${tarball}" -C "${workdir}" .
+  # A failed tar (classically: the disk filled up) still leaves a PARTIAL file
+  # behind, and set -e would abort before anything cleaned it up. That partial
+  # file then becomes the newest tarball in backups/ — which is precisely what
+  # restore.sh picks by default. Remove it so a broken archive can never be
+  # restored over good data.
+  if ! tar czf "${tarball}" -C "${workdir}" .; then
+    rm -f "${tarball}"
+    die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
+  fi
   as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
-  ok "Backup written: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+
+  # A backup you cannot restore is not a backup. Read the archive back and
+  # confirm every file we staged is really in it, BEFORE retention is allowed to
+  # delete older (good) backups on the strength of this one.
+  if ! verify_backup "${tarball}" "${workdir}"; then
+    rm -f "${tarball}"
+    die "The backup archive failed verification and was deleted (older backups were kept untouched). Check free space with 'df -h' and re-run ${SCRIPT_DIR}/backup.sh."
+  fi
+  ok "Backup written and verified: ${tarball} ($(du -h "${tarball}" | cut -f1))"
 
   # Only prune when this backup is as complete as it was supposed to be.
   # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
@@ -133,6 +149,27 @@ do_backup() {
   fi
 
   info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
+}
+
+# verify_backup TARBALL STAGING_DIR — true when the archive reads back cleanly
+# and contains every file that was staged for it. Catches truncated/corrupt
+# archives (the usual cause is a full disk) at the moment they are created,
+# instead of months later during a restore that was supposed to save you.
+# Comparing against the staging directory means new contents are covered
+# automatically, with no list to keep in sync.
+verify_backup() {
+  local tarball="$1" staging="$2" listing staged missing=()
+  # tar tzf decompresses the whole stream, so a truncated gzip fails here.
+  listing="$(tar tzf "${tarball}" 2>/dev/null)" || return 1
+  [[ -n "${listing}" ]] || return 1
+  while IFS= read -r staged; do
+    grep -qxF "./${staged}" <<<"${listing}" || missing+=( "${staged}" )
+  done < <(cd "${staging}" && find . -maxdepth 1 -type f -printf '%f\n' 2>/dev/null)
+  if (( ${#missing[@]} )); then
+    err "Archive is missing staged file(s): ${missing[*]}"
+    return 1
+  fi
+  return 0
 }
 
 # Keep only the newest BACKUP_KEEP tarballs; delete older ones so a daily/cron
@@ -230,4 +267,8 @@ main() {
   esac
 }
 
-main "$@"
+# Run main only when executed, so tests can source this file and unit-test
+# verify_backup() without taking a real backup (same pattern as scripts/tune.sh).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

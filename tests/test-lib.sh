@@ -138,6 +138,32 @@ fallbacks_apply() {
 }
 check "load_env fallbacks apply when .env omits the keys" fallbacks_apply
 
+echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
+# backup.sh only runs main() when executed, so sourcing it here just defines
+# its functions. Guards the "disk filled up mid-tar" case: the archive must read
+# back AND contain every staged file, or retention would delete good backups on
+# the strength of a broken one and restore.sh would later pick it (newest wins).
+# shellcheck source=../backup.sh
+source "${REPO}/backup.sh"
+VB_STAGE="${SANDBOX}/vbstage"
+mkdir -p "${VB_STAGE}"
+printf 'env-contents\n'    > "${VB_STAGE}/env"
+printf 'model-list\n'      > "${VB_STAGE}/models.txt"
+VB_GOOD="${SANDBOX}/good.tar.gz"
+tar czf "${VB_GOOD}" -C "${VB_STAGE}" .
+# '!' is a shell keyword, so it cannot be passed through check's "$@" — negate
+# inside a real function instead.
+vb_rejects() { ! verify_backup "$1" "$2" 2>/dev/null; }
+check "intact archive verifies"            verify_backup "${VB_GOOD}" "${VB_STAGE}"
+VB_TRUNC="${SANDBOX}/truncated.tar.gz"
+head -c 40 "${VB_GOOD}" > "${VB_TRUNC}"
+check "truncated archive is rejected"      vb_rejects "${VB_TRUNC}" "${VB_STAGE}"
+VB_PARTIAL="${SANDBOX}/partial.tar.gz"
+tar czf "${VB_PARTIAL}" -C "${VB_STAGE}" ./env          # models.txt missing
+check "archive missing a staged file is rejected" vb_rejects "${VB_PARTIAL}" "${VB_STAGE}"
+: > "${SANDBOX}/empty.tar.gz"
+check "empty file is rejected"             vb_rejects "${SANDBOX}/empty.tar.gz" "${VB_STAGE}"
+
 echo "# backups_to_prune() keeps the newest KEEP; prints the older ones to delete"
 # Timestamped names sort chronologically; the helper sorts internally, so the
 # order they are fed in must not matter.
