@@ -144,6 +144,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list |
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
+| `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 
 ## `.env` reference
 
@@ -174,7 +175,7 @@ local-code-agent/
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
-│   ├── lib.sh · tune.sh
+│   ├── lib.sh · tune.sh · selftest.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
 │   └── install_tailscale.sh
