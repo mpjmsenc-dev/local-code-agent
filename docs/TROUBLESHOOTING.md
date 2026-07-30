@@ -84,6 +84,21 @@ Check in this order:
    Using the right IP (`tailscale ip -4`) and port (3000)?
 3. Netmode: `sudo ./netmode.sh status` — offline mode does NOT block Tailscale,
    but a half-applied experiment might; `sudo ./netmode.sh online` to reset.
+4. Inbound guard: `sudo ./netmode.sh status` also shows the always-on inbound
+   guard. **By design it allows the WebUI port only over loopback and
+   `tailscale0`** — so reaching WebUI by the server's public or LAN IP
+   (without Tailscale) is *supposed* to fail. Always go through the Tailscale
+   IP. If `status` reports the guard is NOT loaded, re-apply it with
+   `sudo ./netmode.sh harden`.
+
+### I actually want direct LAN access (advanced, reduces privacy)
+
+The guard blocks the WebUI/Ollama ports on every interface except loopback and
+Tailscale on purpose. If you deliberately want to reach WebUI over a trusted
+LAN without Tailscale, the guard is what's stopping you — that is the private-
+only guarantee working. Only lift it if you understand the exposure (and never
+on a host with a public IP): `sudo nft delete table inet lca_inbound` (returns
+on the next boot/`harden` unless you also stop running `harden`).
 
 ## "No internet" on the server
 

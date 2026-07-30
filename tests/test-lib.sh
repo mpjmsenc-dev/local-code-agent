@@ -104,6 +104,21 @@ check "23 GiB -> 14b/8192"  ladder_is 23 qwen2.5-coder:14b 8192
 check "24 GiB -> 14b/16384" ladder_is 24 qwen2.5-coder:14b 16384
 check "64 GiB -> 14b/16384" ladder_is 64 qwen2.5-coder:14b 16384
 
+echo "# largest_present_within() — offline-downgrade fallback picks the largest model <= target"
+# Stub model_present against a PRESENT list so we can unit-test the selection
+# without a real ollama. (This override is intentional and only affects the
+# checks below, which are the last in the file.)
+PRESENT=""
+model_present() { case " ${PRESENT} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+lpw() { PRESENT="$1" largest_present_within "$2"; }
+check "target 14b, only 3b present -> 3b"       test "$(lpw 'qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:3b"
+check "target 14b, 7b+3b present -> 7b"         test "$(lpw 'qwen2.5-coder:7b qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:7b"
+check "target 14b, all present -> 14b"          test "$(lpw 'qwen2.5-coder:14b qwen2.5-coder:7b qwen2.5-coder:3b' qwen2.5-coder:14b)" = "qwen2.5-coder:14b"
+check "target 7b, only 14b present -> none"     test -z "$(lpw 'qwen2.5-coder:14b' qwen2.5-coder:7b)"
+check "target 7b, nothing present -> none"      test -z "$(lpw '' qwen2.5-coder:7b)"
+lpw_fails() { ! ( PRESENT="$1" largest_present_within "$2" >/dev/null ); }
+check "returns nonzero exit when nothing fits"  lpw_fails 'qwen2.5-coder:14b' qwen2.5-coder:7b
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
