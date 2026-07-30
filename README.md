@@ -52,7 +52,9 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 
 1. `sudo tailscale up` on the server, log in via the printed URL.
 2. Install the Tailscale app on your phone, log in to the same account.
-3. Open `http://<tailscale-ip>:3000`, create the **first** account (it becomes admin).
+3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
+   print the exact address. Create the **first** account (it becomes admin).
+   Your model is already selected, so you can just start typing.
 4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, re-run `scripts/install_webui.sh`.
 
 Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
@@ -187,7 +189,7 @@ edited. Override with `AIDER_EDIT_FORMAT` in `.env`.
 | `install.sh` | One-command bootstrap: installs git, clones, runs `setup.sh` |
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
 | `run-agent.sh` | Start aider in the current directory |
-| `webui.sh` | `start\|stop\|restart\|status\|logs` for Open WebUI |
+| `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
@@ -217,6 +219,7 @@ Created from `.env.example` on first run. All keys:
 | `ENABLE_WEBUI` | `true` | Install/run Open WebUI |
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
+| `WEBUI_NAME` | `local-code-agent` | Title shown in the chat app on your phone |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
 | `BACKUP_KEEP` | `7` | How many backups `backup.sh` keeps; older ones are pruned (`0` = keep all) |
 | `BACKUP_SCHEDULE` | `"*-*-* 03:30:00"` | When the backup timer fires (systemd `OnCalendar`) — **keep the quotes**; e.g. `"daily"`, `"weekly"` |

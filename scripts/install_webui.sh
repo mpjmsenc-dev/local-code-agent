@@ -52,6 +52,8 @@ main() {
     -e OLLAMA_BASE_URL="${base_url}" \
     -e PORT="${WEBUI_PORT}" \
     -e ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP}" \
+    -e DEFAULT_MODELS="${MODEL_NAME}" \
+    -e WEBUI_NAME="${WEBUI_NAME}" \
     -e DO_NOT_TRACK=true \
     -e SCARF_NO_ANALYTICS=true \
     -e ANONYMIZED_TELEMETRY=false \
