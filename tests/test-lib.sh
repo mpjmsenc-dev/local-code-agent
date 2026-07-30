@@ -90,6 +90,21 @@ echo "# venv path helpers build paths inside the repo"
 check "venv_dir under REPO_ROOT" test "$(venv_dir)" = "${SANDBOX}/${VENV_NAME}"
 check "aider_bin under venv" test "$(aider_bin)" = "${SANDBOX}/${VENV_NAME}/bin/aider"
 
+echo "# aider_token_budget() splits the Ollama window (prompt + reply), reply>=1024"
+# Matches each tune-ladder context: reply is a quarter (min 1024), prompt the rest.
+check "4096  -> 3072 1024"   test "$(aider_token_budget 4096)"  = "3072 1024"
+check "8192  -> 6144 2048"   test "$(aider_token_budget 8192)"  = "6144 2048"
+check "16384 -> 12288 4096"  test "$(aider_token_budget 16384)" = "12288 4096"
+# input + output must always sum back to the window (no tokens lost/created).
+budget_sums_to() { local in out; read -r in out < <(aider_token_budget "$1"); [[ $((in+out)) -eq "$1" ]]; }
+check "budget sums to 4096"  budget_sums_to 4096
+check "budget sums to 8192"  budget_sums_to 8192
+check "budget sums to 16384" budget_sums_to 16384
+# Corrupt/empty ctx must fall back to the 8192 default — never a zero budget.
+check "empty ctx -> 8192 default"     test "$(aider_token_budget '')"    = "6144 2048"
+check "non-numeric ctx -> 8192"       test "$(aider_token_budget abc)"   = "6144 2048"
+check "absurdly small ctx -> 8192"    test "$(aider_token_budget 16)"    = "6144 2048"
+
 echo "# tune ladder boundaries (spec: 8, 9, 15, 16, 23, 24 GiB)"
 # tune.sh only runs main when executed; sourcing it exposes choose_for_ram().
 # shellcheck source=../scripts/tune.sh

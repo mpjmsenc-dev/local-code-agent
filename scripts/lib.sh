@@ -190,6 +190,26 @@ venv_dir() { printf '%s/%s\n' "${REPO_ROOT}" "${VENV_NAME:-.venv}"; }
 venv_python() { printf '%s/bin/python\n' "$(venv_dir)"; }
 aider_bin() { printf '%s/bin/aider\n' "$(venv_dir)"; }
 
+# aider_token_budget CTX — echo "INPUT OUTPUT" (two integers) splitting an
+# Ollama context window of CTX tokens into a prompt budget and a reply budget.
+# Ollama's num_ctx is the WHOLE window (prompt + generation share it), so we
+# reserve a quarter of it (at least 1024 tokens) for the model's reply and give
+# the rest to the prompt. run-agent.sh feeds these to aider via a model-metadata
+# file so aider packs the repo map / history / files to what Ollama will
+# actually process — otherwise aider trusts litellm's generic metadata (e.g.
+# 32k for qwen2.5-coder) while the server is capped at OLLAMA_CONTEXT_LENGTH,
+# and every over-limit prompt is SILENTLY truncated by Ollama (the system
+# prompt drops off and the model "forgets" its instructions). Bad/empty CTX
+# falls back to 8192 so a corrupt .env can never yield a zero budget.
+aider_token_budget() {
+  local ctx="${1:-8192}" out
+  if ! [[ "${ctx}" =~ ^[0-9]+$ ]] || (( ctx < 256 )); then ctx=8192; fi
+  out=$(( ctx / 4 ))
+  if (( out < 1024 )); then out=1024; fi
+  if (( out >= ctx )); then out=$(( ctx / 2 )); fi
+  printf '%s %s\n' "$(( ctx - out ))" "${out}"
+}
+
 # ---------------------------------------------------------------------------
 # Ollama helpers
 # ---------------------------------------------------------------------------

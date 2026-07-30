@@ -38,13 +38,35 @@ main() {
     fi
   fi
 
+  # Tell aider the model's REAL usable context so it budgets the repo map,
+  # chat history and files to fit what Ollama will actually process. Without
+  # this, aider trusts litellm's generic metadata (32k for qwen2.5-coder) while
+  # the server runs at OLLAMA_CONTEXT_LENGTH, and any bigger prompt is silently
+  # truncated by Ollama. Regenerated every run, so it always tracks auto-tune.
+  local meta_dir meta_file input_tokens output_tokens
+  read -r input_tokens output_tokens < <(aider_token_budget "${OLLAMA_CONTEXT_LENGTH:-8192}")
+  meta_dir="${HOME}/.cache/local-code-agent"
+  mkdir -p "${meta_dir}"
+  meta_file="${meta_dir}/aider.model.metadata.json"
+  cat > "${meta_file}" <<EOF
+{
+  "ollama_chat/${MODEL_NAME}": {
+    "max_input_tokens": ${input_tokens},
+    "max_output_tokens": ${output_tokens},
+    "max_tokens": $(( input_tokens + output_tokens ))
+  }
+}
+EOF
+
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
+  info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${OLLAMA_CONTEXT_LENGTH:-8192}-token window"
   # aider talks to Ollama through litellm, which needs OLLAMA_API_BASE and
   # the ollama_chat/ model prefix.
   export OLLAMA_API_BASE
   OLLAMA_API_BASE="$(ollama_url)"
   exec "${aider}" \
     --config "${REPO_ROOT}/config/aider.conf.yml" \
+    --model-metadata-file "${meta_file}" \
     --model "ollama_chat/${MODEL_NAME}" \
     "$@"
 }
