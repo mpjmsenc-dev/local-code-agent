@@ -112,6 +112,19 @@ every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
 with `sudo ./netmode.sh harden` / `status`.
 
+## Updating
+
+```bash
+cd /opt/local-code-agent
+./update.sh --check     # what would change? (touches nothing)
+./update.sh             # back up → pull → re-run setup → self-test
+```
+
+The backup happens **first**, on purpose: the update refreshes OS packages,
+aider, Ollama and possibly the model, so the restore point has to predate all of
+it. If the self-test fails afterwards, `./restore.sh` puts you back. Your `.env`
+is untracked, so your settings survive updates untouched.
+
 ## Security model
 
 What "private" means here, precisely — and what it doesn't.
@@ -188,6 +201,7 @@ edited. Override with `AIDER_EDIT_FORMAT` in `.env`.
 |---|---|
 | `install.sh` | One-command bootstrap: installs git, clones, runs `setup.sh` |
 | `setup.sh` | Install everything (idempotent, unattended-safe) |
+| `update.sh` | Update safely: backup → new code → re-run setup → self-test (`--check` previews) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
@@ -231,7 +245,7 @@ local-code-agent/
 ├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
 ├── install.sh                  # one-command installer (curl | bash)
 ├── Makefile                    # make gates/lint/test/hooks — the local dev loop
-├── setup.sh · run-agent.sh · webui.sh · netmode.sh
+├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
 │   ├── lib.sh · tune.sh · selftest.sh
