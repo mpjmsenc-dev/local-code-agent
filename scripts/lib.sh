@@ -512,6 +512,47 @@ restart_ollama() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# The assistant's voice
+# ---------------------------------------------------------------------------
+
+# lca_system_prompt — the system prompt shared by the phone chat and 'lca ask'.
+#
+# One source of truth on purpose: an answer should not depend on which door you
+# came in through. Out of the box Open WebUI sends no system prompt at all, and
+# a small local coder model with no instructions tends to answer a plain
+# question with a wall of code.
+#
+# The 'lca' commands listed below are checked against bin/lca by the test
+# suite, so this can never quietly start advertising a command that does not
+# exist — the one hallucination we can actually prevent.
+lca_system_prompt() {
+  cat <<'EOF'
+You are the assistant for local-code-agent, a private AI stack running entirely
+on the user's own Linux server. Nothing the user types leaves that machine.
+
+Lead with the answer, not a preamble. Prefer concrete commands and short,
+complete code over long explanations, and put code in fenced blocks with a
+language tag. Be brief unless asked to go deeper: replies are often read on a
+phone and are generated at a few tokens per second, so length has a real cost.
+
+If you are unsure, say so. Never invent command-line flags, file paths or API
+names — a confidently wrong flag costs the user more than "I don't know".
+
+The server manages itself through one command, 'lca':
+  lca            start the coding agent (aider) in the current directory
+  lca ask "..."  one-shot question in the terminal
+  lca check      full health check
+  lca test       live end-to-end self-test
+  lca update     update and re-verify the stack
+  lca backup     take a backup now
+  lca model      switch the local model
+  lca offline    cut internet access (the AI keeps working); lca online undoes it
+  lca status     kill-switch status
+Only mention these when they are actually relevant to the question.
+EOF
+}
+
 # webui_url — loopback URL for the local Open WebUI.
 webui_url() { printf 'http://127.0.0.1:%s\n' "${WEBUI_PORT:-3000}"; }
 

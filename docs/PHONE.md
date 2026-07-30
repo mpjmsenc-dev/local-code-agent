@@ -62,6 +62,27 @@ In the phone browser menu choose **Add to Home Screen**. Open WebUI is a PWA —
 launched from the home screen icon it looks and feels like the Claude app:
 full-screen chat, streaming responses, chat history, model picker.
 
+## What the chat already knows about your server
+
+`setup.sh` gives the chat a system prompt so it answers as *your* assistant
+rather than a generic model: keep it short (you are reading on a phone, at a few
+tokens per second), prefer real commands, say "I don't know" instead of inventing
+a flag, and know that this box is driven by the `lca` command. Ask *"how do I
+take a backup right now?"* and you get `lca backup`, not a lecture about `tar`.
+The empty-chat screen also offers four starter questions aimed at code and
+servers, in place of Open WebUI's stock ones about vocabulary exams and the
+Roman Empire.
+
+The same prompt is used by `lca ask` in the terminal, so both doors lead to the
+same assistant.
+
+**Changing it later:** Open WebUI reads these two settings from the environment
+**only when its database has no value for them yet** — that is, on a first
+install. Afterwards its own database wins and editing `.env` will do nothing.
+To change them on a server that is already running, use the WebUI itself:
+**Admin Panel → Settings**. (`scripts/install_webui.sh` tells you which of the
+two cases you are in.)
+
 ## Running the coding agent from the phone
 
 The terminal agent (aider) runs over SSH:

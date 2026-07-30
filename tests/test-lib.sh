@@ -341,6 +341,51 @@ home_set_when_unset() {
 }
 check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
 
+echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
+check "system prompt is non-empty" test -n "$(lca_system_prompt)"
+# Run greps through a helper: 'bash -c' would start a child shell that has
+# never sourced lib.sh, so lca_system_prompt would be missing there.
+prompt_says() { lca_system_prompt | grep -qi -- "$1"; }
+check "system prompt tells the model it is private" prompt_says "leaves that machine"
+check "system prompt forbids inventing flags" prompt_says "never invent"
+
+# The prompt advertises 'lca' subcommands to the model. If one of them is
+# renamed in bin/lca and not here, the assistant confidently teaches a command
+# that does not exist — the exact failure the prompt itself warns against.
+# Extract every "  lca <word>" line and require bin/lca to actually dispatch it.
+prompt_commands_all_real() {
+  local sub bad=0
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    # bin/lca dispatches via a case statement: 'ask)' or 'offline|online|...)'.
+    grep -qE "^[[:space:]]*[a-z|\"]*\b${sub}\b[a-z|]*\)" "${REPO}/bin/lca" || {
+      printf 'system prompt advertises unknown command: lca %s\n' "${sub}" >&2
+      bad=1
+    }
+  done < <(lca_system_prompt | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p')
+  return "${bad}"
+}
+check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
+
+echo "# starter questions for the phone chat match Open WebUI's expected shape"
+SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
+check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
+# Wrapper so jq's own stdout is discarded without redirecting check()'s "ok"
+# line into /dev/null along with it.
+json_ok() { jq -e "$1" "$2" >/dev/null 2>&1; }
+not_stock() { ! grep -qi "roman empire\|kids' art" "${SUGGESTIONS}"; }
+if have jq; then
+  check "prompt-suggestions.json is valid JSON" json_ok . "${SUGGESTIONS}"
+  # Open WebUI reads a list of {title: [line1, line2], content: str}. A wrong
+  # shape still parses as JSON and then renders as an empty start screen, so
+  # validating the shape is the only thing that actually catches it.
+  check "every suggestion has a 2-line title and content" json_ok \
+    'type == "array" and length > 0 and all(
+       (.title | type == "array" and length == 2 and all(type == "string"))
+       and (.content | type == "string" and length > 0))' "${SUGGESTIONS}"
+  check "suggestions are not Open WebUI's stock ones" not_stock
+fi
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

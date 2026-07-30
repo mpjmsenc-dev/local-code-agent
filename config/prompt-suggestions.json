@@ -1,0 +1,18 @@
+[
+  {
+    "title": ["Explain this command", "before I run it"],
+    "content": "Explain what this command does, step by step, and flag anything risky about it:\n\nfind . -name '*.log' -mtime +30 -delete"
+  },
+  {
+    "title": ["Write me a script", "that backs up a folder"],
+    "content": "Write a bash script that backs up a folder to another disk. Include a --dry-run flag and explain each part briefly."
+  },
+  {
+    "title": ["Review my code", "for bugs and edge cases"],
+    "content": "I'm going to paste a function. Review it for bugs, edge cases and unclear naming, then show me a corrected version."
+  },
+  {
+    "title": ["Help me debug", "a service that won't start"],
+    "content": "A systemd service won't start. Walk me through diagnosing it, starting with the exact commands to run and what to look for in the output."
+  }
+]
