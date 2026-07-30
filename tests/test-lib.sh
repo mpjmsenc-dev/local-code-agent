@@ -192,6 +192,29 @@ check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
+echo "# .env keys must not collide with aider's own env vars (load_env exports them)"
+# load_env sources .env under 'set -a', so every key becomes an environment
+# variable. A key named AIDER_* can therefore be consumed by aider itself: our
+# sentinel LCA_EDIT_FORMAT=auto, if named AIDER_EDIT_FORMAT, made even
+# 'aider --version' fail because "auto" is not a valid aider edit format.
+no_aider_collision() {
+  local aider_bin_path key
+  aider_bin_path="$(aider_bin)"
+  [[ -x "${aider_bin_path}" ]] || return 0   # aider not installed here: skip
+  local envs; envs="$("${aider_bin_path}" --help 2>/dev/null | grep -oE 'env var: [A-Z_]+' | sed 's/env var: //' | sort -u)"
+  [[ -n "${envs}" ]] || return 0
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    # AIDER_VERSION is ours and predates this rule; it is not an aider env var.
+    if grep -qx "${key}" <<<"${envs}"; then
+      echo "collides with aider: ${key}" >&2
+      return 1
+    fi
+  done < <(grep -oE '^[A-Z_]+' "${REPO}/.env.example" | sort -u)
+  return 0
+}
+check "no .env key collides with an aider env var" no_aider_collision
+
 echo "# processor_from_ps(): is the GPU actually being used? (parsed by pattern, not column)"
 PS_GPU="NAME                ID              SIZE      PROCESSOR    CONTEXT    UNTIL
 qwen2.5-coder:7b    dae161e27b0e    5.5 GB    100% GPU     4096       4 minutes from now"
@@ -234,11 +257,27 @@ fam_pick() { MODEL_FAMILY="$1" choose_for_ram "$2"; printf '%s' "${TUNE_MODEL}";
 check "default family, 16 GiB -> qwen2.5-coder:14b" test "$(fam_pick qwen2.5-coder 16)" = "qwen2.5-coder:14b"
 check "qwen3 family, 12 GiB -> qwen3:8b"            test "$(fam_pick qwen3 12)"         = "qwen3:8b"
 check "qwen3 family, 4 GiB -> qwen3:4b"             test "$(fam_pick qwen3 4)"          = "qwen3:4b"
-check "codellama family, 24 GiB -> codellama:34b"   test "$(fam_pick codellama 24)"     = "codellama:34b"
-check "deepseek-coder-v2 has one size at any rung"  test "$(fam_pick deepseek-coder-v2 8)" = "deepseek-coder-v2:16b"
+check "codellama family, 24 GiB -> codellama:13b"   test "$(fam_pick codellama 24)"     = "codellama:13b"
+# deepseek-coder-v2 ships only 16b, which cannot load on 8 GiB — the ladder
+# must fall back rather than pull ~10 GB and then OOM on first use.
+check "deepseek-coder-v2 on 8 GiB falls back" test "$(fam_pick deepseek-coder-v2 8 2>/dev/null)" = "qwen2.5-coder:3b"
+check "deepseek-coder-v2 on 16 GiB is used"   test "$(fam_pick deepseek-coder-v2 16)" = "deepseek-coder-v2:16b"
 # An unknown family must NOT be used verbatim — that would make tune.sh try to
 # pull a tag that does not exist and fail every boot.
 check "unknown family falls back to the default"    test "$(fam_pick not-a-real-model 16)" = "qwen2.5-coder:14b"
+# A model auto-tune picks MUST fit the rung that picked it. At ~0.6 GB per
+# billion params (q4) plus context, the 16-23 GiB rung tops out around 20B —
+# so a 34b/70b/405b tag here would mean pulling tens of GB and then OOMing.
+fits_rung() {
+  local ram="$1" fam="$2" tag params
+  tag="$(fam_pick "${fam}" "${ram}")"; tag="${tag##*:}"
+  params="${tag%[bB]}"
+  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
+}
+for f in qwen2.5-coder qwen3 deepseek-coder-v2 llama3.1 codellama; do
+  check "auto-tune pick fits 8 GiB  (${f})"  fits_rung 8  "${f}"
+  check "auto-tune pick fits 16 GiB (${f})"  fits_rung 16 "${f}"
+done
 
 echo "# tune ladder boundaries (spec: 8, 9, 15, 16, 23, 24 GiB)"
 # tune.sh only runs main when executed; sourcing it exposes choose_for_ram().

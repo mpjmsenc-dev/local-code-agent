@@ -208,7 +208,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 the model size (models ≤4B rewrite whole files, which they get right far more
 often than search/replace diffs; bigger models use cheaper diffs) and scales
 aider's repo map to your context window so it never crowds out the code being
-edited. Override with `AIDER_EDIT_FORMAT` in `.env`.
+edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 
 ## Scripts
 
@@ -241,7 +241,7 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
-| `AIDER_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
+| `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
