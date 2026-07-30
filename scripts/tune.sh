@@ -6,11 +6,13 @@
 # A systemd oneshot (installed with --install-service) re-runs this on every
 # boot, so a DigitalOcean resize or hypervisor spec change self-adapts.
 #
-# Ladder (RAM in GiB, rounded to nearest):
-#     < 9   qwen2.5-coder:3b   ctx  4096
-#    9-15   qwen2.5-coder:7b   ctx  8192
-#   16-23   qwen2.5-coder:14b  ctx  8192
-#    >=24   qwen2.5-coder:14b  ctx 16384   (32b remains a manual choice)
+# Ladder (RAM in GiB, rounded to nearest) — sizes come from MODEL_FAMILY in
+# .env, so the same rungs work for any supported family:
+#     < 9   <family>:small   ctx  4096
+#    9-15   <family>:mid     ctx  8192
+#   16-23   <family>:big     ctx  8192
+#    >=24   <family>:big     ctx 16384   (larger sizes remain a manual choice)
+# Default family qwen2.5-coder => 3b / 7b / 14b.
 #
 # Usage:
 #   tune.sh                  detect and apply
@@ -28,11 +30,13 @@ TUNE_SERVICE=/etc/systemd/system/local-code-agent-tune.service
 # qwen2.5-coder ladder model no larger than TARGET, or nothing (exit 1).
 # Used to downgrade safely when a pull is impossible (offline / no network).
 largest_present_within() {
-  local target="$1" m order=""
+  local target="$1" m order="" fam small mid big
+  fam="$(model_family)"
+  read -r small mid big <<<"$(family_sizes "${fam}")"
   case "${target}" in
-    *:14b) order="qwen2.5-coder:14b qwen2.5-coder:7b qwen2.5-coder:3b" ;;
-    *:7b)  order="qwen2.5-coder:7b qwen2.5-coder:3b" ;;
-    *)     order="qwen2.5-coder:3b" ;;
+    *:"${big}") order="${fam}:${big} ${fam}:${mid} ${fam}:${small}" ;;
+    *:"${mid}") order="${fam}:${mid} ${fam}:${small}" ;;
+    *)          order="${fam}:${small}" ;;
   esac
   for m in ${order}; do
     if model_present "${m}"; then
@@ -44,19 +48,44 @@ largest_present_within() {
 }
 
 # choose_for_ram RAM_GIB — sets TUNE_MODEL and TUNE_CTX per the ladder.
+# model_family — the family auto-tune picks from (MODEL_FAMILY in .env).
+# Falls back to the default rather than inventing a tag, so a typo cannot make
+# tune.sh try to pull something that does not exist.
+model_family() {
+  local fam="${MODEL_FAMILY:-qwen2.5-coder}"
+  family_sizes "${fam}" >/dev/null 2>&1 || fam="qwen2.5-coder"
+  printf '%s\n' "${fam}"
+}
+
+# family_sizes FAMILY — echo "SMALL MID BIG": the tags this family publishes for
+# the three RAM rungs. Adding a family here is all it takes to support it.
+# Sizes are the Ollama tags; each must exist for that family.
+family_sizes() {
+  case "$1" in
+    qwen2.5-coder)     printf '3b 7b 14b\n' ;;
+    qwen3)             printf '4b 8b 14b\n' ;;
+    deepseek-coder-v2) printf '16b 16b 16b\n' ;;   # only one practical size
+    llama3.1)          printf '8b 8b 70b\n' ;;
+    codellama)         printf '7b 13b 34b\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 choose_for_ram() {
-  local ram="$1"
+  local ram="$1" fam small mid big
+  fam="$(model_family)"
+  read -r small mid big <<<"$(family_sizes "${fam}")"
   if (( ram < 9 )); then
-    TUNE_MODEL="qwen2.5-coder:3b"
+    TUNE_MODEL="${fam}:${small}"
     TUNE_CTX=4096
   elif (( ram <= 15 )); then
-    TUNE_MODEL="qwen2.5-coder:7b"
+    TUNE_MODEL="${fam}:${mid}"
     TUNE_CTX=8192
   elif (( ram <= 23 )); then
-    TUNE_MODEL="qwen2.5-coder:14b"
+    TUNE_MODEL="${fam}:${big}"
     TUNE_CTX=8192
   else
-    TUNE_MODEL="qwen2.5-coder:14b"
+    TUNE_MODEL="${fam}:${big}"
     TUNE_CTX=16384
   fi
 }

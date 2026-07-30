@@ -192,6 +192,19 @@ check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
+echo "# MODEL_FAMILY: the ladder follows the configured family, with a safe fallback"
+# shellcheck source=../scripts/tune.sh
+source "${REPO}/scripts/tune.sh"
+fam_pick() { MODEL_FAMILY="$1" choose_for_ram "$2"; printf '%s' "${TUNE_MODEL}"; }
+check "default family, 16 GiB -> qwen2.5-coder:14b" test "$(fam_pick qwen2.5-coder 16)" = "qwen2.5-coder:14b"
+check "qwen3 family, 12 GiB -> qwen3:8b"            test "$(fam_pick qwen3 12)"         = "qwen3:8b"
+check "qwen3 family, 4 GiB -> qwen3:4b"             test "$(fam_pick qwen3 4)"          = "qwen3:4b"
+check "codellama family, 24 GiB -> codellama:34b"   test "$(fam_pick codellama 24)"     = "codellama:34b"
+check "deepseek-coder-v2 has one size at any rung"  test "$(fam_pick deepseek-coder-v2 8)" = "deepseek-coder-v2:16b"
+# An unknown family must NOT be used verbatim — that would make tune.sh try to
+# pull a tag that does not exist and fail every boot.
+check "unknown family falls back to the default"    test "$(fam_pick not-a-real-model 16)" = "qwen2.5-coder:14b"
+
 echo "# tune ladder boundaries (spec: 8, 9, 15, 16, 23, 24 GiB)"
 # tune.sh only runs main when executed; sourcing it exposes choose_for_ram().
 # shellcheck source=../scripts/tune.sh

@@ -53,6 +53,20 @@ uses every core.
 | 16–23 | `qwen2.5-coder:14b` | 8192 |
 | ≥ 24 | `qwen2.5-coder:14b` | 16384 |
 
+**Want a different model?** Set `MODEL_FAMILY` in `.env` and auto-tune picks the
+largest size of *that* family your RAM allows — one line changes the model
+everywhere, and a resize still re-tunes it:
+
+| `MODEL_FAMILY` | small / mid / big |
+|---|---|
+| `qwen2.5-coder` *(default)* | 3b / 7b / 14b |
+| `qwen3` | 4b / 8b / 14b |
+| `deepseek-coder-v2` | 16b |
+| `llama3.1` | 8b / 8b / 70b |
+| `codellama` | 7b / 13b / 34b |
+
+An unrecognised value falls back to the default instead of failing a pull.
+
 `qwen2.5-coder:32b` is deliberately a manual choice for big machines (≥ 32 GB):
 `./update-model.sh qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
 reboot won't override you. Preview what tune would do: `scripts/tune.sh --dry-run`.
@@ -163,6 +177,7 @@ Created from `.env.example` on first run. All keys:
 |---|---|---|
 | `AUTO_TUNE` | `true` | Re-tune model/context to RAM on every boot; `false` = manual pin |
 | `MODEL_NAME` | `qwen2.5-coder:7b` | Model used by aider + WebUI (managed by auto-tune) |
+| `MODEL_FAMILY` | `qwen2.5-coder` | Family auto-tune picks from: `qwen3`, `deepseek-coder-v2`, `llama3.1`, `codellama` |
 | `OLLAMA_HOST` | `127.0.0.1:11434` | Ollama listen address (keep loopback-only) |
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | Context window in tokens |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
