@@ -633,6 +633,7 @@ The server manages itself through one command, 'lca':
   lca            start the coding agent (aider) in the current directory
   lca ask "..."  one-shot question in the terminal
   lca check      full health check
+  lca logs       recent logs from Ollama, the chat app and the installer
   lca speed      measure tokens/second and what limits it
   lca test       live end-to-end self-test
   lca update     update and re-verify the stack

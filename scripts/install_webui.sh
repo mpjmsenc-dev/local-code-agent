@@ -57,7 +57,9 @@ main() {
   # starter prompts about vocabulary exams and the Roman Empire.
   local params_env=() suggestions_env=()
   if have jq; then
-    params_env=( -e "DEFAULT_MODEL_PARAMS=$(lca_system_prompt | jq -Rs '{system: .}')" )
+    # -c keeps it on one line: an env value with embedded newlines is legal but
+    # awkward to inspect with 'docker inspect' and easy to mangle in a log.
+    params_env=( -e "DEFAULT_MODEL_PARAMS=$(lca_system_prompt | jq -Rsc '{system: .}')" )
     if [[ -r "${REPO_ROOT}/config/prompt-suggestions.json" ]] \
        && jq -e . "${REPO_ROOT}/config/prompt-suggestions.json" >/dev/null 2>&1; then
       suggestions_env=( -e "DEFAULT_PROMPT_SUGGESTIONS=$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json")" )

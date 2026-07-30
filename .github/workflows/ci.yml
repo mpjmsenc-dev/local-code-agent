@@ -264,33 +264,44 @@ jobs:
         run: |
           set -euo pipefail
           command -v sqlite3 >/dev/null || sudo apt-get install -y -qq sqlite3
-          # Seeding happens during startup, which /health can beat by a moment.
+
+          # 1. OUR side of the contract: the container must actually carry the
+          #    values. This is what regresses if someone edits install_webui.sh,
+          #    and it is true regardless of how Open WebUI stores config.
+          env_json="$(sudo docker inspect -f '{{json .Config.Env}}' open-webui)"
+          printf '%s' "${env_json}" | jq -e 'map(select(startswith("DEFAULT_MODEL_PARAMS="))) | length == 1' >/dev/null \
+            || { echo "FAIL: DEFAULT_MODEL_PARAMS was never passed to the container"; printf '%s' "${env_json}" | jq -r '.[]' | cut -c1-80; exit 1; }
+          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
+            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -e '.system | test("local-code-agent")' >/dev/null \
+            || { echo "FAIL: DEFAULT_MODEL_PARAMS does not carry our system prompt"; exit 1; }
+          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_PROMPT_SUGGESTIONS="))' \
+            | sed 's/^DEFAULT_PROMPT_SUGGESTIONS=//' | jq -e 'length > 0' >/dev/null \
+            || { echo "FAIL: DEFAULT_PROMPT_SUGGESTIONS is missing or empty"; exit 1; }
+          echo "OK: the container carries our system prompt and starter questions"
+
+          # 2. Open WebUI must have PARSED them. It logs and swallows bad JSON,
+          #    which would otherwise leave the stock suggestions in place with
+          #    nothing failing anywhere.
+          if sudo docker logs open-webui 2>&1 | grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS'; then
+            echo "FAIL: Open WebUI could not parse our starter questions"; exit 1
+          fi
+
+          # 3. And they must have reached its config store. Seeding happens
+          #    during startup, which /health can beat by a moment.
           for i in $(seq 1 15); do
             sudo docker cp open-webui:/app/backend/data/webui.db /tmp/webui.db 2>/dev/null || true
             sudo chown "$(id -u)" /tmp/webui.db 2>/dev/null || true
-            if [ -s /tmp/webui.db ] \
-               && sqlite3 /tmp/webui.db "select 1 from config where key='models.default_params'" | grep -q 1; then
+            if [ -s /tmp/webui.db ] && tests/webui-config-gate.sh /tmp/webui.db >/dev/null 2>&1; then
               break
             fi
             echo "waiting for Open WebUI to seed its config (${i}/15)..."
             sleep 2
           done
-          system="$(sqlite3 /tmp/webui.db "select value from config where key='models.default_params'" | jq -r '.system // empty')"
-          test -n "${system}" || { echo "FAIL: no system prompt in the WebUI config"; exit 1; }
-          printf '%s' "${system}" | grep -q 'local-code-agent' \
-            || { echo "FAIL: system prompt is not ours: ${system:0:200}"; exit 1; }
-          printf '%s' "${system}" | grep -qi 'never invent' \
-            || { echo "FAIL: system prompt lost its 'never invent flags' instruction"; exit 1; }
-          titles="$(sqlite3 /tmp/webui.db "select value from config where key='ui.prompt_suggestions'" | jq -r '[.[].title[]] | join(" ")')"
-          printf '%s' "${titles}" | grep -q 'Explain this command' \
-            || { echo "FAIL: our starter questions are missing: ${titles}"; exit 1; }
-          # if/fi, not 'grep && { exit 1; }': under 'set -e' an AND-list whose
-          # first command fails is the PASSING case here, and relying on that
-          # subtlety in a gate is how gates rot.
-          if printf '%s' "${titles}" | grep -qi 'roman empire'; then
-            echo "FAIL: stock Open WebUI suggestions are still in place"; exit 1
+          if [ ! -s /tmp/webui.db ]; then
+            echo "Could not copy the database out of the container. What is actually there:"
+            sudo docker exec open-webui sh -c 'ls -la /app/backend/data 2>&1; echo "--- DATA_DIR ---"; printenv DATA_DIR DATABASE_URL 2>&1' || true
           fi
-          echo "OK: the chat has our system prompt and starter questions"
+          tests/webui-config-gate.sh /tmp/webui.db
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env
