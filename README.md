@@ -273,7 +273,8 @@ local-code-agent/
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
-└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ · BACKUPS
+└── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ ·
+            BACKUPS · PERFORMANCE
 ```
 
 ## Performance & GPU
@@ -287,6 +288,11 @@ Inference speed depends on hardware:
   Options: a DigitalOcean **GPU droplet**, a cloud GPU instance, or a local
   hypervisor with **GPU passthrough**. `check-system.sh` reports whether a GPU
   was detected.
+
+`check-system.sh` and `lca test` report whether your model is actually running
+on the GPU or the CPU (`ollama ps`'s PROCESSOR column) — a driver can be present
+and Ollama still fall back to CPU. See **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**
+for what actually moves the needle, in order, and how to measure it.
 
 Note: CI exercises the CPU path on standard runners (there are no GPU runners),
 so the GPU path is documented and detected but not automatically E2E-tested —
@@ -307,7 +313,7 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[PERFORMANCE](docs/PERFORMANCE.md) · [BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 
