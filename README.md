@@ -169,7 +169,8 @@ Created from `.env.example` on first run. All keys:
 
 ```
 local-code-agent/
-├── README.md · LICENSE · .env.example · .gitignore
+├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
+├── Makefile                    # make gates/lint/test/hooks — the local dev loop
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
@@ -180,7 +181,8 @@ local-code-agent/
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
-├── .github/workflows/ci.yml    # CI: shellcheck · unit tests · nft/systemd checks
+├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
+├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
 └── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
 ```
 
@@ -214,7 +216,8 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
-[TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md)
+[TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
+[CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 

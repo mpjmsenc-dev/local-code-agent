@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# pre-push hook — run the exact gates CI runs, so a push never opens a red PR.
+#
+# Installed by `make hooks` (sets git's core.hooksPath to .githooks/). This is
+# the safety rail for the AI-assisted loop: an agent edits code, this hook runs
+# the gates (lint + bash -n + the unit suites) before anything reaches GitHub,
+# so a human only ever reviews PRs whose CI is already green.
+#
+# Bypass a single push with:  git push --no-verify
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+echo "pre-push: running 'make gates' (shellcheck + bash -n + unit tests)..."
+if make gates; then
+  echo "pre-push: gates passed — pushing."
+else
+  echo "pre-push: gates FAILED — push aborted." >&2
+  echo "          Fix the findings above (shellcheck: apt-get install -y shellcheck)," >&2
+  echo "          or bypass this one push with: git push --no-verify" >&2
+  exit 1
+fi
