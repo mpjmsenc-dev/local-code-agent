@@ -61,6 +61,23 @@ smarter but slower per token. First response after idle is slower (model loads
 into RAM; `OLLAMA_KEEP_ALIVE` controls how long it stays warm). Want
 faster/smarter? Resize to more RAM/CPU — auto-tune handles the rest.
 
+## The model ignores earlier context or instructions in a long session
+
+Everything the model sees — system prompt, chat history, open files, aider's
+repo map, and its own reply — shares one fixed context window
+(`OLLAMA_CONTEXT_LENGTH`, set by auto-tune per the RAM ladder). `run-agent.sh`
+tells aider the real window size (via a generated model-metadata file), so aider
+trims the *oldest* history to stay within budget rather than letting Ollama
+silently drop it. If replies start losing the thread or getting cut off:
+
+1. Keep the working set small — aider's `/clear` drops old context; close files
+   you're done with. Less history leaves more window for the answer.
+2. For a bigger window, add RAM and let auto-tune raise the rung (8 GB → 4096,
+   ~12 GB → 8192, 16 GB → 8192, 24 GB+ → 16384), or set `OLLAMA_CONTEXT_LENGTH`
+   in `.env` and re-run `scripts/install_ollama.sh`.
+3. A very large file can't fit whole — point aider at the specific
+   function/region instead of adding the entire file.
+
 ## aider: "model not found" or connection errors
 
 aider reaches Ollama via litellm, which needs two things `run-agent.sh` sets for

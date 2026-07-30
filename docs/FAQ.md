@@ -27,6 +27,15 @@ and pins it (`AUTO_TUNE=false`) so a reboot won't override your choice.
 The model is loaded into RAM on demand and unloaded after `OLLAMA_KEEP_ALIVE`
 (default 30m) of idleness. The first request pays the load time.
 
+**Why does it "forget" earlier messages in a long chat, or lose track in a big file?**
+Local models have a fixed context window (`OLLAMA_CONTEXT_LENGTH`, set by
+auto-tune per the RAM ladder: 4096–16384 tokens). Everything shares it — the
+system prompt, chat history, open files, aider's repo map, and the reply.
+`run-agent.sh` tells aider the *real* window size, so aider trims the oldest
+history to stay within budget instead of letting Ollama silently drop it. Keep
+sessions focused (aider's `/clear`, close finished files); for a bigger window,
+add RAM and auto-tune raises the rung on the next boot.
+
 **Can several people use it?**
 Open WebUI supports multiple accounts (as admin, create them — keep public
 signups locked). They share one model server, so heavy simultaneous use queues.
