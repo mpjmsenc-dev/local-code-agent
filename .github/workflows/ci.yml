@@ -135,6 +135,13 @@ jobs:
         # The one-command installer's whole job is to work on a machine with
         # nothing on it. Proving it here means it cannot rot into "works only
         # where git already happens to be installed".
+        #
+        # shell: bash is REQUIRED. This job runs in container: ubuntu:24.04,
+        # where the runner falls back to 'sh -e' (dash) — which has no
+        # 'pipefail', so 'set -euo pipefail' below dies with
+        # "Illegal option -o pipefail". The other steps in this job only survive
+        # the default because they happen to be sh-compatible.
+        shell: bash
         run: |
           set -euo pipefail
           # ORDER MATTERS. Everything needing git must happen BEFORE git is
