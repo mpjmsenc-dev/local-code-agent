@@ -255,6 +255,42 @@ jobs:
         run: scripts/install_webui.sh
       - name: webui.sh status must pass
         run: ./webui.sh status
+      - name: The chat really receives our system prompt and starter questions
+        # Reading Open WebUI's source says DEFAULT_MODEL_PARAMS and
+        # DEFAULT_PROMPT_SUGGESTIONS are seeded into its config table; this is
+        # what proves they actually are. It also fails loudly if a future image
+        # stops honouring them, which would otherwise be invisible — the chat
+        # would just quietly go back to answering like a stock model.
+        run: |
+          set -euo pipefail
+          command -v sqlite3 >/dev/null || sudo apt-get install -y -qq sqlite3
+          # Seeding happens during startup, which /health can beat by a moment.
+          for i in $(seq 1 15); do
+            sudo docker cp open-webui:/app/backend/data/webui.db /tmp/webui.db 2>/dev/null || true
+            sudo chown "$(id -u)" /tmp/webui.db 2>/dev/null || true
+            if [ -s /tmp/webui.db ] \
+               && sqlite3 /tmp/webui.db "select 1 from config where key='models.default_params'" | grep -q 1; then
+              break
+            fi
+            echo "waiting for Open WebUI to seed its config (${i}/15)..."
+            sleep 2
+          done
+          system="$(sqlite3 /tmp/webui.db "select value from config where key='models.default_params'" | jq -r '.system // empty')"
+          test -n "${system}" || { echo "FAIL: no system prompt in the WebUI config"; exit 1; }
+          printf '%s' "${system}" | grep -q 'local-code-agent' \
+            || { echo "FAIL: system prompt is not ours: ${system:0:200}"; exit 1; }
+          printf '%s' "${system}" | grep -qi 'never invent' \
+            || { echo "FAIL: system prompt lost its 'never invent flags' instruction"; exit 1; }
+          titles="$(sqlite3 /tmp/webui.db "select value from config where key='ui.prompt_suggestions'" | jq -r '[.[].title[]] | join(" ")')"
+          printf '%s' "${titles}" | grep -q 'Explain this command' \
+            || { echo "FAIL: our starter questions are missing: ${titles}"; exit 1; }
+          # if/fi, not 'grep && { exit 1; }': under 'set -e' an AND-list whose
+          # first command fails is the PASSING case here, and relying on that
+          # subtlety in a gate is how gates rot.
+          if printf '%s' "${titles}" | grep -qi 'roman empire'; then
+            echo "FAIL: stock Open WebUI suggestions are still in place"; exit 1
+          fi
+          echo "OK: the chat has our system prompt and starter questions"
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env
