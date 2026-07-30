@@ -259,6 +259,29 @@ else
   p_fail "only ${FREE_GB} GB free at ${MODELS_DIR} — models need headroom (>= 15 GB); clean up with: ollama rm <model>"
 fi
 
+# --- Backups (warn-only: backups are optional) ------------------------------
+step "Backups"
+if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.timer 2>/dev/null; then
+  p_pass "scheduled backup timer enabled (daily; keeps newest ${BACKUP_KEEP})"
+else
+  info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"
+fi
+shopt -s nullglob
+BKS=( "${REPO_ROOT}"/backups/local-code-agent-backup-*.tar.gz )
+shopt -u nullglob
+if (( ${#BKS[@]} )); then
+  mapfile -t BKS_SORTED < <(printf '%s\n' "${BKS[@]}" | sort)
+  NEWEST="${BKS_SORTED[-1]}"
+  NEWEST_AGE_DAYS=$(( ( $(date +%s) - $(stat -c %Y "${NEWEST}" 2>/dev/null || echo 0) ) / 86400 ))
+  if (( NEWEST_AGE_DAYS <= 7 )); then
+    p_pass "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old ($(basename "${NEWEST}"))"
+  else
+    p_warn "${#BKS[@]} backup(s) present but the newest is ${NEWEST_AGE_DAYS} days old — run ${REPO_ROOT}/backup.sh or enable the timer"
+  fi
+else
+  info "no backups yet — create one with: ${REPO_ROOT}/backup.sh"
+fi
+
 # --- Summary ----------------------------------------------------------------
 printf '\n%b\n' "${C_BOLD}=================== SUMMARY ===================${C_RESET}"
 printf '%b\n' "  ${C_GREEN}PASS: ${PASS}${C_RESET}   ${C_YELLOW}WARN: ${WARN}${C_RESET}   ${C_RED}FAIL: ${FAIL}${C_RESET}"
