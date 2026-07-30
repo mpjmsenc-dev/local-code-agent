@@ -1,6 +1,17 @@
 # TROUBLESHOOTING.md — symptom → fix
 
-Run `./check-system.sh` first: it pinpoints most of these automatically.
+Run `lca check` first: it pinpoints most of these automatically.
+
+Two commands worth knowing before you read any further:
+
+```bash
+lca logs                              # Ollama, the chat app and the installer, in one place
+lca logs | lca ask "why did this fail?"   # let your own model read them for you
+```
+
+That second one is not a gimmick — the model is already on the machine, it sees
+the same output you do, and it is usually faster than finding the right section
+below. `lca speed` answers "why is it slow?" specifically.
 
 ## apt is locked ("Could not get lock /var/lib/dpkg/lock-frontend")
 

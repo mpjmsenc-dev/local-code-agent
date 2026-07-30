@@ -80,12 +80,13 @@ Roman Empire.
 The same prompt is used by `lca ask` in the terminal, so both doors lead to the
 same assistant.
 
-**Changing it later:** Open WebUI reads these two settings from the environment
-**only when its database has no value for them yet** — that is, on a first
-install. Afterwards its own database wins and editing `.env` will do nothing.
-To change them on a server that is already running, use the WebUI itself:
-**Admin Panel → Settings**. (`scripts/install_webui.sh` tells you which of the
-two cases you are in.)
+**Changing it later:** these two settings come from the environment, so editing
+the repo and re-running `scripts/install_webui.sh` takes effect. The one
+exception is a setting you have already changed **inside the WebUI**: Open WebUI
+stores that in its own database, and a stored value always wins over the
+environment. So if you edit the assistant's system prompt in **Admin Panel →
+Settings**, that is where it lives from then on, and re-running the installer
+will not overwrite it.
 
 ## Running the coding agent from the phone
 

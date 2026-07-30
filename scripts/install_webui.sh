@@ -41,12 +41,11 @@ main() {
     die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
   fi
 
-  # Open WebUI seeds these two settings from the environment only when the key
-  # is NOT already in its database — Config.seed_defaults is explicit that
-  # "Existing DB values take precedence over defaults". So they take effect on a
-  # first install and are ignored on every later one. Note whether the data
-  # volume already existed so we can say that out loud instead of letting a
-  # .env edit look like it applied.
+  # These two settings are read from the environment on every start. Open WebUI
+  # registers them as its in-memory defaults and only prefers a database row if
+  # one exists — which happens when the value is edited inside the WebUI. So a
+  # change here applies on re-run, EXCEPT for a setting the user has since
+  # changed in Admin Settings, which stays theirs.
   local volume_existed=false
   if as_root docker volume inspect open-webui >/dev/null 2>&1; then
     volume_existed=true
@@ -100,8 +99,8 @@ main() {
   ok "Open WebUI is up on port ${WEBUI_PORT}."
 
   if [[ "${volume_existed}" == "true" && ${#params_env[@]} -gt 0 ]]; then
-    info "Existing chat data found, so Open WebUI keeps the settings already in its database."
-    info "To change the assistant's default system prompt or starter questions now, edit them in the WebUI itself (Admin Panel → Settings)."
+    info "Existing chat data kept. The assistant's system prompt and starter questions come from here,"
+    info "unless you have changed them in the WebUI (Admin Panel → Settings) — a value edited there wins."
   fi
 
   # Open WebUI binds all interfaces (host networking). Apply the always-on

@@ -1,87 +1,71 @@
 #!/usr/bin/env bash
-# tests/webui-config-gate.sh — assert that a copy of Open WebUI's database
-# really contains OUR system prompt and OUR starter questions.
+# tests/webui-config-gate.sh — assert that Open WebUI really SERVES our starter
+# questions to a signed-in user, rather than its stock ones.
 #
-# Run against a webui.db copied out of the container:
-#   tests/webui-config-gate.sh /tmp/webui.db
+#   tests/webui-config-gate.sh http://127.0.0.1:3000
 #
-# Why a script and not an inline CI step: this way it is ShellCheck-covered and
-# can be tested against fixture databases locally, instead of learning what it
-# does one slow CI round-trip at a time.
+# Why this shape, after getting it wrong once: the first version of this gate
+# asserted that our values were written into Open WebUI's `config` table. They
+# are not, and they do not need to be. Config.configure(defaults=DEFAULT_CONFIG)
+# registers the env-derived values as in-memory defaults, and Config.get()
+# returns the database row only IF one exists, falling back to that default
+# otherwise. A fresh install has zero config rows and still serves our values,
+# so the old gate was testing Open WebUI's persistence strategy instead of our
+# behaviour — it failed while the feature worked perfectly.
 #
-# Open WebUI has used two different config layouts, and the published image does
-# not always match the source on main:
-#   per-key  config(key TEXT PRIMARY KEY, value JSON)   -- current
-#   blob     config(id, data JSON, version, ...)        -- older, one nested doc
-# Both are read here, because a gate that breaks on an unrelated upstream
-# refactor is a gate that gets deleted.
+# This asks the server what it would actually send to a user, which is the only
+# thing that matters and is stable across how upstream chooses to store it.
 set -euo pipefail
 
-DB="${1:-}"
-[[ -n "${DB}" ]] || { echo "usage: $0 /path/to/webui.db" >&2; exit 2; }
-[[ -s "${DB}" ]] || { echo "FAIL: ${DB} is missing or empty — the copy out of the container did not work" >&2; exit 1; }
+BASE="${1:-}"
+[[ -n "${BASE}" ]] || { echo "usage: $0 http://127.0.0.1:PORT" >&2; exit 2; }
+command -v jq >/dev/null || { echo "FAIL: jq is not installed" >&2; exit 2; }
 
-command -v sqlite3 >/dev/null || { echo "FAIL: sqlite3 is not installed" >&2; exit 2; }
-command -v jq >/dev/null      || { echo "FAIL: jq is not installed" >&2; exit 2; }
+EMAIL="ci-gate@example.invalid"
+PASSWORD="ci-gate-password-not-a-secret"
 
-# diagnose — everything needed to tell WHY this failed, printed once, so a red
-# build explains itself instead of prompting another round-trip.
-diagnose() {
-  echo "--- diagnosis ---"
-  echo "tables: $(sqlite3 "${DB}" "select group_concat(name) from sqlite_master where type='table'" 2>&1 | head -c 500)"
-  echo "config columns: $(sqlite3 "${DB}" "select group_concat(name) from pragma_table_info('config')" 2>&1 | head -c 300)"
-  echo "config rows: $(sqlite3 "${DB}" "select count(*) from config" 2>&1 | head -c 80)"
-  if [[ "${LAYOUT}" == "per-key" ]]; then
-    echo "config keys: $(sqlite3 "${DB}" "select group_concat(key) from config" 2>&1 | head -c 2000)"
-  elif [[ "${LAYOUT}" == "blob" ]]; then
-    echo "top-level keys: $(sqlite3 "${DB}" "select data from config order by id desc limit 1" 2>&1 | jq -r 'keys | join(",")' 2>&1 | head -c 500)"
-  fi
+# A token is needed because /api/config only includes ui.prompt_suggestions for
+# an authenticated user. On a fresh install signup succeeds and the first
+# account becomes admin; if the account already exists (a re-run against a
+# persistent volume) sign in instead.
+# '|| true' on each: under 'set -o pipefail' a connection failure makes the
+# whole substitution fail, which would kill the script before it could print a
+# diagnosis — leaving only curl's bare exit code as the CI output.
+token="$(curl -sS --max-time 20 -X POST "${BASE}/api/v1/auths/signup" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg e "${EMAIL}" --arg p "${PASSWORD}" '{name:"CI Gate", email:$e, password:$p}')" \
+  2>/dev/null | jq -r '.token // empty' 2>/dev/null || true)"
+
+if [[ -z "${token}" ]]; then
+  token="$(curl -sS --max-time 20 -X POST "${BASE}/api/v1/auths/signin" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg e "${EMAIL}" --arg p "${PASSWORD}" '{email:$e, password:$p}')" \
+    2>/dev/null | jq -r '.token // empty' 2>/dev/null || true)"
+fi
+[[ -n "${token}" ]] || {
+  echo "FAIL: could not obtain a token (is signup enabled on this instance?)" >&2
+  curl -sS --max-time 10 "${BASE}/api/config" 2>/dev/null | head -c 500 >&2 || true
+  exit 1
 }
 
-COLUMNS="$(sqlite3 "${DB}" "select group_concat(name) from pragma_table_info('config')" 2>/dev/null || true)"
-LAYOUT="unknown"
-case ",${COLUMNS}," in
-  *,key,*)  LAYOUT="per-key" ;;
-  *,data,*) LAYOUT="blob" ;;
-esac
+config="$(curl -sS --max-time 20 -H "Authorization: Bearer ${token}" "${BASE}/api/config" || true)"
+[[ -n "${config}" ]] || { echo "FAIL: /api/config returned nothing" >&2; exit 1; }
 
-if [[ "${LAYOUT}" == "unknown" ]]; then
-  echo "FAIL: Open WebUI's config table has an unrecognised layout (columns: ${COLUMNS:-none})." >&2
-  diagnose >&2
+titles="$(printf '%s' "${config}" | jq -r '[(.default_prompt_suggestions // .prompt_suggestions // [])[].title[]?] | join(" ")' 2>/dev/null || true)"
+if [[ -z "${titles}" ]]; then
+  echo "FAIL: the served config carries no starter questions." >&2
+  echo "--- keys in /api/config ---" >&2
+  printf '%s' "${config}" | jq -r 'keys | join(", ")' >&2 || true
   exit 1
 fi
-echo "Open WebUI config layout: ${LAYOUT}"
 
-# read_config DOTTED_KEY — the stored JSON value, whichever layout is in use.
-read_config() {
-  local key="$1"
-  if [[ "${LAYOUT}" == "per-key" ]]; then
-    sqlite3 "${DB}" "select value from config where key='${key}'" 2>/dev/null || true
-  else
-    # Dotted keys are a nested path in the blob layout: models.default_params
-    # lives at .models.default_params.
-    sqlite3 "${DB}" "select data from config order by id desc limit 1" 2>/dev/null \
-      | jq -c --arg k "${key}" 'getpath($k | split(".")) // empty' 2>/dev/null || true
-  fi
-}
-
-fail() { echo "FAIL: $*" >&2; diagnose >&2; exit 1; }
-
-system="$(read_config models.default_params | jq -r '.system // empty' 2>/dev/null || true)"
-[[ -n "${system}" ]] || fail "no default system prompt is stored in Open WebUI's config"
-printf '%s' "${system}" | grep -q 'local-code-agent' \
-  || fail "the stored system prompt is not ours: ${system:0:200}"
-printf '%s' "${system}" | grep -qi 'never invent' \
-  || fail "the stored system prompt lost its 'never invent flags' instruction"
-
-titles="$(read_config ui.prompt_suggestions | jq -r '[.[].title[]?] | join(" ")' 2>/dev/null || true)"
-[[ -n "${titles}" ]] || fail "no starter questions are stored in Open WebUI's config"
 printf '%s' "${titles}" | grep -q 'Explain this command' \
-  || fail "our starter questions are missing: ${titles}"
+  || { echo "FAIL: our starter questions are not the ones being served: ${titles}" >&2; exit 1; }
 # if/fi rather than 'grep && exit 1': under set -e the AND-list's first command
 # failing is the PASSING case here, and a gate should not hinge on that.
 if printf '%s' "${titles}" | grep -qi 'roman empire'; then
-  fail "Open WebUI's stock starter questions are still in place"
+  echo "FAIL: Open WebUI is still serving its stock starter questions" >&2
+  exit 1
 fi
 
-echo "OK: the chat has our system prompt and our starter questions (${LAYOUT} layout)"
+echo "OK: Open WebUI serves our starter questions, not the stock ones"

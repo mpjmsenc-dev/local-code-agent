@@ -38,20 +38,6 @@ EOF
 # just tokens that cost time on CPU.
 heading() { printf '\n===== %s =====\n' "$1"; }
 
-# run_maybe_root CMD... — run a command, retrying through as_root only if it
-# fails AND root is actually available. Reading the journal or docker often
-# works unprivileged (journal group, docker group); trying sudo first would
-# prompt for a password nobody needs to type.
-run_maybe_root() {
-  if "$@" 2>/dev/null; then
-    return 0
-  fi
-  if can_root; then
-    as_root "$@" 2>/dev/null && return 0
-  fi
-  return 1
-}
-
 logs_ollama() {
   local lines="$1" follow="$2"
   heading "ollama (the model server)"
@@ -62,7 +48,7 @@ logs_ollama() {
   fi
   local -a cmd=(journalctl -u ollama --no-pager -n "${lines}")
   [[ "${follow}" == "true" ]] && cmd+=( -f )
-  run_maybe_root "${cmd[@]}" \
+  run_reader journalctl -u ollama --no-pager -n 0 -- "${cmd[@]}" \
     || warn "Could not read the journal for ollama. Try: sudo journalctl -u ollama -n ${lines}"
 }
 
@@ -75,7 +61,7 @@ logs_webui() {
   fi
   local -a cmd=(docker logs --tail "${lines}" "${WEBUI_CONTAINER}")
   [[ "${follow}" == "true" ]] && cmd+=( -f )
-  run_maybe_root "${cmd[@]}" \
+  run_reader docker container inspect "${WEBUI_CONTAINER}" -- "${cmd[@]}" \
     || warn "Could not read logs for container '${WEBUI_CONTAINER}' (is it created? try: lca webui status)."
 }
 

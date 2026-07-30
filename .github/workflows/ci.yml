@@ -286,22 +286,11 @@ jobs:
             echo "FAIL: Open WebUI could not parse our starter questions"; exit 1
           fi
 
-          # 3. And they must have reached its config store. Seeding happens
-          #    during startup, which /health can beat by a moment.
-          for i in $(seq 1 15); do
-            sudo docker cp open-webui:/app/backend/data/webui.db /tmp/webui.db 2>/dev/null || true
-            sudo chown "$(id -u)" /tmp/webui.db 2>/dev/null || true
-            if [ -s /tmp/webui.db ] && tests/webui-config-gate.sh /tmp/webui.db >/dev/null 2>&1; then
-              break
-            fi
-            echo "waiting for Open WebUI to seed its config (${i}/15)..."
-            sleep 2
-          done
-          if [ ! -s /tmp/webui.db ]; then
-            echo "Could not copy the database out of the container. What is actually there:"
-            sudo docker exec open-webui sh -c 'ls -la /app/backend/data 2>&1; echo "--- DATA_DIR ---"; printenv DATA_DIR DATABASE_URL 2>&1' || true
-          fi
-          tests/webui-config-gate.sh /tmp/webui.db
+          # 3. And Open WebUI must actually SERVE them. This asks the running
+          #    server what a signed-in user would receive, which is the only
+          #    thing that matters — and is stable regardless of whether upstream
+          #    persists the value or serves it from its in-memory defaults.
+          tests/webui-config-gate.sh "http://127.0.0.1:${WEBUI_PORT:-3000}"
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env

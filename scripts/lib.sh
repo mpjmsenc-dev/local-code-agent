@@ -645,6 +645,33 @@ Only mention these when they are actually relevant to the question.
 EOF
 }
 
+# run_reader PROBE_CMD... -- REAL_CMD... — decide once, with a cheap probe,
+# whether a log reader needs root, then run the real command directly.
+#
+# The obvious shape ("run it; if that fails, retry under sudo") is wrong for a
+# follow: `journalctl -f` only ends when the user presses Ctrl-C, which exits
+# non-zero, so the retry would silently restart the follow under sudo. Probing
+# first also avoids a sudo password prompt on the many setups where reading the
+# journal or Docker already works unprivileged (journal/docker group).
+run_reader() {
+  local -a probe=() real=()
+  local seen=false arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "--" && "${seen}" == "false" ]]; then seen=true; continue; fi
+    if [[ "${seen}" == "false" ]]; then probe+=( "${arg}" ); else real+=( "${arg}" ); fi
+  done
+  (( ${#probe[@]} > 0 && ${#real[@]} > 0 )) || return 2
+  if "${probe[@]}" >/dev/null 2>&1; then
+    "${real[@]}"
+    return 0
+  fi
+  if can_root && as_root "${probe[@]}" >/dev/null 2>&1; then
+    as_root "${real[@]}"
+    return 0
+  fi
+  return 1
+}
+
 # webui_url — loopback URL for the local Open WebUI.
 webui_url() { printf 'http://127.0.0.1:%s\n' "${WEBUI_PORT:-3000}"; }
 

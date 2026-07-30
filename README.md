@@ -193,6 +193,7 @@ lca                 # starts aider on the local model, right here
 | `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
 | `lca chat` | print the address for the chat app on your phone |
 | `lca check` / `lca test` | health check / live end-to-end self-test |
+| `lca logs` | recent logs from Ollama, the chat app and the installer |
 | `lca speed` | measure tokens/second and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` | internet kill switch (needs sudo) |
