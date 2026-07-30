@@ -190,11 +190,20 @@ lca                 # starts aider on the local model, right here
 | Command | Does |
 |---|---|
 | `lca` | start the coding agent in the current directory |
+| `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
 | `lca chat` | print the address for the chat app on your phone |
 | `lca check` / `lca test` | health check / live end-to-end self-test |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` | internet kill switch (needs sudo) |
 | `lca model <name>` | switch models |
+
+Quick answers without leaving what you are doing:
+
+```bash
+lca ask "how do I find the 10 largest files under /var?"
+lca ask -f netmode.sh "what does this script do?"
+journalctl -u ollama -n 50 | lca ask "why did this fail?"
+```
 
 `lca help` lists them all. Everything after the command is passed through, so
 `lca --no-auto-commits` reaches aider and `lca model X --remove-old` reaches

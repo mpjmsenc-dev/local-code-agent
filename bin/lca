@@ -24,6 +24,8 @@ local-code-agent — private AI stack
 Usage: lca [command] [args...]
 
   lca                     start the coding agent here (aider, in \$PWD)
+  lca ask "question"      one-shot answer, no session, no browser
+  lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
   lca chat                print the address to open the chat app on your phone
   lca check               full health check
   lca test                live end-to-end self-test (proves it really works)
@@ -52,6 +54,7 @@ fi
 
 case "${cmd}" in
   ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
+  ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
   chat)            exec "${REPO}/webui.sh" url ;;
   check)           exec "${REPO}/check-system.sh" "$@" ;;
   test|selftest)   exec "${REPO}/scripts/selftest.sh" "$@" ;;
