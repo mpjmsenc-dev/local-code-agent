@@ -59,10 +59,14 @@ jobs:
         run: |
           sudo scripts/tune.sh --install-service
           sudo ./netmode.sh --install-service
+          sudo ./backup.sh --install-timer
           systemd-analyze verify \
             /etc/systemd/system/local-code-agent-tune.service \
-            /etc/systemd/system/local-code-agent-netmode.service
+            /etc/systemd/system/local-code-agent-netmode.service \
+            /etc/systemd/system/local-code-agent-backup.service \
+            /etc/systemd/system/local-code-agent-backup.timer
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
+          systemctl is-enabled local-code-agent-backup.timer
       - name: Render the ollama drop-in and verify its contents
         run: |
           sudo bash -c 'source scripts/lib.sh && load_env && render_ollama_dropin'

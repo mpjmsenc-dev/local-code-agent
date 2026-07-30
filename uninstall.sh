@@ -60,9 +60,12 @@ main() {
   if systemd_available; then
     as_root systemctl disable --now local-code-agent-tune.service >/dev/null 2>&1 || true
     as_root systemctl disable --now local-code-agent-netmode.service >/dev/null 2>&1 || true
+    as_root systemctl disable --now local-code-agent-backup.timer >/dev/null 2>&1 || true
   fi
   as_root rm -f /etc/systemd/system/local-code-agent-tune.service \
-                /etc/systemd/system/local-code-agent-netmode.service
+                /etc/systemd/system/local-code-agent-netmode.service \
+                /etc/systemd/system/local-code-agent-backup.timer \
+                /etc/systemd/system/local-code-agent-backup.service
   as_root rm -rf "${NETMODE_DIR}"
   ok "Boot services and netmode state removed."
 

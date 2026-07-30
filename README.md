@@ -141,7 +141,7 @@ arguments pass straight through, e.g. `run-agent.sh --no-auto-commits`.
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
-| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list (keeps newest `BACKUP_KEEP`) |
+| `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list (keeps newest `BACKUP_KEEP`; `--install-timer` for daily) |
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |

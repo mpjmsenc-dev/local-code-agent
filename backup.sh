@@ -6,6 +6,11 @@
 #     the multi-GB blobs are deliberately NOT tarred)
 # Then prune old backups, keeping the newest BACKUP_KEEP (.env; default 7) so
 # they can't slowly fill the disk. Restore with: ./restore.sh <tarball>
+#
+# Usage:
+#   backup.sh                 create a backup now (and prune old ones)
+#   backup.sh --install-timer install a systemd timer that runs this daily
+#   backup.sh --uninstall-timer  remove that timer
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,8 +19,10 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
 BACKUP_DIR="${REPO_ROOT}/backups"
+BACKUP_SERVICE=/etc/systemd/system/local-code-agent-backup.service
+BACKUP_TIMER=/etc/systemd/system/local-code-agent-backup.timer
 
-main() {
+do_backup() {
   step "Creating backup"
   local stamp tarball
   stamp="$(date +%Y%m%d-%H%M%S)"
@@ -112,6 +119,66 @@ prune_old_backups() {
       warn "  could not remove ${f}"
     fi
   done
+}
+
+# install_timer — schedule do_backup daily via systemd. The timer owns the
+# schedule; the oneshot service just runs backup.sh (no [Install] on it, so it
+# only ever fires from the timer, never at boot). Persistent=true catches up a
+# run missed while the box was off.
+install_timer() {
+  if ! systemd_available; then
+    warn "systemd is not available here — cannot install the backup timer. Run '${SCRIPT_DIR}/backup.sh' from cron instead."
+    return 0
+  fi
+  info "Installing the daily backup timer (${BACKUP_TIMER})..."
+  {
+    echo "[Unit]"
+    echo "Description=local-code-agent backup (WebUI data + .env + model list)"
+    echo "After=docker.service"
+    echo ""
+    echo "[Service]"
+    echo "Type=oneshot"
+    echo "ExecStart=${SCRIPT_DIR}/backup.sh"
+  } | as_root tee "${BACKUP_SERVICE}" >/dev/null
+  {
+    echo "[Unit]"
+    echo "Description=Run the local-code-agent backup on a daily schedule"
+    echo ""
+    echo "[Timer]"
+    echo "OnCalendar=*-*-* 03:30:00"
+    echo "Persistent=true"
+    echo ""
+    echo "[Install]"
+    echo "WantedBy=timers.target"
+  } | as_root tee "${BACKUP_TIMER}" >/dev/null
+  as_root systemctl daemon-reload
+  as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
+    || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"
+  ok "Scheduled backups on: daily at 03:30, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
+}
+
+# uninstall_timer — remove the timer + service (used by uninstall.sh too).
+uninstall_timer() {
+  if systemd_available; then
+    as_root systemctl disable --now local-code-agent-backup.timer >/dev/null 2>&1 || true
+  fi
+  as_root rm -f "${BACKUP_TIMER}" "${BACKUP_SERVICE}"
+  if systemd_available; then
+    as_root systemctl daemon-reload
+  fi
+  ok "Scheduled backup timer removed."
+}
+
+usage() { sed -n '10,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  case "${1:-}" in
+    "")                 do_backup ;;
+    --install-timer)    install_timer ;;
+    --uninstall-timer)  uninstall_timer ;;
+    -h|--help)          usage; exit 0 ;;
+    *)                  usage; die "Unknown option: ${1}" ;;
+  esac
 }
 
 main "$@"

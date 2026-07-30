@@ -95,6 +95,8 @@ main() {
   info "3. Code in the terminal: cd <your-project> && ${SCRIPT_DIR}/run-agent.sh"
   info "4. Internet kill switch: sudo ${SCRIPT_DIR}/netmode.sh offline|online|status"
   info "5. Health check anytime: ${SCRIPT_DIR}/check-system.sh"
+  info "6. Prove it end-to-end:  ${SCRIPT_DIR}/scripts/selftest.sh   (a.k.a. make smoke)"
+  info "7. Automatic daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
   # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
   # install log for exactly one of these final lines.
   if [[ "${setup_ok}" == "true" ]]; then
