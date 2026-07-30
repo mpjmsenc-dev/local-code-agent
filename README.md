@@ -76,6 +76,50 @@ every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
 with `sudo ./netmode.sh harden` / `status`.
 
+## Security model
+
+What "private" means here, precisely — and what it doesn't.
+
+**How your services are kept private**
+- **Ollama** binds loopback only (`127.0.0.1:11434` by default). Its API is
+  **unauthenticated**, so a non-loopback bind would expose model access to
+  anyone who can reach the host — `check-system.sh` warns if you set one.
+- **Open WebUI** binds all interfaces (it runs with Docker host networking so
+  it can reach loopback Ollama). It is kept private by the **inbound guard**:
+  an always-on nftables table (`lca_inbound`) that drops new inbound to the
+  WebUI and Ollama ports on every interface **except loopback and
+  `tailscale0`**. SSH (22) and all other ports are untouched, so the guard can
+  never lock you out. It is re-applied on every boot and whenever WebUI is
+  (re)created.
+- **Phone access** rides Tailscale — an encrypted, private WireGuard network.
+  Nothing is port-forwarded; you reach WebUI at `http://<tailscale-ip>:3000`.
+- **No telemetry**: aider has analytics/update checks off; Open WebUI runs with
+  `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS`, `ANONYMIZED_TELEMETRY` set.
+
+**The kill switch** (`netmode.sh offline`) adds an egress lockdown: new
+outbound connections — locally-generated *and* docker-forwarded — are dropped
+except loopback and the Tailscale path. It persists across reboots and is
+fail-closed (state is saved before rules apply). Inference keeps working
+offline because the models are local.
+
+**Honest limitations**
+- The encrypted Tailscale tunnel still uses the network as transport —
+  "offline" means the AI stack can't reach the internet, not that the NIC is
+  dead.
+- The inbound guard is targeted (it blocks the two sensitive ports on
+  non-private interfaces), not a full default-drop firewall; it assumes you do
+  not expose other services.
+- Trust is single-VM: anyone with a shell (or root) on the box has full access.
+
+**Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
+- Create the **first** WebUI account promptly, then set
+  `WEBUI_ENABLE_SIGNUP=false` and re-run `scripts/install_webui.sh`.
+- **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
+  internet, and keep `OLLAMA_HOST` on loopback.
+- Verify the posture any time with `./check-system.sh` and
+  `sudo ./netmode.sh status`. On DigitalOcean, the **Recovery Console** is the
+  unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
+
 ## Daily usage: aider (the coding agent)
 
 ```bash
