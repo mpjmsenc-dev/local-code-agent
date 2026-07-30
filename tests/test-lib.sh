@@ -341,6 +341,28 @@ home_set_when_unset() {
 }
 check "HOME is set after sourcing lib.sh with HOME unset" home_set_when_unset
 
+echo "# run_reader() — probe once, then run; never retry a follow under sudo"
+reader_ran() { test "$(run_reader true -- printf ran)" = "ran"; }
+check "probe succeeds -> the real command runs" reader_ran
+# The bug this replaced: 'run it, and on failure retry under sudo' restarts a
+# 'logs -f' as root the moment the user presses Ctrl-C, because quitting a
+# follow exits non-zero. Probing separately is what makes that impossible.
+reader_skips() {
+  local out
+  out="$(run_reader false -- printf SHOULD-NOT-RUN 2>/dev/null || true)"
+  [[ "${out}" != *SHOULD-NOT-RUN* ]]
+}
+check "probe fails -> the real command never runs" reader_skips
+reader_status() { run_reader false -- true; }
+not_ok() { ! "$@" >/dev/null 2>&1; }
+check "probe fails -> nonzero exit" not_ok reader_status
+# A malformed call must be loud, not silently run the wrong half.
+check "no '--' separator -> usage error (2)" not_ok run_reader true echo hi
+check "nothing after '--' -> usage error (2)" not_ok run_reader true --
+# Arguments containing spaces must survive the split intact.
+reader_keeps_spaces() { test "$(run_reader true -- printf '%s' 'two words')" = "two words"; }
+check "arguments with spaces survive the split" reader_keeps_spaces
+
 echo "# classify_gpu() — every GPU situation, testable on a machine with no GPU"
 gpu_is() { test "$(classify_gpu "$2" "$3" "$4")" = "$1"; }
 check "no card, no driver -> none"        gpu_is none      false false ""
