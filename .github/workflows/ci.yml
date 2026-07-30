@@ -70,6 +70,34 @@ jobs:
             grep "^Environment=${key}=" /etc/systemd/system/ollama.service.d/local-code-agent.conf
           done
 
+  minimal-base:
+    # Guards the dependency contract on a TRULY minimal image. The normal
+    # runners (and cloud images) preinstall zstd, ca-certificates, iproute2,
+    # etc. — which is exactly how missing-dependency bugs slipped through
+    # before. Running install_dependencies.sh on bare ubuntu:24.04 and then
+    # asserting the tools resolve catches any such regression automatically.
+    name: Minimal-base install (catches missing deps)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Bootstrap (bare image has no git/CA bundle for checkout)
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+      - uses: actions/checkout@v5
+      - name: Run install_dependencies.sh on a minimal base
+        run: bash scripts/install_dependencies.sh
+      - name: Every tool the stack relies on must now resolve
+        run: |
+          export PATH="${PATH}:/usr/sbin:/sbin"
+          missing=0
+          for t in curl wget git python3 jq zstd nft ss; do
+            if command -v "$t" >/dev/null; then echo "ok   $t"; else echo "MISSING $t"; missing=1; fi
+          done
+          test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
+          python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
+          exit "${missing}"
+
   e2e:
     name: E2E — real Ollama install + real generation
     runs-on: ubuntu-latest

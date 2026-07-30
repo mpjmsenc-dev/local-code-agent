@@ -8,7 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_env
 
-PACKAGES=(curl wget git python3 python3-venv python3-pip build-essential jq unzip zip htop tree nftables)
+# Cloud images and CI runners preinstall many of these; minimal Ubuntu/Debian
+# do NOT, so install them explicitly (install_dependencies runs first):
+#   ca-certificates — TLS trust store; without it every HTTPS download (Docker
+#                     key, ollama/tailscale installers, pip, model pulls) fails
+#   zstd            — the official Ollama installer needs it to unpack
+#   iproute2 (ss)   — install_webui's port-collision safety check needs it
+#   python3-dev     — source builds of aider deps on arch's without wheels (arm64)
+PACKAGES=(ca-certificates curl wget git python3 python3-venv python3-pip python3-dev build-essential jq unzip zip zstd iproute2 htop tree nftables)
 
 main() {
   step "Installing base dependencies"

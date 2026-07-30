@@ -239,6 +239,13 @@ case "${ARCH}" in
   *) p_warn "untested CPU architecture: ${ARCH} (supported: x86_64, aarch64)" ;;
 esac
 info "RAM: ${RAM_GIB} GiB · resizing the VM re-tunes the model on next boot (see scripts/tune.sh)"
+# GPU is optional — Ollama uses a supported one automatically; CPU is the
+# fully-supported default. Report it so slow CPU inference is never a mystery.
+if has_nvidia_gpu; then
+  p_pass "NVIDIA GPU detected ($(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)) — Ollama will use it (fast inference)"
+else
+  info "no NVIDIA GPU — CPU inference (a reading pace); Ollama auto-uses a GPU if you move to a GPU host (see README 'Performance')"
+fi
 
 # Free disk where Ollama keeps its models (>= 15 GB wanted).
 MODELS_DIR=/usr/share/ollama/.ollama/models

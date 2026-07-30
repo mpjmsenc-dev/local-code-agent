@@ -169,7 +169,8 @@ Created from `.env.example` on first run. All keys:
 
 ```
 local-code-agent/
-├── README.md · LICENSE · .env.example · .gitignore
+├── README.md · CONTRIBUTING.md · LICENSE · .env.example · .gitignore
+├── Makefile                    # make gates/lint/test/hooks — the local dev loop
 ├── setup.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
@@ -180,9 +181,26 @@ local-code-agent/
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
-├── .github/workflows/ci.yml    # CI: shellcheck · unit tests · nft/systemd checks
+├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
+├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
 └── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ
 ```
+
+## Performance & GPU
+
+Inference speed depends on hardware:
+- **CPU (default, e.g. a Basic droplet):** works everywhere, but it's a reading
+  pace, not instant — expect a few tokens/second, slower for bigger models. This
+  is the fully-supported, tested path.
+- **GPU (optional, much faster):** if the host has a supported NVIDIA GPU with
+  drivers installed, **Ollama uses it automatically — no config change needed.**
+  Options: a DigitalOcean **GPU droplet**, a cloud GPU instance, or a local
+  hypervisor with **GPU passthrough**. `check-system.sh` reports whether a GPU
+  was detected.
+
+Note: CI exercises the CPU path on standard runners (there are no GPU runners),
+so the GPU path is documented and detected but not automatically E2E-tested —
+verify it on your GPU host with `./check-system.sh` after setup.
 
 ## Honest expectations vs Claude
 
@@ -198,7 +216,8 @@ model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
-[TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md)
+[TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
+[CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 

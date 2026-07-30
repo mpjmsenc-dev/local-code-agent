@@ -153,13 +153,22 @@ main() {
     exit 0
   fi
 
-  # Make sure the server is up before pulling/validating.
-  if ! wait_for_ollama 5; then
-    if systemd_available; then
-      info "Ollama API not answering — starting the service..."
-      as_root systemctl start ollama || true
+  # jq is needed for the real-generation validation below.
+  require_cmd jq
+
+  # Make sure the server is up before pulling/validating (starts it via systemd
+  # or, on a systemd-less host, a detached `ollama serve`).
+  if ! ensure_ollama_up 60; then
+    if ! systemd_available; then
+      # No service manager and we couldn't bring the API up — record the
+      # decision so it applies once Ollama is running, and degrade gracefully
+      # instead of dying with a systemctl hint that cannot work here.
+      set_env_var MODEL_NAME "${TUNE_MODEL}"
+      set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+      warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run tune.sh to apply."
+      exit 0
     fi
-    wait_for_ollama 60 || die "Ollama API is not reachable at $(ollama_url). Start it (sudo systemctl start ollama) and re-run tune.sh."
+    die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then re-run tune.sh."
   fi
 
   # Nothing is persisted to .env or applied to the service until AFTER the

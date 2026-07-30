@@ -21,6 +21,18 @@ case ":${PATH}:" in
 esac
 export PATH
 
+# Some non-login contexts run with $HOME unset — notably cloud-init user-data
+# (how deploy/do-user-data.sh invokes setup.sh on a fresh droplet) and root
+# systemd oneshots (the on-boot tune service). The ollama CLI PANICS with
+# "$HOME is not defined" when it is unset, so every pull/show/generate would
+# crash. Set HOME to the invoking user's home (root's /root under cloud-init
+# and the boot services) so ollama always initializes.
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+  [[ -n "${HOME}" ]] || HOME=/root
+  export HOME
+fi
+
 LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
@@ -178,6 +190,26 @@ venv_dir() { printf '%s/%s\n' "${REPO_ROOT}" "${VENV_NAME:-.venv}"; }
 venv_python() { printf '%s/bin/python\n' "$(venv_dir)"; }
 aider_bin() { printf '%s/bin/aider\n' "$(venv_dir)"; }
 
+# aider_token_budget CTX — echo "INPUT OUTPUT" (two integers) splitting an
+# Ollama context window of CTX tokens into a prompt budget and a reply budget.
+# Ollama's num_ctx is the WHOLE window (prompt + generation share it), so we
+# reserve a quarter of it (at least 1024 tokens) for the model's reply and give
+# the rest to the prompt. run-agent.sh feeds these to aider via a model-metadata
+# file so aider packs the repo map / history / files to what Ollama will
+# actually process — otherwise aider trusts litellm's generic metadata (e.g.
+# 32k for qwen2.5-coder) while the server is capped at OLLAMA_CONTEXT_LENGTH,
+# and every over-limit prompt is SILENTLY truncated by Ollama (the system
+# prompt drops off and the model "forgets" its instructions). Bad/empty CTX
+# falls back to 8192 so a corrupt .env can never yield a zero budget.
+aider_token_budget() {
+  local ctx="${1:-8192}" out
+  if ! [[ "${ctx}" =~ ^[0-9]+$ ]] || (( ctx < 256 )); then ctx=8192; fi
+  out=$(( ctx / 4 ))
+  if (( out < 1024 )); then out=1024; fi
+  if (( out >= ctx )); then out=$(( ctx / 2 )); fi
+  printf '%s %s\n' "$(( ctx - out ))" "${out}"
+}
+
 # ---------------------------------------------------------------------------
 # Ollama helpers
 # ---------------------------------------------------------------------------
@@ -263,10 +295,32 @@ model_responds() {
   [[ -n "${response}" ]]
 }
 
-# detect_ram_gib — total system RAM in GiB, rounded to the nearest GiB so a
-# nominal 16 GB machine (whose kernel reports ~15.6 GiB usable) lands on 16.
+# detect_ram_gib — usable RAM in GiB, rounded to the nearest GiB (a nominal
+# 16 GB machine reports ~15.6 GiB usable and lands on 16). Inside a
+# memory-limited container /proc/meminfo shows the HOST's RAM, which would
+# make auto-tune pick a model that OOMs; so prefer a smaller cgroup limit.
 detect_ram_gib() {
-  awk '/^MemTotal:/ {printf "%d\n", ($2 + 524288) / 1048576}' /proc/meminfo
+  local mem_kb mem_bytes cg=""
+  mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  mem_bytes=$(( mem_kb * 1024 ))
+  if [[ -r /sys/fs/cgroup/memory.max ]]; then
+    cg="$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"                    # cgroup v2
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    cg="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"  # cgroup v1
+  fi
+  # Use the cgroup limit only when it is a real, smaller-than-host value
+  # ("max" or an unlimited sentinel is ignored).
+  if [[ "${cg}" =~ ^[0-9]+$ ]] && (( cg > 0 )) && (( cg < mem_bytes )); then
+    mem_bytes="${cg}"
+  fi
+  awk -v b="${mem_bytes}" 'BEGIN { printf "%d\n", (b + 536870912) / 1073741824 }'
+}
+
+# has_nvidia_gpu — true if an NVIDIA GPU Ollama can use is present. Ollama
+# uses a supported GPU automatically (no config needed); this is only for
+# reporting/observability, so CPU-only stays the fully-supported default.
+has_nvidia_gpu() {
+  have nvidia-smi && nvidia-smi -L >/dev/null 2>&1
 }
 
 # render_ollama_dropin_content — print the drop-in the current .env implies,
@@ -301,6 +355,38 @@ render_ollama_dropin() {
 ollama_dropin_matches() {
   [[ -f "${OLLAMA_DROPIN}" ]] || return 1
   diff -q <(render_ollama_dropin_content) "${OLLAMA_DROPIN}" >/dev/null 2>&1
+}
+
+# start_ollama_bg — start `ollama serve` detached, for hosts WITHOUT systemd
+# (containers, WSL), with the same environment the systemd drop-in would
+# apply. Not boot-persistent — that's the honest cost of having no service
+# manager. No-op if the API already answers.
+start_ollama_bg() {
+  wait_for_ollama 2 && return 0
+  have ollama || return 1
+  local logf="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+  warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
+  OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
+  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
+  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
+  OLLAMA_MAX_LOADED_MODELS=1 \
+    nohup ollama serve >"${logf}" 2>&1 &
+  wait_for_ollama 30
+}
+
+# ensure_ollama_up [TIMEOUT] — guarantee the API is reachable: return 0 if
+# already up, else start it (systemd service, or a detached serve on hosts
+# without systemd) and wait. Nonzero if it cannot be brought up.
+ensure_ollama_up() {
+  local timeout="${1:-60}"
+  wait_for_ollama 3 && return 0
+  have ollama || return 1
+  if systemd_available; then
+    as_root systemctl start ollama >/dev/null 2>&1 || true
+    wait_for_ollama "${timeout}"
+  else
+    start_ollama_bg
+  fi
 }
 
 # restart_ollama — reload systemd and restart the ollama service, then wait
