@@ -109,6 +109,21 @@ main() {
     ok "Virtualenv ${venv} removed."
   fi
 
+  # 6. Generated state outside the repo: run-agent.sh writes an aider
+  # model-metadata file under ~/.cache. Under sudo, $HOME is root's, while the
+  # file was written by the human's own run — clean up both.
+  local cache_dirs=( "${HOME}/.cache/local-code-agent" ) sudo_home d
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    sudo_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "${sudo_home:-}" ]] && cache_dirs+=( "${sudo_home}/.cache/local-code-agent" )
+  fi
+  for d in "${cache_dirs[@]}"; do
+    if [[ -d "${d}" ]]; then
+      rm -rf "${d}"
+      ok "Removed generated cache ${d}."
+    fi
+  done
+
   step "Uninstall complete"
   info "Kept on purpose: Docker Engine, Tailscale, git, this repository and .env."
   info "To finish completely:  sudo tailscale logout   and delete this directory:  ${REPO_ROOT}"

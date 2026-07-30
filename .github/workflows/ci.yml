@@ -147,6 +147,12 @@ jobs:
           # proves aider starts in the caller's directory.
           "${GITHUB_WORKSPACE}/run-agent.sh" --message "Reply with the single word: ready" --yes-always --no-stream | tee /tmp/aider-out.txt
           test -s /tmp/aider-out.txt
+      - name: The acceptance test itself must pass (scripts/selftest.sh)
+        # selftest.sh is what users run to prove the stack works on their own
+        # box. Running it here means it can never bit-rot unnoticed: it does a
+        # live Ollama -> generation -> aider round-trip. WebUI is disabled in
+        # this job, so its step 4 skips rather than fails.
+        run: ./scripts/selftest.sh
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
@@ -170,6 +176,9 @@ jobs:
           test ! -e /etc/systemd/system/local-code-agent-tune.service
           test ! -e /etc/local-code-agent
           test ! -d .venv
+          # Generated state outside the repo must go too (run-agent.sh writes an
+          # aider model-metadata file under ~/.cache/local-code-agent).
+          test ! -d "${HOME}/.cache/local-code-agent"
           echo "uninstall verified"
 
   webui:
