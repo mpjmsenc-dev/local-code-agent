@@ -51,6 +51,29 @@ main() {
   model_present "${MODEL_NAME}" \
     || die "Model '${MODEL_NAME}' is not downloaded. Pull it with: ollama pull ${MODEL_NAME}"
 
+  # If the question names a file that exists right here, include it. "why is
+  # setup.sh failing?" should just work — being made to repeat the filename with
+  # -f is exactly the kind of friction that stops people asking. Only regular,
+  # readable files in the current directory match, at most 3, and every one is
+  # announced so nothing is silently sent to the model.
+  local w auto=0
+  for w in ${question}; do
+    (( auto < 3 )) || break
+    w="${w%%[),.:;?\"]}"          # strip trailing punctuation from the word
+    w="${w##[(\"]}"
+    # A path like bin/lca has no dot, so match on "looks like a path OR has
+    # an extension" and let the filesystem be the real arbiter.
+    [[ "${w}" == */* || "${w}" == *.* ]] || continue
+    [[ -f "${w}" && -r "${w}" ]] || continue
+    # Skip anything already passed with -f.
+    local dup=false g
+    for g in ${files[@]+"${files[@]}"}; do [[ "${g}" == "${w}" ]] && dup=true; done
+    [[ "${dup}" == "true" ]] && continue
+    files+=( "${w}" )
+    auto=$(( auto + 1 ))
+    info "including ${w} from the current directory"
+  done
+
   # Build the prompt: file context, then piped context, then the question.
   local context="" f
   for f in ${files[@]+"${files[@]}"}; do
@@ -64,8 +87,11 @@ main() {
   local prompt="${context}${question}"
 
   local payload
+  # Cap the reply. On CPU (a few tokens/second) an unbounded answer can run for
+  # minutes before it stops on its own; LCA_ASK_TOKENS raises it when needed.
   payload="$(jq -n --arg m "${MODEL_NAME}" --arg s "${system}" --arg p "${prompt}" \
-    '{model:$m, system:$s, prompt:$p, stream:true}')"
+    --arg n "${LCA_ASK_TOKENS:-512}" \
+    '{model:$m, system:$s, prompt:$p, stream:true, options:{num_predict:($n|tonumber)}}')"
 
   # Stream tokens as they arrive: on CPU inference, watching the answer appear
   # is the difference between "working" and "hung".

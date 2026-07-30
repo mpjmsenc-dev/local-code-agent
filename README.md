@@ -201,6 +201,7 @@ Quick answers without leaving what you are doing:
 
 ```bash
 lca ask "how do I find the 10 largest files under /var?"
+lca ask "why is setup.sh failing?"        # names a local file -> it is included
 lca ask -f netmode.sh "what does this script do?"
 journalctl -u ollama -n 50 | lca ask "why did this fail?"
 ```
