@@ -466,6 +466,18 @@ no_hardcoded_ladder() { ! grep -qE 'TUNE_MODEL="[a-z0-9.]+-?[a-z]*:' "${REPO}/ch
 check "check-system.sh sources tune.sh's ladder" sources_the_real_ladder
 check "check-system.sh hardcodes no model in its ladder" no_hardcoded_ladder
 
+# Sourcing tune.sh recomputes SCRIPT_DIR from tune.sh's own location, silently
+# repointing the caller's at scripts/. Both callers restore it; if that restore
+# is ever dropped, the next line added below the source resolves against the
+# wrong directory and fails in a way that looks nothing like its cause.
+restores_script_dir() {
+  awk '/source .*scripts\/tune\.sh/ {seen=1; next} seen && /SCRIPT_DIR=/ {ok=1} END {exit !ok}' "$1"
+}
+check "check-system.sh restores SCRIPT_DIR after sourcing tune.sh" \
+  restores_script_dir "${REPO}/check-system.sh"
+check "update-model.sh restores SCRIPT_DIR after sourcing tune.sh" \
+  restores_script_dir "${REPO}/update-model.sh"
+
 echo "# 'lca help' must not advertise a command bin/lca cannot run"
 # The same class of bug as the system-prompt check above, one layer out: help
 # text drifts when a command is renamed, and a user following it gets "Unknown

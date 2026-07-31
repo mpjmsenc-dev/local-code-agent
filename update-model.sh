@@ -35,8 +35,13 @@ list_recommended() {
   local ram fam small mid big pick note
   ram="$(detect_ram_gib)"
   step "Models that fit this machine (${ram} GiB RAM detected)"
+  # Sourcing tune.sh recomputes SCRIPT_DIR from its own location, repointing
+  # ours at scripts/. Harmless today because this function exits straight
+  # after, but restoring it keeps the next edit from inheriting a landmine.
+  local saved_dir="${SCRIPT_DIR}"
   # shellcheck source=scripts/tune.sh
   source "${SCRIPT_DIR}/scripts/tune.sh"
+  SCRIPT_DIR="${saved_dir}"
   for fam in qwen2.5-coder qwen3 deepseek-coder-v2 llama3.1 codellama; do
     read -r small mid big <<<"$(family_sizes "${fam}")"
     if   (( ram < 9 ));  then pick="${fam}:${small}"

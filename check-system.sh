@@ -139,8 +139,15 @@ RAM_GIB="$(detect_ram_gib)"
 # from qwen2.5-coder on every single check — telling them to run the very
 # script that had just chosen correctly. A duplicated ladder cannot help but
 # rot; sourcing the real one means the two can never disagree again.
+# tune.sh recomputes SCRIPT_DIR from its OWN location, so sourcing it silently
+# repoints ours at scripts/. Nothing below needs it today, but a variable left
+# pointing somewhere unexpected is a trap for whoever edits this next.
+# (REPO_ROOT is safe — lib.sh's double-source guard stops it being recomputed.)
+CHECK_DIR="${SCRIPT_DIR}"
 # shellcheck source=scripts/tune.sh
 source "${SCRIPT_DIR}/scripts/tune.sh"
+SCRIPT_DIR="${CHECK_DIR}"
+unset CHECK_DIR
 TUNE_FAMILY="$(model_family)"
 read -r TUNE_SMALL TUNE_MID TUNE_BIG <<<"$(family_sizes "${TUNE_FAMILY}")"
 if   (( RAM_GIB < 9 ));   then TUNE_MODEL="${TUNE_FAMILY}:${TUNE_SMALL}"
