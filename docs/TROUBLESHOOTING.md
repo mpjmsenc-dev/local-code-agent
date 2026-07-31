@@ -5,13 +5,17 @@ Run `lca check` first: it pinpoints most of these automatically.
 Two commands worth knowing before you read any further:
 
 ```bash
-lca logs                              # Ollama, the chat app and the installer, in one place
-lca logs | lca ask "why did this fail?"   # let your own model read them for you
+lca check | lca ask "what is the most important thing to fix, and the command?"
+lca logs  | lca ask "why did this fail?"
 ```
 
-That second one is not a gimmick — the model is already on the machine, it sees
-the same output you do, and it is usually faster than finding the right section
-below. `lca speed` answers "why is it slow?" specifically.
+Neither is a gimmick. The model is already on the machine, it sees the same
+output you do, and it is usually faster than finding the right section below —
+on a box whose Docker daemon was down, the first command picked Docker out of a
+24-line health report and answered `sudo systemctl start docker`.
+
+`lca logs` on its own shows Ollama, the chat app and the installer in one place.
+`lca speed` answers "why is it slow?" specifically.
 
 ## apt is locked ("Could not get lock /var/lib/dpkg/lock-frontend")
 
