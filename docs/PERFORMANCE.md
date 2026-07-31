@@ -43,9 +43,9 @@ pace and a response that feels immediate.
 | GPU, model too big (`38%/62% CPU/GPU`) | barely better than CPU — the CPU part dominates |
 
 A real measurement, not a guess: on a CPU-only x86_64 box with 16 GiB RAM,
-`qwen2.5-coder:7b` produced **~6 tokens/second** using the snippet at the bottom
-of this page. Use that as your baseline — if you measure much less, something
-else is wrong (swap, a too-large model, a busy machine).
+`qwen2.5-coder:7b` produced **~6 tokens/second** (`lca speed`). Use that as a
+rough baseline — your CPU differs, so if you measure much *less* than that,
+something else is usually wrong: swap, a too-large model, or a busy machine.
 
 That last row is the trap. A partially-offloaded model is **not** "most of the
 speed". If you have a GPU, prefer a model that fits its VRAM completely:

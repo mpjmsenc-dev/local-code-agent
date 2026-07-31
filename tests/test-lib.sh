@@ -440,8 +440,11 @@ prompt_commands_all_real() {
   local sub bad=0
   while read -r sub; do
     [[ -n "${sub}" ]] || continue
-    # bin/lca dispatches via a case statement: 'ask)' or 'offline|online|...)'.
-    grep -qE "^[[:space:]]*[a-z|\"]*\b${sub}\b[a-z|]*\)" "${REPO}/bin/lca" || {
+    # bin/lca dispatches via a case statement: 'ask)', 'offline|online|...)' or
+    # 'help|-h|--help)'. The character class must allow '-' and '"', or a
+    # command sharing a branch with a dashed alias reads as missing and this
+    # test fails for a command that is perfectly real.
+    grep -qE "^[[:space:]]*[a-z|\"-]*\b${sub}\b[a-z|\"-]*\)" "${REPO}/bin/lca" || {
       printf 'system prompt advertises unknown command: lca %s\n' "${sub}" >&2
       bad=1
     }
