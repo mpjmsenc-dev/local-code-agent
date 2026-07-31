@@ -18,7 +18,15 @@ FAIL_LINE="SETUP FINISHED WITH ERRORS — run ${SCRIPT_DIR}/check-system.sh and 
 main() {
   step "local-code-agent setup starting"
   info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
-  chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh
+  # bin/ included: that is where the 'lca' command lives.
+  chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/bin/* 2>/dev/null || true
+
+  # Settings added since this machine was first installed are invisible in its
+  # own .env until they are written there. 'lca update' re-runs setup, so this
+  # is the natural moment to catch an old install up. Values already set are
+  # never touched.
+  sync_env_keys
+  load_env
 
   # Tracks whether every load-bearing step succeeded. A zero-terminal user
   # watches the install log for the exact final line, so the healthy line
