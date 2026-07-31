@@ -486,6 +486,31 @@ check "a value containing a quote is refused" refuses 'has"quote'
 check "a value containing a dollar sign is refused" refuses "has${DOLLAR}dollar"
 set_env_var BACKUP_SCHEDULE "*-*-* 03:30:00"
 
+echo "# sync_env_keys() backfills settings an old install predates"
+# .env is created from .env.example once and never updated, so an install made
+# before a setting existed cannot see it. Simulate that by deleting keys.
+cp "${SANDBOX}/.env" "${SANDBOX}/.env.before"
+grep -vE '^(BACKUP_SCHEDULE|MODEL_FAMILY|LCA_ASK_TOKENS)=' "${SANDBOX}/.env.before" > "${SANDBOX}/.env"
+sync_env_keys >/dev/null 2>&1
+check "a missing key is added" grep -qE '^MODEL_FAMILY=' "${SANDBOX}/.env"
+# BACKUP_SCHEDULE contains spaces, so this only works because set_env_var
+# quotes such values — the bug fixed one commit earlier was not latent at all
+# once anything appended that key.
+check "a spaced key is added intact" \
+  test "$(env_value BACKUP_SCHEDULE)" = "*-*-* 03:30:00"
+check "and .env is still sourceable" test -n "$(env_value MODEL_NAME)"
+# The user's own choices must survive untouched.
+set_env_var MODEL_NAME "qwen2.5-coder:14b"
+sync_env_keys >/dev/null 2>&1
+check "an existing value is never overwritten" \
+  test "$(env_value MODEL_NAME)" = "qwen2.5-coder:14b"
+# Running setup twice must not keep appending.
+sync_env_before="$(md5sum < "${SANDBOX}/.env")"
+sync_env_keys >/dev/null 2>&1
+check "re-running changes nothing (idempotent)" \
+  test "$(md5sum < "${SANDBOX}/.env")" = "${sync_env_before}"
+set_env_var MODEL_NAME "qwen2.5-coder:7b"
+
 echo "# every setting must exist in BOTH lib.sh's defaults and .env.example"
 # A key defaulted in lib.sh but absent from .env.example is a real setting no
 # user can discover. A key in .env.example with no lib.sh default means

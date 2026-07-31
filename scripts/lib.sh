@@ -210,6 +210,37 @@ set_env_var() {
   fi
 }
 
+# sync_env_keys — add settings that exist in .env.example but not yet in .env.
+#
+# .env is created from .env.example exactly ONCE, on first run, and nothing has
+# ever backfilled it. An install made before a setting existed therefore never
+# learns that the setting exists: on this project's own build box, .env had 13
+# keys against .env.example's 20. Behaviour was already correct — load_env
+# supplies a default for anything missing — so this is about discoverability. A
+# knob you cannot see in your own config is a knob you do not know you have.
+#
+# Existing values are NEVER touched; only absent keys are appended, each with
+# the value that was already in force, so nothing changes behaviour.
+sync_env_keys() {
+  [[ -f "${ENV_FILE}" && -f "${ENV_EXAMPLE}" ]] || return 0
+  local line key value added=()
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    # .env.example quotes values containing spaces (BACKUP_SCHEDULE); strip
+    # that here because set_env_var re-adds quoting exactly when it is needed,
+    # and doubling it would write a literal quote into the value.
+    value="${value%\"}"; value="${value#\"}"
+    if ! grep -q "^${key}=" "${ENV_FILE}"; then
+      set_env_var "${key}" "${value}" && added+=( "${key}" )
+    fi
+  done < <(grep -E '^[A-Z_]+=' "${ENV_EXAMPLE}")
+  if (( ${#added[@]} )); then
+    info "Added ${#added[@]} setting(s) to .env that this install predates: ${added[*]}"
+    info "Each was already in effect as a default — see .env.example for what they do."
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Python venv helpers
 # ---------------------------------------------------------------------------
