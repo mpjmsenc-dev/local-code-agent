@@ -111,6 +111,10 @@ can't reach the internet at all. `status` proves it with a live probe.
 - [ ] `sudo lca status` showed "Internet reachable — as expected in online mode."
 - [ ] Bonus: in the console, run `lca check` — it ends green ("All hard checks
       passed" or better). `lca help` lists everything else.
+- [ ] Bonus: ask it something without leaving the terminal —
+      `lca ask "how much disk is left?"`, then `lca ask -c "and how do I free some?"`
+      to follow on. If anything looks wrong, `lca logs | lca ask "why did this fail?"`
+      lets your own AI read its own logs. `lca speed` answers "why is it slow?"
 - [ ] Bonus: prove it end-to-end with `lca test` —
       it asks your model for a real answer and runs a real aider round-trip, then
       prints `SELF-TEST PASSED`. This is the "does it actually work on MY box?"

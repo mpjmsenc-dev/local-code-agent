@@ -107,14 +107,15 @@ main() {
   # interface now, and a next-steps list that contradicts it is how a tool ends
   # up with two half-remembered ways to do everything.
   info "1. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
-  info "2. Chat from your phone: http://${ts_ip}:${WEBUI_PORT}   (or: lca chat)"
+  info "2. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
   info "   Install the Tailscale app on the phone first — docs/PHONE.md"
-  info "3. Code in the terminal: cd <your-project> && lca"
-  info "4. Prove it end-to-end:  lca test"
-  info "5. Health check anytime: lca check"
-  info "6. Internet kill switch: sudo lca offline | sudo lca online | sudo lca status"
-  info "7. Update the stack:     lca update      (backs up first)"
-  info "8. Daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
+  info "3. Ask one question:     lca ask \"how do I find the biggest files here?\""
+  info "4. Code in the terminal: cd <your-project> && lca"
+  info "5. Prove it end-to-end:  lca test        · health check: lca check"
+  info "6. When something looks wrong: lca logs   · when it feels slow: lca speed"
+  info "7. Internet kill switch: sudo lca offline | sudo lca online | sudo lca status"
+  info "8. Update the stack:     lca update      (backs up first)"
+  info "9. Daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
   info "All commands: lca help"
   # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
   # install log for exactly one of these final lines.
