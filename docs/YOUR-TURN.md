@@ -25,7 +25,28 @@ in this order. Copy-paste blocks are exact; button names are exact.
 1. On the droplet's page, click **Access** in the left menu → **Launch Droplet
    Console**. A black terminal window opens in your browser; log in as `root`
    with your password if asked.
-2. Type this and press Enter:
+
+   **The moment you log in, the server tells you where it is up to.** Above the
+   prompt you'll see one of these:
+
+   ```
+    local-code-agent  still installing — nothing works yet (log updated 3s ago)
+      Currently            Downloading the model
+      Watch it             tail -f /var/log/local-code-agent-setup.log
+   ```
+
+   ```
+    local-code-agent  ready   ·   model qwen2.5-coder:7b
+      Chat on your phone   http://100.x.y.z:3000
+      Ask right here       lca ask "why is this box slow?"
+      All commands         lca help
+   ```
+
+   If it says **ready**, skip straight to Step 3. If it says **still
+   installing**, log out and come back later, or watch it live as below. It
+   reprints on every login, so you can keep checking by logging in again.
+
+2. To watch it live, type this and press Enter:
 
    ```bash
    tail -f /var/log/local-code-agent-setup.log
@@ -105,6 +126,7 @@ can't reach the internet at all. `status` proves it with a live probe.
 ## Step 6 — You are finished when…
 
 - [ ] `tail`ing the log showed `SETUP COMPLETE — local-code-agent is ready.`
+- [ ] Logging in again greets you with `local-code-agent  ready`.
 - [ ] Your phone's Tailscale app shows the server in its machine list.
 - [ ] `http://100.x.y.z:3000` opens the chat and you can send a message and get a reply.
 - [ ] Signups are locked (step 4.3 ran without errors).

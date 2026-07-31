@@ -41,6 +41,19 @@ OLLAMA_DROPIN_DIR="/etc/systemd/system/ollama.service.d"
 OLLAMA_DROPIN="${OLLAMA_DROPIN_DIR}/local-code-agent.conf"
 NETMODE_DIR="/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
+# Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs
+# setup' and the login banner read it to answer "is it still installing?".
+# do-user-data.sh cannot source this file — it runs before the clone exists —
+# so it keeps its own literal, and a test holds the two together.
+# Read by scripts/logs.sh and scripts/motd.sh, not here — ShellCheck analyses
+# one file at a time and cannot see a sourcing consumer.
+# shellcheck disable=SC2034
+SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
+# Likewise: check-system.sh, uninstall.sh and scripts/motd.sh. The filename
+# must stay free of dots — run-parts --lsbsysinit, which is how pam_motd runs
+# these, skips any name containing one.
+# shellcheck disable=SC2034
+MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
 
 # ---------------------------------------------------------------------------
 # Colors — tput when stdout is a terminal, plain text when piped/redirected.
@@ -136,7 +149,10 @@ systemd_available() {
 # call re-reads the file, so changes made via set_env_var become visible.
 load_env() {
   if [[ ! -f "${ENV_FILE}" ]]; then
-    if [[ -f "${ENV_EXAMPLE}" ]]; then
+    if [[ "${LCA_ENV_READONLY:-false}" == "true" ]]; then
+      # Deliberately create nothing: see load_env_readonly below.
+      :
+    elif [[ -f "${ENV_EXAMPLE}" ]]; then
       cp "${ENV_EXAMPLE}" "${ENV_FILE}"
       # Notice goes to stderr: load_env may run inside commands whose stdout
       # is data (a message on stdout would corrupt it).
@@ -174,6 +190,18 @@ load_env() {
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
+}
+
+# load_env_readonly — load_env's values without load_env's side effect.
+#
+# load_env creates .env from .env.example when it is missing, which is right
+# for a command the user ran. It is wrong for the login banner: that runs as
+# ROOT on every SSH login, so merely logging into a box where setup has not
+# finished would silently leave a root-owned .env in the repo — and the next
+# non-root setup.sh or 'lca' run would then fail to write it. Reading through
+# load_env rather than re-parsing .env keeps the defaults in one place.
+load_env_readonly() {
+  LCA_ENV_READONLY=true load_env
 }
 
 # set_env_var KEY VALUE — update KEY in .env in place, or append it, so that a

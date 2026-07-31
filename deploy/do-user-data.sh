@@ -75,6 +75,14 @@ main() {
   # now too — that is where the 'lca' command lives.
   chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh "${INSTALL_DIR}"/bin/* 2>/dev/null || true
 
+  # Install the login banner NOW, before the long part. setup.sh installs it
+  # too, but that is 20-30 minutes away — and the entire reason the banner
+  # exists is to tell someone who SSHs in during those 20-30 minutes that an
+  # install is running. Installed only at the end, it could never report the
+  # one state it was written for.
+  echo "--- Installing the login banner (so SSH reports install progress) ---"
+  "${INSTALL_DIR}/scripts/motd.sh" --install || echo "(could not install the login banner — continuing)"
+
   if [[ "${RUN_SETUP}" != "true" ]]; then
     echo "--- LCA_RUN_SETUP=${RUN_SETUP}: cloned only, setup was NOT run ---"
     echo "=== local-code-agent first-boot install finished: $(date) ==="

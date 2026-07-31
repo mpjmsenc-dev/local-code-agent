@@ -168,3 +168,29 @@ recommendation.
 
 Just run `./setup.sh` again. Every installer is idempotent — finished pieces are
 detected and reused; only the missing pieces are (re)done.
+
+This is exactly what the login banner is telling you when it says:
+
+```
+ local-code-agent  the install stopped before it finished (nothing written to the log for 3 h)
+   Stopped at           Installing Docker and Open WebUI
+   Finish it            sudo /opt/local-code-agent/setup.sh
+```
+
+## The login banner says something different from what I expect
+
+It is deliberately driven by the live system, not by the install log, because
+an interrupted install often leaves a perfectly working stack behind. So:
+
+| Banner | What it means |
+|---|---|
+| `still installing` | The install log was written to in the last 15 minutes and has not reached a verdict. |
+| `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run `setup.sh`. |
+| `the install did NOT finish` | The log reached an explicit failure verdict. Start with `lca logs setup`. |
+| `installed, but the model engine is not running` | Ollama is not answering. `lca check`, then `lca logs ollama`. |
+| `ready` | Ollama answered. This wins over anything the log says. |
+
+Not seeing a banner at all? `lca check` reports whether it is installed, and
+`sudo /opt/local-code-agent/scripts/motd.sh --install` puts it back. Systems
+without `/etc/update-motd.d` (some containers and minimal images) get no
+banner — everything else works exactly the same.

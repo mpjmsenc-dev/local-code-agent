@@ -17,7 +17,17 @@ mostly model download).
 
 ## Watching the install
 
-Open the droplet page → **Access** → **Launch Droplet Console**, log in, then:
+Open the droplet page → **Access** → **Launch Droplet Console** and log in.
+The login banner answers this on its own, before you type anything:
+
+```
+ local-code-agent  still installing — nothing works yet (log updated 3s ago)
+   Currently            Downloading the model
+   Watch it             tail -f /var/log/local-code-agent-setup.log
+```
+
+It reprints on every login, so logging in again is the quickest way to check.
+To watch it live instead:
 
 ```bash
 tail -f /var/log/local-code-agent-setup.log
@@ -28,6 +38,8 @@ The install is finished when you see the line:
 ```
 SETUP COMPLETE — local-code-agent is ready.
 ```
+
+…and the banner switches to `local-code-agent  ready`.
 
 Then continue with [YOUR-TURN.md](YOUR-TURN.md) step 3 (Tailscale login).
 

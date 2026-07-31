@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 load_env
-
-SETUP_LOG="/var/log/local-code-agent-setup.log"
+# SETUP_LOG comes from lib.sh — the login banner reads the same file to decide
+# whether an install is still in flight, and two copies of a path drift.
 
 usage() {
   cat <<EOF
