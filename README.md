@@ -205,7 +205,8 @@ Quick answers without leaving what you are doing:
 lca ask "how do I find the 10 largest files under /var?"
 lca ask "why is setup.sh failing?"        # names a local file -> it is included
 lca ask -f netmode.sh "what does this script do?"
-journalctl -u ollama -n 50 | lca ask "why did this fail?"
+lca ask -c "now show me that as a one-liner"   # follows on from the last answer
+lca logs | lca ask "why did this fail?"
 ```
 
 `lca help` lists them all. Everything after the command is passed through, so

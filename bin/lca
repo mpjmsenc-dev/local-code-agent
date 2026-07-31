@@ -26,6 +26,7 @@ Usage: lca [command] [args...]
   lca                     start the coding agent here (aider, in \$PWD)
   lca ask "question"      one-shot answer, no session, no browser
   lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
+  lca ask -c "follow up"  continue from your last question
   lca chat                print the address to open the chat app on your phone
   lca check               full health check
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
