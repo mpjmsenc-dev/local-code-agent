@@ -210,6 +210,11 @@ if have tailscale; then
   else
     p_warn "tailscale installed but not logged in — run: sudo tailscale up"
   fi
+elif [[ "${SKIP_TAILSCALE}" == "true" ]]; then
+  # Deliberately absent is not a problem. Warning here would nag forever on a
+  # healthy machine and point at an installer the user opted out of — the same
+  # unfixable-warning trap the auto-tune ladder had.
+  info "tailscale skipped by configuration (SKIP_TAILSCALE=true) — phone access is via your own private network."
 else
   p_warn "tailscale not installed (run scripts/install_tailscale.sh for phone access)"
 fi

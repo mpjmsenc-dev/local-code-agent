@@ -11,6 +11,16 @@ load_env
 
 main() {
   step "Installing Tailscale"
+  # Symmetric with SKIP_DOCKER. Installing a second VPN on a machine that
+  # already has WireGuard, ZeroTier, or is simply LAN-only is presumptuous —
+  # Tailscale is how THIS project offers private phone access, not the only
+  # way to have it.
+  if [[ "${SKIP_TAILSCALE}" == "true" ]]; then
+    warn "SKIP_TAILSCALE=true — not installing Tailscale."
+    info "Phone access then needs a private network you provide (WireGuard, ZeroTier, a LAN)."
+    info "The inbound guard still restricts the WebUI port to loopback and tailscale0, so reach it over your own network or adjust the guard deliberately."
+    return 0
+  fi
   require_cmd curl
 
   if have tailscale; then
