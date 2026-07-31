@@ -111,7 +111,17 @@ main() {
 
   # --- 3. re-run setup (idempotent: upgrades packages, aider, Ollama, model) ---
   step "Re-running setup"
-  "${SCRIPT_DIR}/setup.sh" </dev/null
+  # Explicitly, not bare under 'set -e': setup.sh failing here is the single
+  # most likely way an update goes wrong, and dying silently would take the
+  # user straight past the one thing they need to know — that a restore point
+  # was taken minutes ago, before any of this.
+  if ! "${SCRIPT_DIR}/setup.sh" </dev/null; then
+    warn "Setup did not finish cleanly — its verdict line is above."
+    if [[ "${do_backup}" == "true" ]]; then
+      warn "Roll back to the pre-update state with: ${SCRIPT_DIR}/restore.sh"
+    fi
+    die "Update stopped after setup reported errors. Diagnose with: ${SCRIPT_DIR}/check-system.sh"
+  fi
 
   # --- 4. prove it still works ------------------------------------------------
   step "Verifying the updated stack"

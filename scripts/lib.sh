@@ -192,6 +192,30 @@ load_env() {
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
 
+# The install's final verdict. Everything that reports on an install keys off
+# these two lines: docs/YOUR-TURN.md and docs/DO.md tell the user to watch for
+# them, deploy/do-user-data.sh documents them as its outcomes, and the login
+# banner classifies the log by them. They live here so that the wording, and
+# the exit status that must accompany it, cannot drift apart.
+SETUP_DONE_LINE="SETUP COMPLETE — local-code-agent is ready."
+SETUP_FAIL_LINE="SETUP FINISHED WITH ERRORS — run ${REPO_ROOT}/check-system.sh and see docs/TROUBLESHOOTING.md"
+
+# setup_verdict OK — print the final line and RETURN THE MATCHING STATUS.
+#
+# The status is the point. setup.sh used to print SETUP FINISHED WITH ERRORS
+# and then exit 0, which made deploy/do-user-data.sh's failure branch dead
+# code — a droplet whose model never downloaded reported a successful
+# first-boot install. A verdict nobody can act on programmatically is not a
+# verdict.
+setup_verdict() {
+  if [[ "${1:-false}" == "true" ]]; then
+    printf '\n%b%s%b\n' "${C_GREEN}${C_BOLD}" "${SETUP_DONE_LINE}" "${C_RESET}"
+    return 0
+  fi
+  printf '\n%b%s%b\n' "${C_YELLOW}${C_BOLD}" "${SETUP_FAIL_LINE}" "${C_RESET}"
+  return 1
+}
+
 # load_env_readonly — load_env's values without load_env's side effect.
 #
 # load_env creates .env from .env.example when it is missing, which is right

@@ -12,9 +12,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
-DONE_LINE="SETUP COMPLETE — local-code-agent is ready."
-FAIL_LINE="SETUP FINISHED WITH ERRORS — run ${SCRIPT_DIR}/check-system.sh and see docs/TROUBLESHOOTING.md"
-
 main() {
   step "local-code-agent setup starting"
   info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
@@ -132,12 +129,11 @@ main() {
   info "9. Daily backups (optional): sudo ${SCRIPT_DIR}/backup.sh --install-timer"
   info "All commands: lca help"
   # Printed plain (no log prefix): docs/YOUR-TURN.md tells users to watch the
-  # install log for exactly one of these final lines.
-  if [[ "${setup_ok}" == "true" ]]; then
-    printf '\n%b%s%b\n' "${C_GREEN}${C_BOLD}" "${DONE_LINE}" "${C_RESET}"
-  else
-    printf '\n%b%s%b\n' "${C_YELLOW}${C_BOLD}" "${FAIL_LINE}" "${C_RESET}"
-  fi
+  # install log for exactly one of these final lines. setup_verdict also
+  # returns the matching status, and because this is main's last command that
+  # becomes setup.sh's exit code — which is what deploy/do-user-data.sh and
+  # update.sh branch on.
+  setup_verdict "${setup_ok}"
 }
 
 main "$@"

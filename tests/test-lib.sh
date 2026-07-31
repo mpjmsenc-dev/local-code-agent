@@ -847,10 +847,10 @@ echo "# the install's final verdict line must read the same everywhere"
 # setup.sh is the single source; the others must quote it verbatim.
 verdict_line_is_consistent() {
   local line f bad=0
-  line="$(sed -n 's/^DONE_LINE="\(.*\)"$/\1/p' "${REPO}/setup.sh")"
+  line="$(sed -n 's/^SETUP_DONE_LINE="\(.*\)"$/\1/p' "${REPO}/scripts/lib.sh")"
   # Without this guard an empty extraction makes every 'grep -qF ""' below
   # match, and the test passes while checking nothing.
-  [[ -n "${line}" ]] || { echo "could not read DONE_LINE from setup.sh" >&2; return 1; }
+  [[ -n "${line}" ]] || { echo "could not read SETUP_DONE_LINE from lib.sh" >&2; return 1; }
   for f in docs/YOUR-TURN.md docs/DO.md deploy/do-user-data.sh; do
     grep -qF -- "${line}" "${REPO}/${f}" || {
       printf '%s does not contain the verdict line from setup.sh: %s\n' "${f}" "${line}" >&2
@@ -859,8 +859,57 @@ verdict_line_is_consistent() {
   done
   return "${bad}"
 }
-check "the SETUP COMPLETE line matches across setup.sh and the docs" \
+check "the SETUP COMPLETE line matches across lib.sh and the docs" \
   verdict_line_is_consistent
+
+echo "# the install's verdict must carry an exit status, not just a line"
+# setup.sh printed "SETUP FINISHED WITH ERRORS" and then exited 0. That made
+# deploy/do-user-data.sh's failure branch — and its comment claiming setup
+# "exits non-zero on a partial failure" — dead code: a droplet whose model
+# never downloaded reported a successful first-boot install, and any
+# automation branching on the exit code was misled. A verdict nobody can act
+# on programmatically is not a verdict.
+verdict_ok_exits_zero()  { setup_verdict true  >/dev/null 2>&1; }
+verdict_bad_exits_one()  { ! setup_verdict false >/dev/null 2>&1; }
+check "setup_verdict true exits 0"  verdict_ok_exits_zero
+check "setup_verdict false exits non-zero" verdict_bad_exits_one
+# ...and each must print the line the docs and the login banner look for.
+verdict_prints() {
+  local want="$1" flag="$2" out
+  out="$(setup_verdict "${flag}" 2>&1 || true)"
+  grep -qF -- "${want}" <<<"${out}" || {
+    printf 'setup_verdict %s printed: %s\n' "${flag}" "${out}" >&2; return 1
+  }
+}
+check "the success verdict prints SETUP COMPLETE" \
+  verdict_prints "SETUP COMPLETE — local-code-agent is ready." true
+check "the failure verdict prints SETUP FINISHED WITH ERRORS" \
+  verdict_prints "SETUP FINISHED WITH ERRORS" false
+# setup.sh must actually USE it — printing the line by hand again would
+# reintroduce exactly the bug above while leaving these tests green.
+setup_uses_verdict() {
+  grep -qE '^[[:space:]]*setup_verdict "\$\{setup_ok\}"' "${REPO}/setup.sh" || {
+    echo "setup.sh no longer ends on setup_verdict" >&2; return 1
+  }
+  # And nothing may re-hardcode a verdict line outside lib.sh.
+  ! grep -qF 'SETUP FINISHED WITH ERRORS' "${REPO}/setup.sh"
+}
+check "setup.sh reports through setup_verdict" setup_uses_verdict
+# update.sh takes a backup specifically so it can be restored when the update
+# goes wrong. Dying bare under 'set -e' would never mention it.
+# Scoped to the "Re-running setup" section and stopped at the next step: the
+# first version of this searched the whole rest of the file, found the
+# unrelated restore.sh mention in the self-test branch below, and passed
+# happily with the guard deleted.
+update_mentions_restore_on_failure() {
+  awk '/step "Re-running setup"/ {seen=1; next}
+       seen && /step "/ {exit}
+       seen && /if ! .*setup\.sh/ {guarded=1}
+       seen && /restore\.sh/ {ok=1}
+       END {exit !(ok && guarded)}' "${REPO}/update.sh"
+}
+check "update.sh points at the backup when setup fails" \
+  update_mentions_restore_on_failure
 
 echo
 if (( FAILED > 0 )); then

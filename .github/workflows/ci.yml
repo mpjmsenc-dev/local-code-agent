@@ -226,7 +226,37 @@ jobs:
             || { echo "FAIL: a failed clone reported success (exit 0)"; exit 1; }
           grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
             || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
-          echo "do-user-data.sh: success, re-run and failure paths all behave"
+
+          # And the path that was dead code until now: setup itself failing.
+          # Every run above uses LCA_RUN_SETUP=false, which is exactly why
+          # nobody noticed that setup.sh printed "SETUP FINISHED WITH ERRORS"
+          # and then exited 0 — so this branch could never be taken and a
+          # droplet with a broken install reported a successful first boot.
+          # Stubbed rather than installing the world: this asserts the wiring,
+          # while the unit tests assert that the real setup.sh returns the
+          # status its verdict claims.
+          rm -rf /tmp/lca-failsrc
+          git clone --quiet . /tmp/lca-failsrc
+          git config --global --add safe.directory /tmp/lca-failsrc
+          printf '#!/usr/bin/env bash\necho "SETUP FINISHED WITH ERRORS — simulated"\nexit 1\n' \
+            > /tmp/lca-failsrc/setup.sh
+          chmod +x /tmp/lca-failsrc/setup.sh
+          git -C /tmp/lca-failsrc -c user.email=ci@example.invalid -c user.name=CI \
+            commit --quiet -am 'CI: setup.sh that fails'
+          git -C /tmp/lca-failsrc branch -f ci-fail-test HEAD
+          git clone --quiet --bare /tmp/lca-failsrc /tmp/lca-fail-mirror.git
+          git -C /tmp/lca-fail-mirror.git symbolic-ref HEAD refs/heads/ci-fail-test
+
+          set +e
+          LCA_REPO_URL=/tmp/lca-fail-mirror.git LCA_DIR=/tmp/lca-dud-fail \
+            LCA_LOG=/tmp/dud-fail.log LCA_RUN_SETUP=true bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a failed setup reported a successful first boot"; cat /tmp/dud-fail.log; exit 1; }
+          grep -q 'setup reported problems' /tmp/dud-fail.log \
+            || { echo "FAIL: the log does not say setup reported problems"; cat /tmp/dud-fail.log; exit 1; }
+          echo "do-user-data.sh: success, re-run, failed clone and failed setup all behave"
       - name: install.sh bootstraps on a bare image (clone only, no setup)
         # The one-command installer's whole job is to work on a machine with
         # nothing on it. Proving it here means it cannot rot into "works only
