@@ -218,6 +218,15 @@ else
   else
     p_fail "Open WebUI /health not answering on port ${WEBUI_PORT} (./webui.sh logs)"
   fi
+  # Open signups are the one setting where the documented happy path ends with
+  # a manual step the user has to remember (YOUR-TURN.md step 4.3). Forget it
+  # and anyone who reaches the app can register an account on the private AI
+  # this whole project exists to keep private. Nothing said so until now.
+  if [[ "${WEBUI_ENABLE_SIGNUP}" == "true" ]]; then
+    p_warn "signups are OPEN (WEBUI_ENABLE_SIGNUP=true) — anyone who can reach the chat app can create an account. Once you have made yours: set WEBUI_ENABLE_SIGNUP=false in .env and re-run scripts/install_webui.sh"
+  else
+    p_pass "signups are closed (WEBUI_ENABLE_SIGNUP=false)"
+  fi
 fi
 
 # --- Tailscale (warn-only) --------------------------------------------------

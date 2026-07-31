@@ -60,6 +60,15 @@ sed -i 's/^WEBUI_ENABLE_SIGNUP=.*/WEBUI_ENABLE_SIGNUP=false/' .env
 (The install script recreates the container with the new setting; your account and
 chats live in a docker volume and survive.)
 
+The second line is the one that closes the door — a running container keeps the
+setting it was started with, so editing `.env` on its own changes nothing. To
+confirm it took:
+
+```bash
+./webui.sh status     # must NOT say "Signup drift"
+lca check             # must say "signups are closed"
+```
+
 ## 5. Make it feel like an app
 
 In the phone browser menu choose **Add to Home Screen**. Open WebUI is a PWA —
