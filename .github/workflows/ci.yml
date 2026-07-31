@@ -32,6 +32,53 @@ jobs:
         run: |
           bash scripts/tune.sh --dry-run
           test -f .env && diff .env .env.example
+      - name: update.sh --check detects updates without applying them
+        # Updating is the second thing every user does after installing, and it
+        # had no coverage at all. --check is the whole detection path — branch
+        # resolution, fetch, behind-count, local-edit warning — with nothing
+        # mutated, so it can be gated cheaply on every push.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.email ci@example.invalid
+          git config --global user.name CI
+          git config --global --add safe.directory "$(pwd)"
+          # A PR build is a DETACHED merge commit and update.sh rightly refuses
+          # those, so the fixture needs a real branch on both ends.
+          BR=ci-update-test
+          git branch -f "${BR}" HEAD
+          git clone --quiet --bare . /tmp/upd-origin.git
+          git -C /tmp/upd-origin.git symbolic-ref HEAD "refs/heads/${BR}"
+          git clone --quiet /tmp/upd-origin.git /tmp/upd-work
+          cp .env.example /tmp/upd-work/.env
+
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          printf '%s\n' "${out}"
+          grep -q 'Already up to date' <<<"${out}" \
+            || { echo "FAIL: a fresh clone should be up to date"; exit 1; }
+
+          # Advance the remote; --check must SEE it and must NOT apply it.
+          git clone --quiet /tmp/upd-origin.git /tmp/upd-push
+          ( cd /tmp/upd-push
+            echo "# upstream change" >> README.md
+            git commit --quiet -am "upstream: a change update.sh must notice"
+            git push --quiet origin "${BR}" )
+          before="$(git -C /tmp/upd-work rev-parse HEAD)"
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          printf '%s\n' "${out}"
+          grep -q '1 new commit' <<<"${out}" \
+            || { echo "FAIL: --check did not report the new commit"; exit 1; }
+          grep -q 'nothing was changed' <<<"${out}" \
+            || { echo "FAIL: --check did not say it changed nothing"; exit 1; }
+          test "$(git -C /tmp/upd-work rev-parse HEAD)" = "${before}" \
+            || { echo "FAIL: --check moved HEAD; it must not touch the checkout"; exit 1; }
+
+          # Local edits must be surfaced before anything is applied.
+          echo "local tweak" >> /tmp/upd-work/README.md
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          grep -q 'local modifications' <<<"${out}" \
+            || { echo "FAIL: local edits were not reported"; printf '%s\n' "${out}"; exit 1; }
+          echo "update.sh --check: detection, no-op guarantee and dirty-tree warning all behave"
 
   system:
     name: System artifacts (nft ruleset + systemd units)

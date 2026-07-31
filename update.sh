@@ -103,7 +103,9 @@ main() {
     # loudly if their local edits diverge instead of silently discarding them.
     git -C "${SCRIPT_DIR}" merge --ff-only "origin/${branch}" \
       || die "Could not fast-forward — you have local commits or conflicting edits. Resolve them (git -C ${SCRIPT_DIR} status), then re-run."
-    chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh 2>/dev/null || true
+    # bin/ included: that is where the 'lca' command lives, and an update that
+    # adds a new one there must leave it runnable.
+    chmod +x "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}"/scripts/*.sh "${SCRIPT_DIR}"/bin/* 2>/dev/null || true
     ok "Now at $(git -C "${SCRIPT_DIR}" log --oneline -1 --no-decorate)"
   fi
 
