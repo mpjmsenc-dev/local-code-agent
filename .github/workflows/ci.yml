@@ -131,6 +131,45 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
           python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
           exit "${missing}"
+      - name: do-user-data.sh — the DigitalOcean first-boot script, both outcomes
+        # This is the file a user literally pastes into the droplet creation
+        # form, and until now nothing tested it at all. YOUR-TURN.md tells them
+        # to watch the log for a verdict line, so the failure path matters as
+        # much as the success path: if a bad repo URL just stops the log, that
+        # is indistinguishable from "still working" and they wait 30 minutes
+        # for nothing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A PR build checks out a DETACHED merge commit, so the mirror needs a
+          # real branch for its HEAD to resolve — otherwise the clone lands
+          # empty and this would "pass" against nothing.
+          git config --global --add safe.directory "$(pwd)"
+          git branch -f ci-dud-test HEAD
+          git clone --quiet --bare . /tmp/lca-mirror.git
+          git -C /tmp/lca-mirror.git symbolic-ref HEAD refs/heads/ci-dud-test
+
+          LCA_REPO_URL=/tmp/lca-mirror.git LCA_DIR=/tmp/lca-dud LCA_LOG=/tmp/dud.log \
+            LCA_RUN_SETUP=false bash deploy/do-user-data.sh
+          test -x /tmp/lca-dud/bin/lca || { echo "FAIL: clone lacks an executable bin/lca"; exit 1; }
+          grep -q 'first-boot install finished' /tmp/dud.log \
+            || { echo "FAIL: no completion line in the log"; cat /tmp/dud.log; exit 1; }
+
+          # Re-running must be safe — the docs tell people to do exactly that.
+          LCA_REPO_URL=/tmp/lca-mirror.git LCA_DIR=/tmp/lca-dud LCA_LOG=/tmp/dud.log \
+            LCA_RUN_SETUP=false bash deploy/do-user-data.sh
+
+          # A clone that cannot succeed must fail loudly AND say so in the log.
+          set +e
+          LCA_REPO_URL=/tmp/definitely-not-here.git LCA_DIR=/tmp/lca-dud-bad \
+            LCA_LOG=/tmp/dud-bad.log LCA_RUN_SETUP=false bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a failed clone reported success (exit 0)"; exit 1; }
+          grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
+            || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
+          echo "do-user-data.sh: success, re-run and failure paths all behave"
       - name: install.sh bootstraps on a bare image (clone only, no setup)
         # The one-command installer's whole job is to work on a machine with
         # nothing on it. Proving it here means it cannot rot into "works only
