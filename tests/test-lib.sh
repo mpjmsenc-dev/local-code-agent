@@ -36,6 +36,7 @@ check "default AUTO_TUNE" test "${AUTO_TUNE}" = "true"
 check "default BACKUP_KEEP" test "${BACKUP_KEEP}" = "7"
 check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
 check "default BACKUP_SCHEDULE" test "${BACKUP_SCHEDULE}" = "*-*-* 03:30:00"
+check "default SKIP_TAILSCALE" test "${SKIP_TAILSCALE}" = "false"
 
 echo "# set_env_var -> load_env round-trip (update + append, no duplicates)"
 set_env_var MODEL_NAME "qwen2.5-coder:14b"
@@ -553,6 +554,29 @@ warm_is_detached() {
        f && /^}/ {exit !ok}' "${REPO}/scripts/lib.sh"
 }
 check "warm_model backgrounds the request" warm_is_detached
+
+echo "# a deliberately skipped component must not be reported as a problem"
+# Adding a skip flag without teaching the health check about it produces an
+# unfixable warning on a healthy box — the exact trap the auto-tune ladder had,
+# where 'lca check' told MODEL_FAMILY users to run a script that was already
+# right. Every SKIP_* must have a branch in check-system.sh that says "skipped"
+# rather than "missing".
+# -F with the needle built in a variable: the literal text is
+#   "${SKIP_X}" == "true"
+# and getting the quoting wrong here produces a check that fails against
+# correct code, which is how the first version of this went.
+skip_is_understood() {
+  local needle="\"\${$1}\" == \"true\""
+  grep -qF "${needle}" "${REPO}/check-system.sh"
+}
+check "check-system.sh understands SKIP_TAILSCALE" skip_is_understood SKIP_TAILSCALE
+check "check-system.sh understands SKIP_DOCKER" skip_is_understood SKIP_DOCKER
+# And the installer itself must honour it, or setup would install it anyway.
+honours_skip() {
+  local needle="\"\${SKIP_TAILSCALE}\" == \"true\""
+  grep -qF "${needle}" "${REPO}/scripts/install_tailscale.sh"
+}
+check "install_tailscale.sh honours SKIP_TAILSCALE" honours_skip
 
 echo "# the README's headline model list must match what the ladder can select"
 # It claimed "3b/7b/14b/32b, auto-selected". 32b is not reachable at ANY RAM

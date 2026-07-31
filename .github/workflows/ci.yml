@@ -355,6 +355,42 @@ jobs:
           if ./bin/lca logs -f >/dev/null 2>&1; then
             echo "FAIL: 'lca logs -f' with no source should be refused"; exit 1
           fi
+      - name: setup.sh itself runs, and is safe to re-run
+        # Until now NOTHING executed setup.sh — the only reference anywhere was
+        # 'test -x'. Every installer it calls was covered individually, but the
+        # orchestrator every user actually runs was not, so an ordering bug
+        # between them would have shipped green.
+        #
+        # Runnable here only because SKIP_TAILSCALE exists: without it setup
+        # would pull in an external VPN installer. Docker and the WebUI are
+        # already off in this job. Everything else is installed by the steps
+        # above, so this exercises ordering, the verdict logic and
+        # sync_env_keys rather than re-downloading the world.
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^SKIP_TAILSCALE=.*/SKIP_TAILSCALE=true/' .env || echo 'SKIP_TAILSCALE=true' >> .env
+          grep -q '^SKIP_TAILSCALE=true' .env || { echo "FAIL: could not set SKIP_TAILSCALE"; exit 1; }
+
+          out="$(sudo -E ./setup.sh </dev/null 2>&1)" || {
+            printf '%s\n' "${out}" | tail -40; echo "FAIL: setup.sh exited non-zero"; exit 1; }
+          printf '%s\n' "${out}" | tail -25
+
+          # The zero-terminal user watches the log for exactly this line.
+          grep -qF 'SETUP COMPLETE — local-code-agent is ready.' <<<"${out}" \
+            || { echo "FAIL: setup.sh did not print its success verdict"; exit 1; }
+          # And it must NOT have installed the thing we told it to skip.
+          if grep -q 'Running the official Tailscale installer' <<<"${out}"; then
+            echo "FAIL: SKIP_TAILSCALE was ignored"; exit 1
+          fi
+
+          # "Safe to re-run at any time" is a documented promise that nothing
+          # verified. Second run must also succeed and reach the same verdict.
+          out2="$(sudo -E ./setup.sh </dev/null 2>&1)" || {
+            printf '%s\n' "${out2}" | tail -40; echo "FAIL: setup.sh is not idempotent"; exit 1; }
+          grep -qF 'SETUP COMPLETE — local-code-agent is ready.' <<<"${out2}" \
+            || { echo "FAIL: re-run did not reach the success verdict"; exit 1; }
+          echo "setup.sh: runs, honours SKIP_TAILSCALE, and is safe to re-run"
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
