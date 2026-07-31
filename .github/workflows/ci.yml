@@ -222,29 +222,36 @@ jobs:
         # path, the tokens/second maths and the verdict branches.
         run: |
           set -euo pipefail
+          # Every assertion greps a HERESTRING, never a pipe. 'grep -q' exits the
+          # instant it matches, which closes the pipe and SIGPIPEs the writer;
+          # under 'set -o pipefail' that makes the pipeline report 141 and the
+          # check fail precisely BECAUSE the pattern was found. Capturing first
+          # also means a failure prints what the command actually said.
           out="$(./bin/lca speed --tokens 16 2>&1)"
           printf '%s\n' "${out}"
           # A rate must actually have been computed — 'inf', '0.0' or an empty
           # field would all mean the counters were misread.
-          printf '%s' "${out}" | grep -qE 'generation +[0-9]+\.[0-9]+ tokens/second' \
+          grep -qE 'generation +[0-9]+\.[0-9]+ tokens/second' <<<"${out}" \
             || { echo "FAIL: no tokens/second figure"; exit 1; }
-          printf '%s' "${out}" | grep -q 'What this means' \
+          grep -q 'What this means' <<<"${out}" \
             || { echo "FAIL: no verdict was reached"; exit 1; }
           # Running twice must produce the comparison against the stored baseline.
-          ./bin/lca speed --tokens 16 2>&1 | grep -q 'vs last run' \
+          out2="$(./bin/lca speed --tokens 16 2>&1)"
+          printf '%s\n' "${out2}"
+          grep -q 'vs last run' <<<"${out2}" \
             || { echo "FAIL: the second run did not compare against the first"; exit 1; }
       - name: lca logs works, and reads the journal for a real ollama service
         run: |
           set -euo pipefail
           out="$(./bin/lca logs -n 5 2>&1)"
           printf '%s\n' "${out}"
-          printf '%s' "${out}" | grep -q 'ollama (the model server)' \
+          grep -q 'ollama (the model server)' <<<"${out}" \
             || { echo "FAIL: no ollama section"; exit 1; }
           # This runner HAS systemd and a real ollama unit, so the journal must
           # actually be readable here — the graceful "no systemd" path must not
           # be what is exercised. if/fi, not 'grep && exit 1': under set -e a
           # non-matching grep is the PASSING case and would abort the step.
-          if printf '%s' "${out}" | grep -q 'No systemd on this machine'; then
+          if grep -q 'No systemd on this machine' <<<"${out}"; then
             echo "FAIL: fell back to the no-systemd path on a systemd runner"; exit 1
           fi
           ./bin/lca logs -n 5 ollama >/dev/null
@@ -318,7 +325,12 @@ jobs:
           # 2. Open WebUI must have PARSED them. It logs and swallows bad JSON,
           #    which would otherwise leave the stock suggestions in place with
           #    nothing failing anywhere.
-          if sudo docker logs open-webui 2>&1 | grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS'; then
+          # Captured, not piped: 'docker logs' produces a lot of output, and a
+          # matching 'grep -q' would exit early and SIGPIPE it — under pipefail
+          # the pipeline then reports 141, the 'if' reads FALSE, and a real
+          # parse error would be found and silently not reported.
+          webui_logs="$(sudo docker logs open-webui 2>&1 || true)"
+          if grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS' <<<"${webui_logs}"; then
             echo "FAIL: Open WebUI could not parse our starter questions"; exit 1
           fi
 
@@ -334,7 +346,7 @@ jobs:
           printf '%s\n' "${out}"
           # A running container must produce actual log lines, not the
           # "could not read logs" fallback.
-          if printf '%s' "${out}" | grep -q 'Could not read logs'; then
+          if grep -q 'Could not read logs' <<<"${out}"; then
             echo "FAIL: could not read logs from a container that is running"; exit 1
           fi
       - name: Recreation from edited .env (port change) must take effect
