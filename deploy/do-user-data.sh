@@ -83,9 +83,6 @@ main() {
 
   echo "--- Running the unattended setup (this takes ~20-30 minutes) ---"
   # setup.sh prints its own verdict line and exits non-zero on a partial
-  # failure. Let that verdict stand rather than adding ours on top: it is more
-  # specific, and YOUR-TURN.md teaches the user to look for it.
-  # setup.sh prints its own verdict line and exits non-zero on a partial
   # failure. Let that stand rather than stacking a vaguer message on top of a
   # more specific one — YOUR-TURN.md teaches the user to look for setup's line.
   if ! "${INSTALL_DIR}/setup.sh" </dev/null; then
@@ -96,11 +93,9 @@ main() {
   echo "=== local-code-agent first-boot install finished: $(date) ==="
 }
 
-# A pipeline rather than 'exec > >(tee ...)': the shell waits for tee to finish,
-# so the final verdict line cannot be lost to a race at exit. PIPESTATUS keeps
-# the exit status of main rather than tee's.
-# A plain pipeline, NOT 'if main | tee': using main as an 'if' condition would
-# disable 'set -e' inside it, so a failing clone would sail on and the script
-# would report success. Here set -e stays active in main, and pipefail makes
-# the pipeline carry main's status rather than tee's.
+# A pipeline rather than 'exec > >(tee ...)' so the shell waits for tee and the
+# final verdict line cannot be lost to a race at exit — and deliberately NOT
+# 'if main | tee', because using main as an 'if' condition disables 'set -e'
+# inside it, which let a failing clone sail on and report success. Here set -e
+# stays active in main and pipefail carries main's status, not tee's.
 main 2>&1 | tee -a "${LOG_FILE}"

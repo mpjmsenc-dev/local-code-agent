@@ -133,11 +133,16 @@ main() {
 
   if [[ -s "${answer_tmp}" ]]; then
     mkdir -p "${ASK_STATE_DIR}"
+    # Owner-only: this file holds the last question and answer verbatim, which
+    # routinely includes the contents of whatever file was attached. A
+    # world-readable copy of that under ~/.cache is not something to leave
+    # behind by default.
+    chmod 700 "${ASK_STATE_DIR}" 2>/dev/null || true
     {
       printf 'Question: %s\n\nAnswer: ' "${question}"
       cat "${answer_tmp}"
       printf '\n'
-    } > "${ASK_LAST}.tmp" && mv "${ASK_LAST}.tmp" "${ASK_LAST}"
+    } > "${ASK_LAST}.tmp" && chmod 600 "${ASK_LAST}.tmp" && mv "${ASK_LAST}.tmp" "${ASK_LAST}"
   fi
 }
 
