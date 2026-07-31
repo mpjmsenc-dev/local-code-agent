@@ -453,6 +453,24 @@ prompt_commands_all_real() {
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
 
+echo "# 'lca help' must not advertise a command bin/lca cannot run"
+# The same class of bug as the system-prompt check above, one layer out: help
+# text drifts when a command is renamed, and a user following it gets "Unknown
+# command". Aliases dispatched but deliberately left out of help (selftest,
+# agent, code) are fine — this only checks help -> dispatch, not the reverse.
+help_commands_all_real() {
+  local sub bad=0
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    grep -qE "^[[:space:]]*[a-z|\"-]*\b${sub}\b[a-z|\"-]*\)" "${REPO}/bin/lca" || {
+      printf 'lca help advertises a command bin/lca does not dispatch: %s\n' "${sub}" >&2
+      bad=1
+    }
+  done < <("${REPO}/bin/lca" help 2>/dev/null | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p' | sort -u)
+  return "${bad}"
+}
+check "every command in 'lca help' is dispatched by bin/lca" help_commands_all_real
+
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
 SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
 check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
