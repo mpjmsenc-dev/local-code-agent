@@ -654,6 +654,188 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# the login banner's install-state machine"
+# The banner is the first thing anyone sees on this box, so being confidently
+# wrong there is worse than saying nothing. Every state is exercised against a
+# real log file, because the states differ only by content and mtime.
+MOTD="${REPO}/scripts/motd.sh"
+LOGDIR="${SANDBOX}/logs"
+mkdir -p "${LOGDIR}"
+# motd_state NAME AGE_SECONDS — write a log (from stdin), age it, classify it.
+motd_state() {
+  local f="${LOGDIR}/$1" age="$2"
+  cat > "${f}"
+  touch -d "@$(( $(date +%s) - age ))" "${f}"
+  LCA_LOG="${f}" bash -c 'source "$1"; load_env_readonly; install_state' _ "${MOTD}" 2>/dev/null
+}
+state_is() {
+  local want="$1" got="$2"
+  [[ "${got}" == "${want}" ]] || { printf 'expected state %s, got %s\n' "${want}" "${got}" >&2; return 1; }
+}
+
+check "a fresh log with no verdict is 'running'" state_is running "$(motd_state running 5 <<'EOF'
+=== local-code-agent first-boot install started: today ===
+==> Downloading the model
+EOF
+)"
+# The one that matters: this repository's own build VM had an interrupted
+# install from 19 hours earlier, and "no verdict yet" would have told a user
+# with a perfectly working stack that nothing works.
+check "an old log with no verdict is 'stalled', not 'running'" state_is stalled "$(motd_state stalled 4000 <<'EOF'
+=== local-code-agent first-boot install started: yesterday ===
+==> Installing Docker
+EOF
+)"
+# The log file is named 'complete', not 'done': an unquoted 'done' as an
+# argument reads to ShellCheck as the loop keyword (SC1010).
+check "SETUP COMPLETE is 'done'" state_is "done" "$(motd_state complete 30 <<'EOF'
+=== local-code-agent first-boot install started: today ===
+SETUP COMPLETE — local-code-agent is ready.
+EOF
+)"
+check "SETUP FINISHED WITH ERRORS is 'failed'" state_is failed "$(motd_state failed 30 <<'EOF'
+=== local-code-agent first-boot install started: today ===
+SETUP FINISHED WITH ERRORS — 2 step(s) failed.
+EOF
+)"
+check "FIRST-BOOT INSTALL FAILED is 'failed'" state_is failed "$(motd_state bootfail 30 <<'EOF'
+=== local-code-agent first-boot install started: today ===
+FIRST-BOOT INSTALL FAILED — the droplet is NOT ready.
+EOF
+)"
+# A re-run appends to the same log. Reading the whole file would find the
+# PREVIOUS run's "COMPLETE" and report a finished install while one is midway.
+check "a re-run ignores the previous run's verdict" state_is running "$(motd_state rerun 5 <<'EOF'
+=== local-code-agent first-boot install started: yesterday ===
+SETUP COMPLETE — local-code-agent is ready.
+=== local-code-agent first-boot install finished: yesterday ===
+=== local-code-agent first-boot install started: today ===
+==> Installing Ollama
+EOF
+)"
+missing_log_is_none() {
+  [[ "$(LCA_LOG="${SANDBOX}/no-such-log" bash -c \
+    'source "$1"; load_env_readonly; install_state' _ "${MOTD}" 2>/dev/null)" == "none" ]]
+}
+check "no log at all is 'none'" missing_log_is_none
+
+echo "# the login banner must never write anything"
+# It runs as ROOT on every SSH login. load_env creates .env from .env.example
+# when missing, so the plain loader would leave a root-owned .env behind merely
+# because someone logged in — and the next non-root setup.sh could not write it.
+motd_creates_nothing() {
+  local dir="${SANDBOX}/noenv"
+  rm -rf "${dir}"; mkdir -p "${dir}/scripts"
+  cp "${REPO}/scripts/lib.sh" "${REPO}/scripts/motd.sh" "${dir}/scripts/"
+  cp "${REPO}/.env.example" "${dir}/"
+  LCA_LOG="${SANDBOX}/no-such-log" "${dir}/scripts/motd.sh" >/dev/null 2>&1 || true
+  [[ ! -e "${dir}/.env" ]]
+}
+check "motd.sh does not create .env" motd_creates_nothing
+# ...while the ordinary loader must still do exactly what it always did.
+load_env_still_creates() {
+  local dir="${SANDBOX}/withenv"
+  rm -rf "${dir}"; mkdir -p "${dir}/scripts"
+  cp "${REPO}/scripts/lib.sh" "${dir}/scripts/"
+  cp "${REPO}/.env.example" "${dir}/"
+  bash -c 'source "$1/scripts/lib.sh"; load_env' _ "${dir}" >/dev/null 2>&1 || true
+  [[ -e "${dir}/.env" ]]
+}
+check "load_env still creates .env (the read-only mode is opt-in)" load_env_still_creates
+
+echo "# the banner's verdict markers must match the lines actually printed"
+# motd.sh classifies on prefixes of setup.sh's and do-user-data.sh's verdict
+# lines. Reword either end and the banner silently reports 'running' forever.
+motd_markers_are_real() {
+  local marker bad=0
+  for marker in "SETUP COMPLETE" "SETUP FINISHED WITH ERRORS" "FIRST-BOOT INSTALL FAILED"; do
+    grep -qF "${marker}" "${REPO}/scripts/motd.sh" || {
+      printf 'motd.sh no longer looks for: %s\n' "${marker}" >&2; bad=1; continue
+    }
+    grep -qF "${marker}" "${REPO}/setup.sh" || grep -qF "${marker}" "${REPO}/deploy/do-user-data.sh" || {
+      printf 'nothing ever prints the marker motd.sh classifies on: %s\n' "${marker}" >&2; bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every marker motd.sh matches on is really printed" motd_markers_are_real
+
+# do-user-data.sh runs before the clone exists, so it cannot source lib.sh and
+# keeps its own copy of the log path. If the two drift, the banner watches a
+# file the installer never writes and reports 'none' during every install.
+log_path_agrees() {
+  local from_lib from_userdata
+  # Matched without a literal '${...}' in the pattern: ShellCheck reads that
+  # inside single quotes as a variable someone forgot to expand (SC2016).
+  from_lib="$(sed -n 's|^SETUP_LOG=.*:-\(/[^}]*\)}"$|\1|p' "${REPO}/scripts/lib.sh")"
+  from_userdata="$(sed -n 's|^LOG_FILE=.*:-\(/[^}]*\)}"$|\1|p' "${REPO}/deploy/do-user-data.sh")"
+  [[ -n "${from_lib}" && -n "${from_userdata}" ]] || {
+    echo "could not read the log path out of one of the two files" >&2; return 1
+  }
+  [[ "${from_lib}" == "${from_userdata}" ]] || {
+    printf 'log path drift: lib.sh=%s do-user-data.sh=%s\n' "${from_lib}" "${from_userdata}" >&2; return 1
+  }
+}
+check "lib.sh and do-user-data.sh agree on the install log path" log_path_agrees
+
+# run-parts --lsbsysinit (how pam_motd invokes it) skips any filename with a
+# dot in it, so installing this as '99-local-code-agent.sh' would silently
+# never run.
+motd_filename_is_runnable() {
+  local path base
+  path="$(sed -n 's|^MOTD_FILE="\(.*\)"$|\1|p' "${REPO}/scripts/lib.sh")"
+  [[ -n "${path}" ]] || { echo "could not read MOTD_FILE from lib.sh" >&2; return 1; }
+  base="${path##*/}"
+  [[ -n "${base}" && "${base}" != *.* ]]
+}
+check "the installed banner filename has no dot (run-parts would skip it)" \
+  motd_filename_is_runnable
+
+echo "# setup.sh must actually run every installer that exists"
+# An installer that nothing calls is worse than a missing one: it looks like
+# coverage, passes ShellCheck, and is only discovered when a user asks why the
+# thing it installs is not there. Adding scripts/install_foo.sh and forgetting
+# the line in setup.sh is a one-keystroke mistake with no other symptom.
+setup_runs_every_installer() {
+  local f name bad=0 found=0
+  for f in "${REPO}"/scripts/install_*.sh; do
+    [[ -e "${f}" ]] || continue
+    found=1
+    name="$(basename "${f}")"
+    grep -qF "scripts/${name}" "${REPO}/setup.sh" || {
+      printf 'setup.sh never invokes scripts/%s\n' "${name}" >&2
+      bad=1
+    }
+  done
+  # No installers found would otherwise "pass" without checking anything.
+  (( found == 1 )) || { echo "no scripts/install_*.sh found at all" >&2; return 1; }
+  return "${bad}"
+}
+check "setup.sh invokes every scripts/install_*.sh" setup_runs_every_installer
+
+echo "# the install's final verdict line must read the same everywhere"
+# docs/YOUR-TURN.md and docs/DO.md tell the user to watch the log for exactly
+# this line, and deploy/do-user-data.sh documents it as one of its three
+# outcomes. Reword it in setup.sh alone and the instruction becomes "wait for a
+# line that never comes" — a failure mode that looks like a hung install.
+# setup.sh is the single source; the others must quote it verbatim.
+verdict_line_is_consistent() {
+  local line f bad=0
+  line="$(sed -n 's/^DONE_LINE="\(.*\)"$/\1/p' "${REPO}/setup.sh")"
+  # Without this guard an empty extraction makes every 'grep -qF ""' below
+  # match, and the test passes while checking nothing.
+  [[ -n "${line}" ]] || { echo "could not read DONE_LINE from setup.sh" >&2; return 1; }
+  for f in docs/YOUR-TURN.md docs/DO.md deploy/do-user-data.sh; do
+    grep -qF -- "${line}" "${REPO}/${f}" || {
+      printf '%s does not contain the verdict line from setup.sh: %s\n' "${f}" "${line}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "the SETUP COMPLETE line matches across setup.sh and the docs" \
+  verdict_line_is_consistent
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

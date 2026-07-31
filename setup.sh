@@ -90,6 +90,12 @@ main() {
     info "No root available — skipping the 'lca' symlink; use ${SCRIPT_DIR}/bin/lca."
   fi
 
+  step "Installing the login banner"
+  # So that SSHing in answers "is it ready?" without the user having to know
+  # which log to tail. Never fatal: a box without update-motd is still a
+  # perfectly working install.
+  "${SCRIPT_DIR}/scripts/motd.sh" --install || warn "Could not install the login banner — everything else is unaffected."
+
   step "Installing boot services (auto-tune + netmode persistence)"
   "${SCRIPT_DIR}/scripts/tune.sh" --install-service
   "${SCRIPT_DIR}/netmode.sh" --install-service

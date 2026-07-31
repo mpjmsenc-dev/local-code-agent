@@ -122,6 +122,20 @@ main() {
     fi
   fi
 
+  # 6b. The login banner, on the same "only if it is ours" rule — otherwise a
+  # second checkout's banner would be removed by this one's uninstall. Left
+  # behind, it would print a banner for a stack that no longer exists.
+  if [[ -L "${MOTD_FILE}" ]]; then
+    local motd_target
+    motd_target="$(readlink -f "${MOTD_FILE}" 2>/dev/null || true)"
+    if [[ "${motd_target}" == "${SCRIPT_DIR}/scripts/motd.sh" ]]; then
+      as_root rm -f "${MOTD_FILE}"
+      ok "Login banner removed."
+    else
+      info "${MOTD_FILE} points elsewhere (${motd_target:-unknown}) — leaving it alone."
+    fi
+  fi
+
   # 7. Generated state outside the repo: run-agent.sh writes an aider
   # model-metadata file under ~/.cache. Under sudo, $HOME is root's, while the
   # file was written by the human's own run — clean up both.

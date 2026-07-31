@@ -173,6 +173,24 @@ if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
     p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: sudo ./setup.sh (or: sudo systemctl enable local-code-agent-tune.service)"
   fi
 fi
+# The login banner is the first thing anyone sees on this box, so a broken one
+# misinforms every single SSH. Only a warning: a machine without update-motd
+# works exactly as well, it just greets you with less.
+if [[ -d "$(dirname "${MOTD_FILE}")" ]]; then
+  if [[ -x "${MOTD_FILE}" || -L "${MOTD_FILE}" ]]; then
+    # Executed, not merely counted: the first version of this passed happily
+    # while the banner was printing "lib.sh: No such file or directory" at
+    # every login, because run-parts runs the symlink and SCRIPT_DIR then
+    # resolved to /etc/update-motd.d.
+    if "${MOTD_FILE}" >/dev/null 2>&1; then
+      p_pass "login banner installed (${MOTD_FILE}) — SSH reports whether the stack is ready"
+    else
+      p_warn "the login banner at ${MOTD_FILE} exits with an error — every SSH login shows that error instead of the status. Fix: sudo ${SCRIPT_DIR}/scripts/motd.sh --install"
+    fi
+  else
+    p_warn "no login banner at ${MOTD_FILE} — SSHing in will not tell you whether the stack is ready. Fix: sudo ${SCRIPT_DIR}/scripts/motd.sh --install"
+  fi
+fi
 
 # --- Open WebUI -------------------------------------------------------------
 step "Open WebUI"

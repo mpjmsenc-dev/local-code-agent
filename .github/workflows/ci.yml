@@ -391,6 +391,60 @@ jobs:
           grep -qF 'SETUP COMPLETE — local-code-agent is ready.' <<<"${out2}" \
             || { echo "FAIL: re-run did not reach the success verdict"; exit 1; }
           echo "setup.sh: runs, honours SKIP_TAILSCALE, and is safe to re-run"
+      - name: The login banner must survive the way pam_motd actually runs it
+        # The banner is the first thing anyone sees on the box, and its one
+        # real hazard is invisible to every other kind of test: run-parts
+        # executes the SYMLINK in /etc/update-motd.d, so an unresolved
+        # SCRIPT_DIR looks for lib.sh there and every login prints
+        # "lib.sh: No such file or directory" instead of the status. That bug
+        # was real and was caught only by running it exactly like this.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Make the gate meaningful on any runner image: setup.sh correctly
+          # skips the install when the directory is absent, which would leave
+          # nothing to assert.
+          sudo mkdir -p /etc/update-motd.d
+          sudo ./scripts/motd.sh --install
+          test -L /etc/update-motd.d/99-local-code-agent \
+            || { echo "FAIL: banner was not installed"; exit 1; }
+
+          # run-parts --lsbsysinit is how pam_motd invokes these, and it SKIPS
+          # any filename containing a dot — so being listed is the assertion.
+          listed="$(run-parts --lsbsysinit --list /etc/update-motd.d)"
+          grep -q '99-local-code-agent' <<<"${listed}" \
+            || { printf '%s\n' "${listed}"; echo "FAIL: run-parts skips our banner"; exit 1; }
+
+          # Executed through the symlink, and it must exit 0.
+          banner="$(/etc/update-motd.d/99-local-code-agent)" \
+            || { printf '%s\n' "${banner}"; echo "FAIL: banner exited non-zero"; exit 1; }
+          printf '%s\n' "${banner}"
+          # if/fi, never 'grep -q PAT && { exit 1; }': the non-matching grep IS
+          # the passing case here, and as an and-list it makes the script's
+          # exit status 1 — the step then fails precisely when it should pass.
+          if grep -q 'lib.sh' <<<"${banner}"; then
+            echo "FAIL: banner could not find lib.sh through the symlink"; exit 1
+          fi
+
+          # Ollama is installed and running by this point, so the honest
+          # verdict here is 'ready' — with the configured model named.
+          grep -q 'ready' <<<"${banner}" \
+            || { echo "FAIL: banner does not report a ready stack"; exit 1; }
+          model="$(grep -E '^MODEL_NAME=' .env | cut -d= -f2)"
+          grep -qF "${model}" <<<"${banner}" \
+            || { echo "FAIL: banner does not name the configured model ${model}"; exit 1; }
+
+          # The state it exists for, and the only one a user meets on a fresh
+          # droplet: an install still in flight. Unobservable without a log.
+          fake=/tmp/lca-inflight.log
+          printf '=== local-code-agent first-boot install started: now ===\n==> Downloading the model\n' > "${fake}"
+          inflight="$(LCA_LOG="${fake}" /etc/update-motd.d/99-local-code-agent)"
+          printf '%s\n' "${inflight}"
+          grep -q 'still installing' <<<"${inflight}" \
+            || { echo "FAIL: banner does not report an install in progress"; exit 1; }
+          grep -q 'Downloading the model' <<<"${inflight}" \
+            || { echo "FAIL: banner does not report how far the install got"; exit 1; }
+          echo "login banner: installed, listed by run-parts, and truthful in both states"
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
@@ -413,6 +467,9 @@ jobs:
           test ! -e /etc/systemd/system/ollama.service.d
           test ! -e /etc/systemd/system/local-code-agent-tune.service
           test ! -e /etc/local-code-agent
+          # A banner left behind would greet every login on behalf of a stack
+          # that no longer exists.
+          test ! -e /etc/update-motd.d/99-local-code-agent
           test ! -d .venv
           # Generated state outside the repo must go too (run-agent.sh writes an
           # aider model-metadata file under ~/.cache/local-code-agent).
