@@ -128,6 +128,18 @@ main() {
       if [[ -n "${live_model}" && "${live_model}" != "${MODEL_NAME}" ]]; then
         warn "Model drift: the chat app preselects '${live_model}', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Refresh with: scripts/install_webui.sh"
       fi
+      # The same drift class as the two above, but this one is the security-
+      # relevant one. docs/YOUR-TURN.md tells the user to close signups by
+      # editing .env — and editing .env does not touch a running container. So
+      # someone who does exactly as instructed, and forgets the re-run, is left
+      # believing signups are locked while anyone who can reach the app can
+      # still create an account. Silent, and on the whole point of the project.
+      local live_signup
+      live_signup="$("${DOCKER[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+        "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^ENABLE_SIGNUP=//p' | head -1)"
+      if [[ -n "${live_signup}" && "${live_signup}" != "${WEBUI_ENABLE_SIGNUP}" ]]; then
+        warn "Signup drift: the running chat app was started with signups ${live_signup^^}, but .env says WEBUI_ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}. Editing .env does NOT change a running container — apply it with: scripts/install_webui.sh"
+      fi
       if webui_responds; then
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else

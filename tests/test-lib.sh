@@ -654,6 +654,32 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# every setting baked into the WebUI container must be drift-checked"
+# Editing .env does not change a running container, so each of these can be
+# changed in .env and silently not take effect. Port and model drift were
+# already reported; signup drift was not — and that is the one where the
+# silence means "you think signups are locked and they are open".
+drift_checked() {
+  local var="$1"
+  # Extracted from the container's env...
+  grep -qF "s/^${var}=//p" "${REPO}/webui.sh" || {
+    printf 'webui.sh never reads %s out of the running container\n' "${var}" >&2; return 1
+  }
+  # ...and actually compared against .env, not just read.
+  grep -qiE "warn \"${2} drift" "${REPO}/webui.sh" || {
+    printf 'webui.sh reads %s but never warns about %s drift\n' "${var}" "${2}" >&2; return 1
+  }
+}
+check "webui.sh reports PORT drift"          drift_checked PORT Port
+check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
+check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
+# And check-system.sh must say something about open signups, since that is
+# where a user looks when asking "is this box safe?".
+signup_reported_by_check() {
+  grep -qF 'WEBUI_ENABLE_SIGNUP' "${REPO}/check-system.sh"
+}
+check "check-system.sh reports the signup setting" signup_reported_by_check
+
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently
 # wrong there is worse than saying nothing. Every state is exercised against a
