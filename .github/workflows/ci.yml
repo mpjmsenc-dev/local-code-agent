@@ -216,6 +216,42 @@ jobs:
         # live Ollama -> generation -> aider round-trip. WebUI is disabled in
         # this job, so its step 4 skips rather than fails.
         run: ./scripts/selftest.sh
+      - name: lca speed measures a real generation and reaches a verdict
+        # speed.sh is new and does real arithmetic on Ollama's timing counters.
+        # A small num_predict keeps it quick while still exercising the warm-up
+        # path, the tokens/second maths and the verdict branches.
+        run: |
+          set -euo pipefail
+          out="$(./bin/lca speed --tokens 16 2>&1)"
+          printf '%s\n' "${out}"
+          # A rate must actually have been computed — 'inf', '0.0' or an empty
+          # field would all mean the counters were misread.
+          printf '%s' "${out}" | grep -qE 'generation +[0-9]+\.[0-9]+ tokens/second' \
+            || { echo "FAIL: no tokens/second figure"; exit 1; }
+          printf '%s' "${out}" | grep -q 'What this means' \
+            || { echo "FAIL: no verdict was reached"; exit 1; }
+          # Running twice must produce the comparison against the stored baseline.
+          ./bin/lca speed --tokens 16 2>&1 | grep -q 'vs last run' \
+            || { echo "FAIL: the second run did not compare against the first"; exit 1; }
+      - name: lca logs works, and reads the journal for a real ollama service
+        run: |
+          set -euo pipefail
+          out="$(./bin/lca logs -n 5 2>&1)"
+          printf '%s\n' "${out}"
+          printf '%s' "${out}" | grep -q 'ollama (the model server)' \
+            || { echo "FAIL: no ollama section"; exit 1; }
+          # This runner HAS systemd and a real ollama unit, so the journal must
+          # actually be readable here — the graceful "no systemd" path must not
+          # be what is exercised. if/fi, not 'grep && exit 1': under set -e a
+          # non-matching grep is the PASSING case and would abort the step.
+          if printf '%s' "${out}" | grep -q 'No systemd on this machine'; then
+            echo "FAIL: fell back to the no-systemd path on a systemd runner"; exit 1
+          fi
+          ./bin/lca logs -n 5 ollama >/dev/null
+          # -f with no source must be refused rather than interleaving streams.
+          if ./bin/lca logs -f >/dev/null 2>&1; then
+            echo "FAIL: 'lca logs -f' with no source should be refused"; exit 1
+          fi
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
@@ -291,6 +327,16 @@ jobs:
           #    thing that matters — and is stable regardless of whether upstream
           #    persists the value or serves it from its in-memory defaults.
           tests/webui-config-gate.sh "http://127.0.0.1:${WEBUI_PORT:-3000}"
+      - name: lca logs reads the real container's output
+        run: |
+          set -euo pipefail
+          out="$(./bin/lca logs -n 20 webui 2>&1)"
+          printf '%s\n' "${out}"
+          # A running container must produce actual log lines, not the
+          # "could not read logs" fallback.
+          if printf '%s' "${out}" | grep -q 'Could not read logs'; then
+            echo "FAIL: could not read logs from a container that is running"; exit 1
+          fi
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env
