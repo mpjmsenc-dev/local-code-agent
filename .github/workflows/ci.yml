@@ -32,6 +32,53 @@ jobs:
         run: |
           bash scripts/tune.sh --dry-run
           test -f .env && diff .env .env.example
+      - name: update.sh --check detects updates without applying them
+        # Updating is the second thing every user does after installing, and it
+        # had no coverage at all. --check is the whole detection path — branch
+        # resolution, fetch, behind-count, local-edit warning — with nothing
+        # mutated, so it can be gated cheaply on every push.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.email ci@example.invalid
+          git config --global user.name CI
+          git config --global --add safe.directory "$(pwd)"
+          # A PR build is a DETACHED merge commit and update.sh rightly refuses
+          # those, so the fixture needs a real branch on both ends.
+          BR=ci-update-test
+          git branch -f "${BR}" HEAD
+          git clone --quiet --bare . /tmp/upd-origin.git
+          git -C /tmp/upd-origin.git symbolic-ref HEAD "refs/heads/${BR}"
+          git clone --quiet /tmp/upd-origin.git /tmp/upd-work
+          cp .env.example /tmp/upd-work/.env
+
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          printf '%s\n' "${out}"
+          grep -q 'Already up to date' <<<"${out}" \
+            || { echo "FAIL: a fresh clone should be up to date"; exit 1; }
+
+          # Advance the remote; --check must SEE it and must NOT apply it.
+          git clone --quiet /tmp/upd-origin.git /tmp/upd-push
+          ( cd /tmp/upd-push
+            echo "# upstream change" >> README.md
+            git commit --quiet -am "upstream: a change update.sh must notice"
+            git push --quiet origin "${BR}" )
+          before="$(git -C /tmp/upd-work rev-parse HEAD)"
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          printf '%s\n' "${out}"
+          grep -q '1 new commit' <<<"${out}" \
+            || { echo "FAIL: --check did not report the new commit"; exit 1; }
+          grep -q 'nothing was changed' <<<"${out}" \
+            || { echo "FAIL: --check did not say it changed nothing"; exit 1; }
+          test "$(git -C /tmp/upd-work rev-parse HEAD)" = "${before}" \
+            || { echo "FAIL: --check moved HEAD; it must not touch the checkout"; exit 1; }
+
+          # Local edits must be surfaced before anything is applied.
+          echo "local tweak" >> /tmp/upd-work/README.md
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
+          grep -q 'local modifications' <<<"${out}" \
+            || { echo "FAIL: local edits were not reported"; printf '%s\n' "${out}"; exit 1; }
+          echo "update.sh --check: detection, no-op guarantee and dirty-tree warning all behave"
 
   system:
     name: System artifacts (nft ruleset + systemd units)
@@ -131,6 +178,45 @@ jobs:
           test -s /etc/ssl/certs/ca-certificates.crt || { echo "MISSING CA bundle"; missing=1; }
           python3 -m venv /tmp/venvtest && echo "ok   python3 -m venv"
           exit "${missing}"
+      - name: do-user-data.sh — the DigitalOcean first-boot script, both outcomes
+        # This is the file a user literally pastes into the droplet creation
+        # form, and until now nothing tested it at all. YOUR-TURN.md tells them
+        # to watch the log for a verdict line, so the failure path matters as
+        # much as the success path: if a bad repo URL just stops the log, that
+        # is indistinguishable from "still working" and they wait 30 minutes
+        # for nothing.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A PR build checks out a DETACHED merge commit, so the mirror needs a
+          # real branch for its HEAD to resolve — otherwise the clone lands
+          # empty and this would "pass" against nothing.
+          git config --global --add safe.directory "$(pwd)"
+          git branch -f ci-dud-test HEAD
+          git clone --quiet --bare . /tmp/lca-mirror.git
+          git -C /tmp/lca-mirror.git symbolic-ref HEAD refs/heads/ci-dud-test
+
+          LCA_REPO_URL=/tmp/lca-mirror.git LCA_DIR=/tmp/lca-dud LCA_LOG=/tmp/dud.log \
+            LCA_RUN_SETUP=false bash deploy/do-user-data.sh
+          test -x /tmp/lca-dud/bin/lca || { echo "FAIL: clone lacks an executable bin/lca"; exit 1; }
+          grep -q 'first-boot install finished' /tmp/dud.log \
+            || { echo "FAIL: no completion line in the log"; cat /tmp/dud.log; exit 1; }
+
+          # Re-running must be safe — the docs tell people to do exactly that.
+          LCA_REPO_URL=/tmp/lca-mirror.git LCA_DIR=/tmp/lca-dud LCA_LOG=/tmp/dud.log \
+            LCA_RUN_SETUP=false bash deploy/do-user-data.sh
+
+          # A clone that cannot succeed must fail loudly AND say so in the log.
+          set +e
+          LCA_REPO_URL=/tmp/definitely-not-here.git LCA_DIR=/tmp/lca-dud-bad \
+            LCA_LOG=/tmp/dud-bad.log LCA_RUN_SETUP=false bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a failed clone reported success (exit 0)"; exit 1; }
+          grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
+            || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
+          echo "do-user-data.sh: success, re-run and failure paths all behave"
       - name: install.sh bootstraps on a bare image (clone only, no setup)
         # The one-command installer's whole job is to work on a machine with
         # nothing on it. Proving it here means it cannot rot into "works only
@@ -216,6 +302,49 @@ jobs:
         # live Ollama -> generation -> aider round-trip. WebUI is disabled in
         # this job, so its step 4 skips rather than fails.
         run: ./scripts/selftest.sh
+      - name: lca speed measures a real generation and reaches a verdict
+        # speed.sh is new and does real arithmetic on Ollama's timing counters.
+        # A small num_predict keeps it quick while still exercising the warm-up
+        # path, the tokens/second maths and the verdict branches.
+        run: |
+          set -euo pipefail
+          # Every assertion greps a HERESTRING, never a pipe. 'grep -q' exits the
+          # instant it matches, which closes the pipe and SIGPIPEs the writer;
+          # under 'set -o pipefail' that makes the pipeline report 141 and the
+          # check fail precisely BECAUSE the pattern was found. Capturing first
+          # also means a failure prints what the command actually said.
+          out="$(./bin/lca speed --tokens 16 2>&1)"
+          printf '%s\n' "${out}"
+          # A rate must actually have been computed — 'inf', '0.0' or an empty
+          # field would all mean the counters were misread.
+          grep -qE 'generation +[0-9]+\.[0-9]+ tokens/second' <<<"${out}" \
+            || { echo "FAIL: no tokens/second figure"; exit 1; }
+          grep -q 'What this means' <<<"${out}" \
+            || { echo "FAIL: no verdict was reached"; exit 1; }
+          # Running twice must produce the comparison against the stored baseline.
+          out2="$(./bin/lca speed --tokens 16 2>&1)"
+          printf '%s\n' "${out2}"
+          grep -q 'vs last run' <<<"${out2}" \
+            || { echo "FAIL: the second run did not compare against the first"; exit 1; }
+      - name: lca logs works, and reads the journal for a real ollama service
+        run: |
+          set -euo pipefail
+          out="$(./bin/lca logs -n 5 2>&1)"
+          printf '%s\n' "${out}"
+          grep -q 'ollama (the model server)' <<<"${out}" \
+            || { echo "FAIL: no ollama section"; exit 1; }
+          # This runner HAS systemd and a real ollama unit, so the journal must
+          # actually be readable here — the graceful "no systemd" path must not
+          # be what is exercised. if/fi, not 'grep && exit 1': under set -e a
+          # non-matching grep is the PASSING case and would abort the step.
+          if grep -q 'No systemd on this machine' <<<"${out}"; then
+            echo "FAIL: fell back to the no-systemd path on a systemd runner"; exit 1
+          fi
+          ./bin/lca logs -n 5 ollama >/dev/null
+          # -f with no source must be refused rather than interleaving streams.
+          if ./bin/lca logs -f >/dev/null 2>&1; then
+            echo "FAIL: 'lca logs -f' with no source should be refused"; exit 1
+          fi
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
@@ -282,7 +411,12 @@ jobs:
           # 2. Open WebUI must have PARSED them. It logs and swallows bad JSON,
           #    which would otherwise leave the stock suggestions in place with
           #    nothing failing anywhere.
-          if sudo docker logs open-webui 2>&1 | grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS'; then
+          # Captured, not piped: 'docker logs' produces a lot of output, and a
+          # matching 'grep -q' would exit early and SIGPIPE it — under pipefail
+          # the pipeline then reports 141, the 'if' reads FALSE, and a real
+          # parse error would be found and silently not reported.
+          webui_logs="$(sudo docker logs open-webui 2>&1 || true)"
+          if grep -q 'Error loading DEFAULT_PROMPT_SUGGESTIONS' <<<"${webui_logs}"; then
             echo "FAIL: Open WebUI could not parse our starter questions"; exit 1
           fi
 
@@ -291,6 +425,16 @@ jobs:
           #    thing that matters — and is stable regardless of whether upstream
           #    persists the value or serves it from its in-memory defaults.
           tests/webui-config-gate.sh "http://127.0.0.1:${WEBUI_PORT:-3000}"
+      - name: lca logs reads the real container's output
+        run: |
+          set -euo pipefail
+          out="$(./bin/lca logs -n 20 webui 2>&1)"
+          printf '%s\n' "${out}"
+          # A running container must produce actual log lines, not the
+          # "could not read logs" fallback.
+          if grep -q 'Could not read logs' <<<"${out}"; then
+            echo "FAIL: could not read logs from a container that is running"; exit 1
+          fi
       - name: Recreation from edited .env (port change) must take effect
         run: |
           sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=3210/' .env

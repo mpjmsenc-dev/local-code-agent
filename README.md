@@ -205,8 +205,20 @@ Quick answers without leaving what you are doing:
 lca ask "how do I find the 10 largest files under /var?"
 lca ask "why is setup.sh failing?"        # names a local file -> it is included
 lca ask -f netmode.sh "what does this script do?"
-journalctl -u ollama -n 50 | lca ask "why did this fail?"
+lca ask -c "now show me that as a one-liner"   # follows on from the last answer
+lca ask -m qwen2.5-coder:3b "..."         # try another model, just this once
 ```
+
+Because it is *your* machine's AI, it can read your machine's own output:
+
+```bash
+lca check | lca ask "what is the most important thing to fix, and the command?"
+lca logs  | lca ask "why did this fail?"
+```
+
+That is not a party trick — on a box whose Docker daemon was down, the first
+one picked Docker out of a 24-line health report as the root cause and gave
+`sudo systemctl start docker`. Nothing left the machine to do it.
 
 `lca help` lists them all. Everything after the command is passed through, so
 `lca --no-auto-commits` reaches aider and `lca model X --remove-old` reaches

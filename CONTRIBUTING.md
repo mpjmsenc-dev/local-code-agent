@@ -76,6 +76,35 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
+## Three shell traps that turn a gate into decoration
+
+All three were shipped here at least once. They matter more in an assertion
+than in ordinary code, because each one fails *silently in the passing
+direction* — the gate keeps reporting green, or red, for the wrong reason.
+
+**1. `cmd | grep -q PATTERN` under `set -o pipefail`.** `grep -q` exits the
+instant it matches, closing the pipe; the writer is killed by SIGPIPE and the
+pipeline reports 141. So the check fails *because* the pattern was found —
+but only once the output is big enough to still be writing, which makes it
+look intermittent. Capture first, then match a herestring:
+
+```bash
+out="$(some_command 2>&1)"
+grep -q 'expected' <<<"${out}" || { echo "FAIL: ..."; exit 1; }
+```
+
+**2. `grep -q PATTERN && { echo FAIL; exit 1; }` under `set -e`.** Here a
+*non*-matching grep is the passing case, and the AND-list's non-zero status
+aborts the step anyway. Use `if`/`fi` for negative assertions.
+
+**3. `bash -c '! some_function'` in `tests/`.** A child shell has never
+sourced `lib.sh`, so the function is "command not found" (exit 127) and `!`
+turns that into a pass — a test that cannot fail. Call a local wrapper
+function instead.
+
+The habit that catches all three: **mutate the thing under test and confirm
+the test goes red.** A test that has never failed has not been tested.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:

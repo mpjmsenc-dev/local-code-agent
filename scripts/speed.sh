@@ -26,12 +26,17 @@ BASELINE="${STATE_DIR}/speed-baseline"
 
 usage() {
   cat <<EOF
-Usage: lca speed [--tokens N]
+Usage: lca speed [--tokens N] [-m MODEL]
 
   --tokens N   how many tokens to generate for the measurement (default 80)
+  -m MODEL     measure MODEL instead of the configured one (${MODEL_NAME})
 
 Measures generation speed with the model's own timing counters, compares it
 against the last run, and explains what limits it on this machine.
+
+Comparing two models before committing to one:
+  lca speed -m qwen2.5-coder:3b
+  lca speed -m qwen2.5-coder:7b
 EOF
 }
 
@@ -54,6 +59,9 @@ main() {
   while [[ $# -gt 0 ]]; do
     case "${1}" in
       --tokens) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "--tokens needs a number"; tokens="$2"; shift 2 ;;
+      # A flag rather than the MODEL_NAME environment variable, which load_env
+      # overwrites from .env — see the same note in ask.sh.
+      -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) arg="$1"; usage; die "Unknown option: ${arg}" ;;
     esac
