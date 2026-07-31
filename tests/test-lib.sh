@@ -460,7 +460,15 @@ set_env_var BACKUP_SCHEDULE "*-*-* 05:00:00"
 # Re-source the file in a subshell and echo one value back. Stronger than
 # reading the current globals: it proves the FILE is still sourceable, which is
 # exactly what an unquoted spaced value destroys.
-env_value() { ( set -a; . "${SANDBOX}/.env" >/dev/null 2>&1; set +a; printf '%s' "${!1-}" ); }
+# Sourced inside a child bash rather than in this shell: with -x, ShellCheck
+# tries to FOLLOW a literal 'source'/'.' and errors when the target does not
+# exist at lint time (SC1091). ".env" happens to exist in a developer's
+# checkout but never in CI, so the inline form lints clean locally and fails
+# there — the worst kind of difference. A quoted 'bash -c' is opaque to that
+# analysis, and running in a real child process is a stricter check anyway.
+env_value() {
+  bash -c 'set -a; . "$1" >/dev/null 2>&1; set +a; printf "%s" "${!2-}"' _ "${SANDBOX}/.env" "$1"
+}
 check "a spaced value round-trips intact" \
   test "$(env_value BACKUP_SCHEDULE)" = "*-*-* 05:00:00"
 check "and .env is still sourceable afterwards" test -n "$(env_value MODEL_NAME)"

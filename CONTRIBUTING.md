@@ -102,8 +102,22 @@ sourced `lib.sh`, so the function is "command not found" (exit 127) and `!`
 turns that into a pass — a test that cannot fail. Call a local wrapper
 function instead.
 
-The habit that catches all three: **mutate the thing under test and confirm
-the test goes red.** A test that has never failed has not been tested.
+**4. Lint that depends on an untracked file.** `shellcheck -x` *follows*
+`source`/`.` targets. A literal `. "${SOMEDIR}/.env"` resolves in a developer's
+checkout, where `.env` exists, and fails in CI, where it never does (SC1091) —
+so `make gates` passes locally and the build goes red. Keep runtime-path
+sourcing out of the analyser's way (running it inside a quoted `bash -c` is
+opaque to it) rather than reaching for a suppression. To check the CI
+condition before pushing:
+
+```bash
+mv .env /tmp/ && make lint; mv /tmp/.env .
+```
+
+The habit that catches the first three: **mutate the thing under test and
+confirm the test goes red.** A test that has never failed has not been tested.
+The habit that catches the fourth: **ask what CI has that you don't, and what
+you have that CI doesn't.**
 
 ## Reviewing a PR
 
