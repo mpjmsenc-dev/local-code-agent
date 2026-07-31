@@ -654,6 +654,51 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# setup.sh must actually run every installer that exists"
+# An installer that nothing calls is worse than a missing one: it looks like
+# coverage, passes ShellCheck, and is only discovered when a user asks why the
+# thing it installs is not there. Adding scripts/install_foo.sh and forgetting
+# the line in setup.sh is a one-keystroke mistake with no other symptom.
+setup_runs_every_installer() {
+  local f name bad=0 found=0
+  for f in "${REPO}"/scripts/install_*.sh; do
+    [[ -e "${f}" ]] || continue
+    found=1
+    name="$(basename "${f}")"
+    grep -qF "scripts/${name}" "${REPO}/setup.sh" || {
+      printf 'setup.sh never invokes scripts/%s\n' "${name}" >&2
+      bad=1
+    }
+  done
+  # No installers found would otherwise "pass" without checking anything.
+  (( found == 1 )) || { echo "no scripts/install_*.sh found at all" >&2; return 1; }
+  return "${bad}"
+}
+check "setup.sh invokes every scripts/install_*.sh" setup_runs_every_installer
+
+echo "# the install's final verdict line must read the same everywhere"
+# docs/YOUR-TURN.md and docs/DO.md tell the user to watch the log for exactly
+# this line, and deploy/do-user-data.sh documents it as one of its three
+# outcomes. Reword it in setup.sh alone and the instruction becomes "wait for a
+# line that never comes" — a failure mode that looks like a hung install.
+# setup.sh is the single source; the others must quote it verbatim.
+verdict_line_is_consistent() {
+  local line f bad=0
+  line="$(sed -n 's/^DONE_LINE="\(.*\)"$/\1/p' "${REPO}/setup.sh")"
+  # Without this guard an empty extraction makes every 'grep -qF ""' below
+  # match, and the test passes while checking nothing.
+  [[ -n "${line}" ]] || { echo "could not read DONE_LINE from setup.sh" >&2; return 1; }
+  for f in docs/YOUR-TURN.md docs/DO.md deploy/do-user-data.sh; do
+    grep -qF -- "${line}" "${REPO}/${f}" || {
+      printf '%s does not contain the verdict line from setup.sh: %s\n' "${f}" "${line}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "the SETUP COMPLETE line matches across setup.sh and the docs" \
+  verdict_line_is_consistent
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
