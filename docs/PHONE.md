@@ -126,12 +126,21 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   take a backup?" with `lca backup`, not a lecture about `tar`.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
-- The first message after a quiet period is slower — the model reloads into RAM,
-  about 20 seconds on a droplet. If that is the thing that annoys you most (it
-  usually is, because you hit it every time you pick up your phone), set
-  `OLLAMA_KEEP_ALIVE=-1` in `.env` and re-run `scripts/install_ollama.sh`: the
-  model then stays resident permanently and the first message is as fast as the
-  rest. The cost is that its RAM is never released.
+- The first message after a quiet period is slower — the model reloads into RAM.
+  How much slower depends on whether the file is still in the operating
+  system's disk cache: measured on one machine, **0.3 seconds** when the model
+  was already resident, ~20 seconds warm, and **228 seconds** from genuinely
+  cold. If that is the thing that annoys you most (it usually is, because you
+  hit it every time you pick up your phone), set `OLLAMA_KEEP_ALIVE=-1` in
+  `.env` and re-run `scripts/install_ollama.sh`: the model then stays resident
+  permanently. The cost is that its RAM is never released.
+- **After a reboot the model is loaded for you.** Nothing used to do this —
+  auto-tune only loads the model when it is *changing*, and then restarts
+  Ollama straight afterwards, dropping it again. The boot service now kicks off
+  a warm-up in the background, so the load happens while you are still
+  unlocking your phone rather than while you wait for a reply. It is
+  best-effort and never delays boot; if you beat it to the first message you
+  are no worse off than before.
 - `lca speed` on the server measures all of this and tells you what is limiting
   it.
 
