@@ -65,8 +65,26 @@ comfort upgrade, not a requirement.
 In descending order of impact:
 
 **1. Use a smaller model.** This is the biggest CPU-side lever by far. Speed
-scales roughly with parameter count: a 3B model answers about 4–5× faster than a
-14B one. For short edits and questions the smaller model is often good enough.
+scales roughly with parameter count, because generating a token means reading
+the whole model out of RAM. Measured on the same CPU-only x86_64 box:
+
+| Model | Measured |
+|---|---|
+| `qwen2.5-coder:3b` | **12.3 tokens/second** |
+| `qwen2.5-coder:7b` | **6.1 tokens/second** |
+
+Almost exactly 2× for 2.3× the parameters — so a 3B model is roughly 4–5× faster
+than a 14B one. For short edits and questions the smaller model is often good
+enough, and it still answers as *your* assistant: `qwen2.5-coder:3b` follows the
+system prompt correctly, answering "how do I take a backup?" with `lca backup`.
+
+Try both before committing to one — no config change, no re-pull:
+
+```bash
+lca speed -m qwen2.5-coder:3b
+lca speed -m qwen2.5-coder:7b
+lca ask -m qwen2.5-coder:3b "explain this error: ..."
+```
 
 ```bash
 ./update-model.sh --list-recommended    # what fits this machine

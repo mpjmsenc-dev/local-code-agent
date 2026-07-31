@@ -116,7 +116,11 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
 - On the base 4 vCPU / 8 GB droplet, auto-tune runs **qwen2.5-coder:3b** (8 GiB
   detected falls in the `< 9 GiB` rung) — the fastest, most modest model.
   The bigger **7b** kicks in from **9 GiB detected** upward (a ~12–16 GB VM).
-  Expect a comfortable reading pace on CPU, slower than Claude.
+  Measured on CPU: **3b ≈ 12 tokens/second, 7b ≈ 6**. A comfortable reading
+  pace, slower than Claude.
+- The small model still behaves like *your* assistant rather than a generic
+  one — 3b was checked against the same system prompt and answers "how do I
+  take a backup?" with `lca backup`, not a lecture about `tar`.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
 - The first message after a quiet period is slower — the model reloads into RAM,

@@ -20,11 +20,12 @@ ASK_LAST="${ASK_STATE_DIR}/ask-last"
 
 usage() {
   cat <<EOF
-Usage: lca ask [-f FILE] [-c] "your question"
+Usage: lca ask [-f FILE] [-c] [-m MODEL] "your question"
        <command> | lca ask "your question"
 
-  -f FILE   include FILE as context (repeatable)
-  -c        continue from your last question and answer
+  -f FILE    include FILE as context (repeatable)
+  -c         continue from your last question and answer
+  -m MODEL   answer with MODEL just this once (default: ${MODEL_NAME})
 
 Answers come from ${MODEL_NAME} running locally — nothing leaves this machine.
 EOF
@@ -36,6 +37,12 @@ main() {
     case "${1}" in
       -f|--file) [[ -n "${2:-}" ]] || die "-f needs a file path"; files+=( "$2" ); shift 2 ;;
       -c|--continue) continue_last=true; shift ;;
+      # A flag, not the MODEL_NAME environment variable: load_env sources .env
+      # under 'set -a', so an exported MODEL_NAME is overwritten by the file and
+      # 'MODEL_NAME=x lca ask ...' silently answers with the configured model
+      # instead. Comparing two models is a real thing people do — this is the
+      # way that actually works.
+      -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *)         arg="$1"; question="${question:+${question} }${arg}"; shift ;;
     esac
