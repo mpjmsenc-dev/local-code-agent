@@ -453,6 +453,53 @@ prompt_commands_all_real() {
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
 
+echo "# set_env_var survives a value with spaces (BACKUP_SCHEDULE is one)"
+# Written unquoted, "*-*-* 05:00:00" makes .env unsourceable and the variable
+# reads back EMPTY. tune.sh writes .env on every boot, so this must be safe.
+set_env_var BACKUP_SCHEDULE "*-*-* 05:00:00"
+# Re-source the file in a subshell and echo one value back. Stronger than
+# reading the current globals: it proves the FILE is still sourceable, which is
+# exactly what an unquoted spaced value destroys.
+# Sourced inside a child bash rather than in this shell: with -x, ShellCheck
+# tries to FOLLOW a literal 'source'/'.' and errors when the target does not
+# exist at lint time (SC1091). ".env" happens to exist in a developer's
+# checkout but never in CI, so the inline form lints clean locally and fails
+# there — the worst kind of difference. A quoted 'bash -c' is opaque to that
+# analysis, and running in a real child process is a stricter check anyway.
+env_value() {
+  bash -c 'set -a; . "$1" >/dev/null 2>&1; set +a; printf "%s" "${!2-}"' _ "${SANDBOX}/.env" "$1"
+}
+check "a spaced value round-trips intact" \
+  test "$(env_value BACKUP_SCHEDULE)" = "*-*-* 05:00:00"
+check "and .env is still sourceable afterwards" test -n "$(env_value MODEL_NAME)"
+# Every write made by today's callers must stay byte-identical — quoting only
+# kicks in for whitespace, so the boot path's output cannot change.
+set_env_var MODEL_NAME "qwen2.5-coder:7b"
+check "an unspaced value is still written bare" \
+  grep -qx 'MODEL_NAME=qwen2.5-coder:7b' "${SANDBOX}/.env"
+# A value that could not survive the round-trip is refused, not mangled.
+# The '$' is built from a variable so the literal does not sit inside single
+# quotes, which reads to ShellCheck as an expansion someone forgot (SC2016).
+refuses() { ! set_env_var TEST_KEY "$1" >/dev/null 2>&1; }
+DOLLAR='$'
+check "a value containing a quote is refused" refuses 'has"quote'
+check "a value containing a dollar sign is refused" refuses "has${DOLLAR}dollar"
+set_env_var BACKUP_SCHEDULE "*-*-* 03:30:00"
+
+echo "# every setting must exist in BOTH lib.sh's defaults and .env.example"
+# A key defaulted in lib.sh but absent from .env.example is a real setting no
+# user can discover. A key in .env.example with no lib.sh default means
+# deleting that line silently changes behaviour, with no fallback behind it.
+lib_default_keys() {
+  sed -n '/^load_env()/,/^}/p' "${REPO}/scripts/lib.sh" \
+    | sed -nE 's/^[[:space:]]*([A-Z_]+)="\$\{[A-Z_]+:-.*/\1/p' | sort -u
+}
+example_keys() { grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u; }
+undocumented_settings() { [[ -z "$(comm -23 <(lib_default_keys) <(example_keys))" ]]; }
+unbacked_settings() { [[ -z "$(comm -13 <(lib_default_keys) <(example_keys))" ]]; }
+check "every lib.sh default is documented in .env.example" undocumented_settings
+check "every .env.example key has a lib.sh default" unbacked_settings
+
 echo "# the RAM ladder must live in exactly one place"
 # check-system.sh used to keep its own copy, hardcoded to qwen2.5-coder. It
 # drifted the moment MODEL_FAMILY existed: a qwen3 user was told forever that

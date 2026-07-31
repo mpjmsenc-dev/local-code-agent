@@ -175,18 +175,38 @@ load_env() {
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
 
-# set_env_var KEY VALUE — update KEY in .env in place, or append it. The
-# written line is plain KEY=VALUE, so a following load_env reads it back
-# unchanged (values here never contain spaces, quotes or '|').
+# set_env_var KEY VALUE — update KEY in .env in place, or append it, so that a
+# following load_env reads the value back unchanged.
+#
+# The old note here said values "never contain spaces", and every caller today
+# honours that (MODEL_NAME, AUTO_TUNE, OLLAMA_CONTEXT_LENGTH). But .env holds
+# one setting that legitimately does — BACKUP_SCHEDULE="*-*-* 03:30:00" — and
+# writing that unquoted CORRUPTS the file: 'source' takes the remainder as a
+# command ("05:00:00: command not found") and the variable ends up EMPTY. Since
+# tune.sh calls this on every boot, that is not a footgun to leave armed.
+#
+# Quoting is applied only when the value actually contains whitespace, so every
+# write made today is byte-for-byte what it was before and the boot path cannot
+# change behaviour.
 set_env_var() {
-  local key="$1" value="$2"
+  local key="$1" value="$2" written="$2"
+  # A '"', '$' or newline would break or expand inside the quoting below, so a
+  # value that would not survive the round-trip is refused rather than written
+  # as something that reads back differently.
+  if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *$'\n'* ]]; then
+    err "Refusing to write ${key} to .env: the value contains a quote, '\$' or newline."
+    return 1
+  fi
+  if [[ "${value}" =~ [[:space:]] ]]; then
+    written="\"${value}\""
+  fi
   if [[ ! -f "${ENV_FILE}" ]]; then
     touch "${ENV_FILE}"
   fi
   if grep -q "^${key}=" "${ENV_FILE}"; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+    sed -i "s|^${key}=.*|${key}=${written}|" "${ENV_FILE}"
   else
-    printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+    printf '%s=%s\n' "${key}" "${written}" >> "${ENV_FILE}"
   fi
 }
 
