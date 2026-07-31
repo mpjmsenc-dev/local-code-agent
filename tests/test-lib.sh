@@ -529,6 +529,20 @@ warm_is_detached() {
 }
 check "warm_model backgrounds the request" warm_is_detached
 
+echo "# the README's headline model list must match what the ladder can select"
+# It claimed "3b/7b/14b/32b, auto-selected". 32b is not reachable at ANY RAM
+# tier — the ladder tops out at 14b by design, with larger sizes left as a
+# manual 'lca model' choice. A promise in the first table someone reads is the
+# worst place for that to be wrong.
+readme_sizes_match_ladder() {
+  local claimed actual
+  claimed="$(grep -oE 'The model family \([^)]*\)' "${REPO}/README.md" \
+    | grep -oE '[0-9]+(\.[0-9]+)?b' | sort -u | tr '\n' ' ')"
+  actual="$(family_sizes qwen2.5-coder | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+  [[ -n "${claimed}" && "${claimed}" == "${actual}" ]]
+}
+check "README's model sizes match family_sizes" readme_sizes_match_ladder
+
 echo "# the RAM ladder must live in exactly one place"
 # check-system.sh used to keep its own copy, hardcoded to qwen2.5-coder. It
 # drifted the moment MODEL_FAMILY existed: a qwen3 user was told forever that

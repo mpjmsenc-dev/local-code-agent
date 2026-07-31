@@ -10,7 +10,7 @@ no telemetry, and no usage quotas**.
 | [Aider](https://aider.chat) | Terminal coding agent (edits code, auto-commits) | Claude Code |
 | [Open WebUI](https://github.com/open-webui/open-webui) | Chat web app, works great on a phone | the Claude app |
 | [Tailscale](https://tailscale.com) | Private network to your phone/laptop | — |
-| qwen2.5-coder | The model family (3b/7b/14b/32b, auto-selected) | the model |
+| qwen2.5-coder | The model family (3b/7b/14b, auto-selected by RAM) | the model |
 
 Everything runs on one Ubuntu 24.04 VM — optimized for a DigitalOcean Basic
 Droplet (4 vCPU / 8 GB), and equally at home on arm64 or any VMware/Proxmox/KVM VM.
@@ -40,7 +40,7 @@ Or do it by hand:
 ```bash
 git clone https://github.com/mpjmsenc-dev/local-code-agent.git
 cd local-code-agent
-chmod +x *.sh scripts/*.sh
+chmod +x *.sh scripts/*.sh bin/*
 ./setup.sh
 ```
 
