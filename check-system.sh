@@ -133,14 +133,26 @@ fi
 # --- Auto-tune drift --------------------------------------------------------
 step "Auto-tune"
 RAM_GIB="$(detect_ram_gib)"
-if (( RAM_GIB < 9 )); then
-  TUNE_MODEL="qwen2.5-coder:3b"
-elif (( RAM_GIB <= 15 )); then
-  TUNE_MODEL="qwen2.5-coder:7b"
-elif (( RAM_GIB <= 23 )); then
-  TUNE_MODEL="qwen2.5-coder:14b"
-else
-  TUNE_MODEL="qwen2.5-coder:14b"
+# Use tune.sh's OWN ladder rather than a second copy of it. The copy that used
+# to live here had already drifted: it hardcoded the qwen2.5-coder family, so
+# anyone who set MODEL_FAMILY=qwen3 and ran tune.sh saw this warn about "drift"
+# from qwen2.5-coder on every single check — telling them to run the very
+# script that had just chosen correctly. A duplicated ladder cannot help but
+# rot; sourcing the real one means the two can never disagree again.
+# tune.sh recomputes SCRIPT_DIR from its OWN location, so sourcing it silently
+# repoints ours at scripts/. Nothing below needs it today, but a variable left
+# pointing somewhere unexpected is a trap for whoever edits this next.
+# (REPO_ROOT is safe — lib.sh's double-source guard stops it being recomputed.)
+CHECK_DIR="${SCRIPT_DIR}"
+# shellcheck source=scripts/tune.sh
+source "${SCRIPT_DIR}/scripts/tune.sh"
+SCRIPT_DIR="${CHECK_DIR}"
+unset CHECK_DIR
+TUNE_FAMILY="$(model_family)"
+read -r TUNE_SMALL TUNE_MID TUNE_BIG <<<"$(family_sizes "${TUNE_FAMILY}")"
+if   (( RAM_GIB < 9 ));   then TUNE_MODEL="${TUNE_FAMILY}:${TUNE_SMALL}"
+elif (( RAM_GIB <= 15 )); then TUNE_MODEL="${TUNE_FAMILY}:${TUNE_MID}"
+else                           TUNE_MODEL="${TUNE_FAMILY}:${TUNE_BIG}"
 fi
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"
 if [[ "${AUTO_TUNE}" != "true" ]]; then
@@ -149,6 +161,17 @@ elif [[ "${MODEL_NAME}" == "${TUNE_MODEL}" ]]; then
   p_pass "configured model matches the tune recommendation"
 else
   p_warn "configured model (${MODEL_NAME}) differs from the recommendation (${TUNE_MODEL}) — run scripts/tune.sh"
+fi
+# AUTO_TUNE only actually adapts to a resized VM if the boot unit runs it.
+# Without this, "resize the droplet and the model follows" is a promise with
+# nothing behind it, and the failure is silent — everything keeps working, at
+# the old model, forever.
+if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
+  if systemctl is-enabled --quiet local-code-agent-tune.service 2>/dev/null; then
+    p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
+  else
+    p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: sudo ./setup.sh (or: sudo systemctl enable local-code-agent-tune.service)"
+  fi
 fi
 
 # --- Open WebUI -------------------------------------------------------------

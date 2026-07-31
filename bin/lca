@@ -28,7 +28,7 @@ Usage: lca [command] [args...]
   lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
   lca ask -c "follow up"  continue from your last question
   lca ask -m MODEL "q"    answer with another model just this once
-  lca chat                print the address to open the chat app on your phone
+  lca chat                show the chat app's address as a QR code to scan
   lca check               full health check
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
   lca speed               measure tokens/second and explain what limits it
@@ -37,6 +37,7 @@ Usage: lca [command] [args...]
   lca backup              take a backup now
   lca restore [file]      restore from a backup
   lca model <name>        switch the model (or 'lca model --list')
+  lca tune                re-pick the model for this machine's RAM (auto-tune)
   lca offline|online      internet kill switch  (needs sudo)
   lca status              kill-switch + guard status (needs sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs

@@ -453,6 +453,49 @@ prompt_commands_all_real() {
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
 
+echo "# the RAM ladder must live in exactly one place"
+# check-system.sh used to keep its own copy, hardcoded to qwen2.5-coder. It
+# drifted the moment MODEL_FAMILY existed: a qwen3 user was told forever that
+# their model differed from a qwen2.5-coder "recommendation", and to run the
+# script that had just chosen it. Any second copy will rot the same way.
+# Matched without a literal '${...}' in the pattern: that reads to ShellCheck
+# as a variable someone forgot to expand (SC2016), and it is also less brittle
+# about how the path to tune.sh happens to be written.
+sources_the_real_ladder() { grep -qE '^[[:space:]]*source .*scripts/tune\.sh' "${REPO}/check-system.sh"; }
+no_hardcoded_ladder() { ! grep -qE 'TUNE_MODEL="[a-z0-9.]+-?[a-z]*:' "${REPO}/check-system.sh"; }
+check "check-system.sh sources tune.sh's ladder" sources_the_real_ladder
+check "check-system.sh hardcodes no model in its ladder" no_hardcoded_ladder
+
+# Sourcing tune.sh recomputes SCRIPT_DIR from tune.sh's own location, silently
+# repointing the caller's at scripts/. Both callers restore it; if that restore
+# is ever dropped, the next line added below the source resolves against the
+# wrong directory and fails in a way that looks nothing like its cause.
+restores_script_dir() {
+  awk '/source .*scripts\/tune\.sh/ {seen=1; next} seen && /SCRIPT_DIR=/ {ok=1} END {exit !ok}' "$1"
+}
+check "check-system.sh restores SCRIPT_DIR after sourcing tune.sh" \
+  restores_script_dir "${REPO}/check-system.sh"
+check "update-model.sh restores SCRIPT_DIR after sourcing tune.sh" \
+  restores_script_dir "${REPO}/update-model.sh"
+
+echo "# 'lca help' must not advertise a command bin/lca cannot run"
+# The same class of bug as the system-prompt check above, one layer out: help
+# text drifts when a command is renamed, and a user following it gets "Unknown
+# command". Aliases dispatched but deliberately left out of help (selftest,
+# agent, code) are fine — this only checks help -> dispatch, not the reverse.
+help_commands_all_real() {
+  local sub bad=0
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    grep -qE "^[[:space:]]*[a-z|\"-]*\b${sub}\b[a-z|\"-]*\)" "${REPO}/bin/lca" || {
+      printf 'lca help advertises a command bin/lca does not dispatch: %s\n' "${sub}" >&2
+      bad=1
+    }
+  done < <("${REPO}/bin/lca" help 2>/dev/null | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p' | sort -u)
+  return "${bad}"
+}
+check "every command in 'lca help' is dispatched by bin/lca" help_commands_all_real
+
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
 SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
 check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
