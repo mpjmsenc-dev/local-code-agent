@@ -29,9 +29,19 @@ jobs:
       - name: Library + tune-ladder unit tests
         run: bash tests/test-lib.sh
       - name: tune.sh --dry-run exits 0 and changes nothing
+        shell: bash
         run: |
-          bash scripts/tune.sh --dry-run
+          set -euo pipefail
+          out="$(bash scripts/tune.sh --dry-run 2>&1)"
+          printf '%s\n' "${out}"
           test -f .env && diff .env .env.example
+          # --dry-run promises to change nothing, and loading a model into RAM
+          # is a change to the machine's state — the one thing the flag exists
+          # to avoid. Captured, not piped, for the SIGPIPE reason in
+          # CONTRIBUTING.md.
+          if grep -qi 'warming' <<<"${out}"; then
+            echo "FAIL: --dry-run warmed the model; it must change nothing"; exit 1
+          fi
       - name: update.sh --check detects updates without applying them
         # Updating is the second thing every user does after installing, and it
         # had no coverage at all. --check is the whole detection path — branch

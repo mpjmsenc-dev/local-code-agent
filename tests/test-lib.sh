@@ -500,6 +500,35 @@ unbacked_settings() { [[ -z "$(comm -13 <(lib_default_keys) <(example_keys))" ]]
 check "every lib.sh default is documented in .env.example" undocumented_settings
 check "every .env.example key has a lib.sh default" unbacked_settings
 
+echo "# warm_model() is best-effort and must never fail or block its caller"
+# It runs at the end of the boot oneshot. If it can fail, a warm-up that could
+# not reach Ollama turns into a failed boot unit; if it can block, the unit
+# sits for minutes (a bounded 300s wait was measured timing out with the model
+# still unloaded, which is why this is detached rather than merely patient).
+warm_is_best_effort() {
+  ( OLLAMA_HOST="127.0.0.1:59999"; MODEL_NAME="not-a-real-model:1b"
+    warm_model >/dev/null 2>&1 )
+}
+check "warm_model succeeds when Ollama is unreachable" warm_is_best_effort
+warm_returns_promptly() {
+  local t0="${SECONDS}"
+  ( OLLAMA_HOST="127.0.0.1:59999"; warm_model >/dev/null 2>&1 )
+  (( SECONDS - t0 < 5 ))
+}
+check "warm_model returns promptly" warm_returns_promptly
+# Structural: the request must stay backgrounded. Losing the '&' is the one
+# edit that would silently reintroduce a multi-minute stall at boot, and no
+# behavioural test catches it without a host that accepts and never answers.
+# '[[:space:]]' not '\s' — awk has no \s, and the first version of this check
+# silently failed against correct code. Caught by mutation-testing it.
+warm_is_detached() {
+  awk '/^warm_model\(\)/ {f=1}
+       f && /curl .*api\/generate/ {c=1}
+       f && c && /&[[:space:]]*\)/ {ok=1}
+       f && /^}/ {exit !ok}' "${REPO}/scripts/lib.sh"
+}
+check "warm_model backgrounds the request" warm_is_detached
+
 echo "# the RAM ladder must live in exactly one place"
 # check-system.sh used to keep its own copy, hardcoded to qwen2.5-coder. It
 # drifted the moment MODEL_FAMILY existed: a qwen3 user was told forever that

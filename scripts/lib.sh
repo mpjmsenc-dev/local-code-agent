@@ -692,6 +692,34 @@ run_reader() {
   return 1
 }
 
+# warm_model [MODEL] — best-effort, DETACHED: pull MODEL into RAM so the first
+# real request does not pay the load.
+#
+# Worth doing because nothing else loads the model at boot. tune.sh only
+# validates when the model is CHANGING, and when it does change it restarts
+# Ollama immediately afterwards, dropping what it just loaded — so after every
+# reboot the first message pays full price. OLLAMA_KEEP_ALIVE does not help:
+# it stops a loaded model being evicted, it never preloads one.
+#
+# Detached on purpose. Measured on a cold page cache, loading a 7B model took
+# 228 seconds, against 0.3s once resident. A bounded wait is worse than
+# useless there: a 300s timeout was measured timing out and leaving the model
+# still UNloaded, having spent the entire five minutes. Backgrounding lets the
+# boot oneshot finish at once (measured: 0.007s to return) while the load
+# proceeds; if the user beats it to the first message they are no worse off
+# than they are today.
+warm_model() {
+  local model="${1:-${MODEL_NAME}}" payload
+  have curl && have jq || return 0
+  [[ -n "${model}" ]] || return 0
+  payload="$(jq -n --arg m "${model}" \
+    '{model:$m, prompt:"hi", stream:false, options:{num_predict:1}}')" || return 0
+  info "Warming ${model} in the background so the first message is not slow."
+  ( curl -sS --max-time 1800 -X POST "$(ollama_url)/api/generate" \
+      -H 'Content-Type: application/json' -d "${payload}" >/dev/null 2>&1 & ) </dev/null
+  return 0
+}
+
 # webui_url — loopback URL for the local Open WebUI.
 webui_url() { printf 'http://127.0.0.1:%s\n' "${WEBUI_PORT:-3000}"; }
 

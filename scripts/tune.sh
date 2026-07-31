@@ -287,6 +287,11 @@ main() {
   else
     ok "Already at the best-available config (${chosen_model}, ctx ${TUNE_CTX}); nothing to apply."
   fi
+
+  # Last, after any restart_ollama above — a restart drops whatever is loaded,
+  # so warming before it would be wasted. This is what makes the first message
+  # after a reboot fast; see warm_model() for why it is detached.
+  warm_model "${chosen_model}"
 }
 
 # Run main only when executed, so tests can source this file and unit-test
