@@ -453,6 +453,19 @@ prompt_commands_all_real() {
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
 
+echo "# the RAM ladder must live in exactly one place"
+# check-system.sh used to keep its own copy, hardcoded to qwen2.5-coder. It
+# drifted the moment MODEL_FAMILY existed: a qwen3 user was told forever that
+# their model differed from a qwen2.5-coder "recommendation", and to run the
+# script that had just chosen it. Any second copy will rot the same way.
+# Matched without a literal '${...}' in the pattern: that reads to ShellCheck
+# as a variable someone forgot to expand (SC2016), and it is also less brittle
+# about how the path to tune.sh happens to be written.
+sources_the_real_ladder() { grep -qE '^[[:space:]]*source .*scripts/tune\.sh' "${REPO}/check-system.sh"; }
+no_hardcoded_ladder() { ! grep -qE 'TUNE_MODEL="[a-z0-9.]+-?[a-z]*:' "${REPO}/check-system.sh"; }
+check "check-system.sh sources tune.sh's ladder" sources_the_real_ladder
+check "check-system.sh hardcodes no model in its ladder" no_hardcoded_ladder
+
 echo "# 'lca help' must not advertise a command bin/lca cannot run"
 # The same class of bug as the system-prompt check above, one layer out: help
 # text drifts when a command is renamed, and a user following it gets "Unknown
