@@ -654,6 +654,35 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# OnCalendar comparison must survive systemd's shorthands"
+# The backup timer keeps the schedule it was installed with, so BACKUP_SCHEDULE
+# edited in .env and never applied leaves backups on the old cadence. Detecting
+# that by comparing raw strings would report drift on a healthy box the moment
+# someone wrote "daily" instead of "*-*-* 00:00:00" — an unfixable warning,
+# which is worse than no warning.
+if have systemd-analyze; then
+  same_schedule() {
+    local a b
+    a="$(normalized_calendar "$1")" || return 1
+    b="$(normalized_calendar "$2")" || return 1
+    [[ "${a}" == "${b}" ]]
+  }
+  differing_schedule() { ! same_schedule "$1" "$2"; }
+  check "'daily' equals '*-*-* 00:00:00' (no false drift)" \
+    same_schedule daily '*-*-* 00:00:00'
+  check "'weekly' differs from 'daily' (real drift is seen)" \
+    differing_schedule weekly daily
+  check "the .env default normalises to itself" \
+    same_schedule '*-*-* 03:30:00' '*-*-* 03:30:00'
+  # An unparseable spec must yield nothing, so the caller stays silent rather
+  # than reporting drift between a real schedule and a parse failure.
+  rejects_nonsense() { ! normalized_calendar 'not-a-schedule' >/dev/null 2>&1; }
+  check "an invalid OnCalendar spec is refused, not guessed" rejects_nonsense
+  # check-system.sh must actually use it.
+  check_compares_schedule() { grep -qF 'normalized_calendar' "${REPO}/check-system.sh"; }
+  check "check-system.sh compares the timer's schedule with .env" check_compares_schedule
+fi
+
 echo "# a manual pin must still apply .env to the running service"
 # AUTO_TUNE=false means "do not re-pick the model from RAM". It used to mean
 # "ignore .env entirely": tune.sh returned before its drift check, so editing

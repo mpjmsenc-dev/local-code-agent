@@ -406,6 +406,17 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
   p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
   TIMER_ON=true
+  # The timer keeps the schedule it was installed with, so a BACKUP_SCHEDULE
+  # edited in .env and never applied leaves backups running on the old cadence
+  # while .env claims otherwise — the same class as the WebUI and ollama drift
+  # above. Compared through systemd's normaliser so "daily" and
+  # "*-*-* 00:00:00" do not read as a difference, and only when BOTH sides
+  # normalise: a warning we cannot substantiate is worse than none.
+  WANT_SCHED="$(normalized_calendar "${BACKUP_SCHEDULE}" || true)"
+  HAVE_SCHED="$(normalized_calendar "${TIMER_SCHED}" || true)"
+  if [[ -n "${WANT_SCHED}" && -n "${HAVE_SCHED}" && "${WANT_SCHED}" != "${HAVE_SCHED}" ]]; then
+    p_warn "backup schedule drift: the timer runs on '${TIMER_SCHED}' but .env says BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' — your change is not in effect. Apply it with: sudo ${REPO_ROOT}/backup.sh --install-timer"
+  fi
 else
   info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"
   TIMER_ON=false
