@@ -654,6 +654,60 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# starting Ollama must not look like a hung terminal"
+# 'lca speed' with Ollama down printed nothing at all for up to 60 seconds:
+# ensure_ollama_up was called with every word suppressed. That is the least
+# helpful possible response from the command people run when the box already
+# feels slow, and 'lca ask' — the most-used command — did the same.
+announces_slow_start() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    wait_for_ollama()   { return 1; }   # never comes up
+    ensure_ollama_up()  { return 1; }
+    ensure_ollama_up_announced 7 2>&1 >/dev/null
+  ' _ "${REPO}/scripts/lib.sh")"
+  grep -q 'starting it' <<<"${out}" || {
+    printf 'no notice while starting Ollama: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a slow Ollama start is announced" announces_slow_start
+# ...on stderr, because in 'lca ask' stdout is the model's answer and a
+# progress line must not end up inside a piped or redirected one.
+announcement_avoids_stdout() {
+  local on_stdout
+  on_stdout="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    wait_for_ollama()  { return 1; }
+    ensure_ollama_up() { return 1; }
+    ensure_ollama_up_announced 7 2>/dev/null
+  ' _ "${REPO}/scripts/lib.sh")"
+  [[ -z "${on_stdout}" ]] || {
+    printf 'progress notice leaked onto stdout: %s\n' "${on_stdout}" >&2; return 1
+  }
+}
+check "the notice goes to stderr, keeping stdout clean" announcement_avoids_stdout
+# Nothing at all when Ollama is already up — the normal case must stay silent.
+silent_when_already_up() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    wait_for_ollama() { return 0; }
+    ensure_ollama_up_announced 7 2>&1
+  ' _ "${REPO}/scripts/lib.sh")"
+  [[ -z "${out}" ]] || {
+    printf 'a healthy Ollama produced noise: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a healthy Ollama produces no notice" silent_when_already_up
+# And the two commands that had the bug must use the announced form.
+uses_announced_start() { grep -qF 'ensure_ollama_up_announced' "${REPO}/scripts/$1"; }
+check "ask.sh announces a slow Ollama start"   uses_announced_start ask.sh
+check "speed.sh announces a slow Ollama start" uses_announced_start speed.sh
+
 echo "# a model pull must survive a transient registry failure"
 # CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB
 # download, and the whole pull was thrown away. On a droplet that is gigabytes

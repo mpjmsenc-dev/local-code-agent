@@ -68,7 +68,7 @@ main() {
   done
 
   require_cmd curl jq
-  ensure_ollama_up 60 >/dev/null 2>&1 || true
+  ensure_ollama_up_announced 60 || true
   wait_for_ollama 5 >/dev/null 2>&1 \
     || die "Ollama is not answering at $(ollama_url). Try: lca check"
   model_present "${MODEL_NAME}" \
