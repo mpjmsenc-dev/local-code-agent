@@ -635,6 +635,31 @@ help_commands_all_real() {
 }
 check "every command in 'lca help' is dispatched by bin/lca" help_commands_all_real
 
+echo "# the README's command table must not omit a command 'lca help' offers"
+# The table is what someone scans to learn the tool, and it had drifted: five
+# commands were missing, including 'lca backup' and 'lca restore' — the entire
+# safety net was invisible to anyone reading the README. Same class as the
+# 'lca help' -> dispatch check above, one layer further out.
+# 'help' is excluded: a help command that documents itself in the table it
+# prints is noise, not a contract.
+readme_documents_every_command() {
+  local sub bad=0 documented
+  documented="$(sed -n '/^| Command | Does |/,/^$/p' "${REPO}/README.md" \
+                 | grep -oE '`lca [a-z]+' | sed 's/^`lca //' | sort -u)"
+  while read -r sub; do
+    [[ -n "${sub}" && "${sub}" != "help" ]] || continue
+    grep -qx -- "${sub}" <<<"${documented}" || {
+      printf "'lca %s' is in 'lca help' but missing from the README table\\n" "${sub}" >&2
+      bad=1
+    }
+  done < <("${REPO}/bin/lca" help 2>/dev/null | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p' | sort -u)
+  # A table that matched nothing would "pass" without checking anything.
+  [[ -n "${documented}" ]] || { echo "no command table found in README.md" >&2; return 1; }
+  return "${bad}"
+}
+check "the README table documents every 'lca help' command" \
+  readme_documents_every_command
+
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
 SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
 check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
