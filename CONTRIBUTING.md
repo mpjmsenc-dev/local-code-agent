@@ -76,9 +76,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Three shell traps that turn a gate into decoration
+## Four shell traps that turn a gate into decoration
 
-All three were shipped here at least once. They matter more in an assertion
+All four were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -118,6 +118,40 @@ The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
 The habit that catches the fourth: **ask what CI has that you don't, and what
 you have that CI doesn't.**
+
+And a warning about that habit, from this repo: a mutation that does not apply
+looks exactly like a test that cannot fail. Twice, a `sed` that silently
+matched nothing was read as "the test didn't catch it" and nearly cost a good
+assertion. **Print proof the mutation landed** (`grep -c`) before believing
+what the test says about it.
+
+## Settings that are *applied* are a bug factory
+
+Most of `.env` is read fresh on every run. A few settings are **applied** to
+something long-lived — a systemd drop-in, a docker container, a systemd timer —
+at the moment that thing is created. Editing `.env` afterwards changes nothing
+until it is rebuilt, and nothing about that is visible: no error, no log line,
+just the old behaviour continuing.
+
+Four separate bugs in this repository came from exactly that, and each was
+silent in a different way: a keep-alive that never took effect, a chat app
+still accepting signups after its owner closed them, backups on a cadence
+nobody chose, and a chat app pointed at an Ollama port nothing listened on.
+Three of them had documentation telling users to edit the key.
+
+So, when you add a setting that gets baked into something:
+
+1. **Compare it back.** `webui_drift()` and `ollama_dropin_matches()` exist for
+   this; add to them rather than writing a fourth comparison inline. Three
+   inline copies is precisely how signups came to have no check at all.
+2. **Make `lca apply` apply it**, so users need one command and not a table.
+3. **Say which key drifted, and what it costs.** "PORT differs" and "anyone can
+   still register an account" are not the same news.
+
+`tests/test-lib.sh` enforces the first point generically: every `-e KEY=` that
+`install_webui.sh` bakes into the container must be compared somewhere, so the
+next one is caught without anyone noticing it. Prefer that shape of test — one
+that fails for a class — over one more hand-written case.
 
 ## Reviewing a PR
 

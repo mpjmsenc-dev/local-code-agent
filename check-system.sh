@@ -398,11 +398,7 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   elif [[ "${BACKUP_KEEP}" == "0" ]]; then
     KEEP_DESC="retention disabled (keeping all)"
   fi
-  # systemd renders this property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
-  # so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
-  # next_elapse tail and reports a garbled schedule.
-  TIMER_SCHED="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
-    | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
+  TIMER_SCHED="$(installed_backup_schedule || true)"
   [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
   p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
   TIMER_ON=true

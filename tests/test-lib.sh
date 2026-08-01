@@ -654,6 +654,67 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# a model pull must survive a transient registry failure"
+# CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB
+# download, and the whole pull was thrown away. On a droplet that is gigabytes
+# and it aborts the first-boot install. Retrying is safe because 'ollama pull'
+# resumes from the blobs already in the local store.
+# Driven with a stub 'ollama' so the retry loop is exercised for real, without
+# a network: sleep is stubbed too, or the test would wait 15 seconds.
+pull_retries_then_succeeds() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); [[ "${ATTEMPTS}" -ge 3 ]]; }
+    sleep() { :; }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "rc=%s attempts=%s\n" "$?" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  [[ "${out}" == "rc=0 attempts=3" ]] || {
+    printf 'expected a successful third attempt, got: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that fails twice then succeeds is a success" pull_retries_then_succeeds
+pull_gives_up_after_three() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 1; }
+    sleep() { :; }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "rc=%s attempts=%s\n" "$?" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  # Bounded: a genuinely unavailable model must still fail, and not loop.
+  [[ "${out}" == "rc=1 attempts=3" ]] || {
+    printf 'expected failure after exactly 3 attempts, got: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that never succeeds fails after exactly 3 attempts" pull_gives_up_after_three
+pull_succeeds_first_time_without_retrying() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0; SLEPT=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 0; }
+    # Counted, not printed: an echo here lands on stdout, and the first version
+    # of this test discarded stdout — so it silently only checked the retry.
+    sleep() { SLEPT=$((SLEPT+1)); }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "attempts=%s slept=%s\n" "${ATTEMPTS}" "${SLEPT}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  # The happy path must not sleep or re-pull — it runs on every setup.
+  [[ "${out}" == "attempts=1 slept=0" ]] || {
+    printf 'a first-time success did extra work: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that works first time does not retry or sleep" \
+  pull_succeeds_first_time_without_retrying
+
 echo "# OnCalendar comparison must survive systemd's shorthands"
 # The backup timer keeps the schedule it was installed with, so BACKUP_SCHEDULE
 # edited in .env and never applied leaves backups on the old cadence. Detecting
@@ -711,12 +772,123 @@ check "tune.sh converges the drop-in even when AUTO_TUNE=false" \
 # that was the second way this test failed against correct code.)
 resync_rule_is_shared() {
   local defs calls
-  defs="$(grep -c '^resync_dropin_if_drifted() {' "${REPO}/scripts/tune.sh" || true)"
-  calls="$(grep -c 'if resync_dropin_if_drifted; then' "${REPO}/scripts/tune.sh" || true)"
-  [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times\n' "${defs}" >&2; return 1; }
+  defs="$(grep -rc '^resync_dropin_if_drifted() {' "${REPO}/scripts/lib.sh" || true)"
+  calls="$(grep -c 'resync_dropin_if_drifted' "${REPO}/scripts/tune.sh" || true)"
+  [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times in lib.sh\n' "${defs}" >&2; return 1; }
   (( calls >= 2 )) || { printf 'convergence rule called from only %s place(s)\n' "${calls}" >&2; return 1; }
+  # Nowhere may re-implement it: a second copy is how the pinned path was
+  # forgotten, and how 'lca apply' would drift from what tune.sh does on boot.
+  ! grep -q 'render_ollama_dropin' "${REPO}/scripts/apply.sh" && return 1
+  grep -q 'resync_dropin_if_drifted\|render_ollama_dropin' "${REPO}/scripts/apply.sh"
 }
 check "the drift rule is defined once and used by both paths" resync_rule_is_shared
+
+echo "# 'lca apply' — one command for every setting that needs applying"
+# Three separate silent failures came from .env settings that are baked into
+# something long-lived. 'lca check' names a different fix command for each;
+# this is the one command that does whatever is needed. It must be honest
+# about a component that is absent (not "already matches"), and a dry run must
+# change nothing — verified against real files, not just asserted here.
+APPLY="${REPO}/scripts/apply.sh"
+check "apply.sh is executable" test -x "${APPLY}"
+apply_covers() { grep -qF "$1" "${APPLY}"; }
+check "apply covers the Ollama drop-in"  apply_covers 'apply_ollama'
+check "apply covers the chat app"        apply_covers 'apply_webui'
+check "apply covers the backup timer"    apply_covers 'apply_backup_timer'
+# The dry run must be incapable of changing anything: every mutating call has
+# to sit behind the 'would' guard that returns early.
+dry_run_guards_every_change() {
+  local fn bad=0
+  for fn in apply_ollama apply_webui apply_backup_timer; do
+    awk -v f="${fn}" '$0 ~ "^"f"\\(\\) \\{" {inf=1}
+         inf && /would /        {guarded=1}
+         inf && /render_ollama_dropin|install_webui\.sh|--install-timer/ \
+             && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
+         inf && /^}/            {inf=0}
+         END {exit bad}' "${APPLY}" || {
+      printf '%s can change something before its dry-run guard\n' "${fn}" >&2; bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every change in apply.sh sits behind the dry-run guard" dry_run_guards_every_change
+# A dry run's plan is the entire answer, so it must survive a redirect. The
+# first version printed it through warn() — i.e. to stderr — so
+# 'lca apply --dry-run > plan.txt' produced a file with a summary count and no
+# plan. Invisible in a terminal, where both streams land together; CI caught it
+# only because it captured stdout.
+dry_run_plan_is_on_stdout() {
+  local out
+  out="$(cd "${SANDBOX}" && DRY_RUN=true CHANGED=0 bash -c '
+    source "$1"; C_YELLOW=""; C_RESET=""
+    source /dev/stdin <<EOF
+$(sed -n "/^would()/,/^}/p" "$2")
+EOF
+    would "do the thing" 2>/dev/null' _ "${REPO}/scripts/lib.sh" "${APPLY}")"
+  grep -q 'do the thing' <<<"${out}" || {
+    echo "the dry-run plan does not reach stdout" >&2; return 1
+  }
+}
+check "the dry-run plan reaches stdout, not stderr" dry_run_plan_is_on_stdout
+# "Cannot ask" is not "nothing to do". Every docker probe collapses "no
+# container" and "daemon is down" into the same non-zero exit, and the first
+# version reported a down daemon as "not created yet — create it with
+# install_webui.sh": untrue, and a command that could not have worked either,
+# while a perfectly good container sat there with drifted settings.
+apply_distinguishes_daemon_down() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"                # lib.sh
+    source "$2"                # apply.sh (its guard stops main from running)
+    docker_daemon_reachable() { return 1; }
+    webui_container_exists()  { return 0; }   # a container DOES exist
+    have() { return 0; }
+    ENABLE_WEBUI=true; SKIP_DOCKER=false; DRY_RUN=false
+    CHANGED=0; BLOCKED=0; UNCHECKED=0
+    apply_webui 2>&1
+    printf "UNCHECKED=%s CHANGED=%s\n" "${UNCHECKED}" "${CHANGED}"
+  ' _ "${REPO}/scripts/lib.sh" "${APPLY}" 2>&1)"
+  grep -qi 'cannot reach the Docker daemon' <<<"${out}" || {
+    printf 'a down daemon was not reported as such: %s\n' "${out}" >&2; return 1
+  }
+  grep -q 'UNCHECKED=1' <<<"${out}" || {
+    printf 'a down daemon was not counted as unchecked: %s\n' "${out}" >&2; return 1
+  }
+  # And it must not have claimed the container is missing.
+  if grep -qi 'not created yet' <<<"${out}"; then
+    echo "a down daemon was reported as a missing container" >&2; return 1
+  fi
+}
+check "apply reports an unreachable Docker daemon, not a missing container" \
+  apply_distinguishes_daemon_down
+# ...and the summary must never say "everything matches" about something it
+# could not look at.
+apply_summary_admits_unchecked() {
+  awk '/CHANGED == 0/ {inf=1}
+       inf && /UNCHECKED > 0/ {guarded=1}
+       inf && /already matches .env/ {if (!guarded) bad=1; inf=0}
+       END {exit bad}' "${APPLY}"
+}
+check "apply never claims a clean bill for an unchecked component" \
+  apply_summary_admits_unchecked
+# A missing component is not a matching one.
+distinguishes_absent_from_matching() {
+  grep -qF 'webui_container_exists' "${APPLY}"
+}
+check "apply says 'not created yet' rather than 'already matches'" \
+  distinguishes_absent_from_matching
+# Scheduled backups are opt-in; applying .env must not create a timer nobody
+# asked for.
+never_creates_a_timer() {
+  awk '/^apply_backup_timer\(\) \{/ {inf=1}
+       inf && /is-enabled/ {guarded=1}
+       inf && /--install-timer/ && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
+       inf && /^}/ {inf=0}
+       END {exit bad}' "${APPLY}"
+}
+check "apply never installs a backup timer that was not there" never_creates_a_timer
+check "'lca apply' is dispatched by bin/lca" grep -q 'apply)' "${REPO}/bin/lca"
 # check-system.sh must report the drift, for the user who has not rebooted yet.
 check_reports_dropin_drift() {
   grep -qF 'ollama_dropin_matches' "${REPO}/check-system.sh"
@@ -730,18 +902,45 @@ echo "# every setting baked into the WebUI container must be drift-checked"
 # silence means "you think signups are locked and they are open".
 drift_checked() {
   local var="$1"
-  # Extracted from the container's env...
-  grep -qF "s/^${var}=//p" "${REPO}/webui.sh" || {
-    printf 'webui.sh never reads %s out of the running container\n' "${var}" >&2; return 1
+  # Read out of the container in exactly ONE place (lib.sh's webui_container_env
+  # / webui_drift). It used to be written out per key inline in webui.sh, and
+  # the third key — signups — was simply never added, which is the whole reason
+  # the comparison now lives in one function.
+  grep -qF "webui_container_env ${var}" "${REPO}/scripts/lib.sh" || {
+    printf 'lib.sh never reads %s out of the running container\n' "${var}" >&2; return 1
   }
-  # ...and actually compared against .env, not just read.
+  # ...while the message stays specific per key: "PORT differs" and "anyone can
+  # still register an account" are not the same news.
   grep -qiE "warn \"${2} drift" "${REPO}/webui.sh" || {
-    printf 'webui.sh reads %s but never warns about %s drift\n' "${var}" "${2}" >&2; return 1
+    printf 'nothing warns specifically about %s (%s) drift\n' "${var}" "${2}" >&2; return 1
   }
 }
 check "webui.sh reports PORT drift"          drift_checked PORT Port
 check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
 check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
+check "webui.sh reports OLLAMA_BASE_URL drift" drift_checked OLLAMA_BASE_URL "Ollama address"
+check "webui.sh reports WEBUI_NAME drift"      drift_checked WEBUI_NAME Name
+# Every setting the installer bakes in from .env must be compared. The three
+# telemetry flags are constants, so they cannot drift; everything else can, and
+# "the ones we happened to think of" is how OLLAMA_BASE_URL — the address the
+# phone uses to reach the model at all — went unchecked.
+every_baked_setting_is_compared() {
+  local key bad=0
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    case "${key}" in
+      DO_NOT_TRACK|SCARF_NO_ANALYTICS|ANONYMIZED_TELEMETRY) continue ;;
+    esac
+    grep -qF "webui_container_env ${key}" "${REPO}/scripts/lib.sh" || {
+      printf 'install_webui.sh bakes in %s but nothing ever compares it\n' "${key}" >&2
+      bad=1
+    }
+  done < <(grep -oE '^[[:space:]]+-e [A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
+             | grep -oE '[A-Z_]+' | sort -u)
+  return "${bad}"
+}
+check "every setting baked into the container is drift-checked" \
+  every_baked_setting_is_compared
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {

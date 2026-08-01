@@ -47,23 +47,6 @@ largest_present_within() {
   return 1
 }
 
-# resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
-# applied state has fallen behind .env. Returns 0 if it acted, 1 if there was
-# nothing to do (or nothing to act on).
-#
-# One copy on purpose: both the auto-tuned and the manually-pinned path need
-# this, and two copies of a convergence rule is how one of them ends up
-# forgotten — which is exactly how the AUTO_TUNE=false path came to ignore
-# .env in the first place.
-resync_dropin_if_drifted() {
-  have ollama && systemd_available || return 1
-  ollama_dropin_matches && return 1
-  warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
-  render_ollama_dropin
-  restart_ollama
-  return 0
-}
-
 # choose_for_ram RAM_GIB — sets TUNE_MODEL and TUNE_CTX per the ladder.
 # model_family — the family auto-tune picks from (MODEL_FAMILY in .env).
 # Falls back to the default rather than inventing a tag, so a typo cannot make

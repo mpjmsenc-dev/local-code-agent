@@ -438,14 +438,33 @@ model_present() {
 }
 
 # pull_model MODEL — download MODEL with progress, with a clear failure.
+# pull_model MODEL — download MODEL, retrying a transient registry failure.
+#
+# install_ollama.sh has retried the *installer* download since a CDN reset cost
+# a whole run; the model pull had none, despite being the far bigger download —
+# gigabytes on a real machine against ~400 MB here. CI then caught the exact
+# failure it needed: the registry answered 503 at 396 MB of 397 MB, throwing
+# the entire download away. On a droplet that aborts the first-boot install and
+# the user is told their box is not ready.
+#
+# Retrying is cheap and safe because 'ollama pull' resumes: completed blobs are
+# already in the local store, so a second attempt re-fetches only what is
+# missing rather than starting over.
 pull_model() {
-  local model="$1"
+  local model="$1" attempt
   info "Pulling model '${model}' (this can take several minutes on first download)..."
-  if ! ollama pull "${model}"; then
-    err "Failed to pull '${model}'. Check your internet connection (is netmode offline? run: sudo ${REPO_ROOT}/netmode.sh status)."
-    return 1
-  fi
-  ok "Model '${model}' is available locally."
+  for attempt in 1 2 3; do
+    if ollama pull "${model}"; then
+      ok "Model '${model}' is available locally."
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      warn "Pull attempt ${attempt}/3 for '${model}' failed (transient registry error?) — retrying in $((attempt * 5))s; finished parts are kept."
+      sleep "$((attempt * 5))"
+    fi
+  done
+  err "Failed to pull '${model}' after 3 attempts. Check your internet connection (is netmode offline? run: sudo ${REPO_ROOT}/netmode.sh status)."
+  return 1
 }
 
 # model_responds MODEL [TIMEOUT] — prove MODEL can actually generate text by
@@ -826,6 +845,108 @@ wait_for_webui() {
     sleep 3
     waited=$((waited+3))
   done
+  return 0
+}
+
+# --- applied state -----------------------------------------------------------
+# Three settings in .env are not read fresh: they are baked into a systemd
+# drop-in, a docker container and a systemd timer when each is created. Reading
+# back what was actually applied is therefore its own job, and one that has now
+# been got wrong three separate times — so it lives here once.
+
+# webui_container_env KEY — the value KEY was baked into the running container
+# with. Non-zero (and prints nothing) when the container or the key is absent.
+webui_container_env() {
+  local env_lines out
+  have docker || return 1
+  env_lines="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { can_root && as_root docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || true)"
+  [[ -n "${env_lines}" ]] || return 1
+  out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# docker_daemon_reachable — true when docker commands can actually run here.
+#
+# Needed because "no container" and "cannot ask" are different answers that
+# every docker probe collapses into the same non-zero exit. Telling someone
+# their chat app was never created, when the truth is that dockerd is down,
+# sends them to an install command that cannot work either.
+docker_daemon_reachable() {
+  have docker || return 1
+  docker info >/dev/null 2>&1 && return 0
+  can_root && as_root docker info >/dev/null 2>&1
+}
+
+# webui_container_exists — true when the chat app's container is present, in
+# any state. Deliberately distinct from "matches .env": a container that does
+# not exist has not drifted, it is simply absent, and reporting that as
+# "already matches your settings" is the kind of confidently-wrong line this
+# project keeps taking out.
+webui_container_exists() {
+  have docker || return 1
+  docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
+  can_root && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+}
+
+# webui_drift — echo the .env keys whose value has not reached the running
+# container, one per line; return non-zero when nothing has drifted.
+#
+# The comparison lives in exactly one place on purpose. It was written out
+# three times inline, and the third — signups — was simply never added, which
+# left people believing they had closed their chat app when they had not.
+webui_drift() {
+  local drifted=() live
+  live="$(webui_container_env PORT || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
+  live="$(webui_container_env DEFAULT_MODELS || true)"
+  [[ -z "${live}" || "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
+  live="$(webui_container_env ENABLE_SIGNUP || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
+  # Not cosmetic, and the worst of the set: this is how the chat app reaches
+  # Ollama. docs/TROUBLESHOOTING.md tells people to move OLLAMA_HOST to another
+  # port and re-run install_ollama.sh — which does not touch the container — so
+  # following our own instructions leaves the phone talking to a port nothing
+  # listens on, with the drop-in perfectly correct and no error anywhere.
+  live="$(webui_container_env OLLAMA_BASE_URL || true)"
+  [[ -z "${live}" || "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
+  # Cosmetic, but the same silence: renaming the app in .env appears to do
+  # nothing at all.
+  live="$(webui_container_env WEBUI_NAME || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  (( ${#drifted[@]} )) || return 1
+  printf '%s\n' "${drifted[@]}"
+}
+
+# installed_backup_schedule — the OnCalendar the backup timer is really on.
+# systemd renders the property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
+# so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
+# next_elapse tail and reports a garbled schedule.
+installed_backup_schedule() {
+  local out
+  systemd_available || return 1
+  out="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
+    | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
+# applied state has fallen behind .env. Returns 0 if it acted, 1 if there was
+# nothing to do (or nothing to act on).
+#
+# One copy on purpose: the auto-tuned path, the manually-pinned path and
+# 'lca apply' all need it, and two copies of a convergence rule is how one of
+# them ends up forgotten — which is exactly how the AUTO_TUNE=false path came
+# to ignore .env in the first place.
+resync_dropin_if_drifted() {
+  have ollama && systemd_available || return 1
+  ollama_dropin_matches && return 1
+  warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
+  render_ollama_dropin
+  restart_ollama
   return 0
 }
 
