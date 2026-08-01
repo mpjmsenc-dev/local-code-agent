@@ -704,9 +704,25 @@ silent_when_already_up() {
 }
 check "a healthy Ollama produces no notice" silent_when_already_up
 # And the two commands that had the bug must use the announced form.
-uses_announced_start() { grep -qF 'ensure_ollama_up_announced' "${REPO}/scripts/$1"; }
-check "ask.sh announces a slow Ollama start"   uses_announced_start ask.sh
-check "speed.sh announces a slow Ollama start" uses_announced_start speed.sh
+uses_announced_start() { grep -qF 'ensure_ollama_up_announced' "${REPO}/$1"; }
+check "ask.sh announces a slow Ollama start"   uses_announced_start scripts/ask.sh
+check "speed.sh announces a slow Ollama start" uses_announced_start scripts/speed.sh
+# restore.sh waited 30 silent seconds at the very end of a recovery, and
+# 'lca model --list' let ollama's own client error through — which says to run
+# "ollama serve", the wrong instruction on a systemd box where the server is a
+# managed service.
+check "restore.sh announces a slow Ollama start"      uses_announced_start restore.sh
+check "update-model.sh announces a slow Ollama start" uses_announced_start update-model.sh
+# Nothing may go back to the silent form: that spelling is the bug.
+no_silent_ollama_start() {
+  local hits
+  hits="$(grep -rln 'ensure_ollama_up [0-9]* >/dev/null' "${REPO}/scripts" "${REPO}" \
+            --include='*.sh' 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these still start Ollama with all output suppressed:\n%s\n' "${hits}" >&2; return 1
+  }
+}
+check "nothing starts Ollama with its output suppressed" no_silent_ollama_start
 
 echo "# a model pull must survive a transient registry failure"
 # CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB

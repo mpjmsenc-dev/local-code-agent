@@ -62,6 +62,13 @@ main() {
     case "${arg}" in
       --list)
         require_cmd ollama
+        # Without this the raw client error surfaces — "could not connect to
+        # ollama server, run 'ollama serve' to start it" — which is the wrong
+        # instruction on a systemd box, where the server is a managed service.
+        if ! wait_for_ollama 2 >/dev/null 2>&1; then
+          ensure_ollama_up_announced 30 \
+            || die "Ollama is not answering at $(ollama_url), so its models cannot be listed. Try: lca check"
+        fi
         info "Installed models:"
         ollama list
         exit 0

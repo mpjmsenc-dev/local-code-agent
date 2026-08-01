@@ -97,7 +97,10 @@ main() {
 
   # 3. Models (re-pull by name).
   if [[ -f "${workdir}/models.txt" ]]; then
-    if have ollama && wait_for_ollama 30; then
+    # Announced, and it STARTS Ollama rather than only waiting: a restore is
+    # exactly when you want the model server up, and the silent form spent
+    # half a minute looking like a hang right at the end of a recovery.
+    if have ollama && ensure_ollama_up_announced 30; then
       local model
       # `ollama list` output: NAME  ID  SIZE  MODIFIED (header on line 1).
       while read -r model; do
