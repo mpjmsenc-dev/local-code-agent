@@ -432,6 +432,27 @@ wait_for_ollama() {
   return 0
 }
 
+# ensure_ollama_up_announced TIMEOUT — ensure_ollama_up, but say so when it is
+# going to take a while.
+#
+# The quiet form spends up to a minute starting the server with every word
+# suppressed, which is indistinguishable from a hung terminal. That landed in
+# the worst two places: 'lca ask', the command people type most, and
+# 'lca speed', which people reach for precisely when the box already feels
+# slow — where a silent minute is the least helpful answer available.
+#
+# The notice goes to STDERR because in 'lca ask' the model's answer is stdout,
+# and progress must not end up inside a piped or redirected answer (load_env's
+# ".env created" notice is on stderr for the same reason). Nothing is printed
+# at all when Ollama is already up, which is the normal case.
+ensure_ollama_up_announced() {
+  local timeout="${1:-60}"
+  wait_for_ollama 2 >/dev/null 2>&1 && return 0
+  info "Ollama is not answering — starting it (this can take up to ${timeout}s)..." >&2
+  ensure_ollama_up "${timeout}" >/dev/null 2>&1 || true
+  wait_for_ollama 2 >/dev/null 2>&1
+}
+
 # model_present MODEL — true if MODEL is already downloaded.
 model_present() {
   ollama show "$1" >/dev/null 2>&1
