@@ -829,6 +829,23 @@ wait_for_webui() {
   return 0
 }
 
+# normalized_calendar SPEC — systemd's own canonical form of an OnCalendar
+# expression, so that "daily" and "*-*-* 00:00:00" compare equal.
+#
+# Comparing the raw strings would report drift on a perfectly healthy box the
+# moment someone wrote a shorthand, which is the unfixable-warning trap the
+# auto-tune ladder had. Returns non-zero (and prints nothing) when the answer
+# cannot be determined — no systemd-analyze, or an invalid spec — so a caller
+# can decline to claim drift it cannot prove.
+normalized_calendar() {
+  local out
+  have systemd-analyze || return 1
+  out="$(systemd-analyze calendar "$1" 2>/dev/null)" || return 1
+  out="$(sed -n 's/^ *Normalized form: *//p' <<<"${out}" | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
 # netmode_state — current persisted netmode ('online' when never toggled).
 netmode_state() {
   if [[ -f "${NETMODE_STATE_FILE}" ]]; then
