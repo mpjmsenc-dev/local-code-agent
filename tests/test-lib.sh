@@ -797,6 +797,29 @@ drift_checked() {
 check "webui.sh reports PORT drift"          drift_checked PORT Port
 check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
 check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
+check "webui.sh reports OLLAMA_BASE_URL drift" drift_checked OLLAMA_BASE_URL "Ollama address"
+check "webui.sh reports WEBUI_NAME drift"      drift_checked WEBUI_NAME Name
+# Every setting the installer bakes in from .env must be compared. The three
+# telemetry flags are constants, so they cannot drift; everything else can, and
+# "the ones we happened to think of" is how OLLAMA_BASE_URL — the address the
+# phone uses to reach the model at all — went unchecked.
+every_baked_setting_is_compared() {
+  local key bad=0
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    case "${key}" in
+      DO_NOT_TRACK|SCARF_NO_ANALYTICS|ANONYMIZED_TELEMETRY) continue ;;
+    esac
+    grep -qF "webui_container_env ${key}" "${REPO}/scripts/lib.sh" || {
+      printf 'install_webui.sh bakes in %s but nothing ever compares it\n' "${key}" >&2
+      bad=1
+    }
+  done < <(grep -oE '^[[:space:]]+-e [A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
+             | grep -oE '[A-Z_]+' | sort -u)
+  return "${bad}"
+}
+check "every setting baked into the container is drift-checked" \
+  every_baked_setting_is_compared
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {

@@ -874,6 +874,17 @@ webui_drift() {
   [[ -z "${live}" || "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
   live="$(webui_container_env ENABLE_SIGNUP || true)"
   [[ -z "${live}" || "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
+  # Not cosmetic, and the worst of the set: this is how the chat app reaches
+  # Ollama. docs/TROUBLESHOOTING.md tells people to move OLLAMA_HOST to another
+  # port and re-run install_ollama.sh — which does not touch the container — so
+  # following our own instructions leaves the phone talking to a port nothing
+  # listens on, with the drop-in perfectly correct and no error anywhere.
+  live="$(webui_container_env OLLAMA_BASE_URL || true)"
+  [[ -z "${live}" || "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
+  # Cosmetic, but the same silence: renaming the app in .env appears to do
+  # nothing at all.
+  live="$(webui_container_env WEBUI_NAME || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
   (( ${#drifted[@]} )) || return 1
   printf '%s\n' "${drifted[@]}"
 }
