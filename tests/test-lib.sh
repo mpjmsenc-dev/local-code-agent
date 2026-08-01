@@ -654,6 +654,67 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# a model pull must survive a transient registry failure"
+# CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB
+# download, and the whole pull was thrown away. On a droplet that is gigabytes
+# and it aborts the first-boot install. Retrying is safe because 'ollama pull'
+# resumes from the blobs already in the local store.
+# Driven with a stub 'ollama' so the retry loop is exercised for real, without
+# a network: sleep is stubbed too, or the test would wait 15 seconds.
+pull_retries_then_succeeds() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); [[ "${ATTEMPTS}" -ge 3 ]]; }
+    sleep() { :; }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "rc=%s attempts=%s\n" "$?" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  [[ "${out}" == "rc=0 attempts=3" ]] || {
+    printf 'expected a successful third attempt, got: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that fails twice then succeeds is a success" pull_retries_then_succeeds
+pull_gives_up_after_three() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 1; }
+    sleep() { :; }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "rc=%s attempts=%s\n" "$?" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  # Bounded: a genuinely unavailable model must still fail, and not loop.
+  [[ "${out}" == "rc=1 attempts=3" ]] || {
+    printf 'expected failure after exactly 3 attempts, got: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that never succeeds fails after exactly 3 attempts" pull_gives_up_after_three
+pull_succeeds_first_time_without_retrying() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0; SLEPT=0
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 0; }
+    # Counted, not printed: an echo here lands on stdout, and the first version
+    # of this test discarded stdout — so it silently only checked the retry.
+    sleep() { SLEPT=$((SLEPT+1)); }
+    pull_model fake-model:1b >/dev/null 2>&1
+    printf "attempts=%s slept=%s\n" "${ATTEMPTS}" "${SLEPT}"
+  ' _ "${REPO}/scripts/lib.sh")"
+  # The happy path must not sleep or re-pull — it runs on every setup.
+  [[ "${out}" == "attempts=1 slept=0" ]] || {
+    printf 'a first-time success did extra work: %s\n' "${out}" >&2; return 1
+  }
+}
+check "a pull that works first time does not retry or sleep" \
+  pull_succeeds_first_time_without_retrying
+
 echo "# OnCalendar comparison must survive systemd's shorthands"
 # The backup timer keeps the schedule it was installed with, so BACKUP_SCHEDULE
 # edited in .env and never applied leaves backups on the old cadence. Detecting

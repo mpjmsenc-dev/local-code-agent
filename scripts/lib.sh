@@ -438,14 +438,33 @@ model_present() {
 }
 
 # pull_model MODEL — download MODEL with progress, with a clear failure.
+# pull_model MODEL — download MODEL, retrying a transient registry failure.
+#
+# install_ollama.sh has retried the *installer* download since a CDN reset cost
+# a whole run; the model pull had none, despite being the far bigger download —
+# gigabytes on a real machine against ~400 MB here. CI then caught the exact
+# failure it needed: the registry answered 503 at 396 MB of 397 MB, throwing
+# the entire download away. On a droplet that aborts the first-boot install and
+# the user is told their box is not ready.
+#
+# Retrying is cheap and safe because 'ollama pull' resumes: completed blobs are
+# already in the local store, so a second attempt re-fetches only what is
+# missing rather than starting over.
 pull_model() {
-  local model="$1"
+  local model="$1" attempt
   info "Pulling model '${model}' (this can take several minutes on first download)..."
-  if ! ollama pull "${model}"; then
-    err "Failed to pull '${model}'. Check your internet connection (is netmode offline? run: sudo ${REPO_ROOT}/netmode.sh status)."
-    return 1
-  fi
-  ok "Model '${model}' is available locally."
+  for attempt in 1 2 3; do
+    if ollama pull "${model}"; then
+      ok "Model '${model}' is available locally."
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      warn "Pull attempt ${attempt}/3 for '${model}' failed (transient registry error?) — retrying in $((attempt * 5))s; finished parts are kept."
+      sleep "$((attempt * 5))"
+    fi
+  done
+  err "Failed to pull '${model}' after 3 attempts. Check your internet connection (is netmode offline? run: sudo ${REPO_ROOT}/netmode.sh status)."
+  return 1
 }
 
 # model_responds MODEL [TIMEOUT] — prove MODEL can actually generate text by
