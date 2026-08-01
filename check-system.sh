@@ -109,6 +109,20 @@ fi
 if ollama_bind_is_public; then
   p_warn "OLLAMA_HOST=${OLLAMA_HOST} binds Ollama beyond loopback — the unauthenticated API may be reachable off-box. Set OLLAMA_HOST=127.0.0.1:11434 in .env unless you intend this."
 fi
+# The drop-in is the ONLY thing that applies OLLAMA_HOST, OLLAMA_CONTEXT_LENGTH
+# and OLLAMA_KEEP_ALIVE to the running service. Editing .env changes nothing on
+# its own — and .env.example openly invites editing OLLAMA_KEEP_ALIVE ("set
+# this to -1 to keep the model resident"). Saying nothing here means a user
+# follows our own documentation, gets no effect, and has nowhere to find out.
+if systemd_available && have ollama; then
+  if [[ ! -f "${OLLAMA_DROPIN}" ]]; then
+    p_warn "no ollama drop-in at ${OLLAMA_DROPIN} — Ollama is running on its own defaults, not your .env. Fix: sudo ${SCRIPT_DIR}/scripts/install_ollama.sh"
+  elif ollama_dropin_matches; then
+    p_pass "your ollama settings are applied (context ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE})"
+  else
+    p_warn "config drift: your .env differs from what Ollama is actually running — edits to OLLAMA_HOST / OLLAMA_CONTEXT_LENGTH / OLLAMA_KEEP_ALIVE are NOT in effect. Fix: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+  fi
+fi
 
 # --- Model ------------------------------------------------------------------
 step "Model (${MODEL_NAME})"

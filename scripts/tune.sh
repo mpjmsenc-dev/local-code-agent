@@ -47,6 +47,23 @@ largest_present_within() {
   return 1
 }
 
+# resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
+# applied state has fallen behind .env. Returns 0 if it acted, 1 if there was
+# nothing to do (or nothing to act on).
+#
+# One copy on purpose: both the auto-tuned and the manually-pinned path need
+# this, and two copies of a convergence rule is how one of them ends up
+# forgotten — which is exactly how the AUTO_TUNE=false path came to ignore
+# .env in the first place.
+resync_dropin_if_drifted() {
+  have ollama && systemd_available || return 1
+  ollama_dropin_matches && return 1
+  warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
+  render_ollama_dropin
+  restart_ollama
+  return 0
+}
+
 # choose_for_ram RAM_GIB — sets TUNE_MODEL and TUNE_CTX per the ladder.
 # model_family — the family auto-tune picks from (MODEL_FAMILY in .env).
 # Falls back to the default rather than inventing a tag, so a typo cannot make
@@ -179,6 +196,17 @@ main() {
   fi
 
   if [[ "${AUTO_TUNE}" != "true" ]]; then
+    # AUTO_TUNE=false means "do not re-pick the model from RAM". It does NOT
+    # mean "ignore .env" — the pinned settings still have to reach the running
+    # service. Without this, editing OLLAMA_KEEP_ALIVE (which .env.example
+    # explicitly invites: "set this to -1 to keep the model resident") or
+    # OLLAMA_CONTEXT_LENGTH changed nothing, forever, with nothing said. And
+    # 'lca model' sets AUTO_TUNE=false for you, so this is the state anyone
+    # who pinned a model is in.
+    if resync_dropin_if_drifted; then
+      ok "Applied your pinned settings: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE})."
+      exit 0
+    fi
     ok "AUTO_TUNE=false — keeping your manual pin: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
     exit 0
   fi
@@ -188,10 +216,7 @@ main() {
     # .env and then been interrupted before re-rendering the drop-in, leaving
     # the running service on stale settings that the .env-only check can't
     # see. Re-converge the applied state if it drifted, then finish.
-    if have ollama && systemd_available && ! ollama_dropin_matches; then
-      warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
-      render_ollama_dropin
-      restart_ollama
+    if resync_dropin_if_drifted; then
       ok "Re-synced Ollama to ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH})."
       exit 0
     fi
