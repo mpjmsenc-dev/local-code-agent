@@ -153,6 +153,37 @@ So, when you add a setting that gets baked into something:
 next one is caught without anyone noticing it. Prefer that shape of test — one
 that fails for a class — over one more hand-written case.
 
+## Run it broken, not working
+
+The happy path is the least informative state to test here, and by a wide
+margin. In one day of work on this repo, five of six bugs found by hand came
+from running a command on a machine that was *already* degraded, and every one
+of them was invisible on a healthy box:
+
+| What was broken | What the command said | The truth |
+|---|---|---|
+| No WebUI container | "already matches .env" | nothing existed to match |
+| Docker daemon stopped | "not created yet — create it with install_webui.sh" | the container may exist; that command cannot work either |
+| Ollama not running | *(25 seconds of nothing)* | it was starting the server, silently |
+| Ollama not running | ollama's own "run 'ollama serve'" | wrong on a systemd box — that spawns a second server |
+| Output captured, not a terminal | plan printed, but not into the pipe | the plan was on stderr |
+
+Two habits fall out of that:
+
+- **Before finishing a command, run it with the thing it depends on turned
+  off.** No container, no daemon, no server, no network. A repair command is
+  reached for precisely when something is already wrong, so the degraded
+  message is the one users actually read.
+- **Capture the output; don't just look at it.** `out="$(cmd)"` shows what a
+  pipe, a redirect or a CI step sees. A terminal merges stdout and stderr and
+  hides the difference — which is exactly how a `--dry-run` whose plan went to
+  stderr looked perfect by hand.
+
+And when a probe cannot answer, say so rather than guessing: "no container"
+and "cannot reach the daemon" are different facts, and every docker probe
+collapses them into the same non-zero exit. A confident wrong line is worse
+than an admitted unknown.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
