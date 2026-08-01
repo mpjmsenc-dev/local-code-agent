@@ -120,7 +120,7 @@ if systemd_available && have ollama; then
   elif ollama_dropin_matches; then
     p_pass "your ollama settings are applied (context ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE})"
   else
-    p_warn "config drift: your .env differs from what Ollama is actually running — edits to OLLAMA_HOST / OLLAMA_CONTEXT_LENGTH / OLLAMA_KEEP_ALIVE are NOT in effect. Fix: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+    p_warn "config drift: your .env differs from what Ollama is actually running — edits to OLLAMA_HOST / OLLAMA_CONTEXT_LENGTH / OLLAMA_KEEP_ALIVE are NOT in effect. Fix: sudo lca apply"
   fi
 fi
 
@@ -411,7 +411,7 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   WANT_SCHED="$(normalized_calendar "${BACKUP_SCHEDULE}" || true)"
   HAVE_SCHED="$(normalized_calendar "${TIMER_SCHED}" || true)"
   if [[ -n "${WANT_SCHED}" && -n "${HAVE_SCHED}" && "${WANT_SCHED}" != "${HAVE_SCHED}" ]]; then
-    p_warn "backup schedule drift: the timer runs on '${TIMER_SCHED}' but .env says BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' — your change is not in effect. Apply it with: sudo ${REPO_ROOT}/backup.sh --install-timer"
+    p_warn "backup schedule drift: the timer runs on '${TIMER_SCHED}' but .env says BACKUP_SCHEDULE='${BACKUP_SCHEDULE}' — your change is not in effect. Fix: sudo lca apply"
   fi
 else
   info "scheduled backups off (optional) — enable with: sudo ${REPO_ROOT}/backup.sh --install-timer"

@@ -121,15 +121,15 @@ main() {
         [[ -n "${key}" ]] || continue
         case "${key}" in
           WEBUI_PORT)
-            warn "Port drift: the container listens on ${live_port}, but .env says WEBUI_PORT=${WEBUI_PORT}. Apply the new port with: scripts/install_webui.sh" ;;
+            warn "Port drift: the container listens on ${live_port}, but .env says WEBUI_PORT=${WEBUI_PORT}. Apply it with: sudo lca apply" ;;
           MODEL_NAME)
-            warn "Model drift: the chat app preselects '$(webui_container_env DEFAULT_MODELS || true)', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Refresh with: scripts/install_webui.sh" ;;
+            warn "Model drift: the chat app preselects '$(webui_container_env DEFAULT_MODELS || true)', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Apply it with: sudo lca apply" ;;
           WEBUI_ENABLE_SIGNUP)
-            warn "Signup drift: the running chat app was started with signups $(webui_container_env ENABLE_SIGNUP | tr '[:lower:]' '[:upper:]' || true), but .env says WEBUI_ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}. Editing .env does NOT change a running container — apply it with: scripts/install_webui.sh" ;;
+            warn "Signup drift: the running chat app was started with signups $(webui_container_env ENABLE_SIGNUP | tr '[:lower:]' '[:upper:]' || true), but .env says WEBUI_ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}. Editing .env does NOT change a running container — apply it with: sudo lca apply" ;;
           OLLAMA_HOST)
-            warn "Ollama address drift: the chat app talks to '$(webui_container_env OLLAMA_BASE_URL || true)', but .env now points Ollama at $(ollama_url). The phone will show no models until the container is re-created: scripts/install_webui.sh" ;;
+            warn "Ollama address drift: the chat app talks to '$(webui_container_env OLLAMA_BASE_URL || true)', but .env now points Ollama at $(ollama_url). The phone will show no models until the container is re-created: sudo lca apply" ;;
           WEBUI_NAME)
-            warn "Name drift: the chat app is titled '$(webui_container_env WEBUI_NAME || true)', but .env says WEBUI_NAME=${WEBUI_NAME}. Apply it with: scripts/install_webui.sh" ;;
+            warn "Name drift: the chat app is titled '$(webui_container_env WEBUI_NAME || true)', but .env says WEBUI_NAME=${WEBUI_NAME}. Apply it with: sudo lca apply" ;;
         esac
       done < <(webui_drift || true)
       if webui_responds; then

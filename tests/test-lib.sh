@@ -1091,6 +1091,25 @@ signup_reported_by_check() {
 }
 check "check-system.sh reports the signup setting" signup_reported_by_check
 
+echo "# every drift message must name the one command that fixes drift"
+# 'lca apply' exists precisely so nobody has to remember which script applies
+# which setting. It was added, documented in TROUBLESHOOTING.md — and then the
+# place users actually MEET drift, the output of 'lca check' and
+# 'webui.sh status', went on naming individual scripts. Seven messages, seven
+# different things to remember, for a problem that now has one answer.
+drift_messages_name_apply() {
+  local bad=0 line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    grep -qF 'lca apply' <<<"${line}" || {
+      printf 'a drift message does not point at "lca apply":\n  %s\n' "${line:0:120}" >&2
+      bad=1
+    }
+  done < <(grep -hE '(warn|p_warn) ".*[Dd]rift' "${REPO}/check-system.sh" "${REPO}/webui.sh")
+  return "${bad}"
+}
+check "every drift message points at 'lca apply'" drift_messages_name_apply
+
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently
 # wrong there is worse than saying nothing. Every state is exercised against a
