@@ -723,6 +723,29 @@ no_silent_ollama_start() {
   }
 }
 check "nothing starts Ollama with its output suppressed" no_silent_ollama_start
+check "run-agent.sh announces a slow Ollama start" uses_announced_start run-agent.sh
+# The suppressed-output spelling was only half of it. A long bare
+# 'wait_for_ollama N' is the other half, and worse: it POLLS without starting
+# anything. On a host with no systemd (or no sudo), 'lca' — the headline
+# command — sat silent for 60 seconds waiting for a server nothing was
+# starting, then advised 'systemctl restart' on a box that has no systemd.
+#
+# The rule is not "never wait". install_ollama.sh, restart_ollama and
+# start_ollama_bg all wait a long time and are right to: each has just started
+# the thing it waits for, and said so. So a long wait is allowed when the few
+# lines above it either START the server or SAY something. Encoding that rather
+# than a blanket ban is what stops this being suppressed the first time it is
+# inconvenient.
+no_unannounced_long_wait() {
+  local hits
+  hits="$(awk -f "${TESTS_DIR}/long-wait.awk" "$@")"
+  [[ -z "${hits}" ]] || {
+    printf 'these wait a long time for an Ollama nobody started, in silence:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no long wait for an Ollama nobody started or announced" \
+  no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh
 
 echo "# a model pull must survive a transient registry failure"
 # CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB

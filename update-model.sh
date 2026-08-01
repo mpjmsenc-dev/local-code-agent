@@ -94,16 +94,13 @@ main() {
   require_cmd ollama curl jq
   step "Switching default model to '${new_model}'"
 
-  if ! wait_for_ollama 5; then
-    # can_root guard: as_root die()s (exits) with neither root nor sudo, and
-    # '|| true' cannot catch an exit — the script would abort here instead of
-    # falling through to the clear "API not reachable" message below.
-    if systemd_available && can_root; then
-      info "Ollama is not answering — starting the service..."
-      as_root systemctl start ollama || true
-    fi
-    wait_for_ollama 60 || die "Ollama API is not reachable at $(ollama_url)."
-  fi
+  # Same shape run-agent.sh had: announced only on the systemd-with-root path,
+  # and on every other host a bare 60-second poll for a server nothing was
+  # starting. ensure_ollama_up_announced starts it either way — the systemd
+  # service where there is one, a background server otherwise — says so while
+  # it happens, and stays silent when Ollama is already up.
+  ensure_ollama_up_announced 60 \
+    || die "Ollama API is not reachable at $(ollama_url). Check: ${REPO_ROOT}/check-system.sh"
 
   local old_model="${MODEL_NAME}"
   if [[ "${new_model}" == "${old_model}" ]]; then
