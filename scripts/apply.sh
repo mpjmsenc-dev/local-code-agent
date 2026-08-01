@@ -170,6 +170,12 @@ main() {
     step "Applying .env to the running system"
   fi
 
+  # Order matters, and only in one direction. The chat app container is created
+  # with OLLAMA_BASE_URL baked in, so when someone moves OLLAMA_HOST to another
+  # port — which docs/TROUBLESHOOTING.md now tells them to fix with this very
+  # command — Ollama has to be listening on the new port BEFORE the container
+  # is rebuilt to point at it. Reversed, the app spends the gap talking to a
+  # port nothing answers on, which is the failure this command exists to end.
   apply_ollama
   apply_webui
   apply_backup_timer

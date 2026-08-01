@@ -1015,6 +1015,22 @@ apply_summary_admits_unchecked() {
 }
 check "apply never claims a clean bill for an unchecked component" \
   apply_summary_admits_unchecked
+
+echo "# 'lca apply' must move Ollama before rebuilding the chat app"
+# The container bakes in OLLAMA_BASE_URL at creation. docs/TROUBLESHOOTING.md
+# now tells people to fix a moved OLLAMA_HOST with 'lca apply', so Ollama must
+# be listening on the new port before the container is rebuilt to point at it.
+# Reversed, the chat app spends the gap talking to a port nothing answers on —
+# the exact failure this command was written to end. Silent if broken: the end
+# state is still correct, only the window between is wrong.
+apply_moves_ollama_first() {
+  awk '/^main\(\) \{/ {inmain=1}
+       inmain && /^  apply_ollama$/ {o=NR}
+       inmain && /^  apply_webui$/  {w=NR}
+       END {exit !(o > 0 && w > 0 && o < w)}' "${APPLY}"
+}
+check "apply re-points Ollama before it rebuilds the chat app" \
+  apply_moves_ollama_first
 # A missing component is not a matching one.
 distinguishes_absent_from_matching() {
   grep -qF 'webui_container_exists' "${APPLY}"
