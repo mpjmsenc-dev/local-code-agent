@@ -107,39 +107,27 @@ main() {
         warn "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh to create it."
         exit 1
       fi
-      local state live_port
+      local state live_port key
       state="$("${DOCKER[@]}" inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}")"
       info "Container '${WEBUI_CONTAINER}': ${state}"
-      # The port is baked into the container's env when it is created
-      # (--network=host plus -e PORT=...). Editing WEBUI_PORT in .env does not
-      # move a running container, so without this check status probes a port the
-      # container never listened on and blames it for "not answering".
-      live_port="$("${DOCKER[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-        "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^PORT=//p' | head -1)"
-      if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
-        warn "Port drift: the container listens on ${live_port}, but .env says WEBUI_PORT=${WEBUI_PORT}. Apply the new port with: scripts/install_webui.sh"
-      fi
-      # The preselected model is baked into the container at creation, so
-      # auto-tune switching MODEL_NAME leaves the phone defaulting to a model
-      # that may no longer be installed — the same drift class as the port.
-      local live_model
-      live_model="$("${DOCKER[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-        "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^DEFAULT_MODELS=//p' | head -1)"
-      if [[ -n "${live_model}" && "${live_model}" != "${MODEL_NAME}" ]]; then
-        warn "Model drift: the chat app preselects '${live_model}', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Refresh with: scripts/install_webui.sh"
-      fi
-      # The same drift class as the two above, but this one is the security-
-      # relevant one. docs/YOUR-TURN.md tells the user to close signups by
-      # editing .env — and editing .env does not touch a running container. So
-      # someone who does exactly as instructed, and forgets the re-run, is left
-      # believing signups are locked while anyone who can reach the app can
-      # still create an account. Silent, and on the whole point of the project.
-      local live_signup
-      live_signup="$("${DOCKER[@]}" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-        "${WEBUI_CONTAINER}" 2>/dev/null | sed -n 's/^ENABLE_SIGNUP=//p' | head -1)"
-      if [[ -n "${live_signup}" && "${live_signup}" != "${WEBUI_ENABLE_SIGNUP}" ]]; then
-        warn "Signup drift: the running chat app was started with signups ${live_signup^^}, but .env says WEBUI_ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}. Editing .env does NOT change a running container — apply it with: scripts/install_webui.sh"
-      fi
+      # Settings are baked into the container when it is created, so editing
+      # .env moves nothing until it is re-created. webui_drift() does the
+      # comparing (one copy, in lib.sh — writing it out per key is how signups
+      # came to have no check at all); the message stays specific per key,
+      # because "PORT differs" and "anyone can still register an account" are
+      # not the same news.
+      live_port="$(webui_container_env PORT || true)"
+      while read -r key; do
+        [[ -n "${key}" ]] || continue
+        case "${key}" in
+          WEBUI_PORT)
+            warn "Port drift: the container listens on ${live_port}, but .env says WEBUI_PORT=${WEBUI_PORT}. Apply the new port with: scripts/install_webui.sh" ;;
+          MODEL_NAME)
+            warn "Model drift: the chat app preselects '$(webui_container_env DEFAULT_MODELS || true)', but .env says MODEL_NAME=${MODEL_NAME} (auto-tune may have changed it). Refresh with: scripts/install_webui.sh" ;;
+          WEBUI_ENABLE_SIGNUP)
+            warn "Signup drift: the running chat app was started with signups $(webui_container_env ENABLE_SIGNUP | tr '[:lower:]' '[:upper:]' || true), but .env says WEBUI_ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}. Editing .env does NOT change a running container — apply it with: scripts/install_webui.sh" ;;
+        esac
+      done < <(webui_drift || true)
       if webui_responds; then
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else

@@ -711,12 +711,63 @@ check "tune.sh converges the drop-in even when AUTO_TUNE=false" \
 # that was the second way this test failed against correct code.)
 resync_rule_is_shared() {
   local defs calls
-  defs="$(grep -c '^resync_dropin_if_drifted() {' "${REPO}/scripts/tune.sh" || true)"
-  calls="$(grep -c 'if resync_dropin_if_drifted; then' "${REPO}/scripts/tune.sh" || true)"
-  [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times\n' "${defs}" >&2; return 1; }
+  defs="$(grep -rc '^resync_dropin_if_drifted() {' "${REPO}/scripts/lib.sh" || true)"
+  calls="$(grep -c 'resync_dropin_if_drifted' "${REPO}/scripts/tune.sh" || true)"
+  [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times in lib.sh\n' "${defs}" >&2; return 1; }
   (( calls >= 2 )) || { printf 'convergence rule called from only %s place(s)\n' "${calls}" >&2; return 1; }
+  # Nowhere may re-implement it: a second copy is how the pinned path was
+  # forgotten, and how 'lca apply' would drift from what tune.sh does on boot.
+  ! grep -q 'render_ollama_dropin' "${REPO}/scripts/apply.sh" && return 1
+  grep -q 'resync_dropin_if_drifted\|render_ollama_dropin' "${REPO}/scripts/apply.sh"
 }
 check "the drift rule is defined once and used by both paths" resync_rule_is_shared
+
+echo "# 'lca apply' — one command for every setting that needs applying"
+# Three separate silent failures came from .env settings that are baked into
+# something long-lived. 'lca check' names a different fix command for each;
+# this is the one command that does whatever is needed. It must be honest
+# about a component that is absent (not "already matches"), and a dry run must
+# change nothing — verified against real files, not just asserted here.
+APPLY="${REPO}/scripts/apply.sh"
+check "apply.sh is executable" test -x "${APPLY}"
+apply_covers() { grep -qF "$1" "${APPLY}"; }
+check "apply covers the Ollama drop-in"  apply_covers 'apply_ollama'
+check "apply covers the chat app"        apply_covers 'apply_webui'
+check "apply covers the backup timer"    apply_covers 'apply_backup_timer'
+# The dry run must be incapable of changing anything: every mutating call has
+# to sit behind the 'would' guard that returns early.
+dry_run_guards_every_change() {
+  local fn bad=0
+  for fn in apply_ollama apply_webui apply_backup_timer; do
+    awk -v f="${fn}" '$0 ~ "^"f"\\(\\) \\{" {inf=1}
+         inf && /would /        {guarded=1}
+         inf && /render_ollama_dropin|install_webui\.sh|--install-timer/ \
+             && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
+         inf && /^}/            {inf=0}
+         END {exit bad}' "${APPLY}" || {
+      printf '%s can change something before its dry-run guard\n' "${fn}" >&2; bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every change in apply.sh sits behind the dry-run guard" dry_run_guards_every_change
+# A missing component is not a matching one.
+distinguishes_absent_from_matching() {
+  grep -qF 'webui_container_exists' "${APPLY}"
+}
+check "apply says 'not created yet' rather than 'already matches'" \
+  distinguishes_absent_from_matching
+# Scheduled backups are opt-in; applying .env must not create a timer nobody
+# asked for.
+never_creates_a_timer() {
+  awk '/^apply_backup_timer\(\) \{/ {inf=1}
+       inf && /is-enabled/ {guarded=1}
+       inf && /--install-timer/ && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
+       inf && /^}/ {inf=0}
+       END {exit bad}' "${APPLY}"
+}
+check "apply never installs a backup timer that was not there" never_creates_a_timer
+check "'lca apply' is dispatched by bin/lca" grep -q 'apply)' "${REPO}/bin/lca"
 # check-system.sh must report the drift, for the user who has not rebooted yet.
 check_reports_dropin_drift() {
   grep -qF 'ollama_dropin_matches' "${REPO}/check-system.sh"
@@ -730,13 +781,17 @@ echo "# every setting baked into the WebUI container must be drift-checked"
 # silence means "you think signups are locked and they are open".
 drift_checked() {
   local var="$1"
-  # Extracted from the container's env...
-  grep -qF "s/^${var}=//p" "${REPO}/webui.sh" || {
-    printf 'webui.sh never reads %s out of the running container\n' "${var}" >&2; return 1
+  # Read out of the container in exactly ONE place (lib.sh's webui_container_env
+  # / webui_drift). It used to be written out per key inline in webui.sh, and
+  # the third key — signups — was simply never added, which is the whole reason
+  # the comparison now lives in one function.
+  grep -qF "webui_container_env ${var}" "${REPO}/scripts/lib.sh" || {
+    printf 'lib.sh never reads %s out of the running container\n' "${var}" >&2; return 1
   }
-  # ...and actually compared against .env, not just read.
+  # ...while the message stays specific per key: "PORT differs" and "anyone can
+  # still register an account" are not the same news.
   grep -qiE "warn \"${2} drift" "${REPO}/webui.sh" || {
-    printf 'webui.sh reads %s but never warns about %s drift\n' "${var}" "${2}" >&2; return 1
+    printf 'nothing warns specifically about %s (%s) drift\n' "${var}" "${2}" >&2; return 1
   }
 }
 check "webui.sh reports PORT drift"          drift_checked PORT Port

@@ -29,6 +29,7 @@ Usage: lca [command] [args...]
   lca ask -c "follow up"  continue from your last question
   lca ask -m MODEL "q"    answer with another model just this once
   lca chat                show the chat app's address as a QR code to scan
+  lca apply               make the running system match your .env edits
   lca check               full health check
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
   lca speed               measure tokens/second and explain what limits it
@@ -61,6 +62,7 @@ case "${cmd}" in
   ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
   ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
   chat)            exec "${REPO}/webui.sh" url ;;
+  apply)           exec "${REPO}/scripts/apply.sh" "$@" ;;
   check)           exec "${REPO}/check-system.sh" "$@" ;;
   speed)           exec "${REPO}/scripts/speed.sh" "$@" ;;
   logs)            exec "${REPO}/scripts/logs.sh" "$@" ;;

@@ -162,11 +162,18 @@ Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,
 drop-in or a docker container — and keep working with the values they were
 started with until that thing is rebuilt. `lca check` reports both cases:
 
+**The short answer: run `sudo lca apply`.** It re-applies `.env` to everything
+that holds its own copy of a setting, touches only what has actually drifted,
+and is safe to run whenever you are unsure. `lca apply --dry-run` says what it
+would do without doing it.
+
+The long answer, if you want to know what it is doing:
+
 | Setting | Applied by | If you only edit `.env` |
 |---|---|---|
-| `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fix: `sudo scripts/tune.sh` (a reboot also does it) |
-| `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP` | the WebUI container | `./webui.sh status` says `… drift`. Fix: `scripts/install_webui.sh` |
-| `BACKUP_SCHEDULE` | the systemd timer | Fix: `sudo ./backup.sh --install-timer` |
+| `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fixed by `lca apply`, `sudo scripts/tune.sh`, or a reboot |
+| `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP` | the WebUI container | `./webui.sh status` says `… drift`. Fixed by `lca apply` or `scripts/install_webui.sh` |
+| `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo ./backup.sh --install-timer` |
 
 ## Ollama settings drifted / drop-in edited by hand
 

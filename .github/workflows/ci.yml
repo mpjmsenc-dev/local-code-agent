@@ -561,6 +561,17 @@ jobs:
           grep -q 'Downloading the model' <<<"${inflight}" \
             || { echo "FAIL: banner does not report how far the install got"; exit 1; }
           echo "login banner: installed, listed by run-parts, and truthful in both states"
+      - name: lca apply agrees with a freshly-installed stack
+        # setup.sh has just run, so by definition nothing has drifted. If apply
+        # reports work here it disagrees with the installer about what .env
+        # means, which is worse than either being wrong alone.
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(sudo -E ./bin/lca apply)"
+          printf '%s\n' "${out}"
+          grep -q 'nothing to do' <<<"${out}" \
+            || { echo "FAIL: apply wants to change a stack setup.sh just built"; exit 1; }
       - name: backup.sh / restore.sh round-trip
         run: |
           ./backup.sh
@@ -700,6 +711,49 @@ jobs:
             echo "FAIL: drift still reported after applying the change"; exit 1
           fi
           echo "signup drift: reported when it exists, silent when it does not"
+      - name: lca apply re-applies what drifted, and leaves everything else alone
+        # The previous step leaves .env and the container agreeing, with
+        # signups closed. 'lca apply' exists because three separate settings
+        # silently failed to take effect and 'lca check' names a different fix
+        # command for each; this proves the one command does the job, is safe
+        # to re-run, and cannot change anything in a dry run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          signups() {
+            sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' open-webui \
+              | sed -n 's/^ENABLE_SIGNUP=//p' | head -1
+          }
+          # Nothing has drifted, so nothing may be touched.
+          quiet="$(./bin/lca apply)"
+          printf '%s\n' "${quiet}"
+          grep -q 'nothing to do' <<<"${quiet}" \
+            || { echo "FAIL: apply claimed work when .env and the system agree"; exit 1; }
+
+          # Drift the one setting whose silence is a security problem.
+          before="$(signups)"
+          sed -i 's/^WEBUI_ENABLE_SIGNUP=.*/WEBUI_ENABLE_SIGNUP=true/' .env
+          [[ "${before}" == "false" ]] \
+            || { echo "FAIL: precondition wrong — container signups were '${before}'"; exit 1; }
+
+          # A dry run must report it and change absolutely nothing.
+          dry="$(./bin/lca apply --dry-run)"
+          printf '%s\n' "${dry}"
+          grep -q 'WOULD' <<<"${dry}" || { echo "FAIL: dry run reported no change"; exit 1; }
+          [[ "$(signups)" == "false" ]] \
+            || { echo "FAIL: --dry-run changed the running container"; exit 1; }
+
+          # The real thing.
+          ./bin/lca apply
+          [[ "$(signups)" == "true" ]] \
+            || { echo "FAIL: apply did not reach the running container"; exit 1; }
+
+          # And it must be safe to run again.
+          again="$(./bin/lca apply)"
+          printf '%s\n' "${again}"
+          grep -q 'nothing to do' <<<"${again}" \
+            || { echo "FAIL: apply is not idempotent"; exit 1; }
+          echo "lca apply: applies drift, honours --dry-run, and is safe to re-run"
       - name: Volume-inclusive backup, destroy, restore — data must survive
         run: |
           sudo docker run --rm --entrypoint sh -v open-webui:/d \

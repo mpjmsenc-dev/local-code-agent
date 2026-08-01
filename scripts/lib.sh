@@ -829,6 +829,85 @@ wait_for_webui() {
   return 0
 }
 
+# --- applied state -----------------------------------------------------------
+# Three settings in .env are not read fresh: they are baked into a systemd
+# drop-in, a docker container and a systemd timer when each is created. Reading
+# back what was actually applied is therefore its own job, and one that has now
+# been got wrong three separate times — so it lives here once.
+
+# webui_container_env KEY — the value KEY was baked into the running container
+# with. Non-zero (and prints nothing) when the container or the key is absent.
+webui_container_env() {
+  local env_lines out
+  have docker || return 1
+  env_lines="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { can_root && as_root docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || true)"
+  [[ -n "${env_lines}" ]] || return 1
+  out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# webui_container_exists — true when the chat app's container is present, in
+# any state. Deliberately distinct from "matches .env": a container that does
+# not exist has not drifted, it is simply absent, and reporting that as
+# "already matches your settings" is the kind of confidently-wrong line this
+# project keeps taking out.
+webui_container_exists() {
+  have docker || return 1
+  docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
+  can_root && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+}
+
+# webui_drift — echo the .env keys whose value has not reached the running
+# container, one per line; return non-zero when nothing has drifted.
+#
+# The comparison lives in exactly one place on purpose. It was written out
+# three times inline, and the third — signups — was simply never added, which
+# left people believing they had closed their chat app when they had not.
+webui_drift() {
+  local drifted=() live
+  live="$(webui_container_env PORT || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
+  live="$(webui_container_env DEFAULT_MODELS || true)"
+  [[ -z "${live}" || "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
+  live="$(webui_container_env ENABLE_SIGNUP || true)"
+  [[ -z "${live}" || "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
+  (( ${#drifted[@]} )) || return 1
+  printf '%s\n' "${drifted[@]}"
+}
+
+# installed_backup_schedule — the OnCalendar the backup timer is really on.
+# systemd renders the property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
+# so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
+# next_elapse tail and reports a garbled schedule.
+installed_backup_schedule() {
+  local out
+  systemd_available || return 1
+  out="$(systemctl show -p TimersCalendar --value local-code-agent-backup.timer 2>/dev/null \
+    | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
+# applied state has fallen behind .env. Returns 0 if it acted, 1 if there was
+# nothing to do (or nothing to act on).
+#
+# One copy on purpose: the auto-tuned path, the manually-pinned path and
+# 'lca apply' all need it, and two copies of a convergence rule is how one of
+# them ends up forgotten — which is exactly how the AUTO_TUNE=false path came
+# to ignore .env in the first place.
+resync_dropin_if_drifted() {
+  have ollama && systemd_available || return 1
+  ollama_dropin_matches && return 1
+  warn "Config drift: the ollama drop-in does not match .env — re-rendering and restarting to re-sync."
+  render_ollama_dropin
+  restart_ollama
+  return 0
+}
+
 # normalized_calendar SPEC — systemd's own canonical form of an OnCalendar
 # expression, so that "daily" and "*-*-* 00:00:00" compare equal.
 #
