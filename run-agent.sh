@@ -17,15 +17,21 @@ main() {
   [[ -x "${aider}" ]] || die "aider is not installed at ${aider}. Run: ${REPO_ROOT}/scripts/install_python.sh"
   require_cmd curl jq
 
-  # Make sure Ollama is up (start the service if it is down).
-  if ! wait_for_ollama 3; then
-    # can_root guard: as_root die()s without root/sudo, which would abort
-    # run-agent.sh here instead of falling through to the clear message below.
-    if systemd_available && can_root; then
-      info "Ollama is not answering — starting the service..."
-      as_root systemctl start ollama || true
+  # Ollama must be up before aider starts. ensure_ollama_up_announced both
+  # STARTS it — the systemd service where there is one and root to do it, a
+  # background server otherwise — and says so while it happens.
+  #
+  # The old shape only announced on the systemd-with-root path, and on every
+  # other host fell through to a bare 'wait_for_ollama 60': sixty seconds of
+  # silence, polling for a server that nothing was starting, before advising
+  # 'systemctl restart' on a machine with no systemd. That is this project's
+  # headline command doing nothing, invisibly, and then giving instructions
+  # that cannot work.
+  if ! ensure_ollama_up_announced 60; then
+    if systemd_available; then
+      die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then check: ${REPO_ROOT}/check-system.sh"
     fi
-    wait_for_ollama 60 || die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then check: ${REPO_ROOT}/check-system.sh"
+    die "Ollama API is not reachable at $(ollama_url), and this host has no systemd to manage it. Start it yourself ('ollama serve') — then check: ${REPO_ROOT}/check-system.sh"
   fi
 
   if ! model_present "${MODEL_NAME}"; then

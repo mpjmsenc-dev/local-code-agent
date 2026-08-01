@@ -43,7 +43,11 @@ main() {
   load_env  # tune.sh may have rewritten MODEL_NAME / OLLAMA_CONTEXT_LENGTH
 
   step "Ensuring model '${MODEL_NAME}' is available"
-  if have ollama && wait_for_ollama 30; then
+  # Announced, and it STARTS Ollama rather than only polling for it. The bare
+  # wait gave up after 30 silent seconds and marked the whole install failed,
+  # when restarting the service it had just installed would usually have fixed
+  # it — a worse outcome reached more slowly, and with nothing on screen.
+  if have ollama && ensure_ollama_up_announced 30; then
     if model_present "${MODEL_NAME}"; then
       ok "Model '${MODEL_NAME}' already downloaded."
     else
