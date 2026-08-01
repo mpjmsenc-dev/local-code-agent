@@ -660,6 +660,31 @@ readme_documents_every_command() {
 check "the README table documents every 'lca help' command" \
   readme_documents_every_command
 
+echo "# every setting in .env.example must be documented in the README"
+# Same class as the command table above. This one caught its own author:
+# SKIP_TAILSCALE was added to .env.example and lib.sh in an earlier change
+# tonight and never reached the README's settings table, so the only way to
+# discover it was to read .env.example — which is precisely what the table
+# exists to save people from.
+readme_documents_every_setting() {
+  local key bad=0 documented
+  # The backtick is built rather than written literally: a matched PAIR inside
+  # single quotes reads to ShellCheck as a command substitution (SC2016).
+  local bt; bt="$(printf '\140')"
+  documented="$(grep -oE "^\| ${bt}[A-Z_]+${bt}" "${REPO}/README.md" | tr -d "|${bt} " | sort -u)"
+  [[ -n "${documented}" ]] || { echo "no settings table found in README.md" >&2; return 1; }
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qx -- "${key}" <<<"${documented}" || {
+      printf '%s is in .env.example but missing from the README settings table\n' "${key}" >&2
+      bad=1
+    }
+  done < <(grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u)
+  return "${bad}"
+}
+check "the README documents every .env.example setting" \
+  readme_documents_every_setting
+
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
 SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
 check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"

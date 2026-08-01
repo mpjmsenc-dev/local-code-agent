@@ -270,8 +270,10 @@ Created from `.env.example` on first run. All keys:
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
+| `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
+| `SKIP_TAILSCALE` | `false` | Skip Tailscale. Phone access is then over a private network you provide; the inbound guard still limits the WebUI port to loopback and `tailscale0` |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
 | `ENABLE_WEBUI` | `true` | Install/run Open WebUI |
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
