@@ -307,6 +307,49 @@ jobs:
       - name: Drop-in is live in the running service
         run: |
           systemctl show ollama -p Environment | tee /dev/stderr | grep -q 'OLLAMA_MAX_LOADED_MODELS=1'
+      - name: A pinned install must still apply .env to the running service
+        # AUTO_TUNE=false meant "do not re-pick the model from RAM". It also,
+        # accidentally, meant "ignore .env": tune.sh returned before its drift
+        # check, so editing OLLAMA_KEEP_ALIVE did nothing on every boot,
+        # forever, with nothing said — and 'lca model' sets AUTO_TUNE=false for
+        # you, so that was the state of anyone who had pinned a model.
+        # .env.example openly invites editing exactly this key.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env /tmp/env.before
+          # Already false for this job — stated explicitly so the step does not
+          # depend on an earlier one, and because "CI was in the affected state
+          # all along" is precisely why nothing here ever caught this.
+          sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
+          sed -i 's/^OLLAMA_KEEP_ALIVE=.*/OLLAMA_KEEP_ALIVE=17m/' .env
+          grep -q '^OLLAMA_KEEP_ALIVE=17m' .env || { echo "FAIL: could not edit .env"; exit 1; }
+
+          # Precondition: the applied state has NOT caught up on its own.
+          if systemctl show ollama -p Environment | grep -q 'OLLAMA_KEEP_ALIVE=17m'; then
+            echo "FAIL: precondition wrong — the service already has the new value"; exit 1
+          fi
+          # ...and the health check must say so, for the user who has not
+          # rebooted yet.
+          drift="$(./check-system.sh 2>&1 || true)"
+          grep -q 'config drift' <<<"${drift}" \
+            || { printf '%s\n' "${drift}" | tail -30; echo "FAIL: check-system did not report the drift"; exit 1; }
+
+          # The boot service is what applies it. This is the step that used to
+          # do nothing at all.
+          sudo -E scripts/tune.sh
+          grep -q 'OLLAMA_KEEP_ALIVE=17m' /etc/systemd/system/ollama.service.d/local-code-agent.conf \
+            || { echo "FAIL: tune.sh did not re-render the drop-in"; exit 1; }
+          systemctl show ollama -p Environment | tee /dev/stderr | grep -q 'OLLAMA_KEEP_ALIVE=17m' \
+            || { echo "FAIL: the running service never picked up the pinned setting"; exit 1; }
+          if grep -q 'config drift' <<<"$(./check-system.sh 2>&1 || true)"; then
+            echo "FAIL: drift still reported after it was applied"; exit 1
+          fi
+
+          # Leave the job as it was found, applied state included.
+          cp /tmp/env.before .env
+          sudo -E scripts/tune.sh
+          echo "pinned settings reach the running service, and drift is reported until they do"
       - name: Pull the model and require a real generation
         run: |
           source scripts/lib.sh

@@ -654,6 +654,46 @@ if have jq; then
   check "suggestions are not Open WebUI's stock ones" not_stock
 fi
 
+echo "# a manual pin must still apply .env to the running service"
+# AUTO_TUNE=false means "do not re-pick the model from RAM". It used to mean
+# "ignore .env entirely": tune.sh returned before its drift check, so editing
+# OLLAMA_KEEP_ALIVE or OLLAMA_CONTEXT_LENGTH did nothing, on every boot, with
+# nothing said. 'lca model' sets AUTO_TUNE=false for you, so that was the state
+# of anyone who had pinned a model — and .env.example openly invites editing
+# OLLAMA_KEEP_ALIVE ("set this to -1 to keep the model resident").
+# Reproduced with real files before it was fixed: .env said -1, the drop-in
+# said 30m, and tune.sh printed "Nothing to do".
+# Anchored on the block that ends in "keeping your manual pin", because
+# tune.sh's --dry-run section tests AUTO_TUNE the same way earlier in the file
+# and the first version of this matched that one instead — failing against
+# correct code. The window resets at each occurrence so only the real branch
+# can satisfy it. No literal '${...}' in the pattern: ShellCheck reads that
+# inside single quotes as an unexpanded variable (SC2016).
+autotune_false_still_converges() {
+  awk '/AUTO_TUNE/ && /!= "true"/ {inblk=1; sawresync=0; next}
+       inblk && /resync_dropin_if_drifted/ {sawresync=1}
+       inblk && /keeping your manual pin/ {if (sawresync) ok=1; inblk=0}
+       END {exit !ok}' "${REPO}/scripts/tune.sh"
+}
+check "tune.sh converges the drop-in even when AUTO_TUNE=false" \
+  autotune_false_still_converges
+# One convergence RULE shared by both paths. (Not "one call to
+# render_ollama_dropin" — the ordinary re-tune path renders too, and asserting
+# that was the second way this test failed against correct code.)
+resync_rule_is_shared() {
+  local defs calls
+  defs="$(grep -c '^resync_dropin_if_drifted() {' "${REPO}/scripts/tune.sh" || true)"
+  calls="$(grep -c 'if resync_dropin_if_drifted; then' "${REPO}/scripts/tune.sh" || true)"
+  [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times\n' "${defs}" >&2; return 1; }
+  (( calls >= 2 )) || { printf 'convergence rule called from only %s place(s)\n' "${calls}" >&2; return 1; }
+}
+check "the drift rule is defined once and used by both paths" resync_rule_is_shared
+# check-system.sh must report the drift, for the user who has not rebooted yet.
+check_reports_dropin_drift() {
+  grep -qF 'ollama_dropin_matches' "${REPO}/check-system.sh"
+}
+check "check-system.sh reports ollama config drift" check_reports_dropin_drift
+
 echo "# every setting baked into the WebUI container must be drift-checked"
 # Editing .env does not change a running container, so each of these can be
 # changed in .env and silently not take effect. Port and model drift were

@@ -155,6 +155,19 @@ If it doesn't exist, the user-data script never ran — most likely the paste in
 running the same script manually as root: copy `deploy/do-user-data.sh` onto the
 droplet and `sudo bash do-user-data.sh`.
 
+## I changed a setting in .env and nothing happened
+
+Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,
+`BACKUP_KEEP`). Others are *applied* to something long-lived — a systemd
+drop-in or a docker container — and keep working with the values they were
+started with until that thing is rebuilt. `lca check` reports both cases:
+
+| Setting | Applied by | If you only edit `.env` |
+|---|---|---|
+| `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fix: `sudo scripts/tune.sh` (a reboot also does it) |
+| `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP` | the WebUI container | `./webui.sh status` says `… drift`. Fix: `scripts/install_webui.sh` |
+| `BACKUP_SCHEDULE` | the systemd timer | Fix: `sudo ./backup.sh --install-timer` |
+
 ## Ollama settings drifted / drop-in edited by hand
 
 `/etc/systemd/system/ollama.service.d/local-code-agent.conf` is **rendered** from

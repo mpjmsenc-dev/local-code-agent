@@ -143,6 +143,11 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   hit it every time you pick up your phone), set `OLLAMA_KEEP_ALIVE=-1` in
   `.env` and re-run `scripts/install_ollama.sh`: the model then stays resident
   permanently. The cost is that its RAM is never released.
+
+  Editing `.env` alone is not enough — Ollama keeps the settings it was started
+  with. Re-running the installer above applies it immediately, and a reboot now
+  applies it too. Until it is applied, `lca check` says so:
+  `config drift: your .env differs from what Ollama is actually running`.
 - **After a reboot the model is loaded for you.** Nothing used to do this —
   auto-tune only loads the model when it is *changing*, and then restarts
   Ollama straight afterwards, dropping it again. The boot service now kicks off
