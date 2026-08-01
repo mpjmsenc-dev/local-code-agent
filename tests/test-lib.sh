@@ -1110,6 +1110,33 @@ drift_messages_name_apply() {
 }
 check "every drift message points at 'lca apply'" drift_messages_name_apply
 
+echo "# no document may tell you to re-run an installer to apply a .env change"
+# 'lca apply' replaced a lookup table of "which script applies which setting",
+# but seven instructions across README.md, YOUR-TURN.md, PHONE.md and
+# TROUBLESHOOTING.md still named the individual installers. One of them was
+# outright incomplete: "change OLLAMA_HOST to another port and re-run
+# scripts/install_ollama.sh" renders the drop-in and never touches the chat
+# app container, which is exactly how the phone came to be pointed at a port
+# nothing listens on. 'lca apply' does both, so the advice is now correct as
+# well as shorter.
+# Naming an installer for what it IS (docs/INSTALL.md) is fine; this only
+# forbids naming it as the way to APPLY an edit.
+no_installer_as_apply_instruction() {
+  local hits
+  # printf for the backtick: a matched PAIR inside single quotes reads to
+  # ShellCheck as a command substitution (SC2016). Predicted this in the last
+  # commit and then wrote it literally anyway — hence the note here.
+  local bt; bt="$(printf '\140')"
+  hits="$(grep -rn "re-run ${bt}scripts/install_\|re-running ${bt}scripts/install_" \
+            "${REPO}"/README.md "${REPO}"/docs/*.md 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these tell the reader to re-run an installer instead of lca apply:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no doc names an installer as the way to apply a .env edit" \
+  no_installer_as_apply_instruction
+
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently
 # wrong there is worse than saying nothing. Every state is exercised against a

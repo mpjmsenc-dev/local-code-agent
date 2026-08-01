@@ -55,7 +55,7 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
    print the exact address. Create the **first** account (it becomes admin).
    Your model is already selected, so you can just start typing.
-4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, re-run `scripts/install_webui.sh`.
+4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, then `sudo lca apply`.
 
 Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
 
@@ -171,7 +171,7 @@ offline because the models are local.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
 - Create the **first** WebUI account promptly, then set
-  `WEBUI_ENABLE_SIGNUP=false` and re-run `scripts/install_webui.sh`.
+  `WEBUI_ENABLE_SIGNUP=false` and run `sudo lca apply`.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
   internet, and keep `OLLAMA_HOST` on loopback.
 - Verify the posture any time with `./check-system.sh` and

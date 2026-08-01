@@ -54,18 +54,15 @@ After your account exists, close the door behind you. On the server:
 ```bash
 cd /opt/local-code-agent
 sed -i 's/^WEBUI_ENABLE_SIGNUP=.*/WEBUI_ENABLE_SIGNUP=false/' .env
-./scripts/install_webui.sh
+sudo lca apply
 ```
 
-(The install script recreates the container with the new setting; your account and
-chats live in a docker volume and survive.)
-
-The second line is the one that closes the door — a running container keeps the
-setting it was started with, so editing `.env` on its own changes nothing. To
-confirm it took:
+`lca apply` is the line that closes the door: a running container keeps the
+setting it was started with, so editing `.env` on its own changes nothing. It
+re-creates the container with the new setting — your account and chats live in
+a docker volume and survive. To confirm it took:
 
 ```bash
-./webui.sh status     # must NOT say "Signup drift"
 lca check             # must say "signups are closed"
 ```
 
@@ -90,7 +87,7 @@ The same prompt is used by `lca ask` in the terminal, so both doors lead to the
 same assistant.
 
 **Changing it later:** these two settings come from the environment, so editing
-the repo and re-running `scripts/install_webui.sh` takes effect. The one
+the repo and running `sudo lca apply` takes effect. The one
 exception is a setting you have already changed **inside the WebUI**: Open WebUI
 stores that in its own database, and a stored value always wins over the
 environment. So if you edit the assistant's system prompt in **Admin Panel →
@@ -141,13 +138,13 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   was already resident, ~20 seconds warm, and **228 seconds** from genuinely
   cold. If that is the thing that annoys you most (it usually is, because you
   hit it every time you pick up your phone), set `OLLAMA_KEEP_ALIVE=-1` in
-  `.env` and re-run `scripts/install_ollama.sh`: the model then stays resident
-  permanently. The cost is that its RAM is never released.
+  `.env` and run `sudo lca apply`: the model then stays resident permanently.
+  The cost is that its RAM is never released.
 
   Editing `.env` alone is not enough — Ollama keeps the settings it was started
-  with. Re-running the installer above applies it immediately, and a reboot now
-  applies it too. Until it is applied, `lca check` says so:
-  `config drift: your .env differs from what Ollama is actually running`.
+  with. `lca apply` applies it immediately, and a reboot now applies it too.
+  Until it is applied, `lca check` says so: `config drift: your .env differs
+  from what Ollama is actually running`.
 - **After a reboot the model is loaded for you.** Nothing used to do this —
   auto-tune only loads the model when it is *changing*, and then restarts
   Ollama straight afterwards, dropping it again. The boot service now kicks off

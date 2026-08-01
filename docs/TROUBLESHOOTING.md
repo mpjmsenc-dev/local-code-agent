@@ -40,7 +40,9 @@ sudo ss -tlnp | grep 11434
 Usually it's a manually-started `ollama serve` fighting the systemd service —
 kill the manual one (`sudo pkill -f "ollama serve"`) and
 `sudo systemctl restart ollama`. Alternatively change `OLLAMA_HOST` in `.env`
-to another port and re-run `scripts/install_ollama.sh`.
+to another port and run `sudo lca apply` — which re-renders the drop-in AND
+re-creates the chat app container, so the phone follows Ollama to the new port
+instead of talking to one nothing listens on.
 
 ## Port 3000 (WebUI) already in use
 
@@ -53,7 +55,7 @@ sudo ss -tlnp | grep :3000
 ```
 
 Then either stop that service, or pick a free port: set `WEBUI_PORT` in `.env`
-to something else and re-run `scripts/install_webui.sh`. If `./webui.sh status`
+to something else and run `sudo lca apply`. If `./webui.sh status`
 or `check-system.sh` reports the container "CRASH-LOOPING (restarting)", this
 port conflict (or a bad `.env` value) is the usual cause — check
 `./webui.sh logs`.
@@ -65,7 +67,7 @@ The model + context don't fit in RAM. In order:
 1. `scripts/tune.sh` — if RAM shrank (resize down), this downgrades the model
    to the right rung of the ladder.
 2. Still tight? Lower `OLLAMA_CONTEXT_LENGTH` in `.env` (e.g. 8192 → 4096) and
-   re-run `scripts/install_ollama.sh` to re-render + restart.
+   run `sudo lca apply` to re-render + restart.
 3. Check nothing else eats RAM: `free -h`, `docker stats`.
 
 ## "It's so slow"
@@ -89,7 +91,7 @@ silently drop it. If replies start losing the thread or getting cut off:
    you're done with. Less history leaves more window for the answer.
 2. For a bigger window, add RAM and let auto-tune raise the rung (8 GB → 4096,
    ~12 GB → 8192, 16 GB → 8192, 24 GB+ → 16384), or set `OLLAMA_CONTEXT_LENGTH`
-   in `.env` and re-run `scripts/install_ollama.sh`.
+   in `.env` and run `sudo lca apply`.
 3. A very large file can't fit whole — point aider at the specific
    function/region instead of adding the entire file.
 
@@ -180,7 +182,7 @@ The long answer, if you want to know what it is doing:
 `/etc/systemd/system/ollama.service.d/local-code-agent.conf` is **rendered** from
 `.env` + `config/ollama.env` — manual edits are overwritten on the next
 `scripts/tune.sh` or `scripts/install_ollama.sh` run. Change the source values in
-`.env` / `config/ollama.env` instead, then `scripts/install_ollama.sh` applies them.
+`.env` / `config/ollama.env` instead, then `sudo lca apply` applies them.
 `check-system.sh` warns when the configured model drifts from the tune
 recommendation.
 

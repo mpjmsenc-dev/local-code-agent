@@ -104,13 +104,13 @@ in this order. Copy-paste blocks are exact; button names are exact.
    ```bash
    cd /opt/local-code-agent
    sed -i 's/^WEBUI_ENABLE_SIGNUP=.*/WEBUI_ENABLE_SIGNUP=false/' .env
-   ./scripts/install_webui.sh
+   sudo lca apply
    ```
 
    **Both lines matter.** Editing `.env` does not change a chat app that is
-   already running — the second line is what actually applies it. If you only
-   do the first, `./webui.sh status` tells you so ("Signup drift"), and
-   `lca check` keeps reporting `signups are OPEN` until it is really closed.
+   already running — `lca apply` is what actually applies it. If you only do
+   the first, `lca check` keeps reporting `signups are OPEN` until it is
+   really closed.
 
 4. Optional but nice: in the phone browser menu, tap **Add to Home Screen** —
    now it opens like a normal app.
