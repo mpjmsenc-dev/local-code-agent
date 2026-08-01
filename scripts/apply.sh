@@ -26,6 +26,7 @@ load_env
 DRY_RUN=false
 CHANGED=0
 BLOCKED=0
+UNCHECKED=0
 
 usage() {
   cat <<EOF
@@ -91,6 +92,15 @@ apply_webui() {
   fi
   if ! have docker; then
     info "Chat app: docker not installed — nothing to apply."
+    return 0
+  fi
+  # "Cannot ask" is not "nothing to do". Without this the message below claims
+  # the container was never created — sending the user to an install command
+  # that cannot work either, while a perfectly good container may be sitting
+  # there with drifted settings.
+  if ! docker_daemon_reachable; then
+    warn "Chat app: cannot reach the Docker daemon, so its settings were neither checked nor applied. Start it (sudo systemctl start docker), then re-run."
+    UNCHECKED=$((UNCHECKED+1))
     return 0
   fi
   if ! webui_container_exists; then
@@ -169,6 +179,11 @@ main() {
     die "${BLOCKED} change(s) need root and were not applied. Re-run: sudo ${REPO_ROOT}/bin/lca apply"
   fi
   if (( CHANGED == 0 )); then
+    if (( UNCHECKED > 0 )); then
+      # Never "everything matches" when something could not be looked at.
+      warn "Nothing needed applying, but ${UNCHECKED} component(s) could not be checked — see above."
+      return 0
+    fi
     ok "Everything already matches .env — nothing to do."
     return 0
   fi
@@ -176,7 +191,15 @@ main() {
     info "${CHANGED} change(s) would be applied. Run without --dry-run to do it."
     return 0
   fi
+  if (( UNCHECKED > 0 )); then
+    warn "Applied ${CHANGED} change(s), but ${UNCHECKED} component(s) could not be checked — see above."
+    return 0
+  fi
   ok "Applied ${CHANGED} change(s). Verify with: lca check"
 }
 
-main "$@"
+# Run main only when executed, so tests can source this file and drive the
+# individual appliers — same pattern as scripts/tune.sh and scripts/motd.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

@@ -849,6 +849,18 @@ webui_container_env() {
   printf '%s' "${out}"
 }
 
+# docker_daemon_reachable — true when docker commands can actually run here.
+#
+# Needed because "no container" and "cannot ask" are different answers that
+# every docker probe collapses into the same non-zero exit. Telling someone
+# their chat app was never created, when the truth is that dockerd is down,
+# sends them to an install command that cannot work either.
+docker_daemon_reachable() {
+  have docker || return 1
+  docker info >/dev/null 2>&1 && return 0
+  can_root && as_root docker info >/dev/null 2>&1
+}
+
 # webui_container_exists — true when the chat app's container is present, in
 # any state. Deliberately distinct from "matches .env": a container that does
 # not exist has not drifted, it is simply absent, and reporting that as

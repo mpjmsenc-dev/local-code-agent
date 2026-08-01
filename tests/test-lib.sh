@@ -769,6 +769,48 @@ EOF
   }
 }
 check "the dry-run plan reaches stdout, not stderr" dry_run_plan_is_on_stdout
+# "Cannot ask" is not "nothing to do". Every docker probe collapses "no
+# container" and "daemon is down" into the same non-zero exit, and the first
+# version reported a down daemon as "not created yet — create it with
+# install_webui.sh": untrue, and a command that could not have worked either,
+# while a perfectly good container sat there with drifted settings.
+apply_distinguishes_daemon_down() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"                # lib.sh
+    source "$2"                # apply.sh (its guard stops main from running)
+    docker_daemon_reachable() { return 1; }
+    webui_container_exists()  { return 0; }   # a container DOES exist
+    have() { return 0; }
+    ENABLE_WEBUI=true; SKIP_DOCKER=false; DRY_RUN=false
+    CHANGED=0; BLOCKED=0; UNCHECKED=0
+    apply_webui 2>&1
+    printf "UNCHECKED=%s CHANGED=%s\n" "${UNCHECKED}" "${CHANGED}"
+  ' _ "${REPO}/scripts/lib.sh" "${APPLY}" 2>&1)"
+  grep -qi 'cannot reach the Docker daemon' <<<"${out}" || {
+    printf 'a down daemon was not reported as such: %s\n' "${out}" >&2; return 1
+  }
+  grep -q 'UNCHECKED=1' <<<"${out}" || {
+    printf 'a down daemon was not counted as unchecked: %s\n' "${out}" >&2; return 1
+  }
+  # And it must not have claimed the container is missing.
+  if grep -qi 'not created yet' <<<"${out}"; then
+    echo "a down daemon was reported as a missing container" >&2; return 1
+  fi
+}
+check "apply reports an unreachable Docker daemon, not a missing container" \
+  apply_distinguishes_daemon_down
+# ...and the summary must never say "everything matches" about something it
+# could not look at.
+apply_summary_admits_unchecked() {
+  awk '/CHANGED == 0/ {inf=1}
+       inf && /UNCHECKED > 0/ {guarded=1}
+       inf && /already matches .env/ {if (!guarded) bad=1; inf=0}
+       END {exit bad}' "${APPLY}"
+}
+check "apply never claims a clean bill for an unchecked component" \
+  apply_summary_admits_unchecked
 # A missing component is not a matching one.
 distinguishes_absent_from_matching() {
   grep -qF 'webui_container_exists' "${APPLY}"
