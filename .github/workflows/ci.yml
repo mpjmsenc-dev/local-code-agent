@@ -568,7 +568,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="$(sudo -E ./bin/lca apply)"
+          out="$(sudo -E ./bin/lca apply 2>&1)"
           printf '%s\n' "${out}"
           grep -q 'nothing to do' <<<"${out}" \
             || { echo "FAIL: apply wants to change a stack setup.sh just built"; exit 1; }
@@ -725,7 +725,7 @@ jobs:
               | sed -n 's/^ENABLE_SIGNUP=//p' | head -1
           }
           # Nothing has drifted, so nothing may be touched.
-          quiet="$(./bin/lca apply)"
+          quiet="$(./bin/lca apply 2>&1)"
           printf '%s\n' "${quiet}"
           grep -q 'nothing to do' <<<"${quiet}" \
             || { echo "FAIL: apply claimed work when .env and the system agree"; exit 1; }
@@ -737,9 +737,10 @@ jobs:
             || { echo "FAIL: precondition wrong — container signups were '${before}'"; exit 1; }
 
           # A dry run must report it and change absolutely nothing.
-          dry="$(./bin/lca apply --dry-run)"
+          dry="$(./bin/lca apply --dry-run 2>&1)"
           printf '%s\n' "${dry}"
-          grep -q 'WOULD' <<<"${dry}" || { echo "FAIL: dry run reported no change"; exit 1; }
+          # -F: '[would]' is a character class to grep, not a literal.
+          grep -qF '[would]' <<<"${dry}" || { echo "FAIL: dry run reported no change"; exit 1; }
           [[ "$(signups)" == "false" ]] \
             || { echo "FAIL: --dry-run changed the running container"; exit 1; }
 
@@ -749,7 +750,7 @@ jobs:
             || { echo "FAIL: apply did not reach the running container"; exit 1; }
 
           # And it must be safe to run again.
-          again="$(./bin/lca apply)"
+          again="$(./bin/lca apply 2>&1)"
           printf '%s\n' "${again}"
           grep -q 'nothing to do' <<<"${again}" \
             || { echo "FAIL: apply is not idempotent"; exit 1; }

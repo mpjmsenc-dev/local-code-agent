@@ -751,6 +751,24 @@ dry_run_guards_every_change() {
   return "${bad}"
 }
 check "every change in apply.sh sits behind the dry-run guard" dry_run_guards_every_change
+# A dry run's plan is the entire answer, so it must survive a redirect. The
+# first version printed it through warn() — i.e. to stderr — so
+# 'lca apply --dry-run > plan.txt' produced a file with a summary count and no
+# plan. Invisible in a terminal, where both streams land together; CI caught it
+# only because it captured stdout.
+dry_run_plan_is_on_stdout() {
+  local out
+  out="$(cd "${SANDBOX}" && DRY_RUN=true CHANGED=0 bash -c '
+    source "$1"; C_YELLOW=""; C_RESET=""
+    source /dev/stdin <<EOF
+$(sed -n "/^would()/,/^}/p" "$2")
+EOF
+    would "do the thing" 2>/dev/null' _ "${REPO}/scripts/lib.sh" "${APPLY}")"
+  grep -q 'do the thing' <<<"${out}" || {
+    echo "the dry-run plan does not reach stdout" >&2; return 1
+  }
+}
+check "the dry-run plan reaches stdout, not stderr" dry_run_plan_is_on_stdout
 # A missing component is not a matching one.
 distinguishes_absent_from_matching() {
   grep -qF 'webui_container_exists' "${APPLY}"

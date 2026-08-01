@@ -41,9 +41,14 @@ EOF
 
 # would CHANGE_DESCRIPTION — in a dry run, announce and decline. Returns 0 when
 # the caller should stop (dry run), 1 when it should go ahead.
+#
+# Printed on STDOUT, deliberately not through warn(). In a dry run these lines
+# are the entire answer the user asked for, so 'lca apply --dry-run > plan.txt'
+# has to contain the plan — routing them to stderr left that file with a
+# summary count and no plan. tune.sh --dry-run reports the same way, on stdout.
 would() {
   [[ "${DRY_RUN}" == "true" ]] || return 1
-  warn "WOULD $1"
+  printf '%b\n' "${C_YELLOW}[would]${C_RESET} $1"
   CHANGED=$((CHANGED+1))
   return 0
 }
