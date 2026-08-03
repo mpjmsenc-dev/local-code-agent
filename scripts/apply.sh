@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # scripts/apply.sh — make the running system match .env.
 #
-# Most settings in .env are read fresh on every run. Three are not: they are
-# baked into a systemd drop-in, a docker container and a systemd timer at the
-# moment each is created, and editing .env moves none of them. That single
-# fact has caused three separate silent failures — a keep-alive that never
-# took effect, a chat app still accepting signups after its owner closed them,
-# and backups running on a cadence nobody chose.
+# Most settings in .env are read fresh on every run. Four are not: they are
+# baked into a systemd drop-in, a docker container, a systemd timer and an
+# nftables ruleset at the moment each is created, and editing .env moves none
+# of them. That single fact has caused four separate silent failures — a
+# keep-alive that never took effect, a chat app still accepting signups after
+# its owner closed them, backups running on a cadence nobody chose, and an
+# inbound guard still protecting the port a service used to listen on.
 #
-# 'lca check' reports all three, each with a different command to fix it. This
+# 'lca check' reports all four, each with a different command to fix it. This
 # is that command, once. It applies whatever has fallen behind and nothing
 # that has not, so it is safe to run whenever you have edited .env and are not
 # sure whether it took.
@@ -33,8 +34,8 @@ usage() {
 Usage: lca apply [--dry-run]
 
 Re-applies .env to the parts of the system that hold their own copy of a
-setting: the Ollama service, the chat app container and the backup timer.
-Only what has actually drifted is touched.
+setting: the Ollama service, the chat app container, the backup timer and the
+inbound guard. Only what has actually drifted is touched.
 
   --dry-run   report what would change, change nothing
 EOF
@@ -154,6 +155,50 @@ apply_backup_timer() {
   CHANGED=$((CHANGED+1))
 }
 
+# The guard bakes in the ports it drops, so a port changed in .env leaves it
+# protecting the old one. Until now it was only ever re-applied as a side
+# effect of re-creating the chat app container — which never happens when the
+# chat app is off, or when docker is unreachable. In that case 'lca apply'
+# printed "Everything already matches .env" while the unauthenticated Ollama
+# API listened, publicly, on a port nothing was guarding.
+apply_guard() {
+  local want dump gaps
+  want="$(guarded_ports || true)"
+  if [[ -z "${want}" ]]; then
+    info "Guard:    nothing binds a public port — no inbound guard needed."
+    return 0
+  fi
+  # Both branches below are "could not look", not "nothing to do": saying the
+  # guard matches when we never read it is the failure this command exists to
+  # end, one level up.
+  if ! have nft; then
+    warn "Guard:    nftables is not installed, so the inbound guard was neither checked nor applied. Install it (${SCRIPT_DIR}/install_dependencies.sh), then re-run."
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  if ! can_root; then
+    warn "Guard:    reading the firewall needs root, so the inbound guard was neither checked nor applied. Re-run as: sudo ${REPO_ROOT}/bin/lca apply"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  dump="$(as_root nft list table inet lca_inbound 2>/dev/null || true)"
+  if [[ -n "${dump}" ]]; then
+    gaps="$(inbound_guard_uncovered "${dump}" || true)"
+    if [[ -z "${gaps}" ]]; then
+      ok "Guard:    already covers ${want//$'\n'/ + }."
+      return 0
+    fi
+    would "re-apply the inbound guard to cover ${gaps//$'\n'/, }." && return 0
+    info "Guard:    re-applying to cover ${gaps//$'\n'/, }..."
+  else
+    would "apply the inbound guard, which is not loaded, to ${want//$'\n'/ + }." && return 0
+    info "Guard:    applying to ${want//$'\n'/ + } (it is not loaded)..."
+  fi
+  "${REPO_ROOT}/netmode.sh" harden
+  ok "Guard:    applied."
+  CHANGED=$((CHANGED+1))
+}
+
 main() {
   local arg
   for arg in "$@"; do
@@ -176,9 +221,14 @@ main() {
   # command — Ollama has to be listening on the new port BEFORE the container
   # is rebuilt to point at it. Reversed, the app spends the gap talking to a
   # port nothing answers on, which is the failure this command exists to end.
+  #
+  # The guard goes last for the same reason: it drops the ports the two above
+  # have just settled on, and re-creating the chat app container re-applies it
+  # anyway — so by the time we get there it usually has nothing left to do.
   apply_ollama
   apply_webui
   apply_backup_timer
+  apply_guard
 
   echo
   if (( BLOCKED > 0 )); then

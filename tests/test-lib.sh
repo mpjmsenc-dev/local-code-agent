@@ -2549,6 +2549,155 @@ setup_skips_only_what_it_already_proved() {
 check "setup.sh skips the re-test only when it already proved inference" \
   setup_skips_only_what_it_already_proved
 
+echo "# the inbound guard bakes its ports in, so .env can drift away from it"
+# Change a port in .env and the guard goes on dropping the old one while the
+# service listens on the new one — unauthenticated, on every interface. 'lca
+# check' reports it and 'lca apply' fixes it, from one copy of the rule.
+GUARD_DUMP='table inet lca_inbound {
+  chain inbound {
+    type filter hook input priority -10; policy accept;
+    iifname "lo" accept
+    iifname "tailscale0" accept
+    tcp dport { 3000, 11434 } ct state new counter packets 0 bytes 0 drop
+  }
+}'
+ports_for() {  # ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
+  local ENABLE_WEBUI="$1" WEBUI_PORT="$2" OLLAMA_HOST="$3"
+  guarded_ports | paste -sd'|' -
+}
+uncovered_for() {  # DUMP ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
+  local dump="$1" ENABLE_WEBUI="$2" WEBUI_PORT="$3" OLLAMA_HOST="$4"
+  inbound_guard_uncovered "${dump}" | paste -sd'|' -
+}
+check "both service ports are guarded by default" \
+  test "$(ports_for true 3000 127.0.0.1:11434)" = "WebUI 3000|Ollama 11434"
+check "with the chat app off, only Ollama's port is" \
+  test "$(ports_for false 3000 127.0.0.1:11434)" = "Ollama 11434"
+# netmode.sh refuses to put SSH in the drop set so the guard can never lock
+# anyone out — so a service parked on 22 is not a gap either. Reporting one
+# would be a failure nobody could ever clear.
+check "a chat app on port 22 is not called a gap" \
+  test "$(ports_for true 22 127.0.0.1:11434)" = "Ollama 11434"
+check "an Ollama on port 22 is not called a gap" \
+  test "$(ports_for true 3000 127.0.0.1:22)" = "WebUI 3000"
+nothing_to_guard() {
+  local ENABLE_WEBUI=false OLLAMA_HOST=127.0.0.1:22
+  ! guarded_ports
+}
+check "and with neither, there is nothing to guard" nothing_to_guard
+
+covers_everything() {
+  local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
+  ! inbound_guard_uncovered "${GUARD_DUMP}"
+}
+check "a guard covering both ports reports no gap" covers_everything
+check "a port moved in .env is reported as uncovered" \
+  test "$(uncovered_for "${GUARD_DUMP}" true 8080 127.0.0.1:11434)" = "WebUI 8080"
+check "both are reported when no guard is loaded at all" \
+  test "$(uncovered_for "" true 3000 127.0.0.1:11434)" = "WebUI 3000|Ollama 11434"
+# A guard covering 11434 must not be read as covering 1143.
+check "a port that is a prefix of a guarded one is still uncovered" \
+  test "$(uncovered_for "${GUARD_DUMP}" false 3000 127.0.0.1:1143)" = "Ollama 1143"
+
+# ...and neither reporter nor fixer may keep its own copy of the rule.
+one_copy_of_the_coverage_rule() {
+  local hits
+  hits="$(grep -n 'dport \\{' "${REPO}/check-system.sh" "${REPO}/scripts/apply.sh" 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'a second copy of the guard-coverage rule:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+guard_is_reported_and_applied() {
+  grep -q 'inbound_guard_uncovered' "${REPO}/check-system.sh" || return 1
+  grep -q 'inbound_guard_uncovered' "${REPO}/scripts/apply.sh"  || return 1
+  # and 'lca apply' must actually run the fix, not just describe it
+  grep -q 'netmode.sh" harden' "${REPO}/scripts/apply.sh" || return 1
+  # ...and main() must reach it, or every test below drives dead code.
+  awk '/^main\(\) \{/     { inb=1; next }
+       inb && /^\}/       { exit }
+       inb && /apply_guard/ { found=1 }
+       END { exit !found }' "${REPO}/scripts/apply.sh"
+}
+check "the guard-coverage rule exists in exactly one place" \
+  one_copy_of_the_coverage_rule
+check "'lca check' reports guard drift and 'lca apply' fixes it" \
+  guard_is_reported_and_applied
+
+# ...and the applier itself is driven for real, because what it decides is
+# whether a firewall gets loaded. apply.sh guards its own main() behind a
+# BASH_SOURCE test precisely so this is possible.
+cp "${REPO}/scripts/apply.sh" "${SANDBOX}/scripts/apply.sh"
+printf '#!/usr/bin/env bash\necho "HARDEN-CALLED"\n' > "${SANDBOX}/netmode.sh"
+chmod +x "${SANDBOX}/netmode.sh"
+cat > "${SANDBOX}/apply-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+# $1 apply.sh  $2 have-nft  $3 can-root  $4 nft dump  $5 dry-run  $6 WEBUI_PORT
+set -euo pipefail
+source "$1"
+# After the source, never before: apply.sh calls load_env, which re-exports
+# every key in .env over whatever the caller had set.
+HAVE_NFT="$2"; CAN_ROOT="$3"; NFT_DUMP="$4"; DRY_RUN="$5"
+ENABLE_WEBUI=true; WEBUI_PORT="${6:-3000}"; OLLAMA_HOST=127.0.0.1:11434
+have()     { case "$1" in nft) return "${HAVE_NFT}" ;; *) return 0 ;; esac; }
+can_root() { return "${CAN_ROOT}"; }
+as_root()  { printf '%s' "${NFT_DUMP}"; }
+apply_guard
+echo "CHANGED=${CHANGED} UNCHECKED=${UNCHECKED} BLOCKED=${BLOCKED}"
+PROBE
+chmod +x "${SANDBOX}/apply-probe.sh"
+apply_probe() {
+  bash "${SANDBOX}/apply-probe.sh" "${SANDBOX}/scripts/apply.sh" "$@" 2>&1
+}
+guard_noop_when_covered() {
+  local out; out="$(apply_probe 0 0 "${GUARD_DUMP}" false)"
+  grep -q 'CHANGED=0 UNCHECKED=0' <<<"${out}" || { echo "${out}" >&2; return 1; }
+  ! grep -q 'HARDEN-CALLED' <<<"${out}"
+}
+# Both ways in: a guard that is loaded but has fallen behind .env, and no
+# guard at all. They are separate branches, so a dry run has to be proved on
+# each — testing only one leaves the other free to load a firewall during a
+# run whose entire promise is that it changes nothing.
+guard_hardens_on_a_drifted_port() {
+  local out; out="$(apply_probe 0 0 "${GUARD_DUMP}" false 8080)"
+  grep -q 'HARDEN-CALLED'   <<<"${out}" || { echo "${out}" >&2; return 1; }
+  grep -q 'CHANGED=1'       <<<"${out}" || { echo "${out}" >&2; return 1; }
+}
+guard_hardens_when_not_loaded() {
+  local out; out="$(apply_probe 0 0 "" false)"
+  grep -q 'HARDEN-CALLED'   <<<"${out}" || { echo "${out}" >&2; return 1; }
+  grep -q 'CHANGED=1'       <<<"${out}" || { echo "${out}" >&2; return 1; }
+}
+guard_dry_run_on_a_drifted_port() {
+  local out; out="$(apply_probe 0 0 "${GUARD_DUMP}" true 8080)"
+  grep -q 'would'           <<<"${out}" || { echo "${out}" >&2; return 1; }
+  ! grep -q 'HARDEN-CALLED' <<<"${out}"
+}
+guard_dry_run_when_not_loaded() {
+  local out; out="$(apply_probe 0 0 "" true)"
+  grep -q 'would'           <<<"${out}" || { echo "${out}" >&2; return 1; }
+  ! grep -q 'HARDEN-CALLED' <<<"${out}"
+}
+# "Could not look" must never be counted as "matches" — that is the exact
+# failure this command exists to end, one level up.
+guard_without_nft_is_unchecked() {
+  local out; out="$(apply_probe 1 0 "" false)"
+  grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || { echo "${out}" >&2; return 1; }
+  ! grep -q 'HARDEN-CALLED' <<<"${out}"
+}
+guard_without_root_is_unchecked() {
+  local out; out="$(apply_probe 0 1 "" false)"
+  grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || { echo "${out}" >&2; return 1; }
+  ! grep -q 'HARDEN-CALLED' <<<"${out}"
+}
+check "apply leaves a guard that already covers .env alone" guard_noop_when_covered
+check "apply re-hardens when a port drifted"                guard_hardens_on_a_drifted_port
+check "apply hardens when no guard is loaded"               guard_hardens_when_not_loaded
+check "--dry-run only talks about a drifted port"           guard_dry_run_on_a_drifted_port
+check "--dry-run only talks about a missing guard"          guard_dry_run_when_not_loaded
+check "no nftables is 'not checked', never 'matches'"        guard_without_nft_is_unchecked
+check "no root is 'not checked', never 'matches'"            guard_without_root_is_unchecked
+
 echo "# what a boot unit will really run ('enabled' is a claim about a symlink)"
 # All three of our units bake the installing checkout's absolute path into
 # ExecStart. 'systemctl is-enabled' keeps answering "enabled" after that path

@@ -208,11 +208,19 @@ The long answer, if you want to know what it is doing:
 | `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP`, `OLLAMA_HOST`, `WEBUI_NAME` | the WebUI container | `lca check` says `chat app config drift`. Fixed by `lca apply` |
 | the assistant's system prompt and starter questions | the WebUI container | same — and these come from the **repo**, not `.env`, so a `git pull` that improves the prompt still needs `sudo lca apply` |
 | `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo ./backup.sh --install-timer` |
+| `WEBUI_PORT`, `OLLAMA_HOST` (the port half) | the inbound guard's nftables ruleset | `lca check` says the guard `does NOT cover` a port. Fixed by `lca apply` or `sudo ./netmode.sh harden` |
 
 That second row was the longest-lived hole in this table: nothing compared the
 system prompt, so `lca apply` answered *"already matches .env"* after a repo
 update that changed it, and the chat kept its old behaviour with nothing
 anywhere saying so.
+
+The last row was the worst one, because the thing left behind was a firewall.
+The guard was only ever re-applied as a side effect of re-creating the chat app
+container — so with the chat app switched off, moving `OLLAMA_HOST` to a new
+port left the guard dropping the old one while the **unauthenticated** Ollama
+API answered on the new one, on every interface, and `lca apply` said
+*"Everything already matches .env"*.
 
 ## Ollama settings drifted / drop-in edited by hand
 

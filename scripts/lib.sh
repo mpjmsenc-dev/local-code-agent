@@ -988,6 +988,54 @@ webui_drift() {
   printf '%s\n' "${drifted[@]}"
 }
 
+# --- the inbound guard's idea of .env vs .env's ------------------------------
+#
+# The guard bakes the ports in when it is applied, so it is drift in exactly
+# the same way the ollama drop-in and the WebUI container are: change a port
+# in .env and the guard goes on protecting the old one while the service
+# listens on the new one, unauthenticated, on every interface.
+#
+# One copy of the rule on purpose. 'lca check' reports this and 'lca apply'
+# fixes it, and two copies of a coverage rule is how one of them ends up
+# calling a port safe that the other knows is exposed.
+
+# guarded_ports — the service ports .env says must not be publicly reachable,
+# as "Label port" lines. Returns 1 when there is nothing to guard.
+guarded_ports() {
+  local oport out=()
+  oport="$(ollama_url)"; oport="${oport##*:}"
+  # Port 22 is never guarded: netmode.sh refuses to put SSH in the drop set so
+  # the guard can never lock anyone out. A service parked there is therefore
+  # not a gap either — reporting it would be an unfixable failure, which is
+  # worse than saying nothing.
+  if [[ "${ENABLE_WEBUI}" == "true" && "${WEBUI_PORT}" != "22" ]]; then
+    out+=("WebUI ${WEBUI_PORT}")
+  fi
+  if [[ "${oport}" =~ ^[0-9]+$ && "${oport}" != "22" ]]; then
+    out+=("Ollama ${oport}")
+  fi
+  (( ${#out[@]} )) || return 1
+  printf '%s\n' "${out[@]}"
+}
+
+# inbound_guard_uncovered DUMP — given the output of
+# 'nft list table inet lca_inbound', print the guarded_ports it does NOT drop.
+# Returns 1 when the guard covers everything (or there is nothing to cover).
+inbound_guard_uncovered() {
+  local dump="$1" entry port gaps=()
+  while read -r entry; do
+    [[ -n "${entry}" ]] || continue
+    port="${entry##* }"
+    # Anchored on word boundaries: a guard covering 11434 must not be read as
+    # covering 1143.
+    if ! grep -qE "dport \{[^}]*\b${port}\b" <<<"${dump}"; then
+      gaps+=("${entry}")
+    fi
+  done < <(guarded_ports || true)
+  (( ${#gaps[@]} )) || return 1
+  printf '%s\n' "${gaps[@]}"
+}
+
 # installed_backup_schedule — the OnCalendar the backup timer is really on.
 # systemd renders the property as '{ OnCalendar=<spec> ; next_elapse=<time> }',
 # so the capture must stop at the ' ; ' — a '[^}]*' capture swallows the
