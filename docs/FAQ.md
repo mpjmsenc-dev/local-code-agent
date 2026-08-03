@@ -54,9 +54,24 @@ Local models have a fixed context window (`OLLAMA_CONTEXT_LENGTH`, set by
 auto-tune per the RAM ladder: 4096–16384 tokens). Everything shares it — the
 system prompt, chat history, open files, aider's repo map, and the reply.
 `run-agent.sh` tells aider the *real* window size, so aider trims the oldest
-history to stay within budget instead of letting Ollama silently drop it. Keep
-sessions focused (aider's `/clear`, close finished files); for a bigger window,
-add RAM and auto-tune raises the rung on the next boot.
+history to stay within budget instead of letting Ollama silently drop it.
+`lca ask` bounds what it sends for the same reason, and says so when it trims.
+
+**The phone chat has no such bound**, and this is worth knowing because the
+symptom is confusing. Open WebUI sends the whole conversation back every turn,
+so a long enough chat overflows the window — and Ollama drops from the *front*,
+which is where the assistant's instructions live. Measured on the 3b rung
+(4096 tokens): with ~3,000 tokens of history it answers "which command writes
+files?" with `lca`; at ~6,000 it answers *"typically `echo`…"*. Same model,
+same question — it had simply stopped being told what it is.
+
+So if the chat starts behaving like a generic model halfway through a long
+conversation, **start a new chat**. Nothing is broken and nothing needs
+re-applying; the instructions come back with the shorter history. More RAM
+raises the rung and the window with it.
+
+Keep sessions focused (aider's `/clear`, close finished files); for a bigger
+window, add RAM and auto-tune raises the rung on the next boot.
 
 **Can several people use it?**
 Open WebUI supports multiple accounts (as admin, create them — keep public

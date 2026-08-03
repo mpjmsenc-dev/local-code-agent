@@ -107,6 +107,22 @@ the environment. So if you edit the assistant's system prompt in **Admin Panel
 → Settings**, that is where it lives from then on, and `lca apply` will not
 overwrite it.
 
+## If a long chat starts sounding like a generic assistant
+
+Start a new chat. That is the whole fix, and it is not a workaround for a bug.
+
+Open WebUI sends the entire conversation back to the model on every message, so
+a long enough chat overflows the model's context window — and the overflow is
+discarded from the *front*, where the assistant's instructions sit. Measured on
+the 3b model a base droplet runs: at about 3,000 tokens of history it answers
+*"which command writes files?"* with `lca`; at about 6,000 it answers
+*"typically `echo`…"*. Same model, same question — it had simply stopped being
+told what it is.
+
+Nothing is broken and nothing needs re-applying. A fresh chat is short, so the
+instructions fit again. More RAM raises the rung and the window with it (see
+the ladder above).
+
 ## What the chat can and cannot do
 
 The chat is a **text box with no filesystem**. It cannot create files, run
