@@ -610,6 +610,27 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# a flag a script accepts but 'lca' never mentions is a hidden feature"
+# update-model.sh takes --list-recommended, which answers "what model fits this
+# machine's RAM?" — the question auto-tune exists for. It appeared in its own
+# usage text and in docs/PERFORMANCE.md, and nowhere a user of 'lca' would look:
+# 'lca model' mentioned only --list. Same shape as 'lca harden', which was
+# dispatched and undocumented; the front door has to name what the tools behind
+# it can do, or it is not a front door.
+model_flags_are_discoverable() {
+  local flag helptext
+  helptext="$("${REPO}/bin/lca" help 2>/dev/null)"
+  while read -r flag; do
+    [[ -n "${flag}" ]] || continue
+    grep -qF -- "${flag}" <<<"${helptext}" || {
+      printf "update-model.sh accepts %s but 'lca help' never mentions it\\n" "${flag}" >&2
+      return 1
+    }
+  done < <(grep -oE '^\s+--[a-z-]+\)' "${REPO}/update-model.sh" | tr -d ' )' | sort -u)
+}
+check "'lca help' names every flag update-model.sh accepts" \
+  model_flags_are_discoverable
+
 echo "# every example in 'lca help' must actually work"
 # The help has advertised "lca --no-auto-commits (arguments for aider)" since
 # it was written, and it did not work: a leading dash matched no branch in the

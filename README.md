@@ -201,7 +201,7 @@ lca                 # starts aider on the local model, right here
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
 | `lca harden` | re-apply the always-on inbound guard on ports 3000/11434 (needs sudo) |
-| `lca model <name>` | switch models |
+| `lca model <name>` | switch models (`--list` what's installed, `--list-recommended` what fits this machine's RAM) |
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |

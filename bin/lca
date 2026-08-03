@@ -37,7 +37,7 @@ Usage: lca [command] [args...]
   lca update [--check]    back up, update, re-run setup, verify
   lca backup              take a backup now
   lca restore [file]      restore from a backup
-  lca model <name>        switch the model (or 'lca model --list')
+  lca model <name>        switch the model ('--list' installed, '--list-recommended' fits your RAM)
   lca tune                re-pick the model for this machine's RAM (auto-tune)
   lca offline|online      internet kill switch  (needs sudo)
   lca status              kill-switch + guard status (needs sudo)
