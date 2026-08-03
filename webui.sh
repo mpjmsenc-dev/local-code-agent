@@ -130,6 +130,10 @@ main() {
             warn "Ollama address drift: the chat app talks to '$(webui_container_env OLLAMA_BASE_URL || true)', but .env now points Ollama at $(ollama_url). The phone will show no models until the container is re-created: sudo lca apply" ;;
           WEBUI_NAME)
             warn "Name drift: the chat app is titled '$(webui_container_env WEBUI_NAME || true)', but .env says WEBUI_NAME=${WEBUI_NAME}. Apply it with: sudo lca apply" ;;
+          SYSTEM_PROMPT)
+            warn "System prompt drift: the running chat app still has the assistant instructions it was created with, and this repo now has different ones. Until it is re-created the chat keeps the OLD behaviour — including anything a repo update was meant to fix. Apply it with: sudo lca apply" ;;
+          PROMPT_SUGGESTIONS)
+            warn "Starter question drift: the chat app's empty-screen suggestions are the ones it was created with, not the ones in config/prompt-suggestions.json. Apply them with: sudo lca apply" ;;
         esac
       done < <(webui_drift || true)
       if webui_responds; then

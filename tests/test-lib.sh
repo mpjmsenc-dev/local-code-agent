@@ -1108,10 +1108,23 @@ check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
 check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
 check "webui.sh reports OLLAMA_BASE_URL drift" drift_checked OLLAMA_BASE_URL "Ollama address"
 check "webui.sh reports WEBUI_NAME drift"      drift_checked WEBUI_NAME Name
+check "webui.sh reports system prompt drift" \
+  drift_checked DEFAULT_MODEL_PARAMS "System prompt"
+check "webui.sh reports starter question drift" \
+  drift_checked DEFAULT_PROMPT_SUGGESTIONS "Starter question"
 # Every setting the installer bakes in from .env must be compared. The three
 # telemetry flags are constants, so they cannot drift; everything else can, and
 # "the ones we happened to think of" is how OLLAMA_BASE_URL — the address the
 # phone uses to reach the model at all — went unchecked.
+#
+# ONE definition, used by both tests below. Written out twice, the reach test
+# guarded its own copy: reverting the loop's pattern to the blind one left
+# every test green. Two copies drifting apart is the bug this whole gate
+# exists to catch, so it must not be how the gate is built.
+baked_keys() {
+  grep -oE '\-e "?[A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
+    | grep -oE '[A-Z_]+' | sort -u
+}
 every_baked_setting_is_compared() {
   local key bad=0
   while read -r key; do
@@ -1123,12 +1136,41 @@ every_baked_setting_is_compared() {
       printf 'install_webui.sh bakes in %s but nothing ever compares it\n' "${key}" >&2
       bad=1
     }
-  done < <(grep -oE '^[[:space:]]+-e [A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
-             | grep -oE '[A-Z_]+' | sort -u)
+  done < <(baked_keys)
   return "${bad}"
 }
 check "every setting baked into the container is drift-checked" \
   every_baked_setting_is_compared
+# The gate above is only as good as what it can see, and for two settings it
+# saw nothing. It anchored on '^<spaces>-e KEY=', which matches the plain
+# 'docker run' flags but NOT the two baked in from inside an array literal as
+# '-e "KEY=$(...)"' — the system prompt and the starter questions. So the pair
+# that decides what the assistant will and will not do were precisely the two
+# nothing compared, and 'lca apply' answered "already matches .env" after a
+# repo update that changed the prompt. Assert the scanner's reach directly:
+# a gate whose blind spot is invisible is worse than no gate.
+baked_scanner_sees_array_form() {
+  local found
+  found="$(baked_keys)"
+  grep -qx 'DEFAULT_MODEL_PARAMS' <<<"${found}" || {
+    echo "the baked-settings scanner cannot see DEFAULT_MODEL_PARAMS" >&2; return 1
+  }
+  grep -qx 'DEFAULT_PROMPT_SUGGESTIONS' <<<"${found}" || {
+    echo "the baked-settings scanner cannot see DEFAULT_PROMPT_SUGGESTIONS" >&2; return 1
+  }
+  # ...and it must not invent keys either: everything it yields has to be a
+  # real '-e' flag in the installer.
+  local key
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qE "\\-e \"?${key}=" "${REPO}/scripts/install_webui.sh" || {
+      printf 'the scanner produced %s, which install_webui.sh never bakes in\n' "${key}" >&2
+      return 1
+    }
+  done <<<"${found}"
+}
+check "the baked-settings scanner sees the array-literal '-e \"KEY=\"' form" \
+  baked_scanner_sees_array_form
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {
@@ -1181,6 +1223,28 @@ no_installer_as_apply_instruction() {
 }
 check "no doc names an installer as the way to apply a .env edit" \
   no_installer_as_apply_instruction
+# The same rule for the messages a user reads at the terminal, which is where
+# it was actually still being broken: 'lca check' warned that signups were open
+# and told you to re-run scripts/install_webui.sh, while PHONE.md — fixed in
+# the same change that added 'lca apply' — told you 'sudo lca apply'. Two
+# half-remembered ways to do one thing is precisely what that command exists
+# to end, and the docs gate could not see a string inside a .sh file.
+#
+# Scoped to the surfaces that REPORT state. An installer telling you to re-run
+# an installer is correct advice — install_webui.sh's port clash happens after
+# it has already removed the old container, so 'lca apply' would have nothing
+# to re-create and the installer really is the next step.
+no_status_command_sends_you_to_an_installer() {
+  local hits
+  hits="$(grep -n 'in \.env and re-run scripts/install_' \
+            "${REPO}/check-system.sh" "${REPO}/webui.sh" 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'a status command names an installer instead of lca apply:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no status command names an installer to apply a .env edit" \
+  no_status_command_sends_you_to_an_installer
 
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently

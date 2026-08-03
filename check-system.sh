@@ -260,7 +260,7 @@ else
   # and anyone who reaches the app can register an account on the private AI
   # this whole project exists to keep private. Nothing said so until now.
   if [[ "${WEBUI_ENABLE_SIGNUP}" == "true" ]]; then
-    p_warn "signups are OPEN (WEBUI_ENABLE_SIGNUP=true) — anyone who can reach the chat app can create an account. Once you have made yours: set WEBUI_ENABLE_SIGNUP=false in .env and re-run scripts/install_webui.sh"
+    p_warn "signups are OPEN (WEBUI_ENABLE_SIGNUP=true) — anyone who can reach the chat app can create an account. Once you have made yours: set WEBUI_ENABLE_SIGNUP=false in .env and run: sudo lca apply"
   else
     p_pass "signups are closed (WEBUI_ENABLE_SIGNUP=false)"
   fi
