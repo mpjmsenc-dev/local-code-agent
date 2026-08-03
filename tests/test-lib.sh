@@ -2658,6 +2658,136 @@ harden_installs_the_boot_service() {
 check "'netmode.sh harden' also installs the boot service" \
   harden_installs_the_boot_service
 
+# ...and it must not report a systemd problem as a firewall problem. Both
+# installers call 'netmode.sh harden' and turn ANY non-zero exit into "Could
+# not apply the inbound guard — the port may be publicly reachable". Once the
+# guard is up, exiting non-zero because the boot unit could not be written
+# would send the reader chasing a firewall that is fine.
+#
+# Run for real rather than grepped: netmode.sh minus its 'main "$@"' line is
+# just function definitions, and SCRIPT_DIR then resolves to the sandbox,
+# which already holds a copy of lib.sh.
+grep -v '^main "\$@"$' "${REPO}/netmode.sh" > "${SANDBOX}/netmode-funcs.sh"
+cat > "${SANDBOX}/harden-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+# $1 = the function definitions, $2 = the exit status install_service should
+# fake. Captured up front: inside the stub, $2 would be the stub's own arg.
+set -euo pipefail
+RC="$2"
+source "$1"
+apply_inbound_guard() { echo "GUARD-APPLIED"; }
+install_service()     { return "${RC}"; }
+do_harden
+echo "HARDEN-RETURNED-0"
+PROBE
+cat > "${SANDBOX}/require-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+RC="$2"
+source "$1"
+install_service() { return "${RC}"; }
+require_service
+echo "REQUIRE-RETURNED-0"
+PROBE
+chmod +x "${SANDBOX}/harden-probe.sh" "${SANDBOX}/require-probe.sh"
+harden_probe()  { bash "${SANDBOX}/harden-probe.sh"  "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1; }
+require_probe() { bash "${SANDBOX}/require-probe.sh" "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1; }
+
+harden_reports_a_failed_service_as_a_warning() {
+  local out
+  out="$(harden_probe 1)" || {
+    printf 'harden exited non-zero because the boot service failed:\n%s\n' "${out}" >&2
+    return 1
+  }
+  grep -q 'GUARD-APPLIED'      <<<"${out}" || return 1
+  grep -q 'HARDEN-RETURNED-0'  <<<"${out}" || return 1
+  # and it has to actually say so, or the reboot exposure is silent
+  grep -qi 'reboot'            <<<"${out}" || {
+    printf 'harden swallowed the boot-service failure without a word:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+harden_is_quiet_when_the_service_installs() {
+  local out
+  out="$(harden_probe 0)" || return 1
+  ! grep -qi 'reboot' <<<"${out}"
+}
+# The same failure IS fatal where installing the unit is the whole job:
+# setup.sh, offline and online all go through require_service.
+require_service_still_dies() {
+  local out
+  out="$(require_probe 1)" && {
+    printf 'require_service returned 0 on a failed install:\n%s\n' "${out}" >&2
+    return 1
+  }
+  grep -q 'systemctl status local-code-agent-netmode' <<<"${out}"
+}
+fatal_callers_use_require_service() {
+  local hits
+  # go_offline, go_online and the --install-service dispatch, and nothing else.
+  # Comments and the definition itself are stripped so only calls are counted.
+  hits="$(grep -v '^[[:space:]]*#' "${REPO}/netmode.sh" \
+            | grep -v 'require_service() {' \
+            | grep -c 'require_service')"
+  (( hits == 3 )) || { printf 'expected 3 require_service callers, found %s\n' "${hits}" >&2
+                       return 1; }
+}
+check "harden warns (not fails) when only the boot service breaks" \
+  harden_reports_a_failed_service_as_a_warning
+check "harden says nothing about reboots when the service installs" \
+  harden_is_quiet_when_the_service_installs
+check "installing the unit is still fatal where that IS the job" \
+  require_service_still_dies
+check "offline, online and --install-service all go through require_service" \
+  fatal_callers_use_require_service
+
+# install_service checks every privileged step itself instead of leaning on
+# errexit, because errexit is suppressed for any command whose status is
+# tested — which is exactly how do_harden calls it. Without the explicit
+# checks, a tee that never wrote the unit file would be followed by a
+# successful enable and reported as a healthy install.
+cat > "${SANDBOX}/service-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+# $1 = function definitions, $2 = the one privileged step to fail.
+set -euo pipefail
+BREAK="$2"
+source "$1"
+systemd_available() { return 0; }
+as_root() {
+  case " $* " in *" ${BREAK} "*) return 1 ;; esac
+  # The real 'as_root tee' reads the unit text from a pipe. A stub that
+  # returns without consuming it leaves the writer to take EPIPE, which
+  # pipefail then reports as a failed install — at random, depending on who
+  # wins the race. Drain it.
+  case "$1" in tee) cat >/dev/null ;; esac
+  return 0
+}
+install_service && echo "INSTALL-SAID-OK" || echo "INSTALL-SAID-FAILED"
+PROBE
+service_probe() {
+  bash "${SANDBOX}/service-probe.sh" "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1
+}
+step_failure_is_reported() {
+  local out
+  out="$(service_probe "$1")"
+  grep -q 'INSTALL-SAID-FAILED' <<<"${out}" || {
+    printf 'a failing "%s" was reported as a healthy install:\n%s\n' "$1" "${out}" >&2
+    return 1
+  }
+}
+tee_failure_is_reported()     { step_failure_is_reported tee; }
+reload_failure_is_reported()  { step_failure_is_reported daemon-reload; }
+enable_failure_is_reported()  { step_failure_is_reported enable; }
+healthy_install_says_ok()     { grep -q 'INSTALL-SAID-OK' <<<"$(service_probe nothing-fails)"; }
+check "a unit file that could not be written is a failed install" \
+  tee_failure_is_reported
+check "a daemon-reload that failed is a failed install" \
+  reload_failure_is_reported
+check "an enable that failed is a failed install" \
+  enable_failure_is_reported
+check "and an install where everything worked reports success" \
+  healthy_install_says_ok
+
 # --install-service is internal: setup.sh and CI call it, and netmode.sh's own
 # usage does not list it. 'lca check' used to print it as the Fix: for a
 # missing boot service, sending someone to a flag they cannot look up. Advice a

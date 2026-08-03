@@ -234,6 +234,16 @@ table_loaded() {
   as_root nft list table inet "${NFT_TABLE}" >/dev/null 2>&1
 }
 
+# install_service — write and enable the boot unit. Returns non-zero on
+# failure instead of die()ing, so each caller can pick the severity: for
+# setup.sh and offline/online this IS the job and failing it is fatal, but
+# do_harden reaches here with the ports already closed, and exiting non-zero
+# there would make both installers print "Could not apply the inbound guard"
+# about a guard that is up — they turn any non-zero exit from 'harden' into
+# exactly that sentence. Every step is checked explicitly rather than left to
+# errexit, because errexit is suppressed for any command whose status is
+# tested — including inside a subshell — and a silently swallowed tee is how
+# a boot service ends up "installed" from a file that was never written.
 install_service() {
   if ! systemd_available; then
     warn "systemd is not available — netmode will not persist across reboots on this machine."
@@ -254,11 +264,16 @@ install_service() {
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
-  } | as_root tee "${NETMODE_SERVICE}" >/dev/null
-  as_root systemctl daemon-reload
-  as_root systemctl enable local-code-agent-netmode.service >/dev/null 2>&1 \
-    || die "Could not enable local-code-agent-netmode.service — check: systemctl status local-code-agent-netmode"
+  } | as_root tee "${NETMODE_SERVICE}" >/dev/null || return 1
+  as_root systemctl daemon-reload || return 1
+  as_root systemctl enable local-code-agent-netmode.service >/dev/null 2>&1 || return 1
   ok "Netmode now persists across reboots."
+}
+
+# require_service — install_service where failing is the end of the road.
+require_service() {
+  install_service \
+    || die "Could not enable local-code-agent-netmode.service — check: systemctl status local-code-agent-netmode"
 }
 
 # do_harden — the user-facing "put the inbound guard back" command.
@@ -277,12 +292,15 @@ install_service() {
 # One command that finishes the job beats a two-round recovery through a flag
 # the user cannot look up.
 #
-# The guard goes on FIRST: it is what was actually asked for, and it must not
-# be held hostage by a systemd problem — install_service die()s if the enable
-# fails, and a machine with a broken systemd still deserves closed ports.
+# The guard goes on FIRST, and a systemd problem is only ever a warning here:
+# closing the ports is what was actually asked for, a machine with a broken
+# systemd still deserves it, and both installers turn ANY non-zero exit from
+# 'harden' into "Could not apply the inbound guard — the port may be publicly
+# reachable", which would be a false alarm about a guard that is up.
 do_harden() {
   apply_inbound_guard
-  install_service
+  install_service \
+    || warn "The inbound guard is applied, but its boot service could not be installed — it will NOT be re-applied after a reboot, and the ports become public then. Check: systemctl status local-code-agent-netmode"
 }
 
 go_offline() {
@@ -296,7 +314,7 @@ go_offline() {
   write_rules_file
   as_root nft -f "${NFT_RULES_FILE}"
   apply_inbound_guard
-  install_service
+  require_service
   ok "OFFLINE: new outbound connections are dropped; Tailscale + loopback stay open."
   info "Your phone still reaches WebUI/SSH over Tailscale. Toggle back with: sudo ${SCRIPT_DIR}/netmode.sh online"
 }
@@ -311,7 +329,7 @@ go_online() {
     as_root nft delete table inet "${NFT_TABLE}"
   fi
   apply_inbound_guard   # the inbound guard is always on, regardless of mode
-  install_service
+  require_service
   ok "ONLINE: normal egress restored."
 }
 
@@ -382,7 +400,7 @@ main() {
     apply-saved)      apply_saved ;;
     render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
     render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
-    --install-service) install_service ;;
+    --install-service) require_service ;;
     *)
       cat <<EOF
 Usage: sudo netmode.sh <offline|online|status|harden>
