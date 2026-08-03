@@ -635,6 +635,40 @@ prompt_leads_with_the_handover() {
 }
 check "the prompt names the trigger in the user's verbs, and says to lead with it" \
   prompt_leads_with_the_handover
+# A trigger strong enough to beat a 3b model's tutorial reflex overshoots. On
+# the real model, "how do I take a backup right now?" was answered by LEADING
+# with the aider recipe 1 time in 3 — which also contradicted the claim in
+# docs/PERFORMANCE.md that 3b answers that question with 'lca backup'.
+#
+# The cure was the same trick as the disease: a concrete counter-example, not
+# an abstract qualifier. Naming the operational questions explicitly took the
+# hijack to 0/4 while build-app stayed at 4/4 and 'lca backup' came back 5/5
+# with no tar lecture. Identical on 7b (4/5 handover, 0/5 tutorial, unchanged
+# from the unguarded prompt), so the exception is asserted, not the sentence.
+# Asserted per PARAGRAPH, not per line. The first version required the
+# examples and the exclusion on one line, and the prompt wraps — so it failed
+# on text that says exactly the right thing. What must hold is that wherever
+# the examples are named, they are named AS an exception; the line breaks are
+# the author's business.
+prompt_excludes_server_questions() {
+  lca_system_prompt | awk 'BEGIN { RS = "" }
+    { p = tolower($0) }
+    p ~ /backup/ && (p ~ /speed/ || p ~ /logs/) &&
+    (p ~ /are not/ || p ~ /never send/ || p ~ /not that/) { found = 1 }
+    END { exit !found }'
+}
+check "the prompt excludes server questions from the handover" \
+  prompt_excludes_server_questions
+# 'lca apply' is the remedy for the entire applied-settings class — a setting
+# edited but not in effect — and the chat is exactly where someone asks "I
+# changed .env and nothing happened". It could not name it: the command was
+# absent from the prompt's own list. Added and measured: 4/4 on that question,
+# where it was 0/4 before because the model had never been told it exists.
+prompt_names_the_apply_command() {
+  lca_system_prompt | grep -qE "^[[:space:]]*lca apply[[:space:]]"
+}
+check "the prompt names 'lca apply', the fix for every applied setting" \
+  prompt_names_the_apply_command
 
 echo "# set_env_var survives a value with spaces (BACKUP_SCHEDULE is one)"
 # Written unquoted, "*-*-* 05:00:00" makes .env unsourceable and the variable

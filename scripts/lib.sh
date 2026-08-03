@@ -787,8 +787,13 @@ Open with exactly:
 Add one line: aider writes those files for you, on this same model. Then offer
 to write any single file's contents here.
 
+Questions about this server itself — backups, logs, speed, disk, an error
+message — are NOT that. Answer those directly with the 'lca' command that does
+the job, and never send them to aider.
+
 The server manages itself through one command, 'lca':
   lca            start the coding agent (aider) — the ONLY one that writes files
+  lca apply      make the running system match .env edits (needs sudo)
   lca check      full health check
   lca logs       recent logs from Ollama, the chat app and the installer
   lca speed      measure tokens/second and what limits it
