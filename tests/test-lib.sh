@@ -1602,9 +1602,15 @@ if have jq; then
     [[ -n "${claimed}" ]] || {
       echo "PHONE.md never says how many starter questions there are" >&2; return 1
     }
-    # Written as a full if, not '(( ... )) && want=...': under 'set -e' a
-    # false arithmetic test makes the whole && list return 1 and aborts the
-    # function. That trap is documented in CONTRIBUTING.md and still caught me.
+    # Written as a full if, not '(( ... )) && want=...'. Measured afterwards,
+    # because the first version of this comment described the mechanism wrongly:
+    # a false left side does NOT abort under 'set -e' — bash exempts every
+    # command in an && list except the last. What it does is make the LIST
+    # return 1, which matters only when the list is a function's final
+    # statement, where it silently becomes the function's exit status. Here it
+    # is not final, so the 'if' is defensive rather than required — but a later
+    # edit that moves it to the end would turn a passing check into a failing
+    # one with nothing to see.
     local want="${n}"
     if (( n <= 10 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {

@@ -40,7 +40,16 @@ main() {
     if [[ ! -t 0 ]]; then
       die "Refusing to uninstall non-interactively without --yes (this removes Ollama, all models, and WebUI data)."
     fi
-    confirm "Remove Ollama (incl. ALL models), the WebUI container and its data, and the boot services?" \
+    # The prompt must describe what THIS invocation will do. It said "and its
+    # data" unconditionally, which is wrong whenever --keep-data was passed —
+    # and a destructive confirmation that overstates the damage is worse than
+    # it sounds: it either gets someone to cancel a safe uninstall, or it
+    # teaches them that this prompt exaggerates.
+    local data_clause="and its data"
+    if [[ "${keep_data}" == "true" ]]; then
+      data_clause="(keeping its data — --keep-data)"
+    fi
+    confirm "Remove Ollama (incl. ALL models), the WebUI container ${data_clause}, and the boot services?" \
       || die "Uninstall cancelled — nothing was changed."
   fi
 

@@ -114,6 +114,21 @@ grep -q 'expected' <<<"${out}" || { echo "FAIL: ..."; exit 1; }
 *non*-matching grep is the passing case, and the AND-list's non-zero status
 aborts the step anyway. Use `if`/`fi` for negative assertions.
 
+Be precise about *why*, because the obvious explanation is wrong and it has
+been written into this repo incorrectly at least once. `set -e` **exempts**
+every command in an `&&` list except the last, so a false left side does not
+abort anything:
+
+```bash
+f() { local x=1; (( x > 9 )) && x=2; }   # f returns 1 — the trap
+g() { local x=1; (( x > 9 )) && x=2; echo hi; }   # g returns 0 — harmless
+```
+
+The damage is confined to the **last statement of a function**, where the
+list's status silently becomes the function's exit status — which in a `check`
+is the difference between pass and fail. Mid-function it is merely untidy.
+Verified by running both, not by reasoning about the manual.
+
 **3. `bash -c '! some_function'` in `tests/`.** A child shell has never
 sourced `lib.sh`, so the function is "command not found" (exit 127) and `!`
 turns that into a pass — a test that cannot fail. Call a local wrapper
