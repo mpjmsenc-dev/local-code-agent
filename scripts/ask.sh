@@ -133,7 +133,12 @@ main() {
   budget_chars=$(( (ctx_tokens - reply_tokens) * 4 - ${#system} - 400 ))
   (( budget_chars > 2000 )) || budget_chars=2000
   if (( ${#context} > budget_chars )); then
-    warn "Context is bigger than ${MODEL_NAME}'s ${ctx_tokens}-token window — keeping the last ${budget_chars} characters so the assistant does not lose its own instructions. (Pipe less, or raise OLLAMA_CONTEXT_LENGTH in .env and run: sudo lca apply.)"
+    # Names what is lost, not just how much is kept. Sections are appended
+    # oldest-first, so trimming to the tail drops whole files and the previous
+    # exchange before it touches piped input — "keeping the last N characters"
+    # is true but does not tell someone who passed three files that two of them
+    # are simply gone.
+    warn "Context (${#context} chars) is bigger than ${MODEL_NAME}'s ${ctx_tokens}-token window. Keeping the most recent ${budget_chars} and dropping what came before — earlier -f files and the previous exchange go first, piped input last. Pass fewer files, pipe less, or raise OLLAMA_CONTEXT_LENGTH in .env and run: sudo lca apply."
     context="${context: -budget_chars}"
   fi
 
