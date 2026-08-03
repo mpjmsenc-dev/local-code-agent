@@ -191,7 +191,7 @@ lca                 # starts aider on the local model, right here
 |---|---|
 | `lca` | start the coding agent in the current directory |
 | `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
-| `lca chat` | print the address for the chat app on your phone |
+| `lca chat` | phone setup: the chat app's address **and** the `ssh://` address, both as QR codes |
 | `lca check` / `lca test` | health check / live end-to-end self-test (`lca check --quick` skips the ~1-minute model probe) |
 | `lca apply` | make the running system match your `.env` edits (`--dry-run` previews) |
 | `lca logs` | recent logs from Ollama, the chat app and the installer |

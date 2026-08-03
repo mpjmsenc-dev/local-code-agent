@@ -96,7 +96,10 @@ in this order. Copy-paste blocks are exact; button names are exact.
 1. On your phone's browser open: `http://100.x.y.z:3000` (your number from step 3).
 
    Easier: type `lca chat` in the droplet console. It prints a QR code — point
-   your phone's camera at the screen and tap the link, no typing.
+   your phone's camera at the screen and tap the link, no typing. It prints a
+   second QR too, the `ssh://` address: scan that one now as well, because the
+   chat will eventually hand you a command to run in a terminal and this is
+   how you get one from the phone.
 2. Tap **Sign up**, enter a name/email/password — this **first account becomes the
    admin**. You're now chatting with your private AI.
 3. Lock signups so nobody else can register. Back in the droplet console:
