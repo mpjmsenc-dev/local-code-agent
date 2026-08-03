@@ -13,6 +13,28 @@ No — see "Honest expectations" in the [README](../README.md). A 7b/14b local
 model is a capable junior assistant, not a frontier model. It shines on
 boilerplate, small edits, explanations, and privacy-critical work.
 
+**Can the phone chat build me a whole app?**
+No, and it will tell you so rather than pretending. The chat is a text box with
+no filesystem — it cannot create files, run commands or see your project, and
+that limit is about the door, not the model: more RAM buys a bigger model, not
+the ability to write files. Asked to build something it hands the job to the
+one thing here that can, which is aider:
+
+```bash
+# in a terminal on the server (SSH in from your phone)
+mkdir -p ~/my-project && cd ~/my-project && lca
+```
+
+`lca chat` prints that SSH address as a QR code next to the chat one, so the
+phone can reach both. Note `lca ask` is *not* it — that is one-shot text, the
+same as the chat. What the chat is genuinely good at: explaining an error,
+reviewing a snippet you paste, writing one complete file you copy, and
+answering questions about this box.
+
+If yours instead writes a long setup tutorial it never finishes, it is running
+an older assistant prompt — see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md), or just run `lca check`.
+
 **What does it cost?**
 Only the server. A 4 vCPU / 8 GB DO Basic droplet runs at DO's standard monthly
 price (per-second billing; powered-off droplets still bill — see
