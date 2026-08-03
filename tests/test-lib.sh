@@ -846,6 +846,23 @@ backup_records_the_machine() {
 }
 check "backup.sh records the machine details restore.sh compares" \
   backup_records_the_machine
+# A command printed in a doc is a command being shipped. The first version of
+# the "read the metadata" snippet in docs/BACKUPS.md globbed the backups
+# directory — which works with exactly one backup and silently prints nothing
+# with two, because tar takes the second archive as a member name to extract
+# from the first. BACKUP_KEEP defaults to 7, so the broken case is the normal
+# one; it only looked right because this box had a single backup at the time.
+docs_read_backups_safely() {
+  local hit
+  while IFS= read -r hit; do
+    [[ -n "${hit}" ]] || continue
+    printf 'a doc globs multiple backup archives into one tar invocation:\n  %s\n' \
+      "${hit}" >&2
+    return 1
+  done < <(grep -rn 'tar .*backup-\*\.tar\.gz' "${REPO}/docs" "${REPO}/README.md" \
+             2>/dev/null | grep -v 'ls -t' || true)
+}
+check "no doc feeds a multi-archive glob to tar" docs_read_backups_safely
 
 echo "# the one mechanism that delivers a new prompt to an existing install"
 # Everything about improving the assistant is worthless if an improvement

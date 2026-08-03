@@ -10,10 +10,30 @@
 | Open WebUI data volume — accounts, chat history, settings | The model blobs (multi-GB) — they re-pull on restore |
 | Your `.env` | Ollama itself, Docker, Tailscale — reinstalled by `setup.sh` |
 | The list of installed model names (`models.txt`) | |
+| Which machine it came from (`meta`: host, RAM, model, context, timestamp) | |
 
 Backups are gzipped tarballs in `backups/`, named
 `local-code-agent-backup-YYYYMMDD-HHMMSS.tar.gz`. The WebUI container is briefly
 paused around the volume archive so its SQLite database is captured consistently.
+
+`meta` is there so a restore can tell you something useful rather than
+something generic. `.env` carries the **source** machine's model and context
+length, so restoring an 8 GB droplet's backup onto a 32 GB VM would otherwise
+leave the big machine running the small model with nothing saying so. With it,
+`restore.sh` names both sizes and points at `lca tune`; restoring onto the same
+machine, it stays quiet. Backups taken before `meta` existed still restore
+fine — you get the conditional advice instead of the specific one.
+
+Read it without restoring anything:
+
+```bash
+tar xzf "$(ls -t backups/local-code-agent-backup-*.tar.gz | head -1)" -O ./meta
+```
+
+(The newest is selected explicitly rather than globbing: once you have more
+than one backup — which is the point of `BACKUP_KEEP` — a bare `*.tar.gz` makes
+`tar` treat the second archive as a *file to extract from the first*, and it
+prints nothing useful.)
 
 ## Make one now
 
