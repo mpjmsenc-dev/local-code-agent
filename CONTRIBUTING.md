@@ -35,6 +35,23 @@ You also need ShellCheck locally, because the lint gate is non-negotiable:
 sudo apt-get install -y shellcheck   # Ubuntu/Debian
 ```
 
+## Run `make hooks` first — this is not optional advice
+
+`.githooks/pre-push` runs `make gates` before anything reaches GitHub, and it
+does nothing until `make hooks` points git at it. A fresh clone does not have
+it enabled.
+
+This is worth stating plainly because it has already cost a red build. A commit
+went out with a ShellCheck failure in it, from a session where every other
+commit had been linted by hand: the check was chained with `;` instead of
+`&&`, so `make lint` printed `Error 1` immediately above a successful push. The
+hook would have refused that push. Hand-running the gates works right up until
+the one time the shell does not do what you read.
+
+If you are driving this repo with an agent, enable it on the agent's checkout
+too. The loop is *edit → gates → push*, and the hook is what makes the middle
+step non-optional rather than remembered.
+
 ## Local gates
 
 | Command | What it does |
