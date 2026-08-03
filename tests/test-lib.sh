@@ -2956,6 +2956,62 @@ advice_names_only_documented_commands() {
 check "no user-facing message recommends the internal --install-service flag" \
   advice_names_only_documented_commands
 
+# The general form of that rule, because finding these one at a time is how
+# the last one survived: every 'some-script.sh --flag' this project puts in
+# front of a human must be a flag that script actually documents. A doc that
+# names a flag the script rejects is worse than no doc — the reader follows
+# it, gets "Unknown option", and has no way to tell whether the feature or
+# the sentence is the broken one.
+#
+# Scoped to the surfaces that only ever give advice. setup.sh and CI *invoke*
+# these scripts, and an invocation is not a recommendation.
+script_help_text() {  # header comment block + usage() body + any quoted line
+  awk 'BEGIN { inhdr = 1 }
+       NR == 1          { next }
+       inhdr && /^#/    { print; next }
+       inhdr            { inhdr = 0 }
+       /^usage\(\) *\{/ { inu = 1; next }
+       inu && /^\}/     { inu = 0; next }
+       inu || /"/       { print }' "$1"
+}
+every_advised_flag_is_real() {
+  local surfaces=( "${REPO}/README.md" "${REPO}"/docs/*.md "${REPO}/check-system.sh"
+                   "${REPO}/bin/lca" "${REPO}/webui.sh" "${REPO}"/scripts/install_*.sh )
+  local script flag path cand text unlisted=()
+  while read -r script flag; do
+    [[ -n "${script}" ]] || continue
+    path=""
+    for cand in "${REPO}/${script}" "${REPO}/scripts/${script}"; do
+      if [[ -f "${cand}" ]]; then path="${cand}"; fi
+    done
+    if [[ -z "${path}" ]]; then
+      unlisted+=("${script} ${flag} — no such script")
+      continue
+    fi
+    text="$(script_help_text "${path}")"
+    # if/fi, not '&& continue': a failing && list is only survivable because
+    # check() tests this function's status and errexit is suppressed for it.
+    # Written this way it does not depend on who calls it.
+    if grep -qF -- "${flag}" <<<"${text}"; then
+      continue
+    fi
+    # A script whose usage advertises '[... args...]' forwards what it does
+    # not recognise (run-agent.sh hands everything to aider), so the flag
+    # namespace is not its own to document.
+    if grep -qE 'args\.\.\.\]' <<<"${text}"; then
+      continue
+    fi
+    unlisted+=("${script} ${flag}")
+  done < <(grep -rhoE '[a-z][a-z_-]*\.sh"? --[a-z-]+' "${surfaces[@]}" | tr -d '"' | sort -u)
+  (( ${#unlisted[@]} == 0 )) || {
+    printf 'advised flags that the script does not document:\n' >&2
+    printf '  %s\n' "${unlisted[@]}" >&2
+    return 1
+  }
+}
+check "every flag we tell a human to run is one that script documents" \
+  every_advised_flag_is_real
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

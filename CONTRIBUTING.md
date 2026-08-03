@@ -180,16 +180,25 @@ names are exactly the ones already taken.
 ## Settings that are *applied* are a bug factory
 
 Most of `.env` is read fresh on every run. A few settings are **applied** to
-something long-lived — a systemd drop-in, a docker container, a systemd timer —
-at the moment that thing is created. Editing `.env` afterwards changes nothing
-until it is rebuilt, and nothing about that is visible: no error, no log line,
-just the old behaviour continuing.
+something long-lived — a systemd drop-in, a docker container, a systemd timer,
+an nftables ruleset — at the moment that thing is created. Editing `.env`
+afterwards changes nothing until it is rebuilt, and nothing about that is
+visible: no error, no log line, just the old behaviour continuing.
 
-Four separate bugs in this repository came from exactly that, and each was
+Five separate bugs in this repository came from exactly that, and each was
 silent in a different way: a keep-alive that never took effect, a chat app
 still accepting signups after its owner closed them, backups on a cadence
-nobody chose, and a chat app pointed at an Ollama port nothing listened on.
-Three of them had documentation telling users to edit the key.
+nobody chose, a chat app pointed at an Ollama port nothing listened on, and an
+inbound guard still dropping the port a service had moved off — leaving the
+unauthenticated Ollama API answering on the new one, publicly, while
+`lca apply` said everything matched. Four of them had documentation telling
+users to edit the key.
+
+The guard is the one to learn from, because it had a comparison *and* a fix
+command and was still wrong: the fix only ever ran as a side effect of
+re-creating the chat app container, so with the chat app switched off nothing
+re-applied it. Being reachable from `lca apply` is not the same as being
+converged by it.
 
 So, when you add a setting that gets baked into something:
 
@@ -204,6 +213,16 @@ So, when you add a setting that gets baked into something:
 `install_webui.sh` bakes into the container must be compared somewhere, so the
 next one is caught without anyone noticing it. Prefer that shape of test — one
 that fails for a class — over one more hand-written case.
+
+The same suite does it for advice, too: every `some-script.sh --flag` that
+appears in the README, in `docs/`, in `lca check`'s output or in `bin/lca` must
+be a flag that script documents, or CI fails naming the pair. That gate exists
+because `lca check` spent a while telling people to run
+`netmode.sh --install-service`, which works but appears in no usage text
+anywhere — so a reader who tried to look it up found nothing. A script that
+advertises `[... args...]` is exempt, since it forwards what it does not
+recognise; `run-agent.sh` is the only one, and it is exempt for that reason and
+not by name.
 
 ## The system prompt is code, and it has to be measured
 
