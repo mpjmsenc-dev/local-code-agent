@@ -605,6 +605,33 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# 'lca update' must re-run setup even when the checkout is already current"
+# The delivery chain for any assistant fix is: update -> setup.sh ->
+# install_webui.sh rebuilds the container -> selftest checks the live prompt.
+# Re-running setup is unconditional, and that is load-bearing rather than
+# wasteful: the documented recovery for a stale chat is 'git pull' followed by
+# apply/update, so by the time update runs, 'behind' is already 0. Skipping
+# setup in that case would read as an obvious optimisation and would silently
+# break the exact path the docs send people down.
+update_reruns_setup_unconditionally() {
+  # Two spaces of indent: at the top level of main(), not nested inside the
+  # 'behind != 0' branch (which would put it at four).
+  grep -qE '^  step "Re-running setup"' "${REPO}/update.sh" || {
+    echo "update.sh only re-runs setup conditionally — a hand-pulled fix would not be applied" >&2
+    return 1
+  }
+  # ...and the verification after it must be the self-test, which since today
+  # is what notices a stale assistant prompt.
+  awk '/step "Re-running setup"/ { seen = 1 }
+       seen && /selftest\.sh/ { found = 1 }
+       END { exit !found }' "${REPO}/update.sh" || {
+    echo "update.sh does not verify with selftest.sh after re-running setup" >&2
+    return 1
+  }
+}
+check "'lca update' re-runs setup unconditionally, then self-tests" \
+  update_reruns_setup_unconditionally
+
 echo "# CI's e2e must compare the WHOLE prompt, not a substring of it"
 # The only end-to-end proof that the assistant's instructions reach a real
 # container is a step in ci.yml. It asserted `.system | test("local-code-agent")`
