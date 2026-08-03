@@ -763,16 +763,89 @@ check "restore.sh applies the .env it just restored" restore_reconciles_with_app
 # auto-tune does not re-pick until the next boot. Nothing said so, which left a
 # documented migration running the droplet's small model on a big new box for
 # no reason anyone could see.
-restore_points_at_tune() {
-  awk '/^  # 1\. \.env/ { seen = 1 }
-       seen && /lca tune/ { found = 1 }
+# The three behavioural tests below drive machine_advice() directly, which is
+# stronger than any grep — but they would all still pass if main() stopped
+# calling it. So this asserts the call, and nothing about the wording.
+#
+# It replaces a version that searched for the literal 'lca tune' after the .env
+# section, which broke the moment that message moved into a function defined
+# further up. It was guarding a position, not a behaviour.
+restore_asks_for_the_advice() {
+  # Bounded at main's closing brace, and blind to comments. The first version
+  # set 'inmain' and never cleared it, so the comment BELOW main explaining
+  # why the file is sourceable — which names the function — satisfied it. The
+  # call could be deleted outright and the gate stayed green.
+  awk '/^main\(\) \{/       { inmain = 1; next }
+       inmain && /^\}/      { inmain = 0 }
+       inmain && /^[[:space:]]*#/ { next }
+       inmain && /machine_advice/ { found = 1 }
        END { exit !found }' "${REPO}/restore.sh" || {
-    echo "restore.sh never mentions re-tuning for the machine it restored onto" >&2
+    echo "restore.sh no longer asks whether the restored .env suits this machine" >&2
     return 1
   }
 }
-check "restore.sh tells you to re-tune after restoring onto other hardware" \
-  restore_points_at_tune
+check "restore.sh checks the restored .env against this machine" \
+  restore_asks_for_the_advice
+# ...and the advice must be RIGHT, not merely present. backup.sh now records
+# the source machine, so restore can compare instead of guessing — the earlier
+# version told everyone to re-tune, including people restoring onto the same
+# box, which is the kind of advice people learn to skip.
+#
+# Driven directly: a real restore overwrites .env and the WebUI volume, so the
+# comparison lives in its own function and restore.sh is sourceable.
+advice_for() {  # META_CONTENT_OR_EMPTY — the message restore would print
+  local meta="${SANDBOX}/meta-fixture"
+  if [[ -n "$1" ]]; then printf '%s\n' "$1" > "${meta}"; else rm -f "${meta}"; fi
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    detect_ram_gib() { echo 16; }          # this machine, for the comparison
+    MODEL_NAME=qwen2.5-coder:7b
+    OLLAMA_CONTEXT_LENGTH=8192
+    machine_advice "$2" 2>&1
+  ' _ "${REPO}/restore.sh" "${meta}"
+}
+same_machine_is_quiet() {
+  local out; out="$(advice_for 'ram_gib=16
+model=qwen2.5-coder:7b')"
+  grep -q 'agree on RAM' <<<"${out}" || { printf 'got: %s\n' "${out}" >&2; return 1; }
+  # Must NOT nag someone who restored onto the same hardware.
+  if grep -q 'lca tune' <<<"${out}"; then
+    printf 'told an unchanged machine to re-tune: %s\n' "${out}" >&2; return 1
+  fi
+}
+different_machine_is_told() {
+  local out; out="$(advice_for 'ram_gib=8
+model=qwen2.5-coder:3b')"
+  grep -q 'lca tune' <<<"${out}" || { printf 'got: %s\n' "${out}" >&2; return 1; }
+  # And the message must carry BOTH sizes, or it cannot be acted on.
+  grep -q '8 GiB' <<<"${out}" && grep -q '16 GiB' <<<"${out}"
+}
+old_backup_gets_conditional_advice() {
+  # No meta at all: a backup taken before this existed. "Cannot tell" is not
+  # "they match" — the same distinction the docker probes had to learn.
+  local out; out="$(advice_for '')"
+  grep -q 'lca tune' <<<"${out}" || { printf 'got: %s\n' "${out}" >&2; return 1; }
+  grep -qi 'predates' <<<"${out}"
+}
+check "restoring onto the same machine does not nag about tuning" \
+  same_machine_is_quiet
+check "restoring onto different RAM names both sizes and says to re-tune" \
+  different_machine_is_told
+check "a backup with no machine details gets conditional advice, not silence" \
+  old_backup_gets_conditional_advice
+# backup.sh must actually record what restore.sh reads, or the comparison above
+# silently degrades to the "old backup" branch for every new backup.
+backup_records_the_machine() {
+  local key
+  for key in ram_gib model context; do
+    grep -qE "printf '${key}=" "${REPO}/backup.sh" || {
+      printf 'backup.sh does not record %s, which restore.sh reads\n' "${key}" >&2
+      return 1
+    }
+  done
+}
+check "backup.sh records the machine details restore.sh compares" \
+  backup_records_the_machine
 
 echo "# the one mechanism that delivers a new prompt to an existing install"
 # Everything about improving the assistant is worthless if an improvement

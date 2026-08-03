@@ -12,6 +12,31 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 
 BACKUP_DIR="${REPO_ROOT}/backups"
 
+# machine_advice META_FILE — say whether the restored .env suits THIS machine.
+#
+# Its own function purely so the three branches can be exercised without
+# running a real restore, which overwrites .env and the WebUI volume and is
+# therefore not something a test suite can do.
+machine_advice() {
+  local meta="$1" src_ram="" src_model="" here_ram
+  if [[ -f "${meta}" ]]; then
+    src_ram="$(sed -n 's/^ram_gib=//p' "${meta}" | head -1)"
+    src_model="$(sed -n 's/^model=//p' "${meta}" | head -1)"
+  fi
+  here_ram="$(detect_ram_gib 2>/dev/null || echo 0)"
+  if [[ "${src_ram}" =~ ^[0-9]+$ ]] && (( src_ram > 0 )) && [[ "${src_ram}" != "${here_ram}" ]]; then
+    # Precise, because the backup records where it came from.
+    warn "This backup is from a ${src_ram} GiB machine (model ${src_model:-unknown}); this one has ${here_ram} GiB. The restored .env is the OLD machine's. Re-pick for this one now: sudo ${REPO_ROOT}/bin/lca tune"
+  elif [[ -z "${src_ram}" ]]; then
+    # A backup taken before provenance was recorded. "Cannot tell" is not
+    # "they match", so give the conditional advice rather than none.
+    info "Restored .env carries the backup machine's model (${MODEL_NAME}, context ${OLLAMA_CONTEXT_LENGTH})."
+    info "This backup predates machine details, so if it came from different hardware: sudo ${REPO_ROOT}/bin/lca tune"
+  else
+    ok "Backup and this machine agree on RAM (${here_ram} GiB) — ${MODEL_NAME} is the right model here."
+  fi
+}
+
 main() {
   step "Restoring from backup"
   local tarball="${1:-}"
@@ -139,10 +164,13 @@ main() {
   # commonest reason to restore one is moving to different hardware
   # (docs/MIGRATE.md is exactly that). Auto-tune re-picks on the next boot, but
   # there is no reason to run the wrong model until then, and nothing said so.
-  info "Restored .env carries the backup machine's model (${MODEL_NAME}, context ${OLLAMA_CONTEXT_LENGTH})."
-  info "If this machine has different RAM, re-pick now instead of waiting for a reboot: sudo ${REPO_ROOT}/bin/lca tune"
+  machine_advice "${workdir}/meta"
 
   ok "Restore complete. Verify with: ./check-system.sh"
 }
 
-main "$@"
+# Sourceable so machine_advice() can be tested without performing a restore —
+# same pattern as scripts/apply.sh and scripts/prompt-bench.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

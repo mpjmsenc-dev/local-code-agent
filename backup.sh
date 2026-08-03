@@ -118,6 +118,25 @@ do_backup() {
     warn "Ollama not installed — skipping the model list."
   fi
 
+  # 4. Provenance. A backup carries the SOURCE machine's model and context
+  #    length, and the commonest reason to restore one is moving to different
+  #    hardware — docs/MIGRATE.md is about nothing else. Without this, restore
+  #    cannot say whether the settings it just put back suit the machine it put
+  #    them on, so it can only offer advice that is right half the time.
+  #
+  #    Never fatal: this is metadata about the backup, not part of it.
+  if {
+       printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+       printf 'host=%s\n'    "$(hostname 2>/dev/null || echo unknown)"
+       printf 'ram_gib=%s\n' "$(detect_ram_gib 2>/dev/null || echo 0)"
+       printf 'model=%s\n'   "${MODEL_NAME}"
+       printf 'context=%s\n' "${OLLAMA_CONTEXT_LENGTH}"
+     } > "${workdir}/meta" 2>/dev/null; then
+    ok "Source machine recorded ($(detect_ram_gib 2>/dev/null || echo '?') GiB, ${MODEL_NAME})."
+  else
+    warn "Could not record the source machine — the backup itself is unaffected."
+  fi
+
   # A failed tar (classically: the disk filled up) still leaves a PARTIAL file
   # behind, and set -e would abort before anything cleaned it up. That partial
   # file then becomes the newest tarball in backups/ — which is precisely what
