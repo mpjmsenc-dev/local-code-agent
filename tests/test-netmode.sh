@@ -20,6 +20,29 @@ trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 "${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 
+# render_with_env ENV_CONTENT — render the inbound guard as if .env said this.
+#
+# netmode.sh resolves .env from its own location, so varying it used to mean
+# writing ${REPO}/.env — which would destroy a developer's real one. The tests
+# that did so guarded with "skip if .env exists", and the effect was that the
+# SSH-lockout invariant and the custom-port checks ran ONLY in CI. A
+# security invariant that skips on the maintainer's machine is exactly the one
+# you want running everywhere, and 'make gates' before a push exercised
+# neither.
+#
+# So render from a throwaway copy of the repo instead. Nothing in the real
+# checkout is touched, and the assertions now run unconditionally.
+render_with_env() {
+  local sandbox rendered
+  sandbox="$(mktemp -d)"
+  ( cd "${REPO}" && tar -c --exclude=.venv --exclude=.git --exclude=backups . ) \
+    | tar -x -C "${sandbox}"
+  printf '%s\n' "$1" > "${sandbox}/.env"
+  rendered="$("${sandbox}/netmode.sh" render-inbound 2>/dev/null || true)"
+  rm -rf "${sandbox}"
+  printf '%s\n' "${rendered}"
+}
+
 contains() {  # desc file needle
   if grep -qF "$3" "$2"; then t_ok "$1"; else t_fail "$1 — missing: $3"; fi
 }
@@ -105,16 +128,11 @@ order_ok "inbound: drop is the last rule in every chain" "${INBOUND}"
 echo "# inbound guard reads quoted/annotated .env ports like load_env (not a sed parser)"
 # Black-box: a quoted WEBUI_PORT with an inline comment must still be the port
 # the guard drops — otherwise the real public port would be left exposed.
-if [[ -f "${REPO}/.env" ]]; then
-  echo "skip - ${REPO}/.env exists; not overwriting it for the quoted-port test"
-else
-  printf 'WEBUI_PORT="8080" # avoid clash\nOLLAMA_HOST="0.0.0.0:11500"\n' > "${REPO}/.env"
-  QG="$("${REPO}/netmode.sh" render-inbound)"
-  rm -f "${REPO}/.env"
-  if grep -qE 'dport \{[^}]*\b8080\b' <<<"${QG}"; then t_ok "quoted WEBUI_PORT 8080 is guarded"; else t_fail "quoted WEBUI_PORT 8080 NOT guarded ($(grep -o 'tcp dport [^}]*}' <<<"${QG}"))"; fi
-  if grep -qE 'dport \{[^}]*\b11500\b' <<<"${QG}"; then t_ok "quoted OLLAMA_HOST port 11500 is guarded"; else t_fail "quoted OLLAMA_HOST port 11500 NOT guarded"; fi
-  if grep -qE 'dport \{[^}]*\b3000\b' <<<"${QG}"; then t_fail "stale default 3000 guarded despite WEBUI_PORT=8080"; else t_ok "no stale default port when WEBUI_PORT is set"; fi
-fi
+QG="$(render_with_env 'WEBUI_PORT="8080" # avoid clash
+OLLAMA_HOST="0.0.0.0:11500"')"
+if grep -qE 'dport \{[^}]*\b8080\b' <<<"${QG}"; then t_ok "quoted WEBUI_PORT 8080 is guarded"; else t_fail "quoted WEBUI_PORT 8080 NOT guarded ($(grep -o 'tcp dport [^}]*}' <<<"${QG}"))"; fi
+if grep -qE 'dport \{[^}]*\b11500\b' <<<"${QG}"; then t_ok "quoted OLLAMA_HOST port 11500 is guarded"; else t_fail "quoted OLLAMA_HOST port 11500 NOT guarded"; fi
+if grep -qE 'dport \{[^}]*\b3000\b' <<<"${QG}"; then t_fail "stale default 3000 guarded despite WEBUI_PORT=8080"; else t_ok "no stale default port when WEBUI_PORT is set"; fi
 
 echo "# SSH invariant: port 22 must NEVER reach the inbound drop set"
 # The guard's whole promise is that it cannot lock you out. A WEBUI_PORT (or
@@ -123,37 +141,31 @@ echo "# SSH invariant: port 22 must NEVER reach the inbound drop set"
 # boot service re-applies the guard after each reboot, leaving only the
 # provider's recovery console. This asserts the invariant is ENFORCED, not just
 # claimed in a comment.
-if [[ -f "${REPO}/.env" ]]; then
-  echo "skip - ${REPO}/.env exists; not overwriting it for the SSH-invariant test"
+SSH_ONE="$(render_with_env 'WEBUI_PORT=22
+OLLAMA_HOST="127.0.0.1:11434"')"
+if grep -qE 'dport \{[^}]*\b22\b' <<<"${SSH_ONE}"; then
+  t_fail "WEBUI_PORT=22 reached the drop set — this would lock SSH out"
 else
-  printf 'WEBUI_PORT=22\nOLLAMA_HOST="127.0.0.1:11434"\n' > "${REPO}/.env"
-  SSH_ONE="$("${REPO}/netmode.sh" render-inbound 2>/dev/null)"
-  rm -f "${REPO}/.env"
-  if grep -qE 'dport \{[^}]*\b22\b' <<<"${SSH_ONE}"; then
-    t_fail "WEBUI_PORT=22 reached the drop set — this would lock SSH out"
-  else
-    t_ok "WEBUI_PORT=22 is refused (SSH is never guarded)"
-  fi
-  if grep -qE 'dport \{[^}]*\b11434\b' <<<"${SSH_ONE}"; then
-    t_ok "the other configured port is still guarded when one is 22"
-  else
-    t_fail "dropping port 22 also lost the legitimate port"
-  fi
-
-  # Every configured port = 22 -> no drop rule at all, and the ruleset must
-  # still be syntactically valid (an empty '{ }' set would break nft).
-  printf 'WEBUI_PORT=22\nOLLAMA_HOST="127.0.0.1:22"\n' > "${REPO}/.env"
-  SSH_ALL="$("${REPO}/netmode.sh" render-inbound 2>/dev/null)"
-  rm -f "${REPO}/.env"
-  if grep -q 'tcp dport' <<<"${SSH_ALL}"; then
-    t_fail "a drop rule was emitted when every configured port was 22"
-  else
-    t_ok "no drop rule emitted when every configured port is 22"
-  fi
-  # Kept for the kernel check below, where the NFT array is defined.
-  SSH_ALL_FILE="$(mktemp)"
-  printf '%s\n' "${SSH_ALL}" > "${SSH_ALL_FILE}"
+  t_ok "WEBUI_PORT=22 is refused (SSH is never guarded)"
 fi
+if grep -qE 'dport \{[^}]*\b11434\b' <<<"${SSH_ONE}"; then
+  t_ok "the other configured port is still guarded when one is 22"
+else
+  t_fail "dropping port 22 also lost the legitimate port"
+fi
+
+# Every configured port = 22 -> no drop rule at all, and the ruleset must
+# still be syntactically valid (an empty '{ }' set would break nft).
+SSH_ALL="$(render_with_env 'WEBUI_PORT=22
+OLLAMA_HOST="127.0.0.1:22"')"
+if grep -q 'tcp dport' <<<"${SSH_ALL}"; then
+  t_fail "a drop rule was emitted when every configured port was 22"
+else
+  t_ok "no drop rule emitted when every configured port is 22"
+fi
+# Kept for the kernel check below, where the NFT array is defined.
+SSH_ALL_FILE="$(mktemp)"
+printf '%s\n' "${SSH_ALL}" > "${SSH_ALL_FILE}"
 
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
