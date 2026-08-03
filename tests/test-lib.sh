@@ -702,15 +702,18 @@ install_is_truncation_safe() {
     echo "install.sh has no main() wrapper — a truncated curl|bash would run a partial installer" >&2
     return 1
   }
-  # The call must be the LAST statement, or the wrapper buys nothing.
-  [[ "$(grep -vE '^\s*(#|$)' "${src}" | tail -1)" == 'main "$@"' ]] || {
-    echo "install.sh does not end with main \"\$@\" — the wrapper is not the last thing that runs" >&2
+  # The call must be the LAST statement, or the wrapper buys nothing. The
+  # trailing 'exit $?' is part of it — see the self-rewrite gate below — and it
+  # costs this one nothing: a truncation landing inside those last few bytes
+  # means everything before the call did arrive, so calling main is right.
+  [[ "$(grep -vE '^\s*(#|$)' "${src}" | tail -1)" == 'main "$@"; exit $?' ]] || {
+    echo "install.sh does not end with main \"\$@\"; exit \$? — the wrapper is not the last thing that runs" >&2
     return 1
   }
   # And nothing may execute at top level between the wrapper and the call.
   awk '/^main\(\) \{/ { seen = 1 }
        seen && /^\}/   { closed = 1; next }
-       closed && !/^[[:space:]]*(#|$)/ && !/^main "\$@"$/ { bad = 1 }
+       closed && !/^[[:space:]]*(#|$)/ && !/^main "\$@"; exit \$\?$/ { bad = 1 }
        END { exit bad }' "${src}" || {
     echo "install.sh runs something at top level after main() — a partial download could reach it" >&2
     return 1
@@ -3036,6 +3039,43 @@ every_advised_flag_is_real() {
 }
 check "every flag we tell a human to run is one that script documents" \
   every_advised_flag_is_real
+
+echo "# a script that rewrites its own file must not let bash read on"
+# bash reads a script incrementally from an open fd. update.sh fast-forwards
+# the checkout it is running from, and install.sh hard-resets it; either can
+# replace the file mid-run, and when main returns bash reads whatever now sits
+# at its old byte offset. Measured with a 7961-byte stand-in: it executed a
+# fragment of a comment in the replacement and exited 127 — right after the
+# update had succeeded and said so. Ending the line with 'exit $?' means both
+# commands come from one parse and there is no next read; a separate 'exit'
+# line would be read at that same stale offset and never run.
+self_rewriting_scripts_exit_explicitly() {
+  local f rewriters=() last
+  for f in "${REPO}"/*.sh; do
+    if grep -qE 'git .*(merge --ff-only|reset --hard)' "${f}"; then
+      rewriters+=("${f}")
+    fi
+  done
+  # Assert the search found something, so a regex that quietly stops matching
+  # cannot pass as "nothing to check".
+  (( ${#rewriters[@]} >= 2 )) || {
+    printf 'expected install.sh and update.sh to be found, got %s\n' "${#rewriters[@]}" >&2
+    return 1
+  }
+  for f in "${rewriters[@]}"; do
+    last="$(tail -1 "${f}")"
+    # Exact, because SAME LINE is the entire property. An 'exit $?' on the
+    # next line satisfies "the file ends with an exit" and fixes nothing: that
+    # line is read at the stale offset too, and never runs. The first version
+    # of this check looked for the substring and passed on exactly that.
+    [[ "${last}" == 'main "$@"; exit $?' ]] || {
+      printf '%s can replace itself mid-run but ends with: %s\n' "${f##*/}" "${last}" >&2
+      return 1
+    }
+  done
+}
+check "install.sh and update.sh stop bash reading a file they replaced" \
+  self_rewriting_scripts_exit_explicitly
 
 echo
 if (( FAILED > 0 )); then

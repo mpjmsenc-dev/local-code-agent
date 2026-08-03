@@ -134,4 +134,15 @@ main() {
   fi
 }
 
-main "$@"
+# 'exit $?' on the SAME line as the call, not the next one.
+#
+# The merge above can replace THIS file — an update that changes update.sh
+# does exactly that — and bash reads a script incrementally from an open fd.
+# When main returns, bash reads whatever now sits at its old byte offset in
+# the new file. Measured: with a longer replacement it executed a fragment of
+# a comment line and exited 127, immediately after printing "Update complete
+# and verified". A cron'd update would have reported failure for a success.
+#
+# A separate 'exit' line would be read at that same stale offset and never
+# run. Both commands have to come out of one parse, so there is no next read.
+main "$@"; exit $?

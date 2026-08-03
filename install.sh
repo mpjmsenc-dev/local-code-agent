@@ -118,4 +118,9 @@ main() {
   info "Phone access   : sudo tailscale up   (then see ${INSTALL_DIR}/docs/PHONE.md)"
 }
 
-main "$@"
+# Same one-line exit as update.sh, for the same reason: re-running this
+# installer against an existing checkout does 'git reset --hard', and if you
+# ran it as ${INSTALL_DIR}/install.sh that rewrites the file bash is still
+# reading. Piped from curl there is no file to rewrite, but the on-disk case
+# is the one people reach for when re-installing.
+main "$@"; exit $?
