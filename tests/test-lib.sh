@@ -605,6 +605,31 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
+# The self-test's 4th check was "does the HTTP port answer". The only real bug
+# report ever filed against this project was a box where Ollama, the model,
+# aider, Tailscale and the WebUI were all fine and the ASSISTANT was wrong —
+# so this test would have printed "SELF-TEST PASSED — your stack works
+# end-to-end" to the person filing it. That is the worst thing a test can do:
+# vouch for the exact thing that is broken.
+selftest_checks_the_live_prompt() {
+  awk '/step "4\/4 Open WebUI"/ { seen = 1 }
+       seen && /DEFAULT_MODEL_PARAMS|webui_drift/ { found = 1 }
+       END { exit !found }' "${REPO}/scripts/selftest.sh" || {
+    echo "selftest.sh never checks which assistant prompt the chat app is running" >&2
+    return 1
+  }
+  # ...and an unreadable value must not be reported as a pass. "Cannot look"
+  # and "fine" are different answers, and this file already learned that the
+  # hard way for docker probes.
+  grep -q 'skipped, not passed' "${REPO}/scripts/selftest.sh" || {
+    echo "selftest.sh does not distinguish 'could not check' from 'passed'" >&2
+    return 1
+  }
+}
+check "'lca test' checks the chat app's assistant prompt is current" \
+  selftest_checks_the_live_prompt
+
 echo "# a restore replaces .env wholesale — the system must be reconciled with it"
 # Every other member of the applied-settings class was found by someone editing
 # one key. Restore changes ALL of them at once, and nothing in it re-rendered

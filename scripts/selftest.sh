@@ -10,7 +10,9 @@
 #   1. Ollama API answers
 #   2. the model produces a real generation (inference works, RAM fits)
 #   3. aider -> litellm -> Ollama makes a real request from a scratch project
-#   4. Open WebUI answers its health probe (when enabled)
+#   4. Open WebUI answers its health probe AND carries this repo's assistant
+#      prompt (a stale one is why the only real bug report ever filed here
+#      would have seen every other check pass)
 #
 # Non-mutating: it pulls nothing, edits no .env, and cleans up its scratch repo.
 # Exit 0 only if every non-skipped check passed.
@@ -105,6 +107,21 @@ if [[ "${ENABLE_WEBUI}" != "true" || "${SKIP_DOCKER}" == "true" ]]; then
   info "Open WebUI disabled (ENABLE_WEBUI=${ENABLE_WEBUI}, SKIP_DOCKER=${SKIP_DOCKER}) — skipping."
 elif webui_responds; then
   p_pass "Open WebUI healthy at $(webui_url) (reach it privately over Tailscale)"
+  # "Healthy" has meant "the HTTP port answers". The only real report ever
+  # filed against this project was a stack where every infrastructural check
+  # passed and the ASSISTANT was wrong — so this test would have printed
+  # "works end-to-end" to the person filing the bug. The assistant's own
+  # instructions are baked into the container at creation, so a repo update
+  # that fixes its behaviour does not reach a running one until it is rebuilt.
+  SELFTEST_LIVE_PROMPT="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
+  if [[ -z "${SELFTEST_LIVE_PROMPT}" ]]; then
+    # Cannot look is not the same as fine. Say which it was.
+    info "could not read the chat app's assistant prompt (no docker access here?) — that check was skipped, not passed"
+  elif webui_drift | grep -q SYSTEM_PROMPT; then
+    p_fail "the chat app is running an OLDER assistant prompt than this repo's — the chat keeps its previous behaviour, including anything an update was meant to fix. Apply it with: sudo ${REPO_ROOT}/bin/lca apply"
+  else
+    p_pass "the chat app carries this repo's assistant prompt (not a stale copy)"
+  fi
 else
   p_fail "Open WebUI not answering at $(webui_url)/health — check: ${REPO_ROOT}/webui.sh status"
 fi
