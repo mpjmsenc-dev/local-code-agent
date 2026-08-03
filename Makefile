@@ -10,13 +10,14 @@
 #   make dry-run  scripts/tune.sh --dry-run (detection only, changes nothing)
 #   make check    ./check-system.sh (full health check; degrades gracefully)
 #   make smoke    scripts/selftest.sh (live end-to-end round-trip on this box)
+#   make bench    measure the assistant's system prompt against the real model
 #   make hooks    install the pre-push git hook (runs `make gates` before push)
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
 SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*)
 
-.PHONY: gates lint syntax test dry-run check smoke hooks help
+.PHONY: gates lint syntax test dry-run check smoke bench hooks help
 .DEFAULT_GOAL := help
 
 gates: syntax lint test ## Everything CI gates on, locally
@@ -43,6 +44,9 @@ check: ## Full system health check
 
 smoke: ## Live end-to-end acceptance test on this machine (Ollama + model + aider + WebUI)
 	./scripts/selftest.sh
+
+bench: ## Measure the assistant's system prompt against the real model (minutes, not seconds)
+	./scripts/prompt-bench.sh
 
 hooks: ## Install the pre-push gate hook (git runs `make gates` before every push)
 	git config core.hooksPath .githooks

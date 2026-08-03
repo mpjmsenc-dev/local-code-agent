@@ -605,6 +605,30 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# the Makefile's header comment and its real targets must agree"
+# The header lists targets by hand; 'make help' derives them from the '##'
+# comments. Two sources for one fact, and adding 'bench' meant editing both —
+# the kind of pair that silently diverges and leaves the header describing a
+# target that no longer exists, or hiding one that does.
+makefile_header_matches_targets() {
+  local real listed stray
+  # Real targets: anything with a '## ' help string, which is what make help shows.
+  real="$(grep -oE '^[a-z-]+:.*## ' "${REPO}/Makefile" | cut -d: -f1 | sort -u)"
+  # Listed: the 'make <target>' lines in the header comment block.
+  listed="$(grep -oE '^#   make [a-z-]+' "${REPO}/Makefile" \
+              | awk '{print $3}' | sort -u)"
+  [[ -n "${real}" && -n "${listed}" ]] || {
+    echo "could not read targets out of the Makefile" >&2; return 1
+  }
+  stray="$(comm -3 <(printf '%s\n' "${real}") <(printf '%s\n' "${listed}"))"
+  [[ -z "${stray}" ]] || {
+    printf 'the Makefile header and its real targets disagree:\n%s\n' "${stray}" >&2
+    return 1
+  }
+}
+check "the Makefile documents exactly the targets it has" \
+  makefile_header_matches_targets
+
 echo "# the README's file tree must list every script that exists"
 # It had drifted by five: apply.sh, ask.sh, logs.sh, speed.sh and motd.sh were
 # all shipped, all user-facing, and none of them appeared in the tree a reader
