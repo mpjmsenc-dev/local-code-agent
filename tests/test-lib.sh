@@ -555,6 +555,29 @@ handover_recipe_actually_runs() {
 }
 check "the handover recipe runs in a home that has no project directory yet" \
   handover_recipe_actually_runs
+# The recipe now exists in three places: the prompt, docs/PHONE.md and
+# docs/TROUBLESHOOTING.md. Three copies of a command line is how a doc comes to
+# teach something that no longer works — and this exact line already shipped
+# broken once. Any doc line SHAPED like the recipe is claiming to be it, so it
+# must be byte-identical to what the prompt actually emits. A doc that does not
+# mention it at all is free to stay silent.
+docs_show_the_prompt_recipe() {
+  local want line stale=0
+  want="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1 \
+            | sed 's/^[[:space:]]*//')"
+  [[ -n "${want}" ]] || { echo "the prompt emits no recipe at all" >&2; return 1; }
+  while IFS= read -r line; do
+    if [[ -n "${line}" && "${line}" != "${want}" ]]; then
+      printf 'a doc teaches a recipe the prompt does not emit:\n  doc:    %s\n  prompt: %s\n' \
+        "${line}" "${want}" >&2
+      stale=1
+    fi
+  done < <(grep -rhE "${HANDOVER_LINE}" "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null \
+             | sed 's/^[[:space:]]*//' || true)
+  return "${stale}"
+}
+check "every doc that shows the handover recipe shows the real one" \
+  docs_show_the_prompt_recipe
 # Naming the command is not the same as getting it said, and the gap between
 # those two was measured rather than guessed. Against the real 3b model — the
 # rung a base 8 GB droplet runs — on the user's own request ("build me a whole
