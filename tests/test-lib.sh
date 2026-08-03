@@ -610,6 +610,53 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# install.sh is piped into bash — a partial download must do nothing"
+# It is advertised as 'curl -fsSL ... | bash', which streams the file and runs
+# each statement as it arrives. A connection dropping part-way would otherwise
+# execute a PARTIAL installer: far enough to install git and create the target
+# directory, not far enough to clone or hand over to setup.sh, and it would
+# leave that half-state behind without an error. Wrapped in main() called on
+# the last line, a truncated download never reaches the call.
+install_is_truncation_safe() {
+  local src="${REPO}/install.sh"
+  grep -qE '^main\(\) \{' "${src}" || {
+    echo "install.sh has no main() wrapper — a truncated curl|bash would run a partial installer" >&2
+    return 1
+  }
+  # The call must be the LAST statement, or the wrapper buys nothing.
+  [[ "$(grep -vE '^\s*(#|$)' "${src}" | tail -1)" == 'main "$@"' ]] || {
+    echo "install.sh does not end with main \"\$@\" — the wrapper is not the last thing that runs" >&2
+    return 1
+  }
+  # And nothing may execute at top level between the wrapper and the call.
+  awk '/^main\(\) \{/ { seen = 1 }
+       seen && /^\}/   { closed = 1; next }
+       closed && !/^[[:space:]]*(#|$)/ && !/^main "\$@"$/ { bad = 1 }
+       END { exit bad }' "${src}" || {
+    echo "install.sh runs something at top level after main() — a partial download could reach it" >&2
+    return 1
+  }
+}
+check "install.sh runs nothing if the curl|bash download is truncated" \
+  install_is_truncation_safe
+# A clone can exit 0 and still not be this project — wrong fork in
+# LCA_REPO_URL, or an LCA_BRANCH predating the code. Observed by accident here
+# against a stale local 'main' holding only a README: git succeeded, the
+# installer said "Clone complete", and there was no setup.sh to run.
+install_verifies_the_clone() {
+  # The EXISTENCE TEST, not any mention of setup.sh. The first version grepped
+  # for the path and passed with the guard replaced by 'true', because the same
+  # path appears in the failure message and in the closing "run it yourself"
+  # hint. A grep that matches the thing you are describing rather than the
+  # thing you are testing is the recurring way a gate here stops gating.
+  grep -qE '\[\[ -f "\$\{INSTALL_DIR\}/setup\.sh" \]\]' "${REPO}/install.sh" || {
+    echo "install.sh trusts git's exit status instead of checking it got the project" >&2
+    return 1
+  }
+}
+check "install.sh checks the clone actually contains the project" \
+  install_verifies_the_clone
+
 echo "# 'lca ask' must bound its TOTAL context, not just each piece of it"
 # Every context source in ask.sh is capped, each with a comment saying it is so
 # that one source "cannot blow the whole context window". Nothing capped the
