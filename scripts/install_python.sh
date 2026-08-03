@@ -29,7 +29,10 @@ main() {
 
   local venv
   venv="$(venv_dir)"
-  if [[ -x "${venv}/bin/python" ]]; then
+  # venv_python(), not "${venv}/bin/python": the helper exists to be the one
+  # place that knows the interpreter's path, and building it inline here is how
+  # it silently stops being that.
+  if [[ -x "$(venv_python)" ]]; then
     info "Virtualenv already exists at ${venv} — reusing it."
   else
     info "Creating virtualenv at ${venv}..."

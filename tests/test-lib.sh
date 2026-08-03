@@ -605,6 +605,33 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# the venv interpreter's path must come from venv_python(), not be re-typed"
+# venv_python() existed, was called by nothing, and two files built the same
+# string by hand instead — install_python.sh deciding whether to reuse a venv,
+# and check-system.sh deciding whether one exists. Harmless today and exactly
+# the shape that has bitten this repo repeatedly: the helper is the single
+# source of truth right up until the moment it is not, and then it is updated
+# while the hand-rolled copies quietly keep the old layout.
+venv_python_is_the_only_source() {
+  local hits
+  # The needle is written '/bin/pyth[o]n' so this line does not match itself.
+  # A whole-file scan for a literal always finds the scanner — the same trap
+  # that made the ci.yml gate flag its own explanatory comment, and that
+  # tests/long-wait.awk hit before either. Excluding this file wholesale would
+  # work and would also blind the check to the rest of it.
+  hits="$(grep -rn '/bin/pyth[o]n' --include='*.sh' --include='lca' \
+            "${REPO}" 2>/dev/null \
+            | grep -v '/\.venv/' \
+            | grep -v 'venv_python()' \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these build the venv interpreter path by hand instead of calling venv_python():\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "nothing re-types the venv interpreter path" venv_python_is_the_only_source
+
 echo "# the README's privacy claim about the inbound guard must stay true"
 # README's "How your services are kept private" states the guard is re-applied
 # "whenever WebUI is (re)created". That is a security claim, and it rests on a

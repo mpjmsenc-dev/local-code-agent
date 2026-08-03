@@ -86,7 +86,7 @@ else
 fi
 VENV_PATH="$(venv_dir)"
 AIDER="$(aider_bin)"
-if [[ -x "${VENV_PATH}/bin/python" ]]; then
+if [[ -x "$(venv_python)" ]]; then
   p_pass "virtualenv exists at ${VENV_PATH}"
 else
   p_fail "virtualenv missing at ${VENV_PATH} (run scripts/install_python.sh)"
