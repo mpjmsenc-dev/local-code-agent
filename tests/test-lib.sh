@@ -478,6 +478,11 @@ check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
 # ~4 characters per token is rough but stable for English prose, and the point
 # is a ceiling, not an estimate. 15% of 4096 leaves real headroom while making
 # a doubling impossible to land quietly.
+#
+# The heuristic has since been checked against the real tokenizer rather than
+# left as an assertion: the shipped prompt is 2,255 characters, this estimates
+# 563 tokens, and ollama reports prompt_eval_count=559 for it on the 3b model.
+# Within one percent, in the safe direction.
 prompt_fits_its_budget() {
   local chars tokens cap
   chars="$(lca_system_prompt | wc -c)"

@@ -61,9 +61,10 @@ history to stay within budget instead of letting Ollama silently drop it.
 symptom is confusing. Open WebUI sends the whole conversation back every turn,
 so a long enough chat overflows the window — and Ollama drops from the *front*,
 which is where the assistant's instructions live. Measured on the 3b rung
-(4096 tokens): with ~3,000 tokens of history it answers "which command writes
-files?" with `lca`; at ~6,000 it answers *"typically `echo`…"*. Same model,
-same question — it had simply stopped being told what it is.
+(4096 tokens), four runs at each size: with ~3,000 tokens of history it answers
+"which command writes files?" with `lca` **4 times out of 4**; at ~6,000 it
+answers *"typically `echo`…"* — **0 out of 4** still knew. Same model, same
+question. It had simply stopped being told what it is.
 
 So if the chat starts behaving like a generic model halfway through a long
 conversation, **start a new chat**. Nothing is broken and nothing needs
