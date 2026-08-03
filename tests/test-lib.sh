@@ -605,6 +605,46 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# 'lca ask' must bound its TOTAL context, not just each piece of it"
+# Every context source in ask.sh is capped, each with a comment saying it is so
+# that one source "cannot blow the whole context window". Nothing capped the
+# sum, and the caps add up to ~54,000 characters — roughly 13,500 tokens —
+# against the 4,096-token window the 3b rung runs with on a base droplet.
+# Piped input alone (12,000 chars) already exceeded the usable budget there.
+#
+# Ollama truncates an over-long prompt from the FRONT, which is where the
+# system prompt sits. So the failure mode is the assistant quietly losing its
+# own instructions and answering like a stock model — on
+# 'lca logs | lca ask "why did this fail?"', which README.md and
+# TROUBLESHOOTING.md both recommend as the way to diagnose a broken box.
+ask_bounds_the_whole_context() {
+  local src="${REPO}/scripts/ask.sh"
+  # The budget must derive from the model's window and account for the system
+  # prompt, not be a constant someone guessed.
+  grep -q 'budget_chars=' "${src}" || {
+    echo "ask.sh computes no total context budget" >&2; return 1
+  }
+  grep -qE 'budget_chars=.*ctx_tokens' "${src}" || {
+    echo "ask.sh's context budget ignores the model's context length" >&2; return 1
+  }
+  grep -qE 'budget_chars=.*\$\{#system\}' "${src}" || {
+    echo "ask.sh's context budget ignores the size of the system prompt" >&2; return 1
+  }
+  # It must actually trim...
+  grep -qE 'context="\$\{context: -budget_chars\}"' "${src}" || {
+    echo "ask.sh never trims the context to its budget" >&2; return 1
+  }
+  # ...and never silently: losing context changes the answer.
+  awk '/if \(\( \$\{#context\} > budget_chars \)\); then/ { inb = 1 }
+       inb && /warn / { found = 1 }
+       inb && /^  fi$/ { exit }
+       END { exit !found }' "${src}" || {
+    echo "ask.sh trims the context without telling anyone" >&2; return 1
+  }
+}
+check "'lca ask' bounds its total context and says when it trims" \
+  ask_bounds_the_whole_context
+
 echo "# the venv interpreter's path must come from venv_python(), not be re-typed"
 # venv_python() existed, was called by nothing, and two files built the same
 # string by hand instead — install_python.sh deciding whether to reuse a venv,

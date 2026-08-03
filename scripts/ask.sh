@@ -109,6 +109,34 @@ main() {
   # Same system prompt as the phone chat — one assistant, two doors.
   local system prompt
   system="$(lca_system_prompt)"
+
+  # Each piece above is capped so that no single one "can blow the whole
+  # context window". Nothing capped the TOTAL, and the caps sum to ~54,000
+  # characters — roughly 13,500 tokens — against the 4,096-token window the 3b
+  # rung runs with on a base droplet. Ollama truncates an over-long prompt from
+  # the FRONT, which is where the system prompt sits, so the failure mode is
+  # the assistant silently losing its own instructions and answering like a
+  # stock model. On 'lca logs | lca ask "why did this fail?"' — recommended by
+  # both the README and TROUBLESHOOTING.md — piped input alone already reached
+  # the edge of that window before anything else was added.
+  #
+  # Budget: the window, less the reply, less the system prompt, less a margin
+  # for the question and the chat scaffolding. ~4 characters per token, the
+  # same rough figure the prompt-size gate uses. The tail is kept because the
+  # sections are appended oldest-first, so piped input — the thing the user
+  # just produced — is last and survives.
+  local ctx_tokens reply_tokens budget_chars
+  ctx_tokens="${OLLAMA_CONTEXT_LENGTH:-8192}"
+  [[ "${ctx_tokens}" =~ ^[0-9]+$ ]] || ctx_tokens=8192
+  reply_tokens="${LCA_ASK_TOKENS:-512}"
+  [[ "${reply_tokens}" =~ ^[0-9]+$ ]] || reply_tokens=512
+  budget_chars=$(( (ctx_tokens - reply_tokens) * 4 - ${#system} - 400 ))
+  (( budget_chars > 2000 )) || budget_chars=2000
+  if (( ${#context} > budget_chars )); then
+    warn "Context is bigger than ${MODEL_NAME}'s ${ctx_tokens}-token window — keeping the last ${budget_chars} characters so the assistant does not lose its own instructions. (Pipe less, or raise OLLAMA_CONTEXT_LENGTH in .env and run: sudo lca apply.)"
+    context="${context: -budget_chars}"
+  fi
+
   prompt="${context}${question}"
 
   local payload
