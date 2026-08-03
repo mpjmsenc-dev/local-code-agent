@@ -3040,6 +3040,31 @@ every_advised_flag_is_real() {
 check "every flag we tell a human to run is one that script documents" \
   every_advised_flag_is_real
 
+echo "# the 'lca' command is a symlink, and a moved checkout leaves it dangling"
+# Every doc and message here says "type lca". Move the checkout and the symlink
+# dangles — including 'lca check', which is exactly what someone reaches for
+# when the stack seems broken. Real symlinks, because the whole question is
+# what readlink and -x do with them.
+LINKS="${SANDBOX}/links"
+mkdir -p "${LINKS}/real/bin" "${LINKS}/other/bin"
+printf '#!/usr/bin/env bash\n' > "${LINKS}/real/bin/lca"
+printf '#!/usr/bin/env bash\n' > "${LINKS}/other/bin/lca"
+chmod +x "${LINKS}/real/bin/lca" "${LINKS}/other/bin/lca"
+ln -s "${LINKS}/real/bin/lca"  "${LINKS}/ok"
+ln -s "${LINKS}/other/bin/lca" "${LINKS}/foreign"
+ln -s "${LINKS}/gone/bin/lca"  "${LINKS}/moved"     # whole checkout renamed
+ln -s "${LINKS}/real/bin/nope" "${LINKS}/deleted"   # just the file removed
+printf 'not a link\n' > "${LINKS}/plain"
+state_of() { lca_link_state "${LINKS}/$1" "${LINKS}/real/bin/lca"; }
+check "a link into this checkout is ok"          test "$(state_of ok)"      = ok
+check "a renamed checkout reads as broken"       test "$(state_of moved)"   = broken
+check "a deleted target reads as broken too"     test "$(state_of deleted)" = broken
+check "a link into another checkout is foreign"  test "$(state_of foreign)" = foreign
+check "a real file at that path is not ours"     test "$(state_of plain)"   = other
+check "nothing there at all is absent"           test "$(state_of nowhere)" = absent
+lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
+check "check-system.sh reports on the lca command" lca_link_is_reported
+
 echo "# a script that rewrites its own file must not let bash read on"
 # bash reads a script incrementally from an open fd. update.sh fast-forwards
 # the checkout it is running from, and install.sh hard-resets it; either can

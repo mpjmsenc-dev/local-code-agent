@@ -214,6 +214,18 @@ if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
     p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: $(reenable_hint local-code-agent-tune.service "sudo ${SCRIPT_DIR}/setup.sh")"
   fi
 fi
+# Every doc, message and banner in this project tells you to type 'lca'. That
+# is a symlink into this checkout, so moving or renaming the directory breaks
+# it — including 'lca check', which is what someone reaches for when the stack
+# seems broken. This copy still runs, so it is the one that can explain.
+LCA_LINK=/usr/local/bin/lca
+case "$(lca_link_state "${LCA_LINK}" "${SCRIPT_DIR}/bin/lca")" in
+  ok)      p_pass "'lca' on PATH runs this checkout" ;;
+  broken)  p_warn "'lca' on PATH points at $(readlink "${LCA_LINK}" 2>/dev/null || echo 'nothing'), which is not there — the lca command is broken (was this checkout moved or renamed?). Fix: sudo ${SCRIPT_DIR}/setup.sh" ;;
+  foreign) p_warn "'lca' on PATH runs $(readlink -f "${LCA_LINK}" 2>/dev/null), a DIFFERENT checkout from this one (${SCRIPT_DIR}) — 'lca check' and this run are not the same code. Fix: sudo ${SCRIPT_DIR}/setup.sh" ;;
+  other)   info "${LCA_LINK} exists but is not a link to a local-code-agent checkout — leaving it alone." ;;
+  *)       info "no 'lca' command on PATH — use ${SCRIPT_DIR}/bin/lca, or install it with: sudo ${SCRIPT_DIR}/setup.sh" ;;
+esac
 # The login banner is the first thing anyone sees on this box, so a broken one
 # misinforms every single SSH. Only a warning: a machine without update-motd
 # works exactly as well, it just greets you with less.

@@ -1099,6 +1099,41 @@ unit_boot_program() {
   printf '%s' "${out}"
 }
 
+# lca_link_state LINK EXPECTED — classify the 'lca' command on PATH.
+#
+# 'lca' is a symlink into a checkout, so moving or renaming that directory
+# leaves it dangling — and the first thing anyone does about a stack that
+# stopped working is type 'lca check', which is then the one command that
+# cannot run. The copy in the checkout still can, so it should say so.
+#
+#   ok       a symlink to EXPECTED
+#   broken   a symlink whose target cannot be executed (the moved checkout)
+#   foreign  a symlink to a different checkout — 'lca check' would run other
+#            code than the health check the reader is looking at right now
+#   other    something else lives at that path; not ours to judge
+#   absent   not installed (a rootless install never creates it)
+lca_link_state() {
+  local link="$1" want="$2" target
+  if [[ -L "${link}" ]]; then
+    # readlink -f fails outright when a NON-final component is missing, which
+    # is exactly the moved-checkout case; -x catches the rest.
+    target="$(readlink -f "${link}" 2>/dev/null || true)"
+    if [[ -z "${target}" || ! -x "${target}" ]]; then
+      printf 'broken'
+    elif [[ "${target}" == "${want}" ]]; then
+      printf 'ok'
+    else
+      printf 'foreign'
+    fi
+    return 0
+  fi
+  if [[ -e "${link}" ]]; then
+    printf 'other'
+    return 0
+  fi
+  printf 'absent'
+}
+
 # reenable_hint UNIT INSTALLER — the command that will actually put UNIT back.
 # 'systemctl enable' can only enable a unit file that exists, and the most
 # likely reason a unit is not enabled is that nothing ever wrote it — so
