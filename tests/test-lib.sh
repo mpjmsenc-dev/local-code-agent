@@ -1079,6 +1079,35 @@ undocumented_settings() { [[ -z "$(comm -23 <(lib_default_keys) <(example_keys))
 unbacked_settings() { [[ -z "$(comm -13 <(lib_default_keys) <(example_keys))" ]]; }
 check "every lib.sh default is documented in .env.example" undocumented_settings
 check "every .env.example key has a lib.sh default" unbacked_settings
+# ...and the two must agree on the VALUE, not merely on the key. Both lists
+# currently match, but nothing held them together, and a divergence is exactly
+# the kind that never reproduces: the box behaves one way with a .env present
+# and another without one, or an install predating a key behaves differently
+# from a fresh one. The comment above says a missing fallback "silently changes
+# behaviour" — a fallback that disagrees with the documented default is the
+# same failure with an extra step.
+example_value() {  # KEY — the value .env.example ships, unquoted, comment-free
+  grep -oE "^$1=.*" "${REPO}/.env.example" | head -1 \
+    | sed -E "s/^$1=//; s/[[:space:]]+#.*\$//; s/^\"//; s/\"\$//"
+}
+defaults_agree_on_values() {
+  local key libval exval mismatch=0
+  while IFS='=' read -r key libval; do
+    [[ -n "${key}" ]] || continue
+    # Key-only parity is the two checks above; here, only shared keys matter.
+    grep -qE "^${key}=" "${REPO}/.env.example" || continue
+    exval="$(example_value "${key}")"
+    if [[ "${libval}" != "${exval}" ]]; then
+      printf 'default disagrees for %s: lib.sh falls back to %q, .env.example ships %q\n' \
+        "${key}" "${libval}" "${exval}" >&2
+      mismatch=1
+    fi
+  done < <(sed -n '/^load_env()/,/^}/p' "${REPO}/scripts/lib.sh" \
+             | sed -nE 's/^[[:space:]]*([A-Z_]+)="\$\{[A-Z_]+:-(.*)\}"$/\1=\2/p')
+  return "${mismatch}"
+}
+check "lib.sh's fallback and .env.example agree on every value" \
+  defaults_agree_on_values
 
 echo "# warm_model() is best-effort and must never fail or block its caller"
 # It runs at the end of the boot oneshot. If it can fail, a warm-up that could
