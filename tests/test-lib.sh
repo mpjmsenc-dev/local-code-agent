@@ -605,6 +605,25 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# a restore replaces .env wholesale — the system must be reconciled with it"
+# Every other member of the applied-settings class was found by someone editing
+# one key. Restore changes ALL of them at once, and nothing in it re-rendered
+# the Ollama drop-in; the chat app container was rebuilt only when the backup
+# happened to contain its volume. So a recovery could complete, report success,
+# and leave the box running settings the user had just replaced — during the
+# one operation whose entire purpose is "put it back how it was".
+restore_reconciles_with_apply() {
+  # Scoped to after the .env restore, so this cannot be satisfied by an
+  # unrelated mention of apply somewhere earlier in the file.
+  awk '/^  # 1\. \.env/ { seen = 1 }
+       seen && /scripts\/apply\.sh/ { found = 1 }
+       END { exit !found }' "${REPO}/restore.sh" || {
+    echo "restore.sh never reconciles the running system with the .env it restored" >&2
+    return 1
+  }
+}
+check "restore.sh applies the .env it just restored" restore_reconciles_with_apply
+
 echo "# the one mechanism that delivers a new prompt to an existing install"
 # Everything about improving the assistant is worthless if an improvement
 # cannot reach a droplet that is already running. Exactly one thing carries it:

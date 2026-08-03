@@ -119,6 +119,22 @@ main() {
     warn "Backup contains no model list — skipping."
   fi
 
+  # A restore replaces .env wholesale, which makes it the single most likely
+  # moment for the running system to disagree with it — and the worst moment to
+  # find that out later. Nothing above re-renders the Ollama drop-in, so a
+  # restored OLLAMA_CONTEXT_LENGTH or OLLAMA_KEEP_ALIVE would not be in effect;
+  # and the chat app container is only rebuilt when the backup happened to
+  # contain its volume, so otherwise it keeps the settings it was created with.
+  #
+  # 'lca apply' is exactly this reconciliation, and it is drift-driven, so
+  # whatever the steps above already handled costs nothing here.
+  step "Reconciling the running system with the restored .env"
+  if "${SCRIPT_DIR}/scripts/apply.sh"; then
+    ok "Restored settings are in effect."
+  else
+    warn "Could not fully apply the restored .env — run: sudo ${SCRIPT_DIR}/bin/lca apply"
+  fi
+
   ok "Restore complete. Verify with: ./check-system.sh"
 }
 

@@ -37,8 +37,16 @@ On a fresh install (after `setup.sh`):
 ./restore.sh path/to/backup.tar.gz
 ```
 
-Restore brings back the WebUI volume and `.env`, then re-pulls the models listed
-in the backup.
+Restore brings back the WebUI volume and `.env`, re-pulls the models listed in
+the backup, and then runs `lca apply` so the restored `.env` is actually **in
+effect** rather than merely on disk.
+
+That last step matters more than it sounds. Some settings are baked into the
+Ollama service and the chat app container when those are created, so putting
+the old `.env` back does not move them on its own — and a restore replaces
+every key at once. Without it a recovery could finish, report success, and
+leave the box running the settings you had just replaced, during the one
+operation whose whole purpose is putting things back how they were.
 
 ## Retention
 
