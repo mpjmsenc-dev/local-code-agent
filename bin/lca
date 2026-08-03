@@ -30,7 +30,7 @@ Usage: lca [command] [args...]
   lca ask -m MODEL "q"    answer with another model just this once
   lca chat                show the chat app's address as a QR code to scan
   lca apply               make the running system match your .env edits
-  lca check               full health check
+  lca check [--quick]     full health check (--quick skips the slow model probe)
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
   lca speed               measure tokens/second and explain what limits it
   lca test                live end-to-end self-test (proves it really works)

@@ -1413,6 +1413,65 @@ update_mentions_restore_on_failure() {
 check "update.sh points at the backup when setup fails" \
   update_mentions_restore_on_failure
 
+echo "# 'lca check --quick' skips the one probe that costs real time"
+# Measured on this box: a full 'lca check' took 242 seconds, of which all but
+# about 3 were one probe — asking the model to generate. setup.sh runs exactly
+# that probe a few steps earlier and dies if it fails, so the final check was
+# paying for it twice on every install and every E2E run in CI.
+quick_flag_documented_in_usage() {
+  local out
+  out="$(bash "${REPO}/check-system.sh" --help 2>&1)" || return 1
+  # A DESCRIBED flag, not merely the token. The first version searched for
+  # '--quick' anywhere in the output and could not fail: the usage line
+  # "Usage: lca check [--quick]" contains it, so deleting the explanation
+  # entirely left the test green. What must stay true is that someone reading
+  # --help learns what the flag does.
+  grep -qE '^[[:space:]]*--quick[[:space:]]+[a-z]' <<<"${out}"
+}
+check "check-system.sh --help explains what --quick does, and exits 0" \
+  quick_flag_documented_in_usage
+# An unknown flag must be refused rather than silently ignored: a typo'd
+# '--quik' that runs the slow path anyway is the failure this whole flag is
+# meant to remove.
+rejects_unknown_flag() {
+  bash "${REPO}/check-system.sh" --definitely-not-a-flag >/dev/null 2>&1
+  (( $? == 2 ))
+}
+check "check-system.sh rejects an unknown flag with exit 2" rejects_unknown_flag
+# The generation probe must sit UNDER the guard, not merely somewhere in the
+# same file. Asserted on the block so that moving the probe out from under the
+# branch fails here even though both strings still appear.
+quick_guards_the_generation_probe() {
+  awk '/\{QUICK\}" == "true" \]\]; then/ { inblock=1; next }
+       inblock && /^# --- / { exit }
+       inblock && /model_responds/ { found=1 }
+       END { exit !found }' "${REPO}/check-system.sh"
+}
+check "the slow generation probe sits under the --quick guard" \
+  quick_guards_the_generation_probe
+# setup.sh must use it — but conditionally. An unconditional --quick would be
+# worse than the duplication it removes: when Ollama is unreachable the smoke
+# test never runs, and this check is then the only thing that would prove
+# inference works at all. So --quick may only ever be reached through the
+# variable that a successful generation sets.
+setup_skips_only_what_it_already_proved() {
+  # The flag is never passed as a literal on the invocation line...
+  ! grep -qE 'check-system\.sh".*--quick' "${REPO}/setup.sh" || return 1
+  # ...it is gated on a variable, which only a real generation sets true...
+  grep -qE '^[[:space:]]*smoke_tested=true$' "${REPO}/setup.sh" || return 1
+  awk '/if model_responds /   { inblock=1; next }
+       inblock && /^[[:space:]]*else/  { exit }
+       inblock && /smoke_tested=true/  { found=1 }
+       END { exit !found }' "${REPO}/setup.sh" || return 1
+  # ...and that variable is what decides the argument.
+  awk '/smoke_tested\}" == "true" \]\]; then/ { inblock=1; next }
+       inblock && /^[[:space:]]*fi$/ { exit }
+       inblock && /--quick/ { found=1 }
+       END { exit !found }' "${REPO}/setup.sh"
+}
+check "setup.sh skips the re-test only when it already proved inference" \
+  setup_skips_only_what_it_already_proved
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

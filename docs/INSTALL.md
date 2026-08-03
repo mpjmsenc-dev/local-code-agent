@@ -47,7 +47,11 @@ shells auto-confirm every prompt, so `./setup.sh </dev/null` is fully unattended
 9. `scripts/install_tailscale.sh` — Tailscale installed; login deferred to you.
 10. Boot services: `local-code-agent-tune.service` (re-tune every boot) and
     `local-code-agent-netmode.service` (netmode persistence).
-11. `./check-system.sh` + a next-steps summary.
+11. `./check-system.sh --quick` + a next-steps summary. `--quick` because step 7
+    already made the model generate for real and aborted the install if it
+    could not — repeating that probe here cost up to a minute and proved
+    nothing new. If step 7 was skipped (Ollama unreachable), the full check
+    runs instead, so inference is never assumed to work untested.
 
 Re-running `./setup.sh` at any time is safe — it reuses/repairs instead of
 duplicating, and resumes cleanly after an interrupted install.
@@ -60,7 +64,9 @@ tailscale ip -4            # your private address
 ```
 
 Phone setup: [PHONE.md](PHONE.md). Daily usage: `run-agent.sh` in any project
-directory. Health: `./check-system.sh`.
+directory. Health: `./check-system.sh` — most of its runtime is one probe that
+asks the model to generate, so add `--quick` when you only want the fast checks
+(services, ports, disk, config drift) and already know inference works.
 
 ## Local hypervisor notes (VMware / Proxmox / KVM)
 

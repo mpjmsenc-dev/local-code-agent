@@ -30,6 +30,10 @@ main() {
   # must NOT print when something essential (the model, the final check)
   # failed — otherwise they proceed onto a broken stack.
   local setup_ok=true
+  # Set only by a generation that actually succeeded below. The final health
+  # check re-runs the same probe, which costs up to a minute on CPU; it is
+  # skipped only when we have already proved inference works ourselves.
+  local smoke_tested=false
 
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
@@ -57,6 +61,7 @@ main() {
     info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
     if model_responds "${MODEL_NAME}"; then
       ok "Model '${MODEL_NAME}' generates text — inference works."
+      smoke_tested=true
     else
       die "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
     fi
@@ -105,7 +110,19 @@ main() {
   "${SCRIPT_DIR}/netmode.sh" harden || warn "Could not apply the inbound guard now — it will be applied on the next boot."
 
   step "Final system check"
-  if "${SCRIPT_DIR}/check-system.sh"; then
+  # Every probe except one is instant. The exception — asking the model to
+  # generate — is the same test the smoke test above already ran and died on
+  # if it failed, so repeating it here buys nothing and costs the installer up
+  # to a minute of apparent hang on a CPU box.
+  #
+  # Conditional on purpose. If Ollama was unreachable the smoke test never
+  # ran, and this is then the only thing that would prove inference works at
+  # all — a --quick there would report a healthy stack nobody had tested.
+  local -a check_args=()
+  if [[ "${smoke_tested}" == "true" ]]; then
+    check_args+=( --quick )
+  fi
+  if "${SCRIPT_DIR}/check-system.sh" ${check_args[@]+"${check_args[@]}"}; then
     ok "All system checks passed."
   else
     warn "Some system checks did not pass — review the summary above (docs/TROUBLESHOOTING.md helps)."
