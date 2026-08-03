@@ -55,7 +55,7 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
    print the exact address. Create the **first** account (it becomes admin).
    Your model is already selected, so you can just start typing.
-4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, re-run `scripts/install_webui.sh`.
+4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, then `sudo lca apply`.
 
 Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
 
@@ -171,7 +171,7 @@ offline because the models are local.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
 - Create the **first** WebUI account promptly, then set
-  `WEBUI_ENABLE_SIGNUP=false` and re-run `scripts/install_webui.sh`.
+  `WEBUI_ENABLE_SIGNUP=false` and run `sudo lca apply`.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
   internet, and keep `OLLAMA_HOST` on loopback.
 - Verify the posture any time with `./check-system.sh` and
@@ -197,8 +197,11 @@ lca                 # starts aider on the local model, right here
 | `lca logs` | recent logs from Ollama, the chat app and the installer |
 | `lca speed` | measure tokens/second and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
-| `lca offline` / `lca online` | internet kill switch (needs sudo) |
+| `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
 | `lca model <name>` | switch models |
+| `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
+| `lca backup` / `lca restore` | take a backup now / put one back |
+| `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
 
 Quick answers without leaving what you are doing:
 
@@ -267,8 +270,10 @@ Created from `.env.example` on first run. All keys:
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
+| `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
 | `VENV_NAME` | `.venv` | Venv directory name (inside this repo) |
+| `SKIP_TAILSCALE` | `false` | Skip Tailscale. Phone access is then over a private network you provide; the inbound guard still limits the WebUI port to loopback and `tailscale0` |
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
 | `ENABLE_WEBUI` | `true` | Install/run Open WebUI |
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |

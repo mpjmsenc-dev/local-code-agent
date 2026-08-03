@@ -635,6 +635,56 @@ help_commands_all_real() {
 }
 check "every command in 'lca help' is dispatched by bin/lca" help_commands_all_real
 
+echo "# the README's command table must not omit a command 'lca help' offers"
+# The table is what someone scans to learn the tool, and it had drifted: five
+# commands were missing, including 'lca backup' and 'lca restore' — the entire
+# safety net was invisible to anyone reading the README. Same class as the
+# 'lca help' -> dispatch check above, one layer further out.
+# 'help' is excluded: a help command that documents itself in the table it
+# prints is noise, not a contract.
+readme_documents_every_command() {
+  local sub bad=0 documented
+  documented="$(sed -n '/^| Command | Does |/,/^$/p' "${REPO}/README.md" \
+                 | grep -oE '`lca [a-z]+' | sed 's/^`lca //' | sort -u)"
+  while read -r sub; do
+    [[ -n "${sub}" && "${sub}" != "help" ]] || continue
+    grep -qx -- "${sub}" <<<"${documented}" || {
+      printf "'lca %s' is in 'lca help' but missing from the README table\\n" "${sub}" >&2
+      bad=1
+    }
+  done < <("${REPO}/bin/lca" help 2>/dev/null | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p' | sort -u)
+  # A table that matched nothing would "pass" without checking anything.
+  [[ -n "${documented}" ]] || { echo "no command table found in README.md" >&2; return 1; }
+  return "${bad}"
+}
+check "the README table documents every 'lca help' command" \
+  readme_documents_every_command
+
+echo "# every setting in .env.example must be documented in the README"
+# Same class as the command table above. This one caught its own author:
+# SKIP_TAILSCALE was added to .env.example and lib.sh in an earlier change
+# tonight and never reached the README's settings table, so the only way to
+# discover it was to read .env.example — which is precisely what the table
+# exists to save people from.
+readme_documents_every_setting() {
+  local key bad=0 documented
+  # The backtick is built rather than written literally: a matched PAIR inside
+  # single quotes reads to ShellCheck as a command substitution (SC2016).
+  local bt; bt="$(printf '\140')"
+  documented="$(grep -oE "^\| ${bt}[A-Z_]+${bt}" "${REPO}/README.md" | tr -d "|${bt} " | sort -u)"
+  [[ -n "${documented}" ]] || { echo "no settings table found in README.md" >&2; return 1; }
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qx -- "${key}" <<<"${documented}" || {
+      printf '%s is in .env.example but missing from the README settings table\n' "${key}" >&2
+      bad=1
+    }
+  done < <(grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u)
+  return "${bad}"
+}
+check "the README documents every .env.example setting" \
+  readme_documents_every_setting
+
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
 SUGGESTIONS="${REPO}/config/prompt-suggestions.json"
 check "prompt-suggestions.json exists" test -r "${SUGGESTIONS}"
@@ -965,6 +1015,22 @@ apply_summary_admits_unchecked() {
 }
 check "apply never claims a clean bill for an unchecked component" \
   apply_summary_admits_unchecked
+
+echo "# 'lca apply' must move Ollama before rebuilding the chat app"
+# The container bakes in OLLAMA_BASE_URL at creation. docs/TROUBLESHOOTING.md
+# now tells people to fix a moved OLLAMA_HOST with 'lca apply', so Ollama must
+# be listening on the new port before the container is rebuilt to point at it.
+# Reversed, the chat app spends the gap talking to a port nothing answers on —
+# the exact failure this command was written to end. Silent if broken: the end
+# state is still correct, only the window between is wrong.
+apply_moves_ollama_first() {
+  awk '/^main\(\) \{/ {inmain=1}
+       inmain && /^  apply_ollama$/ {o=NR}
+       inmain && /^  apply_webui$/  {w=NR}
+       END {exit !(o > 0 && w > 0 && o < w)}' "${APPLY}"
+}
+check "apply re-points Ollama before it rebuilds the chat app" \
+  apply_moves_ollama_first
 # A missing component is not a matching one.
 distinguishes_absent_from_matching() {
   grep -qF 'webui_container_exists' "${APPLY}"
@@ -1040,6 +1106,52 @@ signup_reported_by_check() {
   grep -qF 'WEBUI_ENABLE_SIGNUP' "${REPO}/check-system.sh"
 }
 check "check-system.sh reports the signup setting" signup_reported_by_check
+
+echo "# every drift message must name the one command that fixes drift"
+# 'lca apply' exists precisely so nobody has to remember which script applies
+# which setting. It was added, documented in TROUBLESHOOTING.md — and then the
+# place users actually MEET drift, the output of 'lca check' and
+# 'webui.sh status', went on naming individual scripts. Seven messages, seven
+# different things to remember, for a problem that now has one answer.
+drift_messages_name_apply() {
+  local bad=0 line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    grep -qF 'lca apply' <<<"${line}" || {
+      printf 'a drift message does not point at "lca apply":\n  %s\n' "${line:0:120}" >&2
+      bad=1
+    }
+  done < <(grep -hE '(warn|p_warn) ".*[Dd]rift' "${REPO}/check-system.sh" "${REPO}/webui.sh")
+  return "${bad}"
+}
+check "every drift message points at 'lca apply'" drift_messages_name_apply
+
+echo "# no document may tell you to re-run an installer to apply a .env change"
+# 'lca apply' replaced a lookup table of "which script applies which setting",
+# but seven instructions across README.md, YOUR-TURN.md, PHONE.md and
+# TROUBLESHOOTING.md still named the individual installers. One of them was
+# outright incomplete: "change OLLAMA_HOST to another port and re-run
+# scripts/install_ollama.sh" renders the drop-in and never touches the chat
+# app container, which is exactly how the phone came to be pointed at a port
+# nothing listens on. 'lca apply' does both, so the advice is now correct as
+# well as shorter.
+# Naming an installer for what it IS (docs/INSTALL.md) is fine; this only
+# forbids naming it as the way to APPLY an edit.
+no_installer_as_apply_instruction() {
+  local hits
+  # printf for the backtick: a matched PAIR inside single quotes reads to
+  # ShellCheck as a command substitution (SC2016). Predicted this in the last
+  # commit and then wrote it literally anyway — hence the note here.
+  local bt; bt="$(printf '\140')"
+  hits="$(grep -rn "re-run ${bt}scripts/install_\|re-running ${bt}scripts/install_" \
+            "${REPO}"/README.md "${REPO}"/docs/*.md 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these tell the reader to re-run an installer instead of lca apply:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no doc names an installer as the way to apply a .env edit" \
+  no_installer_as_apply_instruction
 
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently
