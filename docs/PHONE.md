@@ -94,6 +94,31 @@ environment. So if you edit the assistant's system prompt in **Admin Panel →
 Settings**, that is where it lives from then on, and re-running the installer
 will not overwrite it.
 
+## What the chat can and cannot do
+
+The chat is a **text box with no filesystem**. It cannot create files, run
+commands, or see your project — so "build me a whole app" is the one request it
+genuinely cannot fulfil, no matter which model you run. Asked anyway, it will
+say so and point you at the command that can.
+
+That command is bare **`lca`** (aider), in a terminal, inside your project
+directory:
+
+```bash
+cd ~/my-project && lca
+```
+
+aider reads and writes real files and makes commits, on the same local model.
+Note `lca ask` is *not* it — that is one-shot text, like the chat.
+
+Expect from the chat: questions about the box, short complete files you can
+copy, explaining an error, reviewing a snippet you paste. On the base 8 GB
+droplet it runs the 3b model, which is genuinely small — it will not
+autonomously produce a multi-file project, and pushing it to try tends to
+produce confident nonsense rather than code. More RAM buys a bigger model
+(see the ladder above), but the filesystem limit is about the door, not the
+model.
+
 ## Running the coding agent from the phone
 
 The terminal agent (aider) runs over SSH:

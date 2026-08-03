@@ -453,6 +453,29 @@ prompt_commands_all_real() {
   return "${bad}"
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
+# A real deployment asked the phone chat to "build the whole functioning
+# project". The 3b model emitted a fabricated tool call —
+# {"name": "build_expense_tracker", "arguments": {...}} — then refused with
+# "I'm limited ... due to the constraints of my design and training", then
+# drifted into NLP complexity and WCAG for what was a local expense tracker.
+# Nothing in the prompt had told it what it is, so it invented tools it does
+# not have and gave a vague excuse instead of the true, actionable answer.
+prompt_forbids_tool_calls() {
+  local p; p="$(lca_system_prompt)"
+  grep -qi 'no tools' <<<"${p}" && grep -qi 'never emit a function' <<<"${p}"
+}
+check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
+# ...and sends project work to the ONE command that can write files. The first
+# version of this fix said only "the terminal agent", and the model duly
+# suggested 'lca ask' — which is also text-only. Caught by running it.
+prompt_names_the_file_writing_command() {
+  local p; p="$(lca_system_prompt)"
+  grep -qi 'cannot write files' <<<"${p}" \
+    && grep -qF 'NOT ' <<<"${p}" \
+    && grep -qi 'lca ask' <<<"${p}"
+}
+check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
+  prompt_names_the_file_writing_command
 
 echo "# set_env_var survives a value with spaces (BACKUP_SCHEDULE is one)"
 # Written unquoted, "*-*-* 05:00:00" makes .env unsourceable and the variable

@@ -9,6 +9,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
+# --quick skips the one probe that costs real time: asking the model to
+# generate. On a CPU box that is 20 seconds to a minute, which is fine when a
+# human is diagnosing something and wasteful when a script has just done the
+# same test itself (setup.sh smoke-tests the model seconds before calling us).
+QUICK=false
+for arg in "$@"; do
+  case "${arg}" in
+    -q|--quick) QUICK=true ;;
+    -h|--help)
+      echo "Usage: lca check [--quick]"
+      echo
+      echo "  --quick   skip the real-generation probe (seconds instead of a minute)"
+      exit 0 ;;
+    *) err "Unknown option: ${arg}"; echo "Usage: lca check [--quick]" >&2; exit 2 ;;
+  esac
+done
+
 # From here on, keep going no matter what individual probes return.
 set +e
 
@@ -129,11 +146,17 @@ step "Model (${MODEL_NAME})"
 if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
   if model_present "${MODEL_NAME}"; then
     p_pass "model '${MODEL_NAME}' is downloaded"
-    info "asking '${MODEL_NAME}' for a real generation (may take a minute on first load)..."
-    if model_responds "${MODEL_NAME}" 240; then
-      p_pass "model '${MODEL_NAME}' responds to a real generation"
+    if [[ "${QUICK}" == "true" ]]; then
+      # Reported as skipped, never counted as a pass: "downloaded" is not
+      # "works", and this is the only check that proves inference at all.
+      info "--quick: skipping the real-generation probe (run 'lca check' without it to test inference)"
     else
-      p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and journalctl -u ollama)"
+      info "asking '${MODEL_NAME}' for a real generation (may take a minute on first load)..."
+      if model_responds "${MODEL_NAME}" 240; then
+        p_pass "model '${MODEL_NAME}' responds to a real generation"
+      else
+        p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and journalctl -u ollama)"
+      fi
     fi
   elif [[ "$(netmode_state)" == "offline" ]]; then
     p_fail "model '${MODEL_NAME}' not downloaded, and netmode is OFFLINE — run 'sudo ./netmode.sh online' then 'ollama pull ${MODEL_NAME}'"
