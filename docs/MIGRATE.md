@@ -17,11 +17,17 @@ This writes `backups/local-code-agent-backup-<timestamp>.tar.gz` containing the
 Open WebUI data volume (your account + all chats), your `.env`, and the list of
 installed models (names only — model blobs re-download on the new machine).
 
-Copy it to your computer (run this **on your computer**, not the droplet):
+`backup.sh` prints the exact path it wrote. Copy **that one** to your computer
+(run this on your computer, not the droplet):
 
 ```bash
-scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.tar.gz .
+scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-20260101-120000.tar.gz .
 ```
+
+Use the filename `backup.sh` printed rather than a `*` glob: retention keeps
+the newest `BACKUP_KEEP` (default 7), and each one contains the whole WebUI
+volume, so a glob quietly drags every old backup across the wire when you
+wanted the one you just took.
 
 ## On the new VM (target)
 

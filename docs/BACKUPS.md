@@ -45,8 +45,13 @@ Then copy it **off the machine** — a backup on the same disk won't survive a d
 loss:
 
 ```bash
-scp user@host:/path/to/local-code-agent/backups/local-code-agent-backup-*.tar.gz .
+# the path backup.sh just printed — not a * glob, which would pull every
+# retained backup (BACKUP_KEEP defaults to 7, each holding the WebUI volume)
+scp user@host:/path/to/local-code-agent/backups/local-code-agent-backup-20260101-120000.tar.gz .
 ```
+
+Copying *all* of them off the box is a reasonable thing to want too — just do
+it deliberately, with `scp -r .../backups/ .`, rather than by accident.
 
 ## Restore
 

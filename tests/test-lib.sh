@@ -863,6 +863,29 @@ docs_read_backups_safely() {
              2>/dev/null | grep -v 'ls -t' || true)
 }
 check "no doc feeds a multi-archive glob to tar" docs_read_backups_safely
+# Same glob, different command, milder consequence — and worth stopping anyway.
+# 'scp remote:.../backup-*.tar.gz .' works, in the sense that it copies every
+# retained archive. With BACKUP_KEEP=7 and the WebUI volume inside each one,
+# that is potentially gigabytes crossing the wire on a migration where the user
+# asked for the single backup they had just taken. Deliberate is fine; by
+# accident is not.
+docs_copy_one_backup_not_all() {
+  local hit
+  while IFS= read -r hit; do
+    [[ -n "${hit}" ]] || continue
+    printf 'a doc scp-s a backup glob, which copies every retained archive:\n  %s\n' \
+      "${hit}" >&2
+    return 1
+  # Only a glob on the REMOTE side of the colon, which the remote shell expands
+  # against a backups/ directory holding up to BACKUP_KEEP archives. A glob on
+  # the local side is a different thing: it runs on the user's own machine,
+  # where the migration flow has put exactly the one file they downloaded, and
+  # flagging it would be a false positive on correct instructions.
+  done < <(grep -rnE 'scp [^ ]*:[^ ]*backup-\*\.tar\.gz' \
+             "${REPO}/docs" "${REPO}/README.md" 2>/dev/null || true)
+}
+check "no doc copies every backup when it means the newest" \
+  docs_copy_one_backup_not_all
 
 echo "# the one mechanism that delivers a new prompt to an existing install"
 # Everything about improving the assistant is worthless if an improvement
