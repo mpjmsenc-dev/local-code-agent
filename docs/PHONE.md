@@ -44,6 +44,11 @@ Or skip the typing: run `lca chat` on the server and it prints the address as a
 **QR code**. Point your phone's camera at it and tap the link. The address is
 printed above the code too, in case your scanner dislikes a terminal QR.
 
+`lca chat` prints a **second** QR below it: the `ssh://` address for the same
+machine. That is the other half of using this from a phone — the chat will
+eventually tell you to run something in a terminal, and this is how you get
+one. Both halves come from the same Tailscale IP, so one command sets up both.
+
 Tap **Sign up** and create the **FIRST** account — the first account automatically
 becomes the **admin**.
 

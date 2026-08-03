@@ -67,6 +67,24 @@ main() {
         qrencode -t ANSIUTF8 -m 2 "http://${ts_ip}:${WEBUI_PORT}" 2>/dev/null || true
       fi
       info "(the phone must be signed in to the same Tailscale account — docs/PHONE.md)"
+      # The chat's answer to "build me an app" is now, reliably, a command to
+      # run in a terminal. On a phone that means SSH — over this same Tailscale
+      # address, since the inbound guard leaves SSH open by design. Printing it
+      # here costs one line and saves the reader working out that half for
+      # themselves at the exact moment they have been told to go somewhere they
+      # do not yet know how to reach.
+      #
+      # SUDO_USER first: run under sudo, 'id -un' says root, and handing someone
+      # a root SSH line that their server most likely refuses is worse than
+      # printing nothing.
+      local ssh_user="${SUDO_USER:-$(id -un)}"
+      echo
+      ok "For the coding agent (aider), SSH from the phone:  ssh ${ssh_user}@${ts_ip}"
+      if have qrencode; then
+        echo
+        qrencode -t ANSIUTF8 -m 2 "ssh://${ssh_user}@${ts_ip}" 2>/dev/null || true
+      fi
+      info "(then: mkdir -p ~/my-project && cd ~/my-project && lca — see docs/PHONE.md for SSH apps)"
     else
       warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
       info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"

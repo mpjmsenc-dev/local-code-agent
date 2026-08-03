@@ -125,6 +125,26 @@ matched nothing was read as "the test didn't catch it" and nearly cost a good
 assertion. **Print proof the mutation landed** (`grep -c`) before believing
 what the test says about it.
 
+## A scalar flag named like an array elsewhere fails ShellCheck
+
+`shellcheck -x` follows `source`, and it tracks a variable's *type* across
+everything it has read — the file under test and every file that file sources.
+So a local scalar in `tests/test-lib.sh`:
+
+```bash
+local drifted=0            # SC2178: "used as an array but now assigned a string"
+```
+
+trips on `scripts/lib.sh` declaring `local drifted=()` inside an unrelated
+function. The scopes are genuinely separate and the code is correct; ShellCheck
+is not scope-aware here, and the repo lints clean, so the warning has to go.
+
+This cost three separate cycles in one day — `bad`, `stale`, `drifted` — each
+found only at `make lint` after the tests were already green. Give error flags
+and accumulators a name specific to what they count: `recipe_mismatch`,
+`recipe_drift`, `accepts`/`rejects`. It reads better anyway, and the generic
+names are exactly the ones already taken.
+
 ## Settings that are *applied* are a bug factory
 
 Most of `.env` is read fresh on every run. A few settings are **applied** to

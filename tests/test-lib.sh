@@ -604,6 +604,32 @@ docs_show_the_prompt_recipe() {
 }
 check "every doc that shows the handover recipe shows the real one" \
   docs_show_the_prompt_recipe
+# The same rule for the recipe PRINTED by a script. 'lca chat' now tells the
+# reader how to reach a terminal and what to type once they get there, and a
+# .sh file is invisible to the doc gate above — so that copy could drift back
+# to the form that fails while every other check stayed green.
+#
+# Scoped to output (info/ok/warn/echo/printf), because run-agent.sh's header
+# comment documents its own long-path invocation, which is a different command
+# and not a stale copy of this one.
+printed_recipe_matches_the_prompt() {
+  local want hit recipe_drift=0
+  want="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1 \
+            | sed 's/^[[:space:]]*//')"
+  [[ -n "${want}" ]] || return 1
+  while IFS= read -r hit; do
+    [[ -n "${hit}" ]] || continue
+    grep -qF -- "${want}" <<<"${hit}" || {
+      printf 'a script prints a recipe the prompt does not emit:\n  %s\n  prompt: %s\n' \
+        "${hit}" "${want}" >&2
+      recipe_drift=1
+    }
+  done < <(grep -rn 'my-project && ' "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null \
+             | grep -E '(info|ok|warn|echo|printf) ' || true)
+  return "${recipe_drift}"
+}
+check "every recipe a script prints matches the prompt's" \
+  printed_recipe_matches_the_prompt
 # Naming the command is not the same as getting it said, and the gap between
 # those two was measured rather than guessed. Against the real 3b model — the
 # rung a base 8 GB droplet runs — on the user's own request ("build me a whole

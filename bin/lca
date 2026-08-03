@@ -28,7 +28,7 @@ Usage: lca [command] [args...]
   lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
   lca ask -c "follow up"  continue from your last question
   lca ask -m MODEL "q"    answer with another model just this once
-  lca chat                show the chat app's address as a QR code to scan
+  lca chat                phone setup: chat URL + SSH address, both as QR codes
   lca apply               make the running system match your .env edits
   lca check [--quick]     full health check (--quick skips the slow model probe)
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
