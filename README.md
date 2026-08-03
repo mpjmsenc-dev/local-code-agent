@@ -159,7 +159,9 @@ offline because the models are local.
   non-private interfaces), not a full default-drop firewall; it assumes you do
   not expose other services.
 - **Offline mode still permits DNS (UDP/TCP port 53) and STUN (UDP 3478) to any
-  host, plus the WireGuard port 41641.** Tailscale needs them: without DNS,
+  host, the WireGuard port 41641, and — link-local only — DHCP (UDP 67/68/547)
+  and ICMPv6 neighbour discovery, so the VM can keep its lease and its IPv6
+  neighbours.** Tailscale needs them: without DNS,
   `tailscaled` cannot re-resolve its coordination server after a reboot, and
   you would lose the private access that this mode exists to preserve. So
   "offline" means *the AI stack cannot reach the web* (HTTP/HTTPS and

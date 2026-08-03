@@ -48,6 +48,31 @@ contains "WireGuard port allowed"           "${RULES}" 'udp dport 41641 accept'
 contains "established replies allowed"       "${RULES}" 'ct state established,related accept'
 contains "new outbound connections dropped" "${RULES}" 'ct state new counter drop'
 
+echo "# every hole the offline ruleset opens must be named in the README"
+# The README's "Honest limitations" tells the reader exactly which ports stay
+# open in offline mode, and that list is the whole basis for judging what the
+# kill switch does and does not guarantee. It was incomplete: DNS, STUN and
+# WireGuard were named, while DHCP (67/68/547) and ICMPv6 neighbour discovery
+# were accepted by the ruleset and mentioned nowhere.
+#
+# This compares the two directly, so the failure modes it catches are both:
+# a new hole opened without documenting it, and a documented hole quietly
+# removed — the second is how someone gets stranded on a remote VM when
+# Tailscale cannot re-resolve after a reboot.
+README_MD="$(cd "$(dirname "$0")/.." && pwd)/README.md"
+limits="$(sed -n '/^\*\*Honest limitations\*\*/,/^\*\*Your responsibilities/p' "${README_MD}")"
+undocumented=""
+while read -r port; do
+  [[ -n "${port}" ]] || continue
+  grep -qF "${port}" <<<"${limits}" || undocumented="${undocumented} ${port}"
+done < <(grep -oE '(udp|tcp) (dport|sport) \{?[ 0-9,]+\}?' "${RULES}" \
+           | grep -oE '[0-9]+' | sort -un)
+if [[ -z "${undocumented}" ]]; then
+  t_ok "every port the offline ruleset accepts is listed in the README's limitations"
+else
+  t_fail "offline mode opens port(s) the README never mentions:${undocumented}"
+fi
+
 echo "# OFFLINE also covers forwarded (docker-bridge) traffic"
 contains "forward hook present"             "${RULES}" 'hook forward'
 contains "forward allows tailscale0"        "${RULES}" 'oifname "tailscale0" accept'
