@@ -605,6 +605,35 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# CI's e2e must compare the WHOLE prompt, not a substring of it"
+# The only end-to-end proof that the assistant's instructions reach a real
+# container is a step in ci.yml. It asserted `.system | test("local-code-agent")`
+# — satisfied by every version of the prompt that has ever existed, including
+# the one that made a real user's chat invent a tool call. It proved the
+# container had A prompt, never that it had THIS one, which is the only failure
+# that has actually occurred here.
+ci_compares_the_whole_prompt() {
+  local ci="${REPO}/.github/workflows/ci.yml"
+  grep -q 'want_prompt=' "${ci}" || {
+    echo "ci.yml no longer builds the expected prompt to compare against" >&2
+    return 1
+  }
+  grep -qF 'lca_system_prompt' "${ci}" || {
+    echo "ci.yml does not derive the expectation from lca_system_prompt" >&2
+    return 1
+  }
+  # Comment lines stripped first. The comment ABOVE the fixed assertion quotes
+  # the broken one to explain why it was replaced, and a whole-file grep read
+  # that as the bug still being present — tests/long-wait.awk had to learn the
+  # same lesson about reading its own explanation as evidence.
+  if grep -vE '^[[:space:]]*#' "${ci}" | grep -qF 'test("local-code-agent")'; then
+    echo "ci.yml is back to asserting the prompt by substring — any stale prompt passes that" >&2
+    return 1
+  fi
+}
+check "CI compares the container's prompt with this repo's, byte for byte" \
+  ci_compares_the_whole_prompt
+
 echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
 # The self-test's 4th check was "does the HTTP port answer". The only real bug
 # report ever filed against this project was a box where Ollama, the model,

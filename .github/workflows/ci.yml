@@ -630,9 +630,21 @@ jobs:
           env_json="$(sudo docker inspect -f '{{json .Config.Env}}' open-webui)"
           printf '%s' "${env_json}" | jq -e 'map(select(startswith("DEFAULT_MODEL_PARAMS="))) | length == 1' >/dev/null \
             || { echo "FAIL: DEFAULT_MODEL_PARAMS was never passed to the container"; printf '%s' "${env_json}" | jq -r '.[]' | cut -c1-80; exit 1; }
-          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
-            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -e '.system | test("local-code-agent")' >/dev/null \
-            || { echo "FAIL: DEFAULT_MODEL_PARAMS does not carry our system prompt"; exit 1; }
+          # Compared to THIS repo's prompt, byte for byte — not to a substring
+          # of it. The old assertion was `.system | test("local-code-agent")`,
+          # which every version of the prompt has ever satisfied, including the
+          # one that made a real user's chat invent a tool call. It proved the
+          # container had *a* prompt, never that it had the current one, which
+          # is the only failure that has actually happened here.
+          live_prompt="$(printf '%s' "${env_json}" \
+            | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
+            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -r '.system')"
+          want_prompt="$(bash -c 'source scripts/lib.sh >/dev/null 2>&1; lca_system_prompt')"
+          if [[ "${live_prompt}" != "${want_prompt}" ]]; then
+            echo "FAIL: the container's system prompt is not this repo's"
+            diff <(printf '%s\n' "${want_prompt}") <(printf '%s\n' "${live_prompt}") || true
+            exit 1
+          fi
           printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_PROMPT_SUGGESTIONS="))' \
             | sed 's/^DEFAULT_PROMPT_SUGGESTIONS=//' | jq -e 'length > 0' >/dev/null \
             || { echo "FAIL: DEFAULT_PROMPT_SUGGESTIONS is missing or empty"; exit 1; }
