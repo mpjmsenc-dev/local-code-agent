@@ -198,6 +198,7 @@ lca                 # starts aider on the local model, right here
 | `lca speed` | measure tokens/second and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
+| `lca harden` | re-apply the always-on inbound guard on ports 3000/11434 (needs sudo) |
 | `lca model <name>` | switch models |
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |

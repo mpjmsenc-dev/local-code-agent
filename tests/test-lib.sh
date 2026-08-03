@@ -1162,6 +1162,33 @@ help_commands_all_real() {
   return "${bad}"
 }
 check "every command in 'lca help' is dispatched by bin/lca" help_commands_all_real
+# ...and the other direction, which was never checked. A command you can run
+# but cannot find is a feature nobody uses: 'lca harden' — re-apply the inbound
+# guard that keeps ports 3000 and 11434 off the public internet — was
+# dispatched and completely absent from the help, so the only way to learn it
+# existed was to read bin/lca.
+#
+# Aliases and internal spellings are excluded by name, not by pattern, so
+# adding one is a deliberate act rather than something a loose regex forgives.
+dispatched_commands_are_all_documented() {
+  local sub undocumented=0 helptext
+  helptext="$("${REPO}/bin/lca" help 2>/dev/null)"
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    case "${sub}" in
+      # 'selftest' is an alias for 'test'; 'online' is documented on the
+      # 'lca offline|online' line, which the extractor below cannot see.
+      selftest|online) continue ;;
+    esac
+    grep -qE "^  lca ${sub}\b" <<<"${helptext}" || {
+      printf "bin/lca dispatches '%s' but 'lca help' never mentions it\\n" "${sub}" >&2
+      undocumented=1
+    }
+  done < <(grep -oE '^  [a-z|]+\)' "${REPO}/bin/lca" | tr -d ' )' | tr '|' '\n' | sort -u)
+  return "${undocumented}"
+}
+check "every command bin/lca dispatches appears in 'lca help'" \
+  dispatched_commands_are_all_documented
 
 echo "# the README's command table must not omit a command 'lca help' offers"
 # The table is what someone scans to learn the tool, and it had drifted: five
