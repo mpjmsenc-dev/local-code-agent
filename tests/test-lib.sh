@@ -605,6 +605,46 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# the one mechanism that delivers a new prompt to an existing install"
+# Everything about improving the assistant is worthless if an improvement
+# cannot reach a droplet that is already running. Exactly one thing carries it:
+# install_webui.sh REMOVES the existing container and rebuilds it, so a repo
+# update followed by 'lca update' (setup.sh -> install_webui.sh) re-bakes the
+# current prompt in. 'lca apply' does the same on demand.
+#
+# An "optimisation" that skipped the rebuild when the container already exists
+# would look entirely reasonable, pass every other test, and silently stop
+# every future prompt and setting change from reaching anyone who had already
+# installed. That is this repo's signature failure, on its most important path.
+installer_recreates_rather_than_skipping() {
+  local blk
+  blk="$(awk '/if as_root docker container inspect/ { inb = 1 }
+              inb { print }
+              inb && /^  fi$/ { exit }' "${REPO}/scripts/install_webui.sh")"
+  [[ -n "${blk}" ]] || {
+    echo "install_webui.sh no longer has an existing-container branch" >&2
+    return 1
+  }
+  grep -q 'docker rm -f' <<<"${blk}" || {
+    echo "install_webui.sh does not remove the existing container — a new prompt would never reach an existing install" >&2
+    return 1
+  }
+  # ...and it must not bail out early instead of rebuilding.
+  if grep -qE '(return|exit) 0' <<<"${blk}"; then
+    echo "install_webui.sh returns early when the container exists — updates would not be delivered" >&2
+    return 1
+  fi
+}
+check "install_webui.sh rebuilds an existing container instead of skipping it" \
+  installer_recreates_rather_than_skipping
+# ...and setup.sh must actually call it, since 'lca update' delivers changes
+# only by way of setup.sh.
+setup_calls_the_webui_installer() {
+  grep -qE '\$\{SCRIPT_DIR\}/scripts/install_webui\.sh' "${REPO}/setup.sh"
+}
+check "setup.sh runs install_webui.sh, so 'lca update' carries prompt changes" \
+  setup_calls_the_webui_installer
+
 echo "# 'make lint' claims to be the same invocation as CI — check that"
 # The Makefile's whole promise is "run this before pushing and your change
 # matches CI". That rests on two hand-maintained glob lists, in two files, and
