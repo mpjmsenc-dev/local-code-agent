@@ -605,6 +605,32 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# 'make lint' claims to be the same invocation as CI — check that"
+# The Makefile's whole promise is "run this before pushing and your change
+# matches CI". That rests on two hand-maintained glob lists, in two files, and
+# nothing compared them. Add a directory of scripts to one and the local gate
+# and the remote gate quietly stop covering the same files — with the local one
+# passing, which is the direction that hurts.
+make_lint_matches_ci() {
+  local mk ci
+  # Trimmed with parameter expansion, not sed. A literal '$(' inside single
+  # quotes reads to ShellCheck as an expansion someone forgot to double-quote
+  # (SC2016) — the same trap as a matched pair of backticks, already recorded
+  # in CONTRIBUTING.md. Expansion has no such problem.
+  mk="$(grep -oE '^SCRIPTS := .*' "${REPO}/Makefile" | head -1)"
+  mk="${mk#*wildcard }"
+  mk="${mk%)}"
+  ci="$(grep -oE 'shellcheck -x -P SCRIPTDIR .*$' "${REPO}/.github/workflows/ci.yml" \
+          | head -1 | sed 's/^shellcheck -x -P SCRIPTDIR //')"
+  [[ -n "${mk}" ]] || { echo "cannot find SCRIPTS in the Makefile" >&2; return 1; }
+  [[ -n "${ci}" ]] || { echo "cannot find the shellcheck step in ci.yml" >&2; return 1; }
+  [[ "${mk}" == "${ci}" ]] || {
+    printf 'make lint covers:  %s\nCI lints:          %s\n' "${mk}" "${ci}" >&2
+    return 1
+  }
+}
+check "'make lint' lints exactly the files CI lints" make_lint_matches_ci
+
 echo "# the Makefile's header comment and its real targets must agree"
 # The header lists targets by hand; 'make help' derives them from the '##'
 # comments. Two sources for one fact, and adding 'bench' meant editing both —
