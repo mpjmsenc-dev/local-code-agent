@@ -474,14 +474,53 @@ check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
 # contract. What must remain true: the prompt names bare 'lca' as the thing
 # that writes files, and explicitly rules 'lca ask' out for that job.
 prompt_names_the_file_writing_command() {
-  local p; p="$(lca_system_prompt)"
-  grep -qi 'cannot create or edit files' <<<"${p}" || return 1
-  grep -qi "one thing on this server writes files" <<<"${p}" || return 1
-  grep -qi "never offer 'lca ask'" <<<"${p}" || return 1
-  grep -qi 'touches no file' <<<"${p}"
+  local p mentions negated
+  p="$(lca_system_prompt)"
+  # A copy-pasteable recipe ending in the BARE word 'lca'. Matched on shape,
+  # so any sentence may introduce it, but the command itself cannot drift into
+  # 'lca ask' or 'lca run' without failing here.
+  grep -qE '^[[:space:]]*cd .*&&[[:space:]]*lca[[:space:]]*$' <<<"${p}" || return 1
+  # And 'lca ask' may never appear un-negated. The model reads every line; one
+  # neutral mention next to a file-writing request is all it took last time.
+  mentions="$(grep -c 'lca ask' <<<"${p}")"
+  (( mentions > 0 )) || return 1
+  negated="$(grep 'lca ask' <<<"${p}" \
+    | grep -ciE "never|nothing|not |no file|text only|touches no")"
+  [[ "${mentions}" == "${negated}" ]]
 }
 check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
   prompt_names_the_file_writing_command
+# Naming the command is not the same as getting it said, and the gap between
+# those two was measured rather than guessed. Against the real 3b model — the
+# rung a base 8 GB droplet runs — on the user's own request ("build me a whole
+# functioning income and expense tracker app"):
+#
+#   abstract phrasing, "when a request needs files created or edited"
+#     handover 1/4   led with it 0/4   generic multi-file tutorial 3/4
+#   the user's own verbs + "Open with exactly:"
+#     handover 4/4   led with it 4/4   generic multi-file tutorial 0/4
+#
+# Same information, same length, opposite outcome. The tutorial is the failure
+# the user actually reported: a 3b model confidently starts a React/Express
+# project it has no way to finish, and truncates mid-file.
+#
+# So both halves are load-bearing and both are asserted, scoped to the lines
+# immediately around the recipe — the file says "Lead with the answer" further
+# up for an unrelated reason, and a whole-file grep would pass on that and
+# guard nothing.
+prompt_leads_with_the_handover() {
+  lca_system_prompt | awk '
+    { hist[NR] = tolower($0) }
+    /^[[:space:]]*cd .*&&[[:space:]]*lca[[:space:]]*$/ {
+      for (i = NR - 6; i < NR; i++) {
+        if (hist[i] ~ /build|create|make/)                 verb = 1
+        if (hist[i] ~ /open with|start with|begin with|first line/) pos = 1
+      }
+    }
+    END { exit !(verb && pos) }'
+}
+check "the prompt names the trigger in the user's verbs, and says to lead with it" \
+  prompt_leads_with_the_handover
 
 echo "# set_env_var survives a value with spaces (BACKUP_SCHEDULE is one)"
 # Written unquoted, "*-*-* 05:00:00" makes .env unsourceable and the variable
@@ -731,6 +770,34 @@ if have jq; then
        (.title | type == "array" and length == 2 and all(type == "string"))
        and (.content | type == "string" and length > 0))' "${SUGGESTIONS}"
   check "suggestions are not Open WebUI's stock ones" not_stock
+  # PHONE.md tells the reader how many starter questions they will see. It said
+  # "four" for as long as there were five, because nothing tied the sentence to
+  # the file — and that page is the one a phone user actually reads.
+  #
+  # Matched on the NUMBER before the phrase, not on the sentence around it, so
+  # rewording the paragraph is free and changing the count is not.
+  doc_count_matches_suggestions() {
+    local n claimed
+    local words=(zero one two three four five six seven eight nine ten)
+    n="$(jq 'length' "${SUGGESTIONS}")"
+    claimed="$(grep -oiE '(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+) starter question' \
+                 "${REPO}/docs/PHONE.md" | head -1 | awk '{print tolower($1)}')"
+    [[ -n "${claimed}" ]] || {
+      echo "PHONE.md never says how many starter questions there are" >&2; return 1
+    }
+    # Written as a full if, not '(( ... )) && want=...': under 'set -e' a
+    # false arithmetic test makes the whole && list return 1 and aborts the
+    # function. That trap is documented in CONTRIBUTING.md and still caught me.
+    local want="${n}"
+    if (( n <= 10 )); then want="${words[n]}"; fi
+    [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
+      printf 'PHONE.md claims %s starter questions; the file has %s\n' \
+        "${claimed}" "${n}" >&2
+      return 1
+    }
+  }
+  check "PHONE.md's starter-question count matches the file" \
+    doc_count_matches_suggestions
 fi
 
 echo "# starting Ollama must not look like a hung terminal"
@@ -1171,6 +1238,54 @@ baked_scanner_sees_array_form() {
 }
 check "the baked-settings scanner sees the array-literal '-e \"KEY=\"' form" \
   baked_scanner_sees_array_form
+# ...and the comparison itself must work, not merely exist. The tests above
+# are source greps; this one drives webui_drift() for real, with the container
+# read stubbed so it runs anywhere (CI has no docker daemon). The bug being
+# guarded is behavioural: 'lca apply' reported "already matches .env" to
+# someone who had just pulled a repo whose system prompt was different.
+#
+# Each case runs in a subshell so the stub cannot leak into later tests.
+if have jq; then
+  # drift_says PATTERN LIVE_VALUE — is PATTERN among the drifted keys when the
+  # container was created with LIVE_VALUE as its system prompt?
+  # The stub's variable is NOT called 'live'. webui_drift() declares its own
+  # 'local live', and bash's dynamic scoping means the stub — called from
+  # inside it — would read webui_drift's empty one instead of ours. The test
+  # then passed the "no drift" cases and failed the one that mattered, for a
+  # reason that had nothing to do with the code under test.
+  drift_says() {
+    local want="$1" stub_live="$2" out
+    out="$(
+      webui_container_env() {
+        [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
+        [[ -n "${stub_live}" ]] || return 1
+        printf '%s' "${stub_live}"
+      }
+      webui_drift || true
+    )"
+    # Spelled out rather than '! grep -q ...': a bare negation as a function's
+    # last statement is SC2251 (it skips errexit), and the repo lints clean.
+    if [[ "${want}" == "none" ]]; then
+      if grep -q SYSTEM_PROMPT <<<"${out}"; then
+        printf 'drift was claimed when it should not have been: %s\n' "${out}" >&2
+        return 1
+      fi
+      return 0
+    fi
+    grep -q SYSTEM_PROMPT <<<"${out}"
+  }
+  check "a container holding today's prompt is not called drifted" \
+    drift_says none "$(lca_system_prompt | jq -Rsc '{system: .}')"
+  check "a container holding a different prompt IS reported as drift" \
+    drift_says SYSTEM_PROMPT "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')"
+  # An install predating the setting, or one made without jq, baked in no such
+  # value at all. "Cannot tell" is not "differs" — claiming drift there would
+  # send every one of those users to re-create a container for no reason.
+  check "a container created without the setting is not called drifted" \
+    drift_says none ""
+else
+  echo "skip - jq not installed, cannot exercise the system prompt comparison"
+fi
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {
