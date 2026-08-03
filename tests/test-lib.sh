@@ -562,7 +562,7 @@ check "the handover recipe runs in a home that has no project directory yet" \
 # must be byte-identical to what the prompt actually emits. A doc that does not
 # mention it at all is free to stay silent.
 docs_show_the_prompt_recipe() {
-  local want line stale=0
+  local want line recipe_mismatch=0
   want="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1 \
             | sed 's/^[[:space:]]*//')"
   [[ -n "${want}" ]] || { echo "the prompt emits no recipe at all" >&2; return 1; }
@@ -570,11 +570,11 @@ docs_show_the_prompt_recipe() {
     if [[ -n "${line}" && "${line}" != "${want}" ]]; then
       printf 'a doc teaches a recipe the prompt does not emit:\n  doc:    %s\n  prompt: %s\n' \
         "${line}" "${want}" >&2
-      stale=1
+      recipe_mismatch=1
     fi
   done < <(grep -rhE "${HANDOVER_LINE}" "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null \
              | sed 's/^[[:space:]]*//' || true)
-  return "${stale}"
+  return "${recipe_mismatch}"
 }
 check "every doc that shows the handover recipe shows the real one" \
   docs_show_the_prompt_recipe
