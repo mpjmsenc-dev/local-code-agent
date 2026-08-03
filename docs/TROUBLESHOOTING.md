@@ -157,6 +157,37 @@ If it doesn't exist, the user-data script never ran — most likely the paste in
 running the same script manually as root: copy `deploy/do-user-data.sh` onto the
 droplet and `sudo bash do-user-data.sh`.
 
+## I asked the chat to build my app and it wrote a tutorial / invented a tool call
+
+The chat has no filesystem. Asked to build a project it cannot build, a small
+model does not refuse — it starts a confident multi-file tutorial it has no way
+to finish, and truncates part-way through a file. Earlier versions also emitted
+a fabricated tool call (`{"name": "build_expense_tracker", ...}`) or fell back
+on *"the constraints of my design and training"*, which is not the real reason.
+
+The real reason is that this door has no filesystem, and the fix is to use the
+one that does:
+
+```bash
+mkdir -p ~/my-project && cd ~/my-project && lca
+```
+
+That is aider, on the same local model, and it reads and writes real files.
+`lca ask` is **not** it — that is one-shot text, exactly like the chat.
+
+The chat should now say this itself, unprompted, on any request to build,
+create, make or add something. If yours does not, it is running the system
+prompt it was created with:
+
+```bash
+lca check          # look for: chat app config drift: SYSTEM_PROMPT
+cd /opt/local-code-agent && git pull
+sudo lca apply     # re-creates the container; chats and accounts survive
+```
+
+The container keeps a copy of the prompt from the moment it was created, so
+pulling a better one is not enough on its own — see the table below.
+
 ## I changed a setting in .env and nothing happened
 
 Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,
@@ -174,8 +205,14 @@ The long answer, if you want to know what it is doing:
 | Setting | Applied by | If you only edit `.env` |
 |---|---|---|
 | `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fixed by `lca apply`, `sudo scripts/tune.sh`, or a reboot |
-| `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP` | the WebUI container | `./webui.sh status` says `… drift`. Fixed by `lca apply` or `scripts/install_webui.sh` |
+| `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP`, `OLLAMA_HOST`, `WEBUI_NAME` | the WebUI container | `lca check` says `chat app config drift`. Fixed by `lca apply` |
+| the assistant's system prompt and starter questions | the WebUI container | same — and these come from the **repo**, not `.env`, so a `git pull` that improves the prompt still needs `sudo lca apply` |
 | `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo ./backup.sh --install-timer` |
+
+That second row was the longest-lived hole in this table: nothing compared the
+system prompt, so `lca apply` answered *"already matches .env"* after a repo
+update that changed it, and the chat kept its old behaviour with nothing
+anywhere saying so.
 
 ## Ollama settings drifted / drop-in edited by hand
 

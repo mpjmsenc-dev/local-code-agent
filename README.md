@@ -192,7 +192,7 @@ lca                 # starts aider on the local model, right here
 | `lca` | start the coding agent in the current directory |
 | `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
 | `lca chat` | print the address for the chat app on your phone |
-| `lca check` / `lca test` | health check / live end-to-end self-test |
+| `lca check` / `lca test` | health check / live end-to-end self-test (`lca check --quick` skips the ~1-minute model probe) |
 | `lca apply` | make the running system match your `.env` edits (`--dry-run` previews) |
 | `lca logs` | recent logs from Ollama, the chat app and the installer |
 | `lca speed` | measure tokens/second and explain what limits it |
@@ -248,7 +248,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
-| `check-system.sh` | Full health check with colored summary |
+| `check-system.sh` | Full health check with colored summary (`--quick` skips the real-generation probe) |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
 | `backup.sh` / `restore.sh` | Backup/restore WebUI data + `.env` + model list (keeps newest `BACKUP_KEEP`; `--install-timer` for daily) |
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |

@@ -79,20 +79,65 @@ rather than a generic model: keep it short (you are reading on a phone, at a few
 tokens per second), prefer real commands, say "I don't know" instead of inventing
 a flag, and know that this box is driven by the `lca` command. Ask *"how do I
 take a backup right now?"* and you get `lca backup`, not a lecture about `tar`.
-The empty-chat screen also offers four starter questions aimed at code and
+The empty-chat screen also offers five starter questions aimed at code and
 servers, in place of Open WebUI's stock ones about vocabulary exams and the
-Roman Empire.
+Roman Empire. The last of them — *"What are you for, and what needs the
+terminal?"* — is the one worth tapping first: it is the shortest route to
+understanding which half of this box does what.
 
 The same prompt is used by `lca ask` in the terminal, so both doors lead to the
 same assistant.
 
-**Changing it later:** these two settings come from the environment, so editing
-the repo and running `sudo lca apply` takes effect. The one
-exception is a setting you have already changed **inside the WebUI**: Open WebUI
-stores that in its own database, and a stored value always wins over the
-environment. So if you edit the assistant's system prompt in **Admin Panel →
-Settings**, that is where it lives from then on, and re-running the installer
-will not overwrite it.
+**Changing it later:** both settings are baked into the chat app container when
+it is created, so editing the repo is not enough on its own — run `sudo lca
+apply` and it re-creates the container with the new prompt (your account and
+chats live in a docker volume and survive). If you forget, `lca check` now says
+so rather than staying silent: *"chat app config drift: SYSTEM_PROMPT — edited
+in .env or the repo but NOT in effect"*. (`./webui.sh status` spells out each
+one at length; `lca check` is the one to reach for.)
+
+The one exception is a setting you have already changed **inside the WebUI**:
+Open WebUI stores that in its own database, and a stored value always wins over
+the environment. So if you edit the assistant's system prompt in **Admin Panel
+→ Settings**, that is where it lives from then on, and `lca apply` will not
+overwrite it.
+
+## What the chat can and cannot do
+
+The chat is a **text box with no filesystem**. It cannot create files, run
+commands, or see your project — so "build me a whole app" is the one request it
+genuinely cannot fulfil, no matter which model you run.
+
+Ask it anyway and it hands the job over instead of bluffing. It opens with the
+command that *can* do it — bare **`lca`** (aider), in a terminal, inside your
+project directory:
+
+```bash
+mkdir -p ~/my-project && cd ~/my-project && lca
+```
+
+aider reads and writes real files and makes commits, on the same local model.
+Note `lca ask` is *not* it — that is one-shot text, like the chat.
+
+The `mkdir -p` is there because the people who trigger this are usually the
+ones with nothing to `cd` into yet — "build me an app" rarely comes from
+someone who already has the project. It is a no-op if the directory exists, so
+swap in your own path when you have one.
+
+That handover had to be measured into place rather than written. Asked *"build
+me a whole functioning income and expense tracker app"* — a real request from a
+real phone — the 3b model on the earlier prompt started a multi-file
+React/Express tutorial **every single time**, and truncated part-way through
+a file it was never going to finish. That is what a small model does with a
+request it cannot meet: not a refusal, a confident and useless start.
+
+Expect from the chat: questions about the box, short complete files you can
+copy, explaining an error, reviewing a snippet you paste. On the base 8 GB
+droplet it runs the 3b model, which is genuinely small — it will not
+autonomously produce a multi-file project, and pushing it to try tends to
+produce confident nonsense rather than code. More RAM buys a bigger model
+(see the ladder above), but the filesystem limit is about the door, not the
+model.
 
 ## Running the coding agent from the phone
 

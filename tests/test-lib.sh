@@ -453,6 +453,162 @@ prompt_commands_all_real() {
   return "${bad}"
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
+# A real deployment asked the phone chat to "build the whole functioning
+# project". The 3b model emitted a fabricated tool call —
+# {"name": "build_expense_tracker", "arguments": {...}} — then refused with
+# "I'm limited ... due to the constraints of my design and training", then
+# drifted into NLP complexity and WCAG for what was a local expense tracker.
+# Nothing in the prompt had told it what it is, so it invented tools it does
+# not have and gave a vague excuse instead of the true, actionable answer.
+prompt_forbids_tool_calls() {
+  local p; p="$(lca_system_prompt)"
+  grep -qi 'no tools' <<<"${p}" && grep -qi 'never emit a function' <<<"${p}"
+}
+check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
+# ...and sends project work to the ONE command that can write files. The first
+# version of this fix said only "the terminal agent", and the model duly
+# suggested 'lca ask' — which is also text-only. Caught by running it.
+# Asserted on meaning, not on a phrase. The first version keyed off the
+# literal "NOT " that happened to be in draft one, and went red the moment the
+# wording was strengthened — a test that guards a sentence rather than a
+# contract. What must remain true: the prompt names bare 'lca' as the thing
+# that writes files, and explicitly rules 'lca ask' out for that job.
+# The shape of the copy-pasteable handover line, defined ONCE because both
+# gates below match on it. Written out twice they promptly drifted together in
+# the wrong direction: both anchored the line on STARTING with 'cd', and both
+# went red the moment the recipe grew a 'mkdir -p' in front of it. That prefix
+# was not cosmetic — a user whose first message is "build me an app" has no
+# ~/my-project, so the command the chat now gives them every time died on
+# "cd: No such file or directory" before aider ever ran.
+#
+# So the contract is not the first word. It is: ONE copy-pasteable line that
+# enters a project directory and ends in the BARE word 'lca'. Anything may
+# precede the cd; nothing may follow the lca.
+HANDOVER_LINE='^[[:space:]]*(.*&&[[:space:]]*)?cd [^&]*&&[[:space:]]*lca[[:space:]]*$'
+prompt_names_the_file_writing_command() {
+  local p mentions negated
+  p="$(lca_system_prompt)"
+  grep -qE "${HANDOVER_LINE}" <<<"${p}" || return 1
+  # And 'lca ask' may never appear un-negated. The model reads every line; one
+  # neutral mention next to a file-writing request is all it took last time.
+  mentions="$(grep -c 'lca ask' <<<"${p}")"
+  (( mentions > 0 )) || return 1
+  negated="$(grep 'lca ask' <<<"${p}" \
+    | grep -ciE "never|nothing|not |no file|text only|touches no")"
+  [[ "${mentions}" == "${negated}" ]]
+}
+check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
+  prompt_names_the_file_writing_command
+# That pattern IS the gate now, and loosening it to admit a new recipe shape is
+# precisely how a gate quietly stops gating. So assert what it accepts and what
+# it refuses, against the forms this has actually taken and gone wrong as.
+handover_pattern_discriminates() {
+  local s
+  # Named 'accepts'/'rejects', not 'good'/'bad': other functions in this file
+  # use a scalar 'bad' as an error flag, and ShellCheck tracks a name's type
+  # across the whole file — an array called 'bad' here turns those into
+  # SC2178/SC2128 warnings pages away.
+  local -a accepts=(
+    "  cd ~/my-project && lca"
+    "  mkdir -p ~/my-project && cd ~/my-project && lca"
+  )
+  local -a rejects=(
+    "  cd ~/my-project && lca ask"      # the bug this gate was born for
+    "  mkdir -p ~/my-project && lca"    # never entered the project directory
+    "  cd ~/my-project"                 # never reached aider
+    "  lca"                             # no directory at all
+  )
+  for s in "${accepts[@]}"; do
+    grep -qE "${HANDOVER_LINE}" <<<"${s}" || {
+      printf 'the handover pattern rejects a valid recipe: %s\n' "${s}" >&2
+      return 1
+    }
+  done
+  for s in "${rejects[@]}"; do
+    if grep -qE "${HANDOVER_LINE}" <<<"${s}"; then
+      printf 'the handover pattern accepts a broken recipe: %s\n' "${s}" >&2
+      return 1
+    fi
+  done
+}
+check "the handover pattern accepts the real recipe and refuses the broken ones" \
+  handover_pattern_discriminates
+# And the recipe must work for someone who does not have the directory yet —
+# which is most of the people who trigger it, since the trigger is "build me
+# something". Run the line the prompt actually gives, in a throwaway HOME.
+handover_recipe_actually_runs() {
+  local line home rc
+  line="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1)"
+  [[ -n "${line}" ]] || return 1
+  home="${SANDBOX}/fakehome"
+  rm -rf "${home}"; mkdir -p "${home}"
+  # 'lca' itself needs Ollama and aider, so stub it: what is under test is
+  # everything BEFORE it — the part that used to die on "cd: No such file or
+  # directory" before aider was ever reached.
+  HOME="${home}" bash -c "lca() { :; }; ${line}" >/dev/null 2>&1
+  rc=$?
+  (( rc == 0 )) || {
+    printf 'the recipe the chat hands out fails in a fresh HOME (exit %s): %s\n' \
+      "${rc}" "${line}" >&2
+    return 1
+  }
+}
+check "the handover recipe runs in a home that has no project directory yet" \
+  handover_recipe_actually_runs
+# The recipe now exists in three places: the prompt, docs/PHONE.md and
+# docs/TROUBLESHOOTING.md. Three copies of a command line is how a doc comes to
+# teach something that no longer works — and this exact line already shipped
+# broken once. Any doc line SHAPED like the recipe is claiming to be it, so it
+# must be byte-identical to what the prompt actually emits. A doc that does not
+# mention it at all is free to stay silent.
+docs_show_the_prompt_recipe() {
+  local want line recipe_mismatch=0
+  want="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1 \
+            | sed 's/^[[:space:]]*//')"
+  [[ -n "${want}" ]] || { echo "the prompt emits no recipe at all" >&2; return 1; }
+  while IFS= read -r line; do
+    if [[ -n "${line}" && "${line}" != "${want}" ]]; then
+      printf 'a doc teaches a recipe the prompt does not emit:\n  doc:    %s\n  prompt: %s\n' \
+        "${line}" "${want}" >&2
+      recipe_mismatch=1
+    fi
+  done < <(grep -rhE "${HANDOVER_LINE}" "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null \
+             | sed 's/^[[:space:]]*//' || true)
+  return "${recipe_mismatch}"
+}
+check "every doc that shows the handover recipe shows the real one" \
+  docs_show_the_prompt_recipe
+# Naming the command is not the same as getting it said, and the gap between
+# those two was measured rather than guessed. Against the real 3b model — the
+# rung a base 8 GB droplet runs — on the user's own request ("build me a whole
+# functioning income and expense tracker app"):
+#
+#   abstract phrasing, "when a request needs files created or edited"
+#     handover 1/4   led with it 0/4   generic multi-file tutorial 3/4
+#   the user's own verbs + "Open with exactly:"
+#     handover 4/4   led with it 4/4   generic multi-file tutorial 0/4
+#
+# Same information, same length, opposite outcome. The tutorial is the failure
+# the user actually reported: a 3b model confidently starts a React/Express
+# project it has no way to finish, and truncates mid-file.
+#
+# So both halves are load-bearing and both are asserted, scoped to the lines
+# immediately around the recipe — the file says "Lead with the answer" further
+# up for an unrelated reason, and a whole-file grep would pass on that and
+# guard nothing.
+prompt_leads_with_the_handover() {
+  lca_system_prompt | awk -v pat="${HANDOVER_LINE}" '
+    { hist[NR] = tolower($0) }
+    $0 ~ pat {
+      for (i = NR - 6; i < NR; i++) {
+        if (hist[i] ~ /build|create|make/)                 verb = 1
+        if (hist[i] ~ /open with|start with|begin with|first line/) pos = 1
+      }
+    }
+    END { exit !(verb && pos) }'
+}
+check "the prompt names the trigger in the user's verbs, and says to lead with it" \
+  prompt_leads_with_the_handover
 
 echo "# set_env_var survives a value with spaces (BACKUP_SCHEDULE is one)"
 # Written unquoted, "*-*-* 05:00:00" makes .env unsourceable and the variable
@@ -702,6 +858,34 @@ if have jq; then
        (.title | type == "array" and length == 2 and all(type == "string"))
        and (.content | type == "string" and length > 0))' "${SUGGESTIONS}"
   check "suggestions are not Open WebUI's stock ones" not_stock
+  # PHONE.md tells the reader how many starter questions they will see. It said
+  # "four" for as long as there were five, because nothing tied the sentence to
+  # the file — and that page is the one a phone user actually reads.
+  #
+  # Matched on the NUMBER before the phrase, not on the sentence around it, so
+  # rewording the paragraph is free and changing the count is not.
+  doc_count_matches_suggestions() {
+    local n claimed
+    local words=(zero one two three four five six seven eight nine ten)
+    n="$(jq 'length' "${SUGGESTIONS}")"
+    claimed="$(grep -oiE '(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+) starter question' \
+                 "${REPO}/docs/PHONE.md" | head -1 | awk '{print tolower($1)}')"
+    [[ -n "${claimed}" ]] || {
+      echo "PHONE.md never says how many starter questions there are" >&2; return 1
+    }
+    # Written as a full if, not '(( ... )) && want=...': under 'set -e' a
+    # false arithmetic test makes the whole && list return 1 and aborts the
+    # function. That trap is documented in CONTRIBUTING.md and still caught me.
+    local want="${n}"
+    if (( n <= 10 )); then want="${words[n]}"; fi
+    [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
+      printf 'PHONE.md claims %s starter questions; the file has %s\n' \
+        "${claimed}" "${n}" >&2
+      return 1
+    }
+  }
+  check "PHONE.md's starter-question count matches the file" \
+    doc_count_matches_suggestions
 fi
 
 echo "# starting Ollama must not look like a hung terminal"
@@ -1053,6 +1237,29 @@ check_reports_dropin_drift() {
   grep -qF 'ollama_dropin_matches' "${REPO}/check-system.sh"
 }
 check "check-system.sh reports ollama config drift" check_reports_dropin_drift
+# ...and the OTHER half of the same class. Ollama's drop-in drift was reported
+# here from the start; the chat app's was reported only by './webui.sh status',
+# which is not the command the README, the docs or the login banner point
+# anyone at. So the half containing the assistant's own system prompt could
+# drift with 'lca check' saying nothing — the exact silence this class of test
+# exists to break.
+check_reports_webui_drift() {
+  grep -qF 'webui_drift' "${REPO}/check-system.sh" || {
+    echo "'lca check' never asks whether the chat app matches .env" >&2
+    return 1
+  }
+  # And it must not claim a match for a container that is not there: with no
+  # container every comparison reads "cannot tell", and "matches .env" about a
+  # thing that does not exist is worse than saying nothing.
+  awk '/webui_drifted="\$\(webui_drift/ { found=1 }
+       found && /p_pass "chat app matches/ { ok=guarded }
+       /if \[\[ -n "\$\{webui_status\}" \]\]/ { guarded=1 }
+       END { exit !ok }' "${REPO}/check-system.sh" || {
+    echo "the chat-app drift check is not scoped to an existing container" >&2
+    return 1
+  }
+}
+check "check-system.sh reports chat app config drift too" check_reports_webui_drift
 
 echo "# every setting baked into the WebUI container must be drift-checked"
 # Editing .env does not change a running container, so each of these can be
@@ -1079,10 +1286,23 @@ check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
 check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
 check "webui.sh reports OLLAMA_BASE_URL drift" drift_checked OLLAMA_BASE_URL "Ollama address"
 check "webui.sh reports WEBUI_NAME drift"      drift_checked WEBUI_NAME Name
+check "webui.sh reports system prompt drift" \
+  drift_checked DEFAULT_MODEL_PARAMS "System prompt"
+check "webui.sh reports starter question drift" \
+  drift_checked DEFAULT_PROMPT_SUGGESTIONS "Starter question"
 # Every setting the installer bakes in from .env must be compared. The three
 # telemetry flags are constants, so they cannot drift; everything else can, and
 # "the ones we happened to think of" is how OLLAMA_BASE_URL — the address the
 # phone uses to reach the model at all — went unchecked.
+#
+# ONE definition, used by both tests below. Written out twice, the reach test
+# guarded its own copy: reverting the loop's pattern to the blind one left
+# every test green. Two copies drifting apart is the bug this whole gate
+# exists to catch, so it must not be how the gate is built.
+baked_keys() {
+  grep -oE '\-e "?[A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
+    | grep -oE '[A-Z_]+' | sort -u
+}
 every_baked_setting_is_compared() {
   local key bad=0
   while read -r key; do
@@ -1094,12 +1314,89 @@ every_baked_setting_is_compared() {
       printf 'install_webui.sh bakes in %s but nothing ever compares it\n' "${key}" >&2
       bad=1
     }
-  done < <(grep -oE '^[[:space:]]+-e [A-Z_]+=' "${REPO}/scripts/install_webui.sh" \
-             | grep -oE '[A-Z_]+' | sort -u)
+  done < <(baked_keys)
   return "${bad}"
 }
 check "every setting baked into the container is drift-checked" \
   every_baked_setting_is_compared
+# The gate above is only as good as what it can see, and for two settings it
+# saw nothing. It anchored on '^<spaces>-e KEY=', which matches the plain
+# 'docker run' flags but NOT the two baked in from inside an array literal as
+# '-e "KEY=$(...)"' — the system prompt and the starter questions. So the pair
+# that decides what the assistant will and will not do were precisely the two
+# nothing compared, and 'lca apply' answered "already matches .env" after a
+# repo update that changed the prompt. Assert the scanner's reach directly:
+# a gate whose blind spot is invisible is worse than no gate.
+baked_scanner_sees_array_form() {
+  local found
+  found="$(baked_keys)"
+  grep -qx 'DEFAULT_MODEL_PARAMS' <<<"${found}" || {
+    echo "the baked-settings scanner cannot see DEFAULT_MODEL_PARAMS" >&2; return 1
+  }
+  grep -qx 'DEFAULT_PROMPT_SUGGESTIONS' <<<"${found}" || {
+    echo "the baked-settings scanner cannot see DEFAULT_PROMPT_SUGGESTIONS" >&2; return 1
+  }
+  # ...and it must not invent keys either: everything it yields has to be a
+  # real '-e' flag in the installer.
+  local key
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qE "\\-e \"?${key}=" "${REPO}/scripts/install_webui.sh" || {
+      printf 'the scanner produced %s, which install_webui.sh never bakes in\n' "${key}" >&2
+      return 1
+    }
+  done <<<"${found}"
+}
+check "the baked-settings scanner sees the array-literal '-e \"KEY=\"' form" \
+  baked_scanner_sees_array_form
+# ...and the comparison itself must work, not merely exist. The tests above
+# are source greps; this one drives webui_drift() for real, with the container
+# read stubbed so it runs anywhere (CI has no docker daemon). The bug being
+# guarded is behavioural: 'lca apply' reported "already matches .env" to
+# someone who had just pulled a repo whose system prompt was different.
+#
+# Each case runs in a subshell so the stub cannot leak into later tests.
+if have jq; then
+  # drift_says PATTERN LIVE_VALUE — is PATTERN among the drifted keys when the
+  # container was created with LIVE_VALUE as its system prompt?
+  # The stub's variable is NOT called 'live'. webui_drift() declares its own
+  # 'local live', and bash's dynamic scoping means the stub — called from
+  # inside it — would read webui_drift's empty one instead of ours. The test
+  # then passed the "no drift" cases and failed the one that mattered, for a
+  # reason that had nothing to do with the code under test.
+  drift_says() {
+    local want="$1" stub_live="$2" out
+    out="$(
+      webui_container_env() {
+        [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
+        [[ -n "${stub_live}" ]] || return 1
+        printf '%s' "${stub_live}"
+      }
+      webui_drift || true
+    )"
+    # Spelled out rather than '! grep -q ...': a bare negation as a function's
+    # last statement is SC2251 (it skips errexit), and the repo lints clean.
+    if [[ "${want}" == "none" ]]; then
+      if grep -q SYSTEM_PROMPT <<<"${out}"; then
+        printf 'drift was claimed when it should not have been: %s\n' "${out}" >&2
+        return 1
+      fi
+      return 0
+    fi
+    grep -q SYSTEM_PROMPT <<<"${out}"
+  }
+  check "a container holding today's prompt is not called drifted" \
+    drift_says none "$(lca_system_prompt | jq -Rsc '{system: .}')"
+  check "a container holding a different prompt IS reported as drift" \
+    drift_says SYSTEM_PROMPT "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')"
+  # An install predating the setting, or one made without jq, baked in no such
+  # value at all. "Cannot tell" is not "differs" — claiming drift there would
+  # send every one of those users to re-create a container for no reason.
+  check "a container created without the setting is not called drifted" \
+    drift_says none ""
+else
+  echo "skip - jq not installed, cannot exercise the system prompt comparison"
+fi
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {
@@ -1152,6 +1449,28 @@ no_installer_as_apply_instruction() {
 }
 check "no doc names an installer as the way to apply a .env edit" \
   no_installer_as_apply_instruction
+# The same rule for the messages a user reads at the terminal, which is where
+# it was actually still being broken: 'lca check' warned that signups were open
+# and told you to re-run scripts/install_webui.sh, while PHONE.md — fixed in
+# the same change that added 'lca apply' — told you 'sudo lca apply'. Two
+# half-remembered ways to do one thing is precisely what that command exists
+# to end, and the docs gate could not see a string inside a .sh file.
+#
+# Scoped to the surfaces that REPORT state. An installer telling you to re-run
+# an installer is correct advice — install_webui.sh's port clash happens after
+# it has already removed the old container, so 'lca apply' would have nothing
+# to re-create and the installer really is the next step.
+no_status_command_sends_you_to_an_installer() {
+  local hits
+  hits="$(grep -n 'in \.env and re-run scripts/install_' \
+            "${REPO}/check-system.sh" "${REPO}/webui.sh" 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'a status command names an installer instead of lca apply:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no status command names an installer to apply a .env edit" \
+  no_status_command_sends_you_to_an_installer
 
 echo "# the login banner's install-state machine"
 # The banner is the first thing anyone sees on this box, so being confidently
@@ -1383,6 +1702,65 @@ update_mentions_restore_on_failure() {
 }
 check "update.sh points at the backup when setup fails" \
   update_mentions_restore_on_failure
+
+echo "# 'lca check --quick' skips the one probe that costs real time"
+# Measured on this box: a full 'lca check' took 242 seconds, of which all but
+# about 3 were one probe — asking the model to generate. setup.sh runs exactly
+# that probe a few steps earlier and dies if it fails, so the final check was
+# paying for it twice on every install and every E2E run in CI.
+quick_flag_documented_in_usage() {
+  local out
+  out="$(bash "${REPO}/check-system.sh" --help 2>&1)" || return 1
+  # A DESCRIBED flag, not merely the token. The first version searched for
+  # '--quick' anywhere in the output and could not fail: the usage line
+  # "Usage: lca check [--quick]" contains it, so deleting the explanation
+  # entirely left the test green. What must stay true is that someone reading
+  # --help learns what the flag does.
+  grep -qE '^[[:space:]]*--quick[[:space:]]+[a-z]' <<<"${out}"
+}
+check "check-system.sh --help explains what --quick does, and exits 0" \
+  quick_flag_documented_in_usage
+# An unknown flag must be refused rather than silently ignored: a typo'd
+# '--quik' that runs the slow path anyway is the failure this whole flag is
+# meant to remove.
+rejects_unknown_flag() {
+  bash "${REPO}/check-system.sh" --definitely-not-a-flag >/dev/null 2>&1
+  (( $? == 2 ))
+}
+check "check-system.sh rejects an unknown flag with exit 2" rejects_unknown_flag
+# The generation probe must sit UNDER the guard, not merely somewhere in the
+# same file. Asserted on the block so that moving the probe out from under the
+# branch fails here even though both strings still appear.
+quick_guards_the_generation_probe() {
+  awk '/\{QUICK\}" == "true" \]\]; then/ { inblock=1; next }
+       inblock && /^# --- / { exit }
+       inblock && /model_responds/ { found=1 }
+       END { exit !found }' "${REPO}/check-system.sh"
+}
+check "the slow generation probe sits under the --quick guard" \
+  quick_guards_the_generation_probe
+# setup.sh must use it — but conditionally. An unconditional --quick would be
+# worse than the duplication it removes: when Ollama is unreachable the smoke
+# test never runs, and this check is then the only thing that would prove
+# inference works at all. So --quick may only ever be reached through the
+# variable that a successful generation sets.
+setup_skips_only_what_it_already_proved() {
+  # The flag is never passed as a literal on the invocation line...
+  ! grep -qE 'check-system\.sh".*--quick' "${REPO}/setup.sh" || return 1
+  # ...it is gated on a variable, which only a real generation sets true...
+  grep -qE '^[[:space:]]*smoke_tested=true$' "${REPO}/setup.sh" || return 1
+  awk '/if model_responds /   { inblock=1; next }
+       inblock && /^[[:space:]]*else/  { exit }
+       inblock && /smoke_tested=true/  { found=1 }
+       END { exit !found }' "${REPO}/setup.sh" || return 1
+  # ...and that variable is what decides the argument.
+  awk '/smoke_tested\}" == "true" \]\]; then/ { inblock=1; next }
+       inblock && /^[[:space:]]*fi$/ { exit }
+       inblock && /--quick/ { found=1 }
+       END { exit !found }' "${REPO}/setup.sh"
+}
+check "setup.sh skips the re-test only when it already proved inference" \
+  setup_skips_only_what_it_already_proved
 
 echo
 if (( FAILED > 0 )); then

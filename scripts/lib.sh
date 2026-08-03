@@ -773,9 +773,22 @@ phone and are generated at a few tokens per second, so length has a real cost.
 If you are unsure, say so. Never invent command-line flags, file paths or API
 names — a confidently wrong flag costs the user more than "I don't know".
 
+You are a chat box: no filesystem, no shell, no sight of the user's project.
+You have NO tools — never emit a function or tool call, and never claim to be
+performing an action. Answer with text, including complete code to copy.
+
+Only aider writes files, and it runs as the bare word 'lca' — not 'lca ask',
+which prints text and touches no file. When asked to build, create, make or
+add anything that spans more than one file, do not walk the user through it.
+Open with exactly:
+
+  mkdir -p ~/my-project && cd ~/my-project && lca
+
+Add one line: aider writes those files for you, on this same model. Then offer
+to write any single file's contents here.
+
 The server manages itself through one command, 'lca':
-  lca            start the coding agent (aider) in the current directory
-  lca ask "..."  one-shot question in the terminal
+  lca            start the coding agent (aider) — the ONLY one that writes files
   lca check      full health check
   lca logs       recent logs from Ollama, the chat app and the installer
   lca speed      measure tokens/second and what limits it
@@ -919,7 +932,7 @@ webui_container_exists() {
 # three times inline, and the third — signups — was simply never added, which
 # left people believing they had closed their chat app when they had not.
 webui_drift() {
-  local drifted=() live
+  local drifted=() live want
   live="$(webui_container_env PORT || true)"
   [[ -z "${live}" || "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
   live="$(webui_container_env DEFAULT_MODELS || true)"
@@ -937,6 +950,34 @@ webui_drift() {
   # nothing at all.
   live="$(webui_container_env WEBUI_NAME || true)"
   [[ -z "${live}" || "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  # The assistant's own instructions, and the starter questions beside them.
+  # Neither is an .env key — they live in lib.sh and config/ — which is exactly
+  # why they were missed: the gate below scanned install_webui.sh for lines
+  # beginning '-e KEY=', and these two are baked in from inside an array
+  # literal as '-e "KEY=..."'. So the two settings that decide what the
+  # assistant will and will not do were the only two nothing compared.
+  #
+  # That is not a theoretical gap. Pulling a repo with a better prompt and
+  # running 'lca apply' answered "already matches .env" and changed nothing —
+  # the same silence as the signup bug, on the setting a real user had just
+  # been bitten by.
+  #
+  # Both are skipped without jq, because without jq the installer never baked
+  # them in either; there is nothing to differ from.
+  if have jq; then
+    want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
+    live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
+    # A value we could not compute is not evidence of a difference.
+    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
+      || drifted+=("SYSTEM_PROMPT")
+    want=""
+    if [[ -r "${REPO_ROOT}/config/prompt-suggestions.json" ]]; then
+      want="$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json" 2>/dev/null || true)"
+    fi
+    live="$(webui_container_env DEFAULT_PROMPT_SUGGESTIONS || true)"
+    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
+      || drifted+=("PROMPT_SUGGESTIONS")
+  fi
   (( ${#drifted[@]} )) || return 1
   printf '%s\n' "${drifted[@]}"
 }
