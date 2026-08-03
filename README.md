@@ -254,6 +254,8 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
+| `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
+| `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 
 ## `.env` reference
 
@@ -294,7 +296,8 @@ local-code-agent/
 ├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
-│   ├── lib.sh · tune.sh · selftest.sh
+│   ├── lib.sh · tune.sh · selftest.sh · apply.sh · ask.sh
+│   ├── logs.sh · speed.sh · motd.sh · prompt-bench.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
 │   └── install_tailscale.sh

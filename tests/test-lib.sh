@@ -605,6 +605,24 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# the README's file tree must list every script that exists"
+# It had drifted by five: apply.sh, ask.sh, logs.sh, speed.sh and motd.sh were
+# all shipped, all user-facing, and none of them appeared in the tree a reader
+# uses to find out what this repo contains. A listing that is quietly a subset
+# is worse than none — it reads as complete.
+readme_tree_lists_every_script() {
+  local f base undocumented=0
+  for f in "${REPO}"/scripts/*.sh; do
+    base="$(basename "${f}")"
+    grep -qF "${base}" "${REPO}/README.md" || {
+      printf 'scripts/%s exists but the README never mentions it\n' "${base}" >&2
+      undocumented=1
+    }
+  done
+  return "${undocumented}"
+}
+check "the README mentions every script in scripts/" readme_tree_lists_every_script
+
 echo "# scripts/prompt-bench.sh — its classifiers decide every future verdict"
 # The bench needs a running model, so CI cannot run it end to end. But its
 # matchers are what turn a generation into a number, and a wrong matcher makes
