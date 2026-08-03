@@ -112,11 +112,16 @@ command that *can* do it — bare **`lca`** (aider), in a terminal, inside your
 project directory:
 
 ```bash
-cd ~/my-project && lca
+mkdir -p ~/my-project && cd ~/my-project && lca
 ```
 
 aider reads and writes real files and makes commits, on the same local model.
 Note `lca ask` is *not* it — that is one-shot text, like the chat.
+
+The `mkdir -p` is there because the people who trigger this are usually the
+ones with nothing to `cd` into yet — "build me an app" rarely comes from
+someone who already has the project. It is a no-op if the directory exists, so
+swap in your own path when you have one.
 
 That handover had to be measured into place rather than written. Asked *"build
 me a whole functioning income and expense tracker app"* — a real request from a

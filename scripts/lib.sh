@@ -782,7 +782,7 @@ which prints text and touches no file. When asked to build, create, make or
 add anything that spans more than one file, do not walk the user through it.
 Open with exactly:
 
-  cd ~/my-project && lca
+  mkdir -p ~/my-project && cd ~/my-project && lca
 
 Add one line: aider writes those files for you, on this same model. Then offer
 to write any single file's contents here.

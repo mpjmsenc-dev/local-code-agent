@@ -473,13 +473,22 @@ check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
 # wording was strengthened — a test that guards a sentence rather than a
 # contract. What must remain true: the prompt names bare 'lca' as the thing
 # that writes files, and explicitly rules 'lca ask' out for that job.
+# The shape of the copy-pasteable handover line, defined ONCE because both
+# gates below match on it. Written out twice they promptly drifted together in
+# the wrong direction: both anchored the line on STARTING with 'cd', and both
+# went red the moment the recipe grew a 'mkdir -p' in front of it. That prefix
+# was not cosmetic — a user whose first message is "build me an app" has no
+# ~/my-project, so the command the chat now gives them every time died on
+# "cd: No such file or directory" before aider ever ran.
+#
+# So the contract is not the first word. It is: ONE copy-pasteable line that
+# enters a project directory and ends in the BARE word 'lca'. Anything may
+# precede the cd; nothing may follow the lca.
+HANDOVER_LINE='^[[:space:]]*(.*&&[[:space:]]*)?cd [^&]*&&[[:space:]]*lca[[:space:]]*$'
 prompt_names_the_file_writing_command() {
   local p mentions negated
   p="$(lca_system_prompt)"
-  # A copy-pasteable recipe ending in the BARE word 'lca'. Matched on shape,
-  # so any sentence may introduce it, but the command itself cannot drift into
-  # 'lca ask' or 'lca run' without failing here.
-  grep -qE '^[[:space:]]*cd .*&&[[:space:]]*lca[[:space:]]*$' <<<"${p}" || return 1
+  grep -qE "${HANDOVER_LINE}" <<<"${p}" || return 1
   # And 'lca ask' may never appear un-negated. The model reads every line; one
   # neutral mention next to a file-writing request is all it took last time.
   mentions="$(grep -c 'lca ask' <<<"${p}")"
@@ -490,6 +499,62 @@ prompt_names_the_file_writing_command() {
 }
 check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
   prompt_names_the_file_writing_command
+# That pattern IS the gate now, and loosening it to admit a new recipe shape is
+# precisely how a gate quietly stops gating. So assert what it accepts and what
+# it refuses, against the forms this has actually taken and gone wrong as.
+handover_pattern_discriminates() {
+  local s
+  # Named 'accepts'/'rejects', not 'good'/'bad': other functions in this file
+  # use a scalar 'bad' as an error flag, and ShellCheck tracks a name's type
+  # across the whole file — an array called 'bad' here turns those into
+  # SC2178/SC2128 warnings pages away.
+  local -a accepts=(
+    "  cd ~/my-project && lca"
+    "  mkdir -p ~/my-project && cd ~/my-project && lca"
+  )
+  local -a rejects=(
+    "  cd ~/my-project && lca ask"      # the bug this gate was born for
+    "  mkdir -p ~/my-project && lca"    # never entered the project directory
+    "  cd ~/my-project"                 # never reached aider
+    "  lca"                             # no directory at all
+  )
+  for s in "${accepts[@]}"; do
+    grep -qE "${HANDOVER_LINE}" <<<"${s}" || {
+      printf 'the handover pattern rejects a valid recipe: %s\n' "${s}" >&2
+      return 1
+    }
+  done
+  for s in "${rejects[@]}"; do
+    if grep -qE "${HANDOVER_LINE}" <<<"${s}"; then
+      printf 'the handover pattern accepts a broken recipe: %s\n' "${s}" >&2
+      return 1
+    fi
+  done
+}
+check "the handover pattern accepts the real recipe and refuses the broken ones" \
+  handover_pattern_discriminates
+# And the recipe must work for someone who does not have the directory yet —
+# which is most of the people who trigger it, since the trigger is "build me
+# something". Run the line the prompt actually gives, in a throwaway HOME.
+handover_recipe_actually_runs() {
+  local line home rc
+  line="$(lca_system_prompt | grep -E "${HANDOVER_LINE}" | head -1)"
+  [[ -n "${line}" ]] || return 1
+  home="${SANDBOX}/fakehome"
+  rm -rf "${home}"; mkdir -p "${home}"
+  # 'lca' itself needs Ollama and aider, so stub it: what is under test is
+  # everything BEFORE it — the part that used to die on "cd: No such file or
+  # directory" before aider was ever reached.
+  HOME="${home}" bash -c "lca() { :; }; ${line}" >/dev/null 2>&1
+  rc=$?
+  (( rc == 0 )) || {
+    printf 'the recipe the chat hands out fails in a fresh HOME (exit %s): %s\n' \
+      "${rc}" "${line}" >&2
+    return 1
+  }
+}
+check "the handover recipe runs in a home that has no project directory yet" \
+  handover_recipe_actually_runs
 # Naming the command is not the same as getting it said, and the gap between
 # those two was measured rather than guessed. Against the real 3b model — the
 # rung a base 8 GB droplet runs — on the user's own request ("build me a whole
@@ -509,9 +574,9 @@ check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
 # up for an unrelated reason, and a whole-file grep would pass on that and
 # guard nothing.
 prompt_leads_with_the_handover() {
-  lca_system_prompt | awk '
+  lca_system_prompt | awk -v pat="${HANDOVER_LINE}" '
     { hist[NR] = tolower($0) }
-    /^[[:space:]]*cd .*&&[[:space:]]*lca[[:space:]]*$/ {
+    $0 ~ pat {
       for (i = NR - 6; i < NR; i++) {
         if (hist[i] ~ /build|create|make/)                 verb = 1
         if (hist[i] ~ /open with|start with|begin with|first line/) pos = 1
