@@ -244,6 +244,28 @@ prompt. Run the literal line in a throwaway `HOME`, and check the model
 reproduces it *whole*: a longer recipe is only a fix if it survives the copy
 (this one did, 6/6 verbatim — but that was worth measuring, not assuming).
 
+**A comment on its own line survives the copy; a trailing one does not.** The
+answers are read on a phone, so the recipe has to say where it runs. Three
+forms, same information, measured the same way:
+
+| Where the "where" lives | says where |
+|---|---|
+| an instruction — "Add one line: that goes in a terminal…" | 1/6 |
+| `#` comment on its **own line** above the command | **5/6** |
+| the same words trailing the command line itself | **0/5** |
+
+The instruction fails because a 3b model will not narrate context on request.
+The trailing comment fails for a different and more useful reason: the model
+reproduces a block line by line and drops what hangs off the end of a line. So
+"put it in what gets copied" is not enough — it has to be its own line to get
+copied.
+
+That last row also nearly cost a gate. Accepting it would have meant relaxing
+the pattern that requires the recipe line to end at `lca`, which is the gate
+that catches the `lca ask` misdirection. Loosening a gate to fit a new shape is
+how gates stop gating; it was worth measuring before touching it, and the
+measurement said don't.
+
 **Count the failure, not the success.** Scoring "did it say the right thing?"
 means writing a regex for every phrasing of right, and the one used here quietly
 missed "run `lca` in your project directory" — so every reported success rate
