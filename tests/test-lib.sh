@@ -3062,6 +3062,14 @@ check "a deleted target reads as broken too"     test "$(state_of deleted)" = br
 check "a link into another checkout is foreign"  test "$(state_of foreign)" = foreign
 check "a real file at that path is not ours"     test "$(state_of plain)"   = other
 check "nothing there at all is absent"           test "$(state_of nowhere)" = absent
+# The comparison has to survive the two sides being spelled differently.
+# check-system.sh builds its side with 'cd && pwd', which keeps a symlinked
+# path, while readlink -f hands back the physical one — so an install reached
+# through a symlinked parent would read as 'foreign' and shout about a healthy
+# machine.
+ln -s "${LINKS}/real" "${LINKS}/real-alias"
+check "a checkout reached through a symlinked parent is still ok" \
+  test "$(lca_link_state "${LINKS}/ok" "${LINKS}/real-alias/bin/lca")" = ok
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 

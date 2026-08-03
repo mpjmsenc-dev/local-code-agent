@@ -1114,6 +1114,12 @@ unit_boot_program() {
 #   absent   not installed (a rootless install never creates it)
 lca_link_state() {
   local link="$1" want="$2" target
+  # Resolve BOTH sides the same way before comparing. SCRIPT_DIR is built with
+  # 'cd && pwd', which keeps a symlinked path, while readlink -f returns the
+  # physical one — so a checkout reached through a symlinked parent (a /tmp on
+  # macOS, a symlinked /opt, a bind-mounted home) would compare unequal and
+  # report 'foreign': a frightening message about a perfectly healthy machine.
+  want="$(readlink -f "${want}" 2>/dev/null || printf '%s' "${want}")"
   if [[ -L "${link}" ]]; then
     # readlink -f fails outright when a NON-final component is missing, which
     # is exactly the moved-checkout case; -x catches the rest.
