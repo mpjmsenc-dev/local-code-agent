@@ -174,8 +174,12 @@ remotely alike:
 
 | Prompt says | Hands over | Leads with it | Doomed tutorial |
 |---|---|---|---|
+| nothing about it — what shipped before | 0/8 | 0/8 | **8/8** |
 | "when a request needs files created or edited" | 1/4 | 0/4 | 3/4 |
-| "when asked to build, create, make or add…" + "Open with exactly:" | 4/4 | 4/4 | 0/4 |
+| "when asked to build, create, make or add…" + "Open with exactly:" | **8/8** | **8/8** | 0/8 |
+
+The middle two rows differ in nothing but that sentence, so the sentence is
+what moved it.
 
 The abstraction asks a 3 billion parameter model to classify a request before
 it can obey. Its prior — "someone asked for an app, write a tutorial" — wins
@@ -190,6 +194,16 @@ not fire on questions it should not — a handover rule strong enough to beat
 the tutorial reflex can easily hijack "what does this error mean?", and a chat
 that answers everything with `cd ~/my-project && lca` has been made useless in
 the course of making it honest.
+
+**A command you put in the prompt is a command you are shipping — run it.**
+Once the handover fired reliably, it was reliably handing out
+`cd ~/my-project && lca`, which dies on `cd: No such file or directory` for
+anyone who does not already have that directory — i.e. most of the people who
+ask for an app to be built. Getting the model to say a thing and having the
+thing work are two separate problems, and the second one is invisible from the
+prompt. Run the literal line in a throwaway `HOME`, and check the model
+reproduces it *whole*: a longer recipe is only a fix if it survives the copy
+(this one did, 6/6 verbatim — but that was worth measuring, not assuming).
 
 **Count the failure, not the success.** Scoring "did it say the right thing?"
 means writing a regex for every phrasing of right, and the one used here quietly
