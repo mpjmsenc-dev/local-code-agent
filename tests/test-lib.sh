@@ -468,11 +468,17 @@ check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
 # ...and sends project work to the ONE command that can write files. The first
 # version of this fix said only "the terminal agent", and the model duly
 # suggested 'lca ask' — which is also text-only. Caught by running it.
+# Asserted on meaning, not on a phrase. The first version keyed off the
+# literal "NOT " that happened to be in draft one, and went red the moment the
+# wording was strengthened — a test that guards a sentence rather than a
+# contract. What must remain true: the prompt names bare 'lca' as the thing
+# that writes files, and explicitly rules 'lca ask' out for that job.
 prompt_names_the_file_writing_command() {
   local p; p="$(lca_system_prompt)"
-  grep -qi 'cannot write files' <<<"${p}" \
-    && grep -qF 'NOT ' <<<"${p}" \
-    && grep -qi 'lca ask' <<<"${p}"
+  grep -qi 'cannot create or edit files' <<<"${p}" || return 1
+  grep -qi "one thing on this server writes files" <<<"${p}" || return 1
+  grep -qi "never offer 'lca ask'" <<<"${p}" || return 1
+  grep -qi 'touches no file' <<<"${p}"
 }
 check "system prompt distinguishes 'lca' from 'lca ask' for file work" \
   prompt_names_the_file_writing_command
