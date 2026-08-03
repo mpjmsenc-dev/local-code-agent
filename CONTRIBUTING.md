@@ -266,6 +266,23 @@ that catches the `lca ask` misdirection. Loosening a gate to fit a new shape is
 how gates stop gating; it was worth measuring before touching it, and the
 measurement said don't.
 
+**Read a real answer before you trust a threshold.** Every proxy metric here
+has been wrong at least once, always in a way that looked like a product
+defect:
+
+| The metric said | The truth was |
+|---|---|
+| "handed over 1/6" | the pattern missed "run `lca` in your project directory" |
+| "tutorial 1/3 on 7b" | the detector counted our *own* recipe's `mkdir` |
+| "truncated 2/4" | the harness capped generation at 400 tokens |
+| "complete file 1/4" | a correct `config.py` is 3 lines; the threshold wanted 5 |
+
+Each cost a round trip, and two of them nearly went into a commit message as
+findings. When a number moves in the direction you expected, that is when to
+be most suspicious of it — dump one raw generation and read it before drawing
+any conclusion. The fourth row was found that way after the third had already
+been found that way.
+
 **Count the failure, not the success.** Scoring "did it say the right thing?"
 means writing a regex for every phrasing of right, and the one used here quietly
 missed "run `lca` in your project directory" — so every reported success rate
