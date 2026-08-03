@@ -135,6 +135,13 @@ main() {
     warn "Could not fully apply the restored .env — run: sudo ${SCRIPT_DIR}/bin/lca apply"
   fi
 
+  # A backup carries the SOURCE machine's model and context length, and the
+  # commonest reason to restore one is moving to different hardware
+  # (docs/MIGRATE.md is exactly that). Auto-tune re-picks on the next boot, but
+  # there is no reason to run the wrong model until then, and nothing said so.
+  info "Restored .env carries the backup machine's model (${MODEL_NAME}, context ${OLLAMA_CONTEXT_LENGTH})."
+  info "If this machine has different RAM, re-pick now instead of waiting for a reboot: sudo ${REPO_ROOT}/bin/lca tune"
+
   ok "Restore complete. Verify with: ./check-system.sh"
 }
 

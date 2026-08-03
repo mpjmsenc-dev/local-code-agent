@@ -757,6 +757,22 @@ restore_reconciles_with_apply() {
   }
 }
 check "restore.sh applies the .env it just restored" restore_reconciles_with_apply
+# ...and says the restored model came from the BACKUP's machine. The commonest
+# reason to restore is moving to different hardware — docs/MIGRATE.md is about
+# exactly that — so the restored MODEL_NAME and context are the old VM's, and
+# auto-tune does not re-pick until the next boot. Nothing said so, which left a
+# documented migration running the droplet's small model on a big new box for
+# no reason anyone could see.
+restore_points_at_tune() {
+  awk '/^  # 1\. \.env/ { seen = 1 }
+       seen && /lca tune/ { found = 1 }
+       END { exit !found }' "${REPO}/restore.sh" || {
+    echo "restore.sh never mentions re-tuning for the machine it restored onto" >&2
+    return 1
+  }
+}
+check "restore.sh tells you to re-tune after restoring onto other hardware" \
+  restore_points_at_tune
 
 echo "# the one mechanism that delivers a new prompt to an existing install"
 # Everything about improving the assistant is worthless if an improvement

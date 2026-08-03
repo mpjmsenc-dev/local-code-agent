@@ -49,10 +49,22 @@ scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.ta
    ./restore.sh
    ```
 
-   This restores `.env` and the WebUI volume, recreates the container, and
-   re-pulls your models. Note: auto-tune on the next boot may pick a different
-   model than the droplet had — that's the feature, not a bug: it matches the
-   new VM's RAM.
+   This restores `.env` and the WebUI volume, recreates the container, re-pulls
+   your models, and finishes by running `lca apply` so the restored settings are
+   actually in effect rather than merely on disk.
+
+   Then re-pick the model for *this* machine:
+
+   ```bash
+   sudo lca tune
+   ```
+
+   The backup carries the **droplet's** model and context length, which is the
+   whole point of this document being about moving to different hardware.
+   Auto-tune would fix it on the next boot anyway — this just means you are not
+   running the small droplet's model on a big new VM until then. Picking a
+   different model than the droplet had is the feature, not a bug: it matches
+   the new VM's RAM.
 
 5. Join the new machine to your Tailscale network:
 
