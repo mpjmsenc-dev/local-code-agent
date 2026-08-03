@@ -211,7 +211,7 @@ if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
       p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
     fi
   else
-    p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: sudo ./setup.sh (or: sudo systemctl enable local-code-agent-tune.service)"
+    p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: $(reenable_hint local-code-agent-tune.service "sudo ${SCRIPT_DIR}/setup.sh")"
   fi
 fi
 # The login banner is the first thing anyone sees on this box, so a broken one

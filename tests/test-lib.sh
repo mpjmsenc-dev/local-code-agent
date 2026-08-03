@@ -2765,6 +2765,31 @@ check "a unit whose program is there says nothing"  present_program_is_silent
 check "a unit we cannot read at all is not called broken" \
   unknown_unit_is_not_called_broken
 
+# A unit that is merely disabled and one whose file was never written need
+# different fixes, and 'lca check' offered the light one unconditionally:
+# 'systemctl enable' cannot enable a file that is not there, which is the most
+# likely reason it is not enabled.
+enable_hint_when_the_file_is_there() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  test "$(reenable_hint live.service './setup.sh')" = "sudo systemctl enable live.service"
+}
+installer_hint_when_the_file_is_gone() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  test "$(reenable_hint absent.service './setup.sh')" = "./setup.sh"
+}
+# '--now' would also RUN the unit, which for auto-tune can mean an unasked-for
+# model download; the question was about the next boot.
+enable_hint_does_not_run_the_unit() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  ! grep -q -- '--now' <<<"$(reenable_hint live.service './setup.sh')"
+}
+check "an existing unit file is re-enabled, not re-installed" \
+  enable_hint_when_the_file_is_there
+check "a missing unit file sends you to the installer that writes it" \
+  installer_hint_when_the_file_is_gone
+check "the enable hint does not start the unit as a side effect" \
+  enable_hint_does_not_run_the_unit
+
 # ...and check-system.sh must actually consult it, for all three units, rather
 # than trusting is-enabled the way it did before.
 every_boot_unit_is_verified() {

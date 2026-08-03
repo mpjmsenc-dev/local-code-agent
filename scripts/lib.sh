@@ -1099,6 +1099,22 @@ unit_boot_program() {
   printf '%s' "${out}"
 }
 
+# reenable_hint UNIT INSTALLER — the command that will actually put UNIT back.
+# 'systemctl enable' can only enable a unit file that exists, and the most
+# likely reason a unit is not enabled is that nothing ever wrote it — so
+# offering it unconditionally names a command that fails in the common case.
+# INSTALLER is the heavier thing that writes the file.
+reenable_hint() {
+  if [[ -f "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" ]]; then
+    # Deliberately not '--now': that would run the unit immediately, and for
+    # auto-tune that can mean an unasked-for model download. The question was
+    # about the next boot.
+    printf 'sudo systemctl enable %s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 # stale_boot_program UNIT — echo the program a unit will try to run at boot,
 # but only when that program is no longer there. Prints nothing and returns 1
 # when the unit is fine AND when we could not work out what it runs: an answer
