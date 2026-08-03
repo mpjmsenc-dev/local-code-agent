@@ -77,6 +77,15 @@ case "${cmd}" in
   webui)           exec "${REPO}/webui.sh" "$@" ;;
   tune)            exec "${REPO}/scripts/tune.sh" "$@" ;;
   help|-h|--help)  usage ;;
+  # 'lca help' has advertised "lca --no-auto-commits (arguments for aider)"
+  # since the help text was written, and it did not work: a leading dash
+  # matched no branch and fell through to "Unknown command". Bare 'lca' starts
+  # aider, so passing aider's own flags straight after it is the obvious
+  # reading, and it is what the example promises.
+  #
+  # "${cmd}" is re-prepended because the shift above already consumed it.
+  # Placed after the help branch so -h and --help keep their meaning.
+  -*)              exec "${REPO}/run-agent.sh" "${cmd}" "$@" ;;
   *)
     usage
     printf '\nUnknown command: %s\n' "${cmd}" >&2

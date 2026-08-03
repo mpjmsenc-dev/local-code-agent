@@ -610,6 +610,37 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# every example in 'lca help' must actually work"
+# The help has advertised "lca --no-auto-commits (arguments for aider)" since
+# it was written, and it did not work: a leading dash matched no branch in the
+# dispatcher and fell through to "Unknown command". Nobody noticed because the
+# gate that keeps help honest checks the COMMANDS in the list, and this lives
+# in the examples underneath it.
+#
+# Asserted on the dispatcher, not by running aider: starting it needs a model.
+help_examples_are_dispatched() {
+  local src="${REPO}/bin/lca"
+  # A dashed argument must route somewhere real...
+  grep -qE '^\s*-\*\)\s*exec .*run-agent\.sh' "${src}" || {
+    echo "bin/lca has no branch for a leading-dash argument, but 'lca help' shows one" >&2
+    return 1
+  }
+  # ...after the help branch, or -h and --help would start aider instead.
+  awk '/help\|-h\|--help\)/ { helpline = NR }
+       /^  -\*\)/           { dashline = NR }
+       END { exit !(helpline && dashline && helpline < dashline) }' "${src}" || {
+    echo "the dash branch precedes the help branch — 'lca --help' would start aider" >&2
+    return 1
+  }
+  # And an unknown NON-dashed command must still be refused.
+  grep -qE 'Unknown command' "${src}" || {
+    echo "bin/lca no longer refuses unknown commands" >&2
+    return 1
+  }
+}
+check "'lca <aider-flag>' reaches aider, as 'lca help' promises" \
+  help_examples_are_dispatched
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit
