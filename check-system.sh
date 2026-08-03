@@ -345,7 +345,7 @@ else
     if systemctl is-enabled --quiet local-code-agent-netmode.service 2>/dev/null; then
       p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
     else
-      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh --install-service"
+      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh harden"
     fi
   fi
 fi

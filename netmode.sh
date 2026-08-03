@@ -13,7 +13,8 @@
 #          Inference is unaffected — models are local.
 # online:  restore normal egress.
 # status:  print the persisted mode AND prove it with a live probe.
-# harden:  (re)apply the always-on INBOUND guard (see below).
+# harden:  (re)apply the always-on INBOUND guard (see below) AND install the
+#          boot service that puts it back after a reboot.
 #
 # Inbound guard (always on, independent of offline/online): a second nft
 # table drops NEW inbound connections to the Open WebUI and Ollama ports on
@@ -260,6 +261,30 @@ install_service() {
   ok "Netmode now persists across reboots."
 }
 
+# do_harden — the user-facing "put the inbound guard back" command.
+#
+# Eight messages across this repo send people here when the guard is missing:
+# 'netmode status', 'lca check' twice, both installers, TROUBLESHOOTING.md,
+# DO.md and the SSH-port refusal above. The usage text at the bottom of this
+# file then tells them "the inbound guard persist[s] across reboots" — which
+# was only true if you arrived by setup.sh, offline or online, the three paths
+# that also install the boot unit. Reached the documented way, harden loaded
+# the ruleset for THIS boot and nothing else, so the ports that had just been
+# closed went public again at the next reboot.
+#
+# 'lca check' did catch that, but only on the NEXT run, and it then named
+# --install-service — an internal flag this script's own usage does not list.
+# One command that finishes the job beats a two-round recovery through a flag
+# the user cannot look up.
+#
+# The guard goes on FIRST: it is what was actually asked for, and it must not
+# be held hostage by a systemd problem — install_service die()s if the enable
+# fails, and a machine with a broken systemd still deserves closed ports.
+do_harden() {
+  apply_inbound_guard
+  install_service
+}
+
 go_offline() {
   require_cmd nft
   step "Engaging internet kill switch (offline mode)"
@@ -353,7 +378,7 @@ main() {
     offline)          go_offline ;;
     online)           go_online ;;
     status)           show_status ;;
-    harden)           apply_inbound_guard ;;
+    harden)           do_harden ;;
     apply-saved)      apply_saved ;;
     render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
     render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
@@ -368,7 +393,8 @@ Usage: sudo netmode.sh <offline|online|status|harden>
   online    Kill-switch OFF: normal internet access restored.
   status    Show the persisted mode and prove it with a live probe.
   harden    (Re)apply the always-on inbound guard so the WebUI/Ollama ports
-            are reachable only over loopback and Tailscale, never publicly.
+            are reachable only over loopback and Tailscale, never publicly —
+            now, and again after every reboot.
 
 The chosen mode and the inbound guard persist across reboots.
 EOF

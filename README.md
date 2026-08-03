@@ -110,7 +110,9 @@ caveat: the encrypted Tailscale tunnel still uses the network as transport;
 Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
 every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
-with `sudo ./netmode.sh harden` / `status`.
+with `sudo ./netmode.sh harden` / `status`; `harden` also (re)installs the boot
+service, so one command closes the ports for good rather than until the next
+reboot.
 
 ## Updating
 
@@ -200,7 +202,7 @@ lca                 # starts aider on the local model, right here
 | `lca speed` | measure tokens/second and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
-| `lca harden` | re-apply the always-on inbound guard on ports 3000/11434 (needs sudo) |
+| `lca harden` | re-close ports 3000/11434 — now, and again on every boot (needs sudo) |
 | `lca model <name>` | switch models (`--list` what's installed, `--list-recommended` what fits this machine's RAM) |
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |

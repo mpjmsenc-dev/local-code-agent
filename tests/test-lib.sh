@@ -2549,6 +2549,53 @@ setup_skips_only_what_it_already_proved() {
 check "setup.sh skips the re-test only when it already proved inference" \
   setup_skips_only_what_it_already_proved
 
+echo "# the documented way to put the inbound guard back must actually stick"
+# 'netmode.sh harden' is the ONE command this repo names when the guard is
+# missing — netmode status, 'lca check' twice, both installers and two docs all
+# point at it — and netmode.sh's usage promises the guard survives reboots.
+# For a long time it did not: harden loaded the ruleset for the current boot,
+# while offline/online (which nobody is told to run to fix a missing guard)
+# were the only subcommands that installed the unit re-applying it at boot.
+# Following the documented recovery from "your ports are public" therefore
+# made them public again at the next reboot.
+harden_installs_the_boot_service() {
+  grep -qE '^[[:space:]]*harden\)[[:space:]]+do_harden[[:space:]]*;;' "${REPO}/netmode.sh" \
+    || { echo "netmode.sh: 'harden)' no longer dispatches to do_harden" >&2; return 1; }
+  # awk's exit still runs END, so a body that ends before the match fails.
+  awk '/^do_harden\(\) \{/     { inb=1; next }
+       inb && /^\}/            { exit }
+       inb && /install_service/ { found=1 }
+       END { exit !found }' "${REPO}/netmode.sh" \
+    || { echo "netmode.sh: do_harden does not install the boot service" >&2; return 1; }
+  # ...and it still applies the guard now, which is the point of the command.
+  awk '/^do_harden\(\) \{/         { inb=1; next }
+       inb && /^\}/                { exit }
+       inb && /apply_inbound_guard/ { found=1 }
+       END { exit !found }' "${REPO}/netmode.sh" \
+    || { echo "netmode.sh: do_harden no longer applies the guard" >&2; return 1; }
+}
+check "'netmode.sh harden' also installs the boot service" \
+  harden_installs_the_boot_service
+
+# --install-service is internal: setup.sh and CI call it, and netmode.sh's own
+# usage does not list it. 'lca check' used to print it as the Fix: for a
+# missing boot service, sending someone to a flag they cannot look up. Advice a
+# human reads has to name a command that command's --help documents. Scoped to
+# the surfaces that give advice — tune.sh documents its own flag, legitimately,
+# and setup.sh/CI invoke both programmatically.
+advice_names_only_documented_commands() {
+  local hits
+  hits="$(grep -n -- '--install-service' \
+            "${REPO}/check-system.sh" "${REPO}/bin/lca" "${REPO}/README.md" \
+            "${REPO}"/scripts/install_*.sh "${REPO}"/docs/*.md 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these send a user to the internal --install-service flag:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no user-facing message recommends the internal --install-service flag" \
+  advice_names_only_documented_commands
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"

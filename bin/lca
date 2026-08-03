@@ -41,7 +41,7 @@ Usage: lca [command] [args...]
   lca tune                re-pick the model for this machine's RAM (auto-tune)
   lca offline|online      internet kill switch  (needs sudo)
   lca status              kill-switch + guard status (needs sudo)
-  lca harden              re-apply the inbound guard on ports 3000/11434 (sudo)
+  lca harden              re-close ports 3000/11434 now and on every boot (sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs
   lca help                this text
 
