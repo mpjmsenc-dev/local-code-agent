@@ -465,6 +465,32 @@ prompt_forbids_tool_calls() {
   grep -qi 'no tools' <<<"${p}" && grep -qi 'never emit a function' <<<"${p}"
 }
 check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
+# The prompt is not free. It is re-read on EVERY message, out of the 4096-token
+# window the 3b rung runs with, so each paragraph is rent charged per turn for
+# the life of the install — and it is the one cost that never shows up in a
+# test, a log or a benchmark.
+#
+# It doubled once already, 328 -> 656 tokens, before anyone noticed: 16% of
+# that window handed to instructions on every single turn. The fix then was to
+# cut what measurement showed did not work, which is only possible if someone
+# is watching the number. Nobody was.
+#
+# ~4 characters per token is rough but stable for English prose, and the point
+# is a ceiling, not an estimate. 15% of 4096 leaves real headroom while making
+# a doubling impossible to land quietly.
+prompt_fits_its_budget() {
+  local chars tokens cap
+  chars="$(lca_system_prompt | wc -c)"
+  tokens=$(( chars / 4 ))
+  cap=$(( 4096 * 15 / 100 ))
+  (( tokens <= cap )) || {
+    printf 'the system prompt is ~%s tokens (%s chars) — over the %s-token budget, which is 15%%%% of the 4096 context the 3b rung runs with\n' \
+      "${tokens}" "${chars}" "${cap}" >&2
+    return 1
+  }
+}
+check "the system prompt stays inside its share of a 4096-token context" \
+  prompt_fits_its_budget
 # ...and sends project work to the ONE command that can write files. The first
 # version of this fix said only "the terminal agent", and the model duly
 # suggested 'lca ask' — which is also text-only. Caught by running it.
