@@ -605,6 +605,32 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# the README's privacy claim about the inbound guard must stay true"
+# README's "How your services are kept private" states the guard is re-applied
+# "whenever WebUI is (re)created". That is a security claim, and it rests on a
+# single line in install_webui.sh. It matters more now than when it was
+# written: 'lca apply' re-creates the container on every settings change, so
+# this is the path that keeps ports 3000 and 11434 off the public internet
+# after routine use, not just at install time.
+#
+# Delete that line and nothing fails, nothing logs, and the only symptom is an
+# exposed port on someone's droplet.
+webui_installer_applies_the_guard() {
+  grep -qE 'netmode\.sh" harden' "${REPO}/scripts/install_webui.sh" || {
+    echo "install_webui.sh no longer applies the inbound guard — README claims it does" >&2
+    return 1
+  }
+  # And the README must still be making the claim this guards; if the sentence
+  # goes, the test should be re-examined rather than silently protecting a
+  # promise nobody makes any more.
+  grep -qi 'whenever WebUI is' "${REPO}/README.md" || {
+    echo "README no longer claims the guard is re-applied when WebUI is re-created" >&2
+    return 1
+  }
+}
+check "install_webui.sh re-applies the inbound guard, as the README promises" \
+  webui_installer_applies_the_guard
+
 echo "# 'lca update' must re-run setup even when the checkout is already current"
 # The delivery chain for any assistant fix is: update -> setup.sh ->
 # install_webui.sh rebuilds the container -> selftest checks the live prompt.
