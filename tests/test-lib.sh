@@ -581,6 +581,29 @@ handover_recipe_actually_runs() {
 }
 check "the handover recipe runs in a home that has no project directory yet" \
   handover_recipe_actually_runs
+# The reader is on a PHONE, inside a chat app with no terminal in it, so a bash
+# block is only actionable once they know where it goes. Measured on 3b: only
+# 1 answer in 6 mentioned a terminal, SSH or the server at all.
+#
+# Telling the model to SAY so barely helped — 0/6 to 1/6. Putting the same
+# words INSIDE the block it copies took it to 5/6, at no cost to how faithfully
+# the command itself came through. That is the rule this asserts: for a small
+# model, the payload travels in what it copies, not in an instruction about
+# what to narrate.
+#
+# A '#' line, so it stays paste-safe: it is a valid shell comment.
+handover_block_says_where_it_runs() {
+  lca_system_prompt | awk -v pat="${HANDOVER_LINE}" '
+    { hist[NR] = tolower($0) }
+    $0 ~ pat {
+      # The line immediately above must be a comment naming where it runs.
+      if (hist[NR-1] ~ /^[[:space:]]*#/ &&
+          (hist[NR-1] ~ /terminal|ssh|server|shell/)) found = 1
+    }
+    END { exit !found }'
+}
+check "the handover block says where to run it, inside the block" \
+  handover_block_says_where_it_runs
 # The recipe now exists in three places: the prompt, docs/PHONE.md and
 # docs/TROUBLESHOOTING.md. Three copies of a command line is how a doc comes to
 # teach something that no longer works — and this exact line already shipped
