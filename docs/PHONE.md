@@ -91,9 +91,10 @@ same assistant.
 **Changing it later:** both settings are baked into the chat app container when
 it is created, so editing the repo is not enough on its own — run `sudo lca
 apply` and it re-creates the container with the new prompt (your account and
-chats live in a docker volume and survive). If you forget, `./webui.sh status`
-now says so rather than staying silent: *"System prompt drift: the running chat
-app still has the assistant instructions it was created with"*.
+chats live in a docker volume and survive). If you forget, `lca check` now says
+so rather than staying silent: *"chat app config drift: SYSTEM_PROMPT — edited
+in .env or the repo but NOT in effect"*. (`./webui.sh status` spells out each
+one at length; `lca check` is the one to reach for.)
 
 The one exception is a setting you have already changed **inside the WebUI**:
 Open WebUI stores that in its own database, and a stored value always wins over

@@ -1214,6 +1214,29 @@ check_reports_dropin_drift() {
   grep -qF 'ollama_dropin_matches' "${REPO}/check-system.sh"
 }
 check "check-system.sh reports ollama config drift" check_reports_dropin_drift
+# ...and the OTHER half of the same class. Ollama's drop-in drift was reported
+# here from the start; the chat app's was reported only by './webui.sh status',
+# which is not the command the README, the docs or the login banner point
+# anyone at. So the half containing the assistant's own system prompt could
+# drift with 'lca check' saying nothing — the exact silence this class of test
+# exists to break.
+check_reports_webui_drift() {
+  grep -qF 'webui_drift' "${REPO}/check-system.sh" || {
+    echo "'lca check' never asks whether the chat app matches .env" >&2
+    return 1
+  }
+  # And it must not claim a match for a container that is not there: with no
+  # container every comparison reads "cannot tell", and "matches .env" about a
+  # thing that does not exist is worse than saying nothing.
+  awk '/webui_drifted="\$\(webui_drift/ { found=1 }
+       found && /p_pass "chat app matches/ { ok=guarded }
+       /if \[\[ -n "\$\{webui_status\}" \]\]/ { guarded=1 }
+       END { exit !ok }' "${REPO}/check-system.sh" || {
+    echo "the chat-app drift check is not scoped to an existing container" >&2
+    return 1
+  }
+}
+check "check-system.sh reports chat app config drift too" check_reports_webui_drift
 
 echo "# every setting baked into the WebUI container must be drift-checked"
 # Editing .env does not change a running container, so each of these can be

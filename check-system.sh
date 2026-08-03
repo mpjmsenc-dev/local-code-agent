@@ -264,6 +264,25 @@ else
   else
     p_pass "signups are closed (WEBUI_ENABLE_SIGNUP=false)"
   fi
+  # The container keeps a COPY of every setting it was created with, so an
+  # .env edit never reaches it on its own. This file already reports exactly
+  # that for Ollama's drop-in a few checks above — the chat app's half was
+  # only ever reported by './webui.sh status', which is not the command the
+  # README, the docs, or the login banner send anyone to. So the half of the
+  # applied-settings class that includes the assistant's own system prompt was
+  # invisible from 'lca check'.
+  #
+  # Only when a container exists: with none, every comparison reads "cannot
+  # tell", and printing "matches .env" about a thing that is not there is the
+  # confidently-wrong line this file works hardest to avoid.
+  if [[ -n "${webui_status}" ]]; then
+    webui_drifted="$(webui_drift || true)"
+    if [[ -n "${webui_drifted}" ]]; then
+      p_warn "chat app config drift: ${webui_drifted//$'\n'/, } — edited in .env or the repo but NOT in effect, because the running container still holds what it was created with. Fix: sudo lca apply"
+    else
+      p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
+    fi
+  fi
 fi
 
 # --- Tailscale (warn-only) --------------------------------------------------
