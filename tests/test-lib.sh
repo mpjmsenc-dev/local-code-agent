@@ -610,6 +610,33 @@ handover_block_says_where_it_runs() {
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
 
+echo "# every systemd unit this project installs must also be uninstalled"
+# Four units are installed today — tune, netmode, backup service and timer —
+# and uninstall.sh removes all four. Nothing holds that together. A fifth unit
+# added to an installer and forgotten here would survive 'uninstall.sh',
+# keep running at every boot, and reference a directory the user believes they
+# deleted. Units are the worst thing to leak because they are the one artefact
+# that outlives the reboot.
+#
+# Same shape as the gate for settings baked into the WebUI container: derive
+# the list from what the installers actually create, rather than maintaining a
+# second copy of it here.
+every_installed_unit_is_removed() {
+  local unit leaked=0
+  while read -r unit; do
+    [[ -n "${unit}" ]] || continue
+    grep -qF "${unit}" "${REPO}/uninstall.sh" || {
+      printf 'something installs %s but uninstall.sh never removes it\n' "${unit}" >&2
+      leaked=1
+    }
+  done < <(grep -rhoE 'local-code-agent[a-z-]*\.(service|timer)' \
+             "${REPO}/setup.sh" "${REPO}"/scripts/*.sh "${REPO}/netmode.sh" \
+             "${REPO}/backup.sh" 2>/dev/null | sort -u)
+  return "${leaked}"
+}
+check "uninstall.sh removes every systemd unit the installers create" \
+  every_installed_unit_is_removed
+
 echo "# install.sh is piped into bash — a partial download must do nothing"
 # It is advertised as 'curl -fsSL ... | bash', which streams the file and runs
 # each statement as it arrives. A connection dropping part-way would otherwise
