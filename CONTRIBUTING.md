@@ -207,9 +207,28 @@ that argument every time. Naming the user's own verbs removes the
 classification step, and saying *where the answer goes* beats saying what it
 should contain.
 
-So: keep a couple of real prompts in a scratch file, run each candidate
-several times (they are sampled, so one generation proves nothing), count
-outcomes, and put the counts in the commit message. Also check the change does
+**There is a bench for this — use it.** `scripts/prompt-bench.sh` asks the real
+model the three questions that matter and counts the outcomes:
+
+```bash
+scripts/prompt-bench.sh -n 6                 # the prompt as it stands
+scripts/prompt-bench.sh -n 6 -f candidate.txt   # a change, same -n
+scripts/prompt-bench.sh -n 6 -m qwen2.5-coder:3b   # pin the smallest rung
+```
+
+One question must hand over (`build me an app`) and two must **not** (`how do I
+take a backup`, `explain list vs tuple` — the second is what the chat is *for*).
+A change has to hold all three columns at once, which is the difficulty: the
+guard that fixed the backup hijack had to be checked against the build case,
+and the line that made answers say *where* had to be checked against both.
+
+It is deliberately outside `make test` and CI — it needs a running model and
+minutes of CPU, and CI has neither. Its **classifiers** are unit-tested there,
+because a wrong matcher makes every future measurement wrong in a way nobody
+would notice; two already did.
+
+So: run each candidate several times (they are sampled, so one generation
+proves nothing), count outcomes, and put the counts in the commit message. Also check the change does
 not fire on questions it should not — a handover rule strong enough to beat
 the tutorial reflex can easily hijack "what does this error mean?", and a chat
 that answers everything with `cd ~/my-project && lca` has been made useless in

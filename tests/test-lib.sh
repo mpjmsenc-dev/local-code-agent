@@ -604,6 +604,61 @@ handover_block_says_where_it_runs() {
 }
 check "the handover block says where to run it, inside the block" \
   handover_block_says_where_it_runs
+
+echo "# scripts/prompt-bench.sh — its classifiers decide every future verdict"
+# The bench needs a running model, so CI cannot run it end to end. But its
+# matchers are what turn a generation into a number, and a wrong matcher makes
+# every future prompt measurement wrong in a way nobody would notice — this
+# already happened twice by hand: a success pattern that missed "run lca in
+# your project directory", and a tutorial detector that counted our own
+# recipe's 'mkdir' as evidence of a doomed walkthrough.
+#
+# The script is sourceable precisely so these can be exercised without a model.
+# Run in a child bash so its argument parsing never sees this file's "$@".
+bench_matcher() {
+  local fn="$1" want="$2" text="$3" got
+  got="$(bash -c '
+    source "$1" >/dev/null 2>&1
+    if "$2" "$3"; then echo yes; else echo no; fi
+  ' _ "${REPO}/scripts/prompt-bench.sh" "${fn}" "${text}" 2>/dev/null || echo error)"
+  [[ "${got}" == "${want}" ]] || {
+    printf '%s("%s") = %s, wanted %s\n' "${fn}" "${text:0:48}" "${got}" "${want}" >&2
+    return 1
+  }
+}
+if have jq && have curl; then
+  check "bench: bare 'lca' counts as handing over" \
+    bench_matcher hands_over yes 'run: mkdir -p ~/x && cd ~/x && lca'
+  # The distinction the whole prompt fix rests on: 'lca ask' writes no files,
+  # so an answer offering it has NOT handed the job over.
+  check "bench: 'lca ask' does not count as handing over" \
+    bench_matcher hands_over no 'use lca ask to query the model'
+  check "bench: a terminal/SSH mention counts as saying where" \
+    bench_matcher says_where yes 'run it in a terminal on the server'
+  check "bench: ordinary prose does not count as saying where" \
+    bench_matcher says_where no 'here is some python code'
+  check "bench: the recipe counts as the handover firing" \
+    bench_matcher hijacked yes 'mkdir -p ~/my-project && cd ~/x && lca'
+  # 'lca backup' is the RIGHT answer to a backup question, not a hijack.
+  check "bench: 'lca backup' is not the handover firing" \
+    bench_matcher hijacked no 'you can use lca backup for that'
+  check "bench: numbered setup steps are a tutorial" \
+    bench_matcher is_tutorial yes '1. run npm init
+2. then pip install flask'
+  # ...and a handover written AS numbered steps is not, though it contains
+  # 'mkdir'. This is the case that matters and the one that actually happened:
+  # a 7b answer laid the recipe out as steps, the detector saw numbering plus
+  # 'mkdir', and scored the fix as the very failure it had removed.
+  #
+  # The first version of this test used the bare recipe with no numbering. It
+  # passed with the strip deleted — the numbered-steps half already returned
+  # false, so the strip was never reached and the test could not fail.
+  check "bench: a handover written as numbered steps is not a tutorial" \
+    bench_matcher is_tutorial no '1. Open a terminal on the server
+2. Run: mkdir -p ~/my-project && cd ~/my-project && lca'
+else
+  echo "skip - curl/jq missing, cannot source prompt-bench.sh"
+fi
 # The recipe now exists in three places: the prompt, docs/PHONE.md and
 # docs/TROUBLESHOOTING.md. Three copies of a command line is how a doc comes to
 # teach something that no longer works — and this exact line already shipped
