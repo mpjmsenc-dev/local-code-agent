@@ -205,7 +205,11 @@ fi
 # the old model, forever.
 if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
   if systemctl is-enabled --quiet local-code-agent-tune.service 2>/dev/null; then
-    p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
+    if TUNE_GONE="$(stale_boot_program local-code-agent-tune.service)"; then
+      p_warn "auto-tune's boot service is enabled but runs ${TUNE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — resizing this VM will NOT change the model. Fix: sudo ./setup.sh"
+    else
+      p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
+    fi
   else
     p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: sudo ./setup.sh (or: sudo systemctl enable local-code-agent-tune.service)"
   fi
@@ -343,7 +347,15 @@ else
   # says so. The boot unit is the only thing that re-applies it.
   if systemd_available; then
     if systemctl is-enabled --quiet local-code-agent-netmode.service 2>/dev/null; then
-      p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
+      # ...but "enabled" only means the symlink is there. The unit runs an
+      # absolute path baked in by whichever checkout installed it, so moving
+      # or renaming this directory leaves a green tick on a boot service that
+      # cannot start — and the ports it was guarding become public.
+      if NETMODE_GONE="$(stale_boot_program local-code-agent-netmode.service)"; then
+        p_warn "the inbound guard's boot service is enabled but runs ${NETMODE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — it will fail at the next boot and the WebUI/Ollama ports become public. Fix: sudo ./netmode.sh harden"
+      else
+        p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
+      fi
     else
       p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh harden"
     fi
@@ -444,6 +456,13 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
   p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"
   TIMER_ON=true
+  # The timer fires local-code-agent-backup.service, and that is where the
+  # baked-in path lives. A timer pointing at a script that moved keeps firing
+  # on schedule and failing every time — the one drift you find out about by
+  # needing a backup that was never taken.
+  if BACKUP_GONE="$(stale_boot_program local-code-agent-backup.service)"; then
+    p_warn "the backup timer runs ${BACKUP_GONE}, which it can no longer execute (was this checkout moved or renamed?) — every scheduled backup since then has failed. Fix: sudo ./backup.sh --install-timer"
+  fi
   # The timer keeps the schedule it was installed with, so a BACKUP_SCHEDULE
   # edited in .env and never applied leaves backups running on the old cadence
   # while .env claims otherwise — the same class as the WebUI and ollama drift

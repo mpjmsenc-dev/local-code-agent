@@ -2549,6 +2549,87 @@ setup_skips_only_what_it_already_proved() {
 check "setup.sh skips the re-test only when it already proved inference" \
   setup_skips_only_what_it_already_proved
 
+echo "# what a boot unit will really run ('enabled' is a claim about a symlink)"
+# All three of our units bake the installing checkout's absolute path into
+# ExecStart. 'systemctl is-enabled' keeps answering "enabled" after that path
+# is moved, renamed or deleted, so 'lca check' printed a green "inbound guard
+# will be re-applied on boot" for a unit that could not start — and the ports
+# it guards would be public from the next reboot on. Same shape for the backup
+# timer, where the symptom is backups that silently never ran.
+UNITS="${SANDBOX}/units"
+mkdir -p "${UNITS}"
+
+# systemd renders ExecStart as a brace-delimited record; the path must be read
+# out of it without swallowing the argv[] tail that follows.
+check "systemd's ExecStart record yields just the path" \
+  test "$(show_execstart_program <<'EOF'
+{ path=/opt/local-code-agent/netmode.sh ; argv[]=/opt/local-code-agent/netmode.sh apply-saved ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+EOF
+)" = "/opt/local-code-agent/netmode.sh"
+# ...and a path containing a space still comes back whole, which is why the
+# capture ends at the ' ; ' instead of at the first blank.
+check "a path with a space survives the ExecStart record" \
+  test "$(show_execstart_program <<'EOF'
+{ path=/opt/my apps/lca/netmode.sh ; argv[]=/opt/my apps/lca/netmode.sh apply-saved ; ignore_errors=no }
+EOF
+)" = "/opt/my apps/lca/netmode.sh"
+
+# The unit file is the fallback, and the only source when systemd is installed
+# but not running. We write the quoted form; the bare form is what an older
+# version of this repo left behind.
+printf '[Service]\nType=oneshot\nExecStart="/opt/lca/netmode.sh" apply-saved\n' \
+  > "${UNITS}/quoted.service"
+printf '[Service]\nExecStart=/opt/lca/tune.sh\n' > "${UNITS}/bare.service"
+printf '[Unit]\nDescription=no exec here\n'      > "${UNITS}/empty.service"
+check "a quoted ExecStart parses (args dropped)" \
+  test "$(execstart_program "${UNITS}/quoted.service")" = "/opt/lca/netmode.sh"
+check "an unquoted ExecStart parses" \
+  test "$(execstart_program "${UNITS}/bare.service")" = "/opt/lca/tune.sh"
+no_execstart_is_silent()   { ! execstart_program "${UNITS}/empty.service"; }
+no_unit_file_is_silent()   { ! execstart_program "${UNITS}/absent.service"; }
+check "a unit with no ExecStart reports nothing"   no_execstart_is_silent
+check "a unit file that is not there reports nothing" no_unit_file_is_silent
+
+# stale_boot_program is the check-system predicate: it speaks up ONLY when it
+# knows the program is gone. 'local' on the seam keeps it dynamically scoped to
+# the call, so the surrounding tests are unaffected.
+printf '[Service]\nExecStart="%s/scripts/lib.sh"\n' "${REPO}" > "${UNITS}/live.service"
+printf '[Service]\nExecStart="%s/moved-away/netmode.sh"\n' "${REPO}" > "${UNITS}/moved.service"
+moved_program_is_named() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  test "$(stale_boot_program moved.service)" = "${REPO}/moved-away/netmode.sh"
+}
+present_program_is_silent() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  ! stale_boot_program live.service
+}
+# An unknown is not a fault: with no unit file and no answer from systemd there
+# is nothing to report, and a check that cries wolf about its own blind spot is
+# worse than one that stays quiet.
+unknown_unit_is_not_called_broken() {
+  local SYSTEMD_UNIT_DIR="${UNITS}"
+  ! stale_boot_program absent.service
+}
+check "a unit whose program moved is reported, with the missing path" \
+  moved_program_is_named
+check "a unit whose program is there says nothing"  present_program_is_silent
+check "a unit we cannot read at all is not called broken" \
+  unknown_unit_is_not_called_broken
+
+# ...and check-system.sh must actually consult it, for all three units, rather
+# than trusting is-enabled the way it did before.
+every_boot_unit_is_verified() {
+  local unit
+  for unit in local-code-agent-netmode.service local-code-agent-tune.service \
+              local-code-agent-backup.service; do
+    grep -q "stale_boot_program ${unit}" "${REPO}/check-system.sh" \
+      || { printf 'check-system.sh never checks what %s really runs\n' "${unit}" >&2
+           return 1; }
+  done
+}
+check "check-system.sh verifies the program behind every boot unit" \
+  every_boot_unit_is_verified
+
 echo "# the documented way to put the inbound guard back must actually stick"
 # 'netmode.sh harden' is the ONE command this repo names when the guard is
 # missing — netmode status, 'lca check' twice, both installers and two docs all

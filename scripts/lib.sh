@@ -1001,6 +1001,69 @@ installed_backup_schedule() {
   printf '%s' "${out}"
 }
 
+# --- what a boot unit will actually try to run ------------------------------
+#
+# 'systemctl is-enabled' is a statement about a symlink. It keeps answering
+# "enabled" long after the checkout the unit points into was moved, renamed or
+# deleted — every one of our three units bakes an absolute path from the
+# installing checkout into ExecStart — and the breakage only surfaces at the
+# next boot. For the netmode guard that means the WebUI and Ollama ports go
+# public while 'lca check' reports the boot service as healthy; for the timer
+# it means backups that silently never ran, discovered when one is needed.
+# Reading the path back is the only way to see any of it coming.
+
+# show_execstart_program — parse 'systemctl show -p ExecStart --value' (stdin).
+# systemd renders it as '{ path=/x/y.sh ; argv[]=... ; ... }', so the capture
+# has to stop at the ' ; ' — the same trap installed_backup_schedule documents.
+show_execstart_program() {
+  sed -n 's/.*path=\(.*\) ; argv\[\]=.*/\1/p' | head -1
+}
+
+# execstart_program FILE — the program named by a unit FILE's ExecStart. We
+# write these ourselves as 'ExecStart="/path/to/script.sh" [args]', so the
+# quoted form is what matters; the unquoted form is handled for units written
+# by an older version of this repo. Reading the file is also the only source
+# on a machine where systemd is installed but not running.
+execstart_program() {
+  local out
+  [[ -r "$1" ]] || return 1
+  out="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p;s/^ExecStart=\([^" ]*\).*/\1/p' "$1" \
+           | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# unit_boot_program UNIT — the program that unit will execute, or nothing
+# (exit 1) when it cannot be determined. systemd is asked first because a
+# drop-in can override ExecStart and it is the authority on what will really
+# run; the unit file is the fallback.
+#
+# SYSTEMD_UNIT_DIR is a seam for the tests, which cannot write to
+# /etc/systemd/system; nothing sets it in normal use.
+unit_boot_program() {
+  local out=""
+  if systemd_available; then
+    out="$(systemctl show -p ExecStart --value "$1" 2>/dev/null | show_execstart_program)"
+  fi
+  [[ -n "${out}" ]] \
+    || out="$(execstart_program "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" || true)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# stale_boot_program UNIT — echo the program a unit will try to run at boot,
+# but only when that program is no longer there. Prints nothing and returns 1
+# when the unit is fine AND when we could not work out what it runs: an answer
+# we cannot compute is not evidence of a fault, and a health check that cries
+# wolf about its own blind spot is worse than one that stays quiet.
+stale_boot_program() {
+  local prog
+  prog="$(unit_boot_program "$1" || true)"
+  [[ -n "${prog}" ]] || return 1
+  [[ -x "${prog}" ]] && return 1
+  printf '%s' "${prog}"
+}
+
 # resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
 # applied state has fallen behind .env. Returns 0 if it acted, 1 if there was
 # nothing to do (or nothing to act on).

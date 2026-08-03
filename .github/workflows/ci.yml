@@ -154,6 +154,52 @@ jobs:
             /etc/systemd/system/local-code-agent-backup.timer
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: A boot unit pointing at a moved checkout must be reported
+        # 'systemctl is-enabled' is an answer about a symlink. It keeps saying
+        # "enabled" after the checkout the unit runs from is moved, renamed or
+        # deleted, and the health check used to stop there — so a netmode unit
+        # that could not start still printed a green "will be re-applied on
+        # boot", and the WebUI/Ollama ports would go public at the next reboot.
+        #
+        # This is also the only place the ExecStart parse meets real systemd:
+        # the unit tests can only feed it a recorded rendering, and the raw
+        # line is echoed here so a future format change is visible in the log.
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNIT=local-code-agent-netmode.service
+          raw="$(systemctl show -p ExecStart --value "${UNIT}")"
+          echo "systemd renders ExecStart as: ${raw}"
+          parsed="$(bash -c 'source scripts/lib.sh; show_execstart_program' <<<"${raw}")"
+          [[ "${parsed}" == "${PWD}/netmode.sh" ]] \
+            || { echo "FAIL: parsed '${parsed}', expected ${PWD}/netmode.sh"; exit 1; }
+
+          moved_reported() {
+            grep -q 'can no longer execute' <<<"$(./check-system.sh --quick 2>&1 || true)"
+          }
+
+          # A healthy box must stay quiet — a false alarm here would be worse
+          # than the blind spot it replaces.
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: a healthy boot unit was reported as broken"; exit 1
+          fi
+
+          # Now point the unit where the checkout is not.
+          sudo sed -i 's|^ExecStart=.*|ExecStart="/gone/local-code-agent/netmode.sh" apply-saved|' \
+            "/etc/systemd/system/${UNIT}"
+          sudo systemctl daemon-reload
+          moved_reported || {
+            ./check-system.sh --quick 2>&1 | tail -30
+            echo "FAIL: a boot unit whose program is missing was not reported"; exit 1; }
+
+          # ...and the fix the warning names must actually repair it.
+          sudo ./netmode.sh harden
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: 'netmode.sh harden' did not repair the boot unit"; exit 1
+          fi
+          echo "boot unit: staleness reported, and 'netmode.sh harden' repairs it"
       - name: A backup schedule changed in .env must be reported until applied
         # The timer keeps the schedule it was installed with. Editing
         # BACKUP_SCHEDULE and forgetting '--install-timer' leaves backups on
