@@ -295,6 +295,42 @@ load_env_readonly() {
   LCA_ENV_READONLY=true load_env
 }
 
+# git_identity_user — whose git config actually matters here.
+#
+# Under sudo that is the human, not root: aider runs as them, and root's empty
+# identity would be the wrong answer to report.
+git_identity_user() { printf '%s\n' "${SUDO_USER:-$(id -un)}"; }
+
+# git_identity — "Name <email>" from that user's GLOBAL git config, or nothing
+# (and non-zero) when either half is unset.
+#
+# One copy, because two reporters ask the same question. install_git.sh warns
+# about it at install time — inside a 20-30 minute log nobody reads twice — and
+# 'lca check' is where anyone looks afterwards. Without it:
+#
+#   - aider still commits, but stamps the work with a placeholder author.
+#     Measured on a HOME with no gitconfig: 'Your Name <you@example.com>'.
+#   - a 'git commit' the user runs themselves in that project refuses outright:
+#     "Author identity unknown ... Please tell me who you are." Measured on a
+#     host whose hostname has no domain, which is every fresh droplet.
+#
+# The chat's handover sends people into a brand-new git repo, so this is the
+# first thing many of them will do.
+git_identity() {
+  local who name email
+  have git || return 1
+  who="$(git_identity_user)"
+  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]] && have sudo; then
+    name="$(sudo -u "${who}" git config --global user.name 2>/dev/null || true)"
+    email="$(sudo -u "${who}" git config --global user.email 2>/dev/null || true)"
+  else
+    name="$(git config --global user.name 2>/dev/null || true)"
+    email="$(git config --global user.email 2>/dev/null || true)"
+  fi
+  [[ -n "${name}" && -n "${email}" ]] || return 1
+  printf '%s <%s>\n' "${name}" "${email}"
+}
+
 # set_env_var KEY VALUE — update KEY in .env in place, or append it, so that a
 # following load_env reads the value back unchanged.
 #

@@ -101,6 +101,18 @@ if [[ -x "${AIDER}" ]]; then
 else
   p_fail "aider not installed in the venv (run ${SCRIPT_DIR}/scripts/install_python.sh)"
 fi
+# aider's product is commits, and a commit needs an author. install_git.sh
+# warns about a missing identity — 20-30 minutes into a first-boot log nobody
+# scrolls back through — and nothing said it again afterwards, though this is
+# the command people run when something looks wrong. Warn, never fail: the
+# stack works without it.
+if have git; then
+  if GIT_IDENTITY="$(git_identity)"; then
+    p_pass "git identity for '$(git_identity_user)': ${GIT_IDENTITY}"
+  else
+    p_warn "no global git identity for '$(git_identity_user)' — aider still commits, but stamps your work 'Your Name <you@example.com>', and a 'git commit' you run yourself in that project refuses outright ('Please tell me who you are'). Fix once: git config --global user.name 'Ada Lovelace' && git config --global user.email 'ada@example.com'"
+  fi
+fi
 
 # --- Ollama service + API ---------------------------------------------------
 step "Ollama"

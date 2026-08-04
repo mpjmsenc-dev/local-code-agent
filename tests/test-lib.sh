@@ -47,6 +47,62 @@ check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
 check "default BACKUP_SCHEDULE" test "${BACKUP_SCHEDULE}" = "*-*-* 03:30:00"
 check "default SKIP_TAILSCALE" test "${SKIP_TAILSCALE}" = "false"
 
+echo "# git_identity() — aider's product is commits, and a commit needs an author"
+# Without a global identity aider still commits, stamping the work with a
+# placeholder ('Your Name <you@example.com>' — measured), while a 'git commit'
+# the user runs themselves in that same project refuses outright: "Author
+# identity unknown ... Please tell me who you are". Measured on a host whose
+# hostname carries no domain, which is every fresh droplet. The chat's handover
+# drops people into a brand-new git repo, so that is the first thing many of
+# them try.
+#
+# Driven against a sandbox HOME, so it answers for a real 'git config --global'
+# rather than for whatever the developer running the suite happens to have.
+identity_in() {   # HOME dir -> the identity, or "none"
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    export HOME="$2"
+    git_identity 2>/dev/null || echo none' _ "${REPO}/scripts/lib.sh" "$1" 2>/dev/null
+}
+GIT_ID_SB="${SANDBOX}/gitid"
+rm -rf "${GIT_ID_SB}"; mkdir -p "${GIT_ID_SB}/none" "${GIT_ID_SB}/both" "${GIT_ID_SB}/half"
+HOME="${GIT_ID_SB}/both" git config --global user.name  "Ada Lovelace"
+HOME="${GIT_ID_SB}/both" git config --global user.email "ada@example.com"
+# Half-configured is the interesting one: git needs BOTH, and reporting a name
+# with no address as "identity: Ada Lovelace <>" would be a pass for a config
+# that still cannot commit.
+HOME="${GIT_ID_SB}/half" git config --global user.name  "Ada Lovelace"
+check "a complete identity is reported" \
+  test "$(identity_in "${GIT_ID_SB}/both")" = "Ada Lovelace <ada@example.com>"
+check "no identity at all is reported as missing" \
+  test "$(identity_in "${GIT_ID_SB}/none")" = "none"
+check "a name with no email is still missing" \
+  test "$(identity_in "${GIT_ID_SB}/half")" = "none"
+# ...and both reporters must ask lib.sh, not re-derive it. install_git.sh looks
+# at the SUDO_USER's config rather than root's, and a second copy of that rule
+# is how one of them ends up reporting on the wrong account.
+both_reporters_ask_lib() {
+  local f bad=0
+  for f in scripts/install_git.sh check-system.sh; do
+    grep -q 'git_identity' "${REPO}/${f}" || {
+      printf '%s no longer asks lib.sh for the git identity\n' "${f}" >&2
+      bad=1
+    }
+    # An ASSIGNMENT from a git config substitution, not any mention of the
+    # command: both files quote 'git config --global user.name ...' inside the
+    # message that tells the reader how to fix it, and the first version of
+    # this gate failed on its own advice text.
+    if grep -vE '^[[:space:]]*#' "${REPO}/${f}" \
+       | grep -qE '=[[:space:]]*"?\$\(.*git config'; then
+      printf '%s reads the git config itself instead of asking lib.sh\n' "${f}" >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+check "'lca check' and the installer share one idea of the git identity" \
+  both_reporters_ask_lib
+
 echo "# set_env_var -> load_env round-trip (update + append, no duplicates)"
 set_env_var MODEL_NAME "qwen2.5-coder:14b"
 set_env_var OLLAMA_CONTEXT_LENGTH 16384
