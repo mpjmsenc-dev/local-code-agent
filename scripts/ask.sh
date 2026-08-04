@@ -176,24 +176,54 @@ main() {
   answer_tmp="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '${answer_tmp}'" EXIT
+  # Status captured, not swallowed. Bare under 'set -o pipefail' this pipeline
+  # was the last statement of main, so a curl that died mid-answer — the 600s
+  # cap, or Ollama being OOM-killed by the very model it just loaded — exited
+  # the whole command silently. The user was left with half an answer, no
+  # error, and a non-zero status nothing explained. speed.sh has always said so
+  # on the same failure.
+  local stream_rc=0
   curl -sS --no-buffer --max-time 600 -X POST "$(ollama_url)/api/generate" \
     -H 'Content-Type: application/json' -d "${payload}" \
     | jq -rj --unbuffered '.response // empty' \
-    | tee "${answer_tmp}"
+    | tee "${answer_tmp}" || stream_rc=$?
   printf '\n'
 
   if [[ -s "${answer_tmp}" ]]; then
-    mkdir -p "${ASK_STATE_DIR}"
+    # Not bare either: ~/.cache/local-code-agent ends up root-owned the moment
+    # anything here is run once under sudo, and then this whole block failed
+    # under 'set -e' — after a perfect answer had already been printed. Losing
+    # the follow-up history is a papercut; exiting non-zero with no message,
+    # having apparently just worked, is not.
+    local save_ok=true
+    mkdir -p "${ASK_STATE_DIR}" 2>/dev/null || save_ok=false
     # Owner-only: this file holds the last question and answer verbatim, which
     # routinely includes the contents of whatever file was attached. A
     # world-readable copy of that under ~/.cache is not something to leave
     # behind by default.
     chmod 700 "${ASK_STATE_DIR}" 2>/dev/null || true
-    {
-      printf 'Question: %s\n\nAnswer: ' "${question}"
-      cat "${answer_tmp}"
-      printf '\n'
-    } > "${ASK_LAST}.tmp" && chmod 600 "${ASK_LAST}.tmp" && mv "${ASK_LAST}.tmp" "${ASK_LAST}"
+    # The redirect is inside a subshell so that a failure to OPEN the file is
+    # the subshell's error to swallow. Grouped instead, bash reports it before
+    # the group runs and the '2>/dev/null' on the group never sees it — a raw
+    # "Not a directory" above the warning that explains it.
+    ( {
+        printf 'Question: %s\n\nAnswer: ' "${question}"
+        cat "${answer_tmp}"
+        printf '\n'
+      } > "${ASK_LAST}.tmp" ) 2>/dev/null || save_ok=false
+    if [[ "${save_ok}" == "true" ]]; then
+      chmod 600 "${ASK_LAST}.tmp" 2>/dev/null || save_ok=false
+      mv "${ASK_LAST}.tmp" "${ASK_LAST}" 2>/dev/null || save_ok=false
+    fi
+    if [[ "${save_ok}" != "true" ]]; then
+      rm -f "${ASK_LAST}.tmp" 2>/dev/null || true
+      warn "Could not save this exchange to ${ASK_LAST}, so 'lca ask -c' will have nothing to continue from. Check who owns it: ls -ld ${ASK_STATE_DIR}"
+    fi
+  fi
+
+  if (( stream_rc != 0 )); then
+    warn "The answer above is incomplete — the request to Ollama ended early (a 10-minute cap, a restart, or the model being killed for memory). Try a shorter question, or check: lca check"
+    return 1
   fi
 }
 

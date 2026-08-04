@@ -739,6 +739,70 @@ help_examples_are_dispatched() {
 check "'lca <aider-flag>' reaches aider, as 'lca help' promises" \
   help_examples_are_dispatched
 
+echo "# saving state may not kill the command that already did its work"
+# ~/.cache/local-code-agent is created by whichever of 'lca ask' and 'lca speed'
+# runs first, and becomes root-owned the moment either is run once under sudo.
+# Every non-root run then died on the write, bare under 'set -e': 'lca ask'
+# after printing a perfect answer, 'lca speed' between the numbers and the
+# section that says what they mean. Both exited non-zero having apparently just
+# worked. The saved state is a nicety; the output is the command.
+#
+# Three-line window because these writes wrap, and 'if !' can be two lines
+# above its redirect. Comments stripped first, as everywhere else here.
+cache_writes_cannot_abort() {
+  local f hits bad=0
+  for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
+    hits="$(sed 's/#.*//' "${f}" | awk '{ a = b; b = c; c = $0 }
+      c ~ /(mkdir -p|>)[ ]*"\$\{(ASK_STATE_DIR|STATE_DIR|BASELINE|ASK_LAST)/ {
+        w = a " " b " " c
+        if (w !~ /\|\|/ && w !~ /if !/) printf "  %d: %s\n", NR, c }')"
+    [[ -z "${hits}" ]] || {
+      printf '%s writes cached state bare under set -e:\n%s\n' "${f##*/}" "${hits}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "cached state is written without risking the run" cache_writes_cannot_abort
+
+# "Not readable" is not "not there", and the two need opposite advice. 'lca
+# logs' tested -r on the install log and then called the absence normal — so on
+# a box where that root-written log is not world-readable it announced that a
+# file sitting right there did not exist, and the reader stopped looking. The
+# other two sources have always escalated through run_reader.
+logs_setup_tells_the_two_apart() {
+  local body
+  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
+  grep -q 'run_reader' <<<"${body}" || {
+    echo 'logs.sh reads the install log without escalating, unlike its two siblings' >&2
+    return 1; }
+  # The "normal, nothing to see" message belongs to absence alone.
+  grep -qE '\[\[ ! -e ' <<<"${body}" || {
+    echo 'logs.sh still decides "no install log" from readability rather than existence' >&2
+    return 1; }
+  ! grep -qE '\[\[ ! -r ' <<<"${body}"
+}
+check "'lca logs' separates an unreadable install log from a missing one" \
+  logs_setup_tells_the_two_apart
+
+# 'lca ask' streams the answer through a pipeline. Bare under 'set -o pipefail'
+# that pipeline was the last statement of main, so a curl that died mid-answer
+# — the 600s cap, or Ollama being OOM-killed by the model it just loaded — took
+# the whole command down silently: half an answer, no error, and a non-zero
+# status nothing explained. speed.sh has always said so on the same failure.
+ask_reports_a_cut_short_answer() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
+  # The pipeline's status has to be captured...
+  grep -qE 'tee "[$]\{answer_tmp\}" \|\| [a-z_]+=[$]\?' <<<"${body}" || {
+    echo 'ask.sh runs the answer pipeline bare — a truncated answer exits silently' >&2
+    return 1; }
+  # ...and acted on, not just stored.
+  grep -qE '\(\( *stream_rc *!= *0 *\)\)' <<<"${body}"
+}
+check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_answer
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit

@@ -68,15 +68,21 @@ logs_webui() {
 logs_setup() {
   local lines="$1" follow="$2"
   heading "install log"
-  if [[ ! -r "${SETUP_LOG}" ]]; then
+  # "Not readable" is not "not there", and the two need opposite advice. This
+  # tested -r and then called the absence normal — so on a box where the log is
+  # root-only (it is written by root, through tee, on a droplet) it announced
+  # that a file sitting right there did not exist, and the reader stopped
+  # looking. The other two sources here have always escalated through
+  # run_reader; this one was the odd one out.
+  if [[ ! -e "${SETUP_LOG}" ]]; then
     info "No install log at ${SETUP_LOG} — normal unless this machine was built from deploy/do-user-data.sh."
     return 0
   fi
-  if [[ "${follow}" == "true" ]]; then
-    tail -n "${lines}" -f "${SETUP_LOG}"
-  else
-    tail -n "${lines}" "${SETUP_LOG}"
-  fi
+  local -a cmd=(tail -n "${lines}")
+  [[ "${follow}" == "true" ]] && cmd+=( -f )
+  cmd+=( "${SETUP_LOG}" )
+  run_reader test -r "${SETUP_LOG}" -- "${cmd[@]}" \
+    || warn "${SETUP_LOG} exists but could not be read, even as root. Check it with: ls -l ${SETUP_LOG}"
 }
 
 main() {

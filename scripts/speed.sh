@@ -171,8 +171,19 @@ main() {
       printf '  vs last run:    not comparable (last run used %s)\n' "${prev_model}"
     fi
   fi
-  mkdir -p "${STATE_DIR}"
-  printf 'model=%s\ntps=%s\nplacement=%s\n' "${MODEL_NAME}" "${tps}" "${placement}" > "${BASELINE}"
+  # Not bare under 'set -e'. ~/.cache/local-code-agent becomes root-owned the
+  # moment anything here is run once under sudo, and a failed write then killed
+  # this script between the numbers and the verdict — losing the one section
+  # that says what they mean. A baseline is a nicety; the explanation is the
+  # command.
+  # Subshell, not a group: a redirect that cannot open its target is reported
+  # by bash before a group's own '2>/dev/null' applies, so the raw error would
+  # print above the warning that explains it.
+  if ! ( mkdir -p "${STATE_DIR}" \
+         && printf 'model=%s\ntps=%s\nplacement=%s\n' \
+              "${MODEL_NAME}" "${tps}" "${placement}" > "${BASELINE}" ) 2>/dev/null; then
+    warn "Could not save this result to ${BASELINE}, so the next run has nothing to compare against. Check who owns it: ls -ld ${STATE_DIR}"
+  fi
 
   # ---- verdict -----------------------------------------------------------
   # Ordered by impact: report the thing that actually dominates, not a list.
