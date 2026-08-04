@@ -284,6 +284,20 @@ an interrupted install often leaves a perfectly working stack behind. So:
 | `engine running, but model … is NOT downloaded` | Ollama answers, but the model in `.env` is not on disk — so nothing can reply yet. It is a download, not a fault: `sudo /opt/local-code-agent/setup.sh` finishes it. |
 | `ready · model …` | Ollama answered **and** the model is there. This wins over anything the log says. |
 
+One extra line can appear under `ready`, and it is the one worth reading:
+
+| Row | What it means |
+|---|---|
+| `Chat is OUT OF DATE  ·  it answers with an older assistant — sudo lca apply` | The chat app is healthy and reachable, but it is running the assistant instructions it was **created** with. Those are baked into the container, so `git pull` does not reach a running one and nothing restarts it. Run `sudo lca apply`. |
+
+That row is why `ready` is not the whole story. The assistant decides what the
+chat *does* — whether it hands a build request to `lca` or tries to walk you
+through it, whether it emits a tool call it cannot make — and every
+infrastructural check on the box passes either way. If you are seeing odd chat
+behaviour and this row is showing, apply it before debugging anything else.
+The row appears only on a positive answer: no `jq`, no container, or a docker
+that will not answer within two seconds all print nothing rather than guess.
+
 Not seeing a banner at all? `lca check` reports whether it is installed, and
 `sudo /opt/local-code-agent/scripts/motd.sh --install` puts it back. Systems
 without `/etc/update-motd.d` (some containers and minimal images) get no

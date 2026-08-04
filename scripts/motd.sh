@@ -279,10 +279,34 @@ banner_ready() {
   elif [[ -n "${hint}" ]]; then
     row "Chat on your phone" "${hint}"
   fi
+  chat_stale_row
   row "Ask right here" "lca ask \"why is this box slow?\""
   row "All commands" "lca help"
   offline_row
   printf '\n'
+}
+
+# chat_stale_row — the chat app is healthy AND running an older assistant than
+# this repo's.
+#
+# The assistant's instructions are baked into the container when it is created,
+# so 'git pull' does not reach a running one and nothing restarts it. Every
+# other line of this banner is true on such a box: the engine is up, the model
+# is pulled, the URL works. The only real bug report this project has ever had
+# was exactly that box, twice — and "ready" plus a phone URL is the last thing
+# its owner saw before asking the chat to build an app and getting a JSON blob
+# back. 'lca check' knew. 'lca test' knew. The one screen you get without
+# asking for it did not.
+#
+# Two seconds, not the fifteen a health check may take: the banner runs on
+# every SSH login, and a probe that hangs here hangs the login itself. A
+# missing line costs nothing — webui_prompt_drifted answers "no" whenever it
+# could not look.
+chat_stale_row() {
+  [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
+  if LCA_INSPECT_TIMEOUT=2 webui_prompt_drifted; then
+    row "Chat is OUT OF DATE" "it answers with an older assistant — sudo lca apply"
+  fi
 }
 
 # offline_row — the kill switch is invisible once engaged, and every download

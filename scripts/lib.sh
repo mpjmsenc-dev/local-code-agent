@@ -972,10 +972,21 @@ wait_for_webui() {
 # webui_container_env KEY — the value KEY was baked into the running container
 # with. Non-zero (and prints nothing) when the container or the key is absent.
 webui_container_env() {
-  local env_lines out
+  local env_lines out fmt runner=()
   have docker || return 1
-  env_lines="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root && as_root docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+  # Bounded, because 'docker inspect' is not. The CLI waits for ever on a
+  # daemon that accepts the socket connection and then answers nothing, and
+  # every caller of this function is a REPORTER — 'lca check', 'lca test',
+  # 'lca apply', the login banner. A reporter that hangs is strictly worse
+  # than one that says "cannot tell", and the banner runs on every SSH login:
+  # there, a hang is a machine you cannot get into to fix the daemon.
+  #
+  # Callers that must answer fast lower it (LCA_INSPECT_TIMEOUT=2). Not an
+  # .env key on purpose: it is a property of the caller, not of the install.
+  if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
+  fmt='{{range .Config.Env}}{{println .}}{{end}}'
+  env_lines="$("${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { can_root && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
     || true)"
   [[ -n "${env_lines}" ]] || return 1
   out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
@@ -1044,13 +1055,11 @@ webui_drift() {
   # been bitten by.
   #
   # Both are skipped without jq, because without jq the installer never baked
-  # them in either; there is nothing to differ from.
+  # them in either; there is nothing to differ from. The prompt comparison
+  # itself is webui_prompt_drifted, one function down — the login banner asks
+  # that question alone and must not pay for the six values above to do it.
   if have jq; then
-    want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
-    live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
-    # A value we could not compute is not evidence of a difference.
-    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
-      || drifted+=("SYSTEM_PROMPT")
+    if webui_prompt_drifted; then drifted+=("SYSTEM_PROMPT"); fi
     want=""
     if [[ -r "${REPO_ROOT}/config/prompt-suggestions.json" ]]; then
       want="$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json" 2>/dev/null || true)"
@@ -1061,6 +1070,27 @@ webui_drift() {
   fi
   (( ${#drifted[@]} )) || return 1
   printf '%s\n' "${drifted[@]}"
+}
+
+# webui_prompt_drifted — true ONLY when the assistant's own instructions baked
+# into the running container are DIFFERENT from this repo's.
+#
+# Its own predicate so a caller can ask that one question with a single docker
+# inspect instead of the seven webui_drift needs. The login banner is that
+# caller, and it runs on every SSH login.
+#
+# Positive answers only, the same asymmetry as motd.sh's model_missing: no jq,
+# no container, an unreadable value — all of them are "cannot tell" and return
+# non-zero. A banner that cried "out of date" whenever it could not look would
+# be ignored inside a week, and being ignored is the one failure mode that
+# makes the line worthless.
+webui_prompt_drifted() {
+  local want live
+  have jq || return 1
+  want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
+  live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
+  [[ -n "${want}" && -n "${live}" ]] || return 1
+  [[ "${live}" != "${want}" ]]
 }
 
 # webui_prompt_comparable — true when webui_drift could actually compare the

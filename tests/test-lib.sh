@@ -2796,6 +2796,56 @@ if have jq; then
 else
   echo "skip - jq not installed, cannot exercise the system prompt comparison"
 fi
+
+echo "# reading the container's settings must never wait for ever on a wedged docker"
+# 'docker inspect' has no timeout of its own. Against a daemon that accepts the
+# socket connection and then answers nothing, the CLI waits indefinitely — and
+# every caller of webui_container_env is a REPORTER: 'lca check', 'lca test',
+# 'lca apply', the login banner. The banner runs as root on every SSH login, so
+# unbounded there is not "the banner is slow", it is a machine nobody can log
+# in to in order to restart the daemon.
+#
+# Behavioural, not a grep: a docker that sleeps, and a clock.
+webui_env_is_bounded() {
+  local dir="${SANDBOX}/wedged" start elapsed
+  rm -rf "${dir}"; mkdir -p "${dir}"
+  printf '#!/bin/sh\nsleep 30\n' >"${dir}/docker"
+  # sudo stubbed too, and not for convenience: without it the root fallback
+  # either prompts for a password (hanging the test on a developer box) or
+  # finds the REAL docker through sudo's secure_path, so the run would prove
+  # nothing about the stub. 'exec "$@"' keeps the fallback on the sleeper.
+  printf '#!/bin/sh\nexec "$@"\n' >"${dir}/sudo"
+  chmod +x "${dir}/docker" "${dir}/sudo"
+  # A file rather than 'bash -c': shellcheck stops recognising the -c argument
+  # as a script once a 'timeout' wrapper stands in front of it, and reads the
+  # positional parameters inside as an unexpanded string (SC2016). The repo
+  # lints at zero findings, and a disable directive to keep a test convenient
+  # is exactly the sort of thing that later hides a real one.
+  cat >"${dir}/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+export PATH="$2:${PATH}"
+export LCA_INSPECT_TIMEOUT=1
+source "$1" >/dev/null 2>&1
+load_env_readonly
+webui_container_env PORT
+PROBE
+  start="$(date +%s)"
+  # Wrapped, so a regression FAILS this check instead of stalling the suite
+  # for a minute — the unbounded form takes 30s per attempt, twice.
+  timeout 25 bash "${dir}/probe.sh" "${REPO}/scripts/lib.sh" "${dir}" >/dev/null 2>&1 || true
+  elapsed=$(( $(date +%s) - start ))
+  if (( elapsed >= 10 )); then
+    printf 'webui_container_env took %ss against a hung docker — it is unbounded\n' "${elapsed}" >&2
+    return 1
+  fi
+}
+if have timeout; then
+  check "webui_container_env gives up on a hung docker instead of waiting" \
+    webui_env_is_bounded
+else
+  echo "skip - no 'timeout' command, cannot bound the docker read"
+fi
+
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
 signup_reported_by_check() {
@@ -3143,6 +3193,75 @@ ready_banner_asks_about_the_model() {
 }
 check "the ready banner asks whether the model is there" \
   ready_banner_asks_about_the_model
+
+echo "# ...and whether the chat app is still answering with an older assistant"
+# The container is created with the assistant's instructions baked in, so a
+# 'git pull' that fixes the assistant does not reach a running one and nothing
+# restarts it. On such a box every other line of this banner is true — engine
+# up, model pulled, URL live — which is exactly why "ready" was the last thing
+# the one real bug reporter saw before asking the chat to build an app and
+# getting a JSON tool-call blob back. 'lca check' knew. 'lca test' knew. The
+# only screen you get without asking for it did not.
+if have jq; then
+  motd_stale() {   # stubbed live prompt value -> "stale" | "no"
+    # Same shape as motd_missing above, and the same reason for the uppercase
+    # stub variable: webui_prompt_drifted declares its own 'local live', and
+    # bash's dynamic scoping would hand the stub that empty one.
+    local out
+    out="$(bash -c '
+      source "$1" >/dev/null 2>&1
+      load_env_readonly
+      ENABLE_WEBUI="$3"; SKIP_DOCKER=false
+      LIVE="$2"
+      if [[ "${LIVE}" == "__unreadable__" ]]; then webui_container_env() { return 1; }
+      else webui_container_env() {
+             [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
+             printf "%s" "${LIVE}"
+           }; fi
+      chat_stale_row' _ "${MOTD}" "$1" "${2:-true}" 2>/dev/null || true)"
+    if grep -q 'OUT OF DATE' <<<"${out}"; then echo stale; else echo no; fi
+  }
+  stale_is() { [[ "$(motd_stale "$2" "${3:-true}")" == "$1" ]]; }
+  check "a container holding today's prompt draws no warning" \
+    stale_is no    "$(lca_system_prompt | jq -Rsc '{system: .}')"
+  check "a container holding an older prompt IS called out on the banner" \
+    stale_is stale "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')"
+  # "Could not look" is not "out of date". A banner that warned whenever docker
+  # was unreadable would be crying wolf at every login on a box with no chat
+  # app at all, and a banner people learn to skip is worth nothing.
+  check "an unreadable container draws no warning" \
+    stale_is no    '__unreadable__'
+  check "a container created without the setting draws no warning" \
+    stale_is no    ''
+  # Switched off in .env: there is no chat app to be out of date.
+  check "no warning when the chat app is disabled" \
+    stale_is no    "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')" false
+else
+  echo "skip - jq not installed, cannot exercise the banner's staleness warning"
+fi
+# ...and the ready banner has to draw it, or the probe is decoration — the same
+# trap as model_missing, which is why that check exists directly above.
+ready_banner_warns_about_a_stale_chat() {
+  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
+    | awk '/^banner_ready\(\) \{/ { inb = 1 }
+           inb && /chat_stale_row/ { found = 1 }
+           inb && /^\}/            { exit }
+           END { exit !found }'
+}
+check "the ready banner draws the stale-chat warning" \
+  ready_banner_warns_about_a_stale_chat
+# The banner runs on EVERY login, so this one probe must be bounded far tighter
+# than a health check. webui_container_env is bounded (proved above); this is
+# the caller actually asking for the short leash.
+motd_bounds_the_docker_read() {
+  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
+    | awk '/^chat_stale_row\(\) \{/ { inb = 1 }
+           inb && /LCA_INSPECT_TIMEOUT=[0-9]/ { found = 1 }
+           inb && /^\}/ { exit }
+           END { exit !found }'
+}
+check "the banner asks docker with a short leash, not the default one" \
+  motd_bounds_the_docker_read
 
 echo "# the login banner must never write anything"
 # It runs as ROOT on every SSH login. load_env creates .env from .env.example
