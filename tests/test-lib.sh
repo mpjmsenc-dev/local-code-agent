@@ -418,6 +418,31 @@ image_is_named_once() {
   }
 }
 check "the Open WebUI image name lives in exactly one place" image_is_named_once
+# The README's security model now states two facts about the install that only
+# the code can keep true: the vendor installers are piped into a root shell,
+# and the chat app runs a floating tag. A security section that describes an
+# install nobody performs any more is worse than one that says nothing.
+readme_supply_chain_matches_the_code() {
+  local f want got
+  for f in scripts/install_ollama.sh scripts/install_tailscale.sh; do
+    grep -qE 'curl [^|]*[|] *as_root sh' "${REPO}/${f}" || {
+      printf '%s no longer pipes its vendor installer into a root shell, which the README says it does\n' "${f}" >&2
+      return 1
+    }
+  done
+  want="$(grep -oE 'ghcr[.]io/open-webui/open-webui:[a-zA-Z0-9._-]+' "${REPO}/scripts/lib.sh" | head -1)"
+  got="$(grep -oE 'ghcr[.]io/open-webui/open-webui:[a-zA-Z0-9._-]+' "${REPO}/README.md" | head -1)"
+  [[ -n "${want}" && -n "${got}" ]] || {
+    echo "could not read the chat app image tag from lib.sh or from the README" >&2
+    return 1
+  }
+  [[ "${want}" == "${got}" ]] || {
+    printf 'the README names %s; lib.sh uses %s\n' "${got}" "${want}" >&2
+    return 1
+  }
+}
+check "the README's supply-chain claims still match the install" \
+  readme_supply_chain_matches_the_code
 # ...and neither script may reach 'docker run <image>' without having checked
 # the image is there. Docker pulls a missing one silently: several gigabytes,
 # and in backup.sh's case with the chat app frozen, during a command the user

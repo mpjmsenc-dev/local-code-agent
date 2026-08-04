@@ -182,6 +182,20 @@ offline because the models are local.
   exceptions are deliberate; they are not scoped further precisely because a
   narrower rule risks cutting Tailscale and stranding you on a remote VM.
 - Trust is single-VM: anyone with a shell (or root) on the box has full access.
+- **The install trusts four upstreams, as root.** `install.sh` is fetched with
+  `curl | bash` (its header offers a download-and-read path instead), and setup
+  then runs the vendors' own installers the way each vendor documents:
+  `curl -fsSL https://ollama.com/install.sh | sh` and the same shape for
+  Tailscale, plus Docker's apt key and repository. Nothing here is pinned by
+  hash. That is the normal way these three are installed and this project does
+  not improve on it — but "private" describes where your *data* goes, not who
+  you are trusting to put the software there.
+- **Two components float rather than pin.** The chat app runs the
+  `ghcr.io/open-webui/open-webui:main` tag, and `AIDER_VERSION` is empty by
+  default, meaning the latest aider from PyPI. So `lca update` — which
+  re-creates the container and re-runs pip — can bring in whatever upstream
+  published since. Pin aider with `AIDER_VERSION=` in `.env` if you would
+  rather choose your moment; the WebUI tag is not currently configurable.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
 - Create the **first** WebUI account promptly, then set
