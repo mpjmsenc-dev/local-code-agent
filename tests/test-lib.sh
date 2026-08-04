@@ -3280,6 +3280,18 @@ doc_blocks_establish_their_directory() {
     printf 'a reader following these would be in the wrong directory:\n%s\n' "${hits}" >&2
     return 1
   }
+  # And in prose, where a block's cd cannot help: INSTALL.md taught "Daily
+  # usage: `run-agent.sh` in any project directory", which is the right idea
+  # attached to a name that is not on PATH — 'lca' is the command that exists
+  # for exactly that. Imperative phrasings only, so that describing a file
+  # ("`scripts/install_webui.sh` now refuses to start on a taken port") stays
+  # legal; it is a statement about the code, not an instruction.
+  hits="$(grep -rniE "(run|re-run|check|try|with|usage)['\":\` ]+ ?[a-z][a-z_-]*\.sh" \
+            "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these docs tell the reader to run a name that is not on PATH:\n%s\n' "${hits}" >&2
+    return 1
+  }
 }
 check "every doc block that runs a script says where to stand" \
   doc_blocks_establish_their_directory

@@ -63,8 +63,8 @@ sudo tailscale up          # log in via the printed URL
 tailscale ip -4            # your private address
 ```
 
-Phone setup: [PHONE.md](PHONE.md). Daily usage: `run-agent.sh` in any project
-directory. Health: `./check-system.sh` — most of its runtime is one probe that
+Phone setup: [PHONE.md](PHONE.md). Daily usage: `lca` in any project
+directory. Health: `lca check` — most of its runtime is one probe that
 asks the model to generate, so add `--quick` when you only want the fast checks
 (services, ports, disk, config drift) and already know inference works.
 

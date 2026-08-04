@@ -252,7 +252,7 @@ an interrupted install often leaves a perfectly working stack behind. So:
 | Banner | What it means |
 |---|---|
 | `still installing` | The install log was written to in the last 15 minutes and has not reached a verdict. |
-| `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run `setup.sh`. |
+| `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run it: `cd /opt/local-code-agent && sudo ./setup.sh`. |
 | `the install did NOT finish` | The log reached an explicit failure verdict. Start with `lca logs setup`. |
 | `installed, but the model engine is not running` | Ollama is not answering. `lca check`, then `lca logs ollama`. |
 | `ready` | Ollama answered. This wins over anything the log says. |
