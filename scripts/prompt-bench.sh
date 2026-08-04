@@ -99,8 +99,15 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # run of it looked worse than the bare question — 3/4 with a tutorial — and at
 # n=6 through this bench it is 6/6, tutorial 0. That is the noise this file's
 # own header warns about, caught by re-running rather than by shipping the
-# first number. Baseline on the 3b rung, current prompt, both build questions:
-# hands over 6/6, says where 6/6, tutorial 0/6, tool-call 0/6.
+# first number.
+#
+# Baseline, 3b rung, current prompt, n=6, through /api/chat (see ask() below):
+#   build     hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
+#   wishlist  hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
+#   backup    handover-fired 0/6                            tool-call 0/6
+#   explain   handover-fired 0/6                            tool-call 0/6
+# Unchanged from the same measurement through /api/generate, which is what
+# made the endpoint switch safe to make without resetting the baseline.
 BENCH_WISHLIST="build me an income and expense tracker app with categories, a monthly summary, search and filter, CSV export, local storage, a responsive UI, unit tests and a README. After finishing, review the code and suggest improvements."
 BENCH_BACKUP="how do I take a backup right now?"
 BENCH_EXPLAIN="explain the difference between a list and a tuple in python"

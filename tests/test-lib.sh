@@ -1936,6 +1936,35 @@ if have jq && have curl; then
 else
   echo "skip - curl/jq missing, cannot source prompt-bench.sh"
 fi
+# ...and it must ask the model the way the CHAT asks it.
+#
+# The bench posted to /api/generate with the prompt in the 'system' field. Open
+# WebUI posts to /api/chat with it as a system MESSAGE — a different path
+# through the model's chat template. The bug that started all of this was a
+# tool-call envelope, which is exactly the kind of behaviour a template
+# decides, so a bench that could not reproduce the user's path could not
+# confirm a fix on it either. Both endpoints measured identically on the 3b
+# rung at n=6, which is what made the switch safe; that agreement is not a
+# reason to drift back.
+bench_asks_the_chat_endpoint() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/prompt-bench.sh" \
+    | awk '/^ask\(\) \{/ { inb = 1 } inb { print } inb && /^\}/ { exit }')"
+  [[ -n "${body}" ]] || {
+    echo "could not find prompt-bench.sh's ask() — this gate stopped watching" >&2
+    return 1
+  }
+  grep -q '/api/chat' <<<"${body}" || {
+    echo "prompt-bench.sh no longer asks /api/chat, the endpoint the chat app uses" >&2
+    return 1
+  }
+  grep -q 'role: "system"' <<<"${body}" || {
+    echo "prompt-bench.sh no longer sends the prompt as a system message" >&2
+    return 1
+  }
+}
+check "the bench asks the same endpoint the chat app does" \
+  bench_asks_the_chat_endpoint
 # The recipe now exists in three places: the prompt, docs/PHONE.md and
 # docs/TROUBLESHOOTING.md. Three copies of a command line is how a doc comes to
 # teach something that no longer works — and this exact line already shipped

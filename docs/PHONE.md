@@ -211,6 +211,11 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   quality of the code it writes once aider is running, not whether it hands
   over — so if the chat is misbehaving, more RAM is not the fix. Check
   `lca check` for `chat app config drift: SYSTEM_PROMPT` first.
+
+  The 3b column has since been re-measured through `/api/chat` — the request
+  shape Open WebUI itself sends, with the prompt as a system *message* rather
+  than a template field — and every figure came back the same. The chat app's
+  own path is not a different animal from the bench's.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
 - The first message after a quiet period is slower — the model reloads into RAM.
