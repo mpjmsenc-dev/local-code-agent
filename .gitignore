@@ -1,5 +1,10 @@
 # Local configuration (contains machine-specific values; never commit)
 .env
+# restore.sh writes these beside it: the .env it replaced, and one it refused
+# to install. Both are somebody's real configuration, so they are no more
+# committable than .env itself — and '.env' alone does not match them.
+.env.pre-restore
+.env.rejected
 
 # Python virtualenv
 .venv/

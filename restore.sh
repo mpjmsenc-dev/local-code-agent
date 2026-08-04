@@ -77,7 +77,30 @@ main() {
   tar xzf "${tarball}" -C "${workdir}"
 
   # 1. .env
-  if [[ -f "${workdir}/env" ]]; then
+  #
+  # Read before it is installed, because installing it is what runs it. The
+  # next statement after this block is load_env, which SOURCES .env — so every
+  # line of a file that arrived inside a tarball named on the command line
+  # executes here, as root, since a restore recreates docker volumes.
+  # docs/MIGRATE.md is built on carrying that tarball between machines, which
+  # makes "it is your own backup" an assumption about a file that has been
+  # off-box and back.
+  #
+  # Rejecting is not the same as failing: the volume and the models are still
+  # restored below, and the current .env — which load_env then reads instead —
+  # is left alone. A conservative validator can also refuse a legitimate but
+  # unusual file, so the rejected one is kept next to .env rather than dropped,
+  # and the message says where.
+  local env_usable=false
+  if [[ ! -f "${workdir}/env" ]]; then
+    warn "Backup contains no .env — skipping."
+  elif env_file_is_inert "${workdir}/env"; then
+    env_usable=true
+  else
+    cp "${workdir}/env" "${ENV_FILE}.rejected" 2>/dev/null || true
+    warn "The .env inside this backup contains shell syntax (an expansion, a command substitution, or a second command on a line), not just settings — restoring it would RUN that, as root. It was NOT installed and your current .env is untouched. Read it at ${ENV_FILE}.rejected and, if you recognise every line, copy it over by hand. Continuing with the rest of the restore."
+  fi
+  if [[ "${env_usable}" == "true" ]]; then
     if [[ -f "${ENV_FILE}" ]] && ! cmp -s "${workdir}/env" "${ENV_FILE}"; then
       if confirm "Overwrite existing .env with the backed-up one? (current saved as .env.pre-restore)"; then
         cp "${ENV_FILE}" "${ENV_FILE}.pre-restore"
@@ -90,8 +113,6 @@ main() {
       cp "${workdir}/env" "${ENV_FILE}"
       ok ".env restored."
     fi
-  else
-    warn "Backup contains no .env — skipping."
   fi
   load_env
 

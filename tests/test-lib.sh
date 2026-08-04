@@ -158,6 +158,74 @@ check "'127.0.0.1:11434' stays private"          bind_private "127.0.0.1:11434"
 check "'localhost:11434' stays private"          bind_private "localhost:11434"
 check "'[::1]:11434' stays private"              bind_private "[::1]:11434"
 
+echo "# env_file_is_inert(): a restored .env is EXECUTED, so it has to be read first"
+# load_env sources .env. restore.sh copies one straight out of a tarball named
+# on the command line and then calls load_env — as root, because a restore
+# recreates docker volumes. docs/MIGRATE.md is built on carrying that tarball
+# between machines, so "it is your own backup" is an assumption about a file
+# that has been off-box and back. A '$(...)' in it ran with no prompt and no
+# trace.
+#
+# Both directions matter. Too strict is a real cost here (a legitimate .env
+# refused during a recovery), so the accepted cases include the shipped
+# .env.example itself, a CRLF file — load_env strips CR before sourcing, and a
+# validator that did not would reject what it accepts — and a file with no
+# trailing newline.
+EI_DIR="${SANDBOX}/envinert"
+mkdir -p "${EI_DIR}"
+ei_write() { printf '%b' "$2" > "${EI_DIR}/$1"; }
+ei_inert()  { env_file_is_inert "${EI_DIR}/$1"; }
+ei_reject() { ! env_file_is_inert "${EI_DIR}/$1"; }
+ei_write plain    'A=1\nB="x y"\n\n# a comment\n'
+ei_write crlf     'A=1\r\nB=2\r\n'
+ei_write nonl     'A=1\nB=2'
+ei_write exported 'export A=1\n'
+check "a plain settings file is inert"        ei_inert  plain
+check "the shipped .env.example is inert"     env_file_is_inert "${REPO}/.env.example"
+check "a CRLF file is inert (load_env strips CR)" ei_inert crlf
+check "no trailing newline still reads"       ei_inert  nonl
+check "'export KEY=' is inert"                ei_inert  exported
+# Assembled from variables rather than written literally: ShellCheck flags a
+# '$(' or a backtick inside single quotes (SC2016) and this repo's lint gate is
+# not negotiable. The bytes on disk are the same either way — and if one of
+# these ever DID expand at write time, the fixture would stop containing a
+# rejected construct and its own check below would fail.
+ei_d='$'
+ei_bt="$(printf '\140')"
+ei_write cmdsub   "A=1\nB=${ei_d}(id)\n"
+ei_write backtick "A=1\nB=${ei_bt}id${ei_bt}\n"
+ei_write brace    "A=1\nB=${ei_d}{HOME}\n"
+ei_write bareexp  "A=1\nB=${ei_d}HOME\n"
+ei_write bare     'A=1\nid\n'
+ei_write semi     'A=1; id\n'
+ei_write andand   'A=1\nB=x && id\n'
+ei_write pipe     'A=1\nB=x | id\n'
+ei_write redirect 'A=1\nB=x > /etc/passwd\n'
+ei_write cont     'A=1\\\nid\n'
+check "command substitution is refused"       ei_reject cmdsub
+check "backticks are refused"                 ei_reject backtick
+check "a braced expansion is refused"         ei_reject brace
+check "a bare expansion is refused"           ei_reject bareexp
+check "a line that is just a command is refused" ei_reject bare
+check "a second command after ';' is refused" ei_reject semi
+check "a second command after '&&' is refused" ei_reject andand
+check "a pipeline is refused"                 ei_reject pipe
+check "a redirect is refused"                 ei_reject redirect
+check "a continued line is refused"           ei_reject cont
+check "a missing file is refused"             ei_reject no-such-file
+# ...and restore.sh must actually consult it, BEFORE the load_env that would
+# run the file. Order is the whole point: validating afterwards validates
+# something that has already executed.
+restore_validates_env_first() {
+  # '[^#]*' so a future comment naming the helper cannot satisfy this the way
+  # three earlier scanners in this file were satisfied by their own prose.
+  awk '/^[[:space:]]*[^#]*env_file_is_inert/ { checked = NR }
+       /^[[:space:]]*load_env[[:space:]]*$/ { loaded = NR; exit }
+       END { exit !(checked > 0 && loaded > checked) }' "${REPO}/restore.sh"
+}
+check "restore.sh validates the backed-up .env before sourcing it" \
+  restore_validates_env_first
+
 echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
 # backup.sh only runs main() when executed, so sourcing it here just defines
 # its functions. Guards the "disk filled up mid-tar" case: the archive must read

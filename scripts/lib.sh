@@ -192,6 +192,44 @@ load_env() {
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
 
+# env_file_is_inert FILE — true when FILE is settings and nothing else:
+# comments, blank lines, and plain KEY=VALUE assignments with no expansion, no
+# command substitution and no second command on the line.
+#
+# load_env SOURCES .env, so every line in it is shell that runs with the
+# privileges of whoever called. That is fine for the file the user edits on
+# their own machine. It is not fine for restore.sh, which copies a .env
+# straight out of a tarball named on the command line and then calls load_env
+# — as root, because a restore recreates docker volumes. docs/MIGRATE.md is
+# built on moving that tarball between machines, so "it is your own backup" is
+# an assumption about a file that has been off-box and back.
+#
+# Deliberately a whitelist. A blacklist of dangerous constructs is a list
+# someone has to keep complete forever, and a real .env has never needed
+# anything outside this shape — see .env.example, where the most exotic line is
+# a double-quoted OnCalendar spec.
+env_file_is_inert() {
+  local file="$1" line
+  [[ -f "${file}" ]] || return 1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    # load_env strips CR before sourcing; match it, or a CRLF file would be
+    # rejected here and accepted there.
+    line="${line%$'\r'}"
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*= ]] || return 1
+    # One character class rather than a list of constructs, so there is nothing
+    # to keep complete: anything that could expand, substitute, start a second
+    # command, redirect, or join this line to the next is out. The backslash
+    # matters as much as the rest — a line ending in one continues, which would
+    # hide a rejected construct on a line this loop reads separately.
+    case "${line}" in
+      *[\$\`\;\&\|\<\>\\]*) return 1 ;;
+    esac
+  done < "${file}"
+  return 0
+}
+
 # The install's final verdict. Everything that reports on an install keys off
 # these two lines: docs/YOUR-TURN.md and docs/DO.md tell the user to watch for
 # them, deploy/do-user-data.sh documents them as its outcomes, and the login
