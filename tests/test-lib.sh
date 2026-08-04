@@ -3416,6 +3416,42 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# the README's family table must be the ladder the code actually walks"
+# MODEL_FAMILY is the one .env key whose entire purpose is "one line changes
+# the model everywhere", so its table is the interface. It promised
+# llama3.1 -> 70b and codellama -> 34b; family_sizes returns 8b and 13b, both
+# capped on purpose ("manual only" in the source). A user on a 24 GB box was
+# told auto-tune would give them a 70b and it silently gave them 8b, forever.
+readme_family_table_matches_the_code() {
+  local row fam want got mismatched=() bt tbl
+  # A matched PAIR of backticks inside single quotes reads to ShellCheck as a
+  # command substitution (SC2016), and the table's cells are full of them —
+  # same trap the docs gates in this file already document. Build the character.
+  bt="$(printf '\140')"
+  tbl="$(sed -n "/^| ${bt}MODEL_FAMILY${bt} | small/,/^\$/p" "${REPO}/README.md" | grep "^| ${bt}")"
+  while read -r row; do
+    [[ -n "${row}" ]] || continue
+    fam="$(sed -n "s/^| ${bt}\\([a-z0-9.-]*\\)${bt}.*/\\1/p" <<<"${row}")"
+    [[ -n "${fam}" ]] || continue
+    # The three rungs are the first three NNb tokens in the cell; anything
+    # after them (a note about manual-only sizes) is prose and ignored.
+    want="$(grep -oE '[0-9]+(\.[0-9]+)?b' <<<"${row}" | head -3 | paste -sd' ' -)"
+    got="$(bash -c 'source "$1" >/dev/null 2>&1; source "$2" >/dev/null 2>&1
+                    family_sizes "$3"' _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "${fam}")"
+    [[ "${want}" == "${got}" ]] || mismatched+=("${fam}: README says '${want}', family_sizes returns '${got}'")
+  done < <(printf '%s\n' "${tbl}")
+  (( ${#mismatched[@]} == 0 )) || {
+    printf 'the README advertises rungs auto-tune never selects:\n' >&2
+    printf '  %s\n' "${mismatched[@]}" >&2
+    return 1
+  }
+  # And the table must not be empty, or the loop above proves nothing.
+  (( $(grep -c . <<<"${tbl}") >= 4 )) || {
+    echo 'the MODEL_FAMILY table could not be found in README.md' >&2; return 1; }
+}
+check "the README's MODEL_FAMILY rungs match family_sizes" \
+  readme_family_table_matches_the_code
+
 echo "# the guard renderer and the guard reader, run against each other"
 # inbound_guard_uncovered is the rule behind two user-facing claims — 'lca
 # check' printing "does NOT cover", and 'lca apply' deciding whether to reload

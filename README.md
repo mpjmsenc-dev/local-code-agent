@@ -83,9 +83,9 @@ everywhere, and a resize still re-tunes it:
 |---|---|
 | `qwen2.5-coder` *(default)* | 3b / 7b / 14b |
 | `qwen3` | 4b / 8b / 14b |
-| `deepseek-coder-v2` | 16b |
-| `llama3.1` | 8b / 8b / 70b |
-| `codellama` | 7b / 13b / 34b |
+| `deepseek-coder-v2` | 16b / 16b / 16b |
+| `llama3.1` | 8b / 8b / 8b — 70b and 405b stay a manual choice |
+| `codellama` | 7b / 13b / 13b — 34b stays a manual choice |
 
 An unrecognised value falls back to the default instead of failing a pull.
 
