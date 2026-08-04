@@ -1014,6 +1014,24 @@ guarded_ports() {
   if [[ "${oport}" =~ ^[0-9]+$ && "${oport}" != "22" ]]; then
     out+=("Ollama ${oport}")
   fi
+  # The port the container is REALLY on, when that is not the one .env names.
+  #
+  # Open WebUI's port is baked in at creation and it runs with --network=host,
+  # so editing WEBUI_PORT leaves the running chat app listening on the old port
+  # on every interface. The guard is rebuilt from .env — by a reboot, or by
+  # 'harden' on its own — and covers the NEW port, leaving the old one, which
+  # is the one actually accepting connections, reachable from the public IP.
+  #
+  # Reporting it does not create an unfixable failure: 'lca apply' re-creates
+  # the container before it reconciles the guard, so by the time apply looks
+  # here the live port and .env agree again. Where docker cannot be read at
+  # all this yields nothing, which is the right answer to a question we cannot
+  # ask.
+  local live
+  live="$(webui_container_env PORT 2>/dev/null || true)"
+  if [[ "${live}" =~ ^[0-9]+$ && "${live}" != "22" && "${live}" != "${WEBUI_PORT}" ]]; then
+    out+=("live WebUI ${live}")
+  fi
   (( ${#out[@]} )) || return 1
   printf '%s\n' "${out[@]}"
 }

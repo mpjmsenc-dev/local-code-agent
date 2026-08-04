@@ -2613,6 +2613,40 @@ nothing_to_guard() {
 }
 check "and with neither, there is nothing to guard" nothing_to_guard
 
+# The port the container is REALLY on. Open WebUI bakes its port in at
+# creation and runs with --network=host, so editing WEBUI_PORT leaves it
+# listening on the OLD port on every interface — and a reboot rebuilds the
+# guard from .env, covering the new port while the old one goes on accepting
+# public connections. Stubbed, because the real answer needs a docker daemon.
+live_port_is_guarded_too() {
+  local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
+  [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434|live WebUI 3000" ]]
+}
+live_port_adds_nothing_when_it_agrees() {
+  local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
+  [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 3000|Ollama 11434" ]]
+}
+live_port_is_silent_without_docker() {
+  local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_env() { return 1; }   # docker unreadable — cannot ask
+  [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434" ]]
+}
+# ...and the uncovered check must name it, since that is the exposed one.
+live_port_reads_as_uncovered() {
+  local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
+  # a guard built from .env alone: 8080 and 11434, not 3000
+  [[ "$(inbound_guard_uncovered 'tcp dport { 8080, 11434 } drop')" == "live WebUI 3000" ]]
+}
+check "a container left on the old port is guarded as well" live_port_is_guarded_too
+check "no duplicate when the live port and .env agree"       live_port_adds_nothing_when_it_agrees
+check "no claim about the live port when docker cannot be read" \
+  live_port_is_silent_without_docker
+check "a guard built from .env alone leaves the live port uncovered" \
+  live_port_reads_as_uncovered
+
 covers_everything() {
   local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
   ! inbound_guard_uncovered "${GUARD_DUMP}"
