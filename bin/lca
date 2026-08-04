@@ -65,7 +65,12 @@ fi
 case "${cmd}" in
   ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
   ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
-  chat)            exec "${REPO}/webui.sh" url ;;
+  # "$@" forwarded like every other branch, even though 'url' takes no
+  # arguments: dropping it swallowed 'lca chat --help', which then printed the
+  # address instead of explaining the command — one line after 'lca help'
+  # promises that every command explains itself. webui.sh rejects the extra
+  # argument itself; that is its job, not this dispatcher's.
+  chat)            exec "${REPO}/webui.sh" url "$@" ;;
   apply)           exec "${REPO}/scripts/apply.sh" "$@" ;;
   check)           exec "${REPO}/check-system.sh" "$@" ;;
   speed)           exec "${REPO}/scripts/speed.sh" "$@" ;;

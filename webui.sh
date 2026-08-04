@@ -9,7 +9,7 @@ load_env
 
 usage() {
   cat <<EOF
-Usage: webui.sh <command>
+Usage: lca webui <command>       (or webui.sh directly)
 
 Commands:
   start     Start the Open WebUI container
@@ -54,6 +54,14 @@ main() {
   # being down is what sent you looking for help.
   case "${cmd}" in
     -h|--help) usage; exit 0 ;;
+  esac
+  # No subcommand here takes an argument, so a second one is always a mistake —
+  # and the mistake that matters is '--help', which would otherwise be ignored
+  # and the subcommand run anyway. Same guard, and same reason, as netmode.sh.
+  case "${2:-}" in
+    "") ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "Unknown extra argument: ${2}" ;;
   esac
   # 'url' only reads .env and Tailscale — it must keep working when Docker is
   # down or the container was never created, since that is exactly when someone

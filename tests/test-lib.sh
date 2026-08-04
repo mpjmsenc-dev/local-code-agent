@@ -3100,6 +3100,21 @@ every_dispatch_target_is_checked() {
 check "the --help list covers everything bin/lca dispatches to" \
   every_dispatch_target_is_checked
 
+# The scripts answering --help only helps if the flag reaches them. 'chat' was
+# 'exec webui.sh url' with no "$@", so 'lca chat --help' printed the chat
+# address — one line after 'lca help' promises every command explains itself.
+every_dispatch_forwards_its_arguments() {
+  local hits
+  hits="$(grep -nE '^[[:space:]]*[^#]*exec "\$\{REPO\}/[a-z/-]+\.sh"' "${REPO}/bin/lca" \
+            | grep -v '"\$@"' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these swallow the arguments, so --help never reaches the script:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "every 'lca' branch passes its arguments through" \
+  every_dispatch_forwards_its_arguments
+
 # netmode.sh takes its subcommand as $1 and used to ignore everything after
 # it, while bin/lca forwards trailing arguments verbatim. So 'lca harden
 # --help' arrived as 'netmode.sh harden --help' and APPLIED THE FIREWALL —
