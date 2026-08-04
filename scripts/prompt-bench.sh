@@ -120,6 +120,17 @@ load_system() {
 
 # ask QUESTION SEED — one generation, printed raw.
 #
+# Through /api/chat, with the prompt as a system MESSAGE. That is the shape
+# Open WebUI sends, and this file exists to measure what the phone gets.
+#
+# It used to post to /api/generate with the prompt in the 'system' field — a
+# different code path through the model's chat template. The bug that prompted
+# all of this was a tool-call envelope, which is precisely the kind of
+# behaviour a template decides, so a bench that could not reproduce the user's
+# path could not confirm a fix for it either. Measured across the switch on the
+# 3b rung, the build question, n=6: identical (hands over 6/6, tool-call 0/6),
+# so the numbers recorded above carry over rather than being reset by it.
+#
 # The request is built with jq rather than by pasting into a here-doc: the
 # prompt contains quotes, backticks and em dashes, and one unescaped character
 # would produce a 400 that looks exactly like a model that answered nothing.
@@ -127,11 +138,13 @@ ask() {
   local q="$1" seed="$2" payload
   payload="$(jq -nc --arg m "${MODEL}" --arg s "${SYSTEM}" --arg p "${q}" \
     --argjson seed "${seed}" \
-    '{model: $m, system: $s, prompt: $p, stream: false,
+    '{model: $m,
+      messages: [{role: "system", content: $s}, {role: "user", content: $p}],
+      stream: false,
       options: {num_predict: 260, temperature: 0.4, seed: $seed}}')"
-  curl -sf --max-time 900 -X POST "$(ollama_url)/api/generate" \
+  curl -sf --max-time 900 -X POST "$(ollama_url)/api/chat" \
     -H 'Content-Type: application/json' -d "${payload}" \
-    | jq -r '.response // ""'
+    | jq -r '.message.content // ""'
 }
 
 # Counting the FAILURE is more reliable than counting the success: "did it say

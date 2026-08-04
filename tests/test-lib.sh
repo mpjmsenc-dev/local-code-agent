@@ -3067,6 +3067,47 @@ every_health_wait_checks_the_port() {
 check "every health wait explains a port mismatch instead of timing out" \
   every_health_wait_checks_the_port
 
+echo "# a restart is not an apply, and must stop implying that it is"
+# 'docker restart' is stop-then-start of the SAME container, and a container's
+# environment is fixed when it is created. So a restart carries every setting
+# the container was built with — and restarting is exactly what someone tries
+# after editing .env. The whole output was "Open WebUI restarted."
+webui_note() {  # drifted keys (newline-separated), or __none__ -> the note
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    KEYS="$2"
+    if [[ "${KEYS}" == "__none__" ]]; then webui_drift() { return 1; }
+    else webui_drift() { printf "%s\n" "${KEYS}"; }; fi
+    drift_note 2>&1' _ "${REPO}/webui.sh" "$1" 2>/dev/null
+}
+note_says()  { grep -qF -- "$1" <<<"$(webui_note "$2")"; }
+note_quiet() { [[ -z "$(webui_note "$1")" ]]; }
+check "nothing drifted -> the restart says nothing extra" \
+  note_quiet __none__
+check "a drifted setting is named after the restart" \
+  note_says "SYSTEM_PROMPT" "SYSTEM_PROMPT"
+check "...and the note points at the one command that applies it" \
+  note_says "lca apply" "SYSTEM_PROMPT"
+# ...and both commands that re-use an existing container must draw it. 'start'
+# is the same trap: it starts the container that is already there.
+start_and_restart_draw_the_note() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/webui.sh" \
+    | awk '/^  case "\$\{cmd\}" in/ { inb = 1 } inb')"
+  [[ -n "${body}" ]] || {
+    echo "could not find webui.sh's command dispatch — this gate stopped watching" >&2
+    return 1
+  }
+  local n
+  n="$(grep -c 'drift_note' <<<"${body}")"
+  [[ "${n}" == "2" ]] || {
+    printf 'expected start and restart to draw the drift note, found %s call(s)\n' "${n}" >&2
+    return 1
+  }
+}
+check "both 'start' and 'restart' say what they did NOT apply" \
+  start_and_restart_draw_the_note
+
 echo "# auto-tune must apply its own decision to everything that holds a copy"
 # tune.sh runs on every boot; a droplet resize is the headline reason. When the
 # ladder moves it writes MODEL_NAME, re-renders the Ollama drop-in, restarts

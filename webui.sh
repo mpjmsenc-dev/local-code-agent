@@ -62,6 +62,26 @@ port_mismatch_reason() {
     "${live}" "${WEBUI_PORT}" "${REPO_ROOT}"
 }
 
+# drift_note — one line after a successful start/restart, when the container is
+# still running settings .env has since moved away from.
+#
+# 'restart' is stop-then-start of the SAME container, and a container's
+# environment is fixed when it is created: everything it was built with is
+# still in force afterwards. So "Open WebUI restarted." was the whole output on
+# a box whose assistant instructions, model or signup policy had changed —
+# and restarting is exactly what someone tries when they have edited .env and
+# want it to take effect. 'status' has said all of this for a while; the two
+# commands that people actually reach for said nothing.
+#
+# Deliberately not fatal and deliberately not per-key: the restart did work,
+# and the detail is one 'lca webui status' away.
+drift_note() {
+  local drifted
+  drifted="$(webui_drift || true)"
+  [[ -n "${drifted}" ]] || return 0
+  warn "Still NOT in effect: ${drifted//$'\n'/, } — a restart re-uses the settings the container was CREATED with. Apply them with: sudo ${REPO_ROOT}/bin/lca apply (details: lca webui status)"
+}
+
 main() {
   local cmd="${1:-}"
   [[ -n "${cmd}" ]] || { usage; exit 1; }
@@ -140,6 +160,7 @@ main() {
         info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
         wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
+        drift_note
       else
         info "Container '${WEBUI_CONTAINER}' does not exist yet — creating it..."
         "${SCRIPT_DIR}/scripts/install_webui.sh"
@@ -159,6 +180,7 @@ main() {
       info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
       wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
       ok "Open WebUI restarted."
+      drift_note
       ;;
     status)
       if ! container_exists; then
