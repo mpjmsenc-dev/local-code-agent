@@ -2252,7 +2252,11 @@ check "no doc names an installer as the way to apply a .env edit" \
 # to re-create and the installer really is the next step.
 no_status_command_sends_you_to_an_installer() {
   local hits
-  hits="$(grep -n 'in \.env and re-run scripts/install_' \
+  # Path-agnostic on purpose: these messages name absolute paths now (see the
+  # "advice has to work from where the reader is standing" gate), and a pattern
+  # tied to the old relative spelling would match nothing ever again — a gate
+  # that cannot fail, guarding a rule that still matters.
+  hits="$(grep -nE 'in \.env and re-run [^"]*install_' \
             "${REPO}/check-system.sh" "${REPO}/webui.sh" 2>/dev/null || true)"
   [[ -z "${hits}" ]] || {
     printf 'a status command names an installer instead of lca apply:\n%s\n' "${hits}" >&2
@@ -3039,6 +3043,31 @@ every_advised_flag_is_real() {
 }
 check "every flag we tell a human to run is one that script documents" \
   every_advised_flag_is_real
+
+echo "# advice has to work from where the reader is standing"
+# bin/lca never cd's — that is the whole point, aider must see YOUR project —
+# so 'lca check' from ~/my-project ran a health check that answered
+# "(./webui.sh start)" and "run scripts/tune.sh". Neither resolves there. The
+# reader types it, gets "No such file or directory", and now has two problems.
+# Every path a message names must be absolute.
+advice_paths_are_absolute() {
+  local hits
+  # Message helpers only: an 'echo' inside a render function is writing a file,
+  # not talking to anyone. ${SCRIPT_DIR}/${REPO_ROOT} are erased first so an
+  # already-absolute path cannot match, then anything relative still standing
+  # is a defect.
+  hits="$(grep -nE '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null \
+          | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+          | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g' \
+          | grep -E '(\./|[[:space:]("'"'"']scripts/)[a-z_-]+\.sh' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these name a path that only resolves inside the checkout:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "every path a message names resolves from any directory" \
+  advice_paths_are_absolute
 
 echo "# the 'lca' command is a symlink, and a moved checkout leaves it dangling"
 # Every doc and message here says "type lca". Move the checkout and the symlink

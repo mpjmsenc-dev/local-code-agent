@@ -173,7 +173,7 @@ do_backup() {
     prune_old_backups
   fi
 
-  info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
+  info "Copy it off the machine (e.g. scp) — restore with: ${SCRIPT_DIR}/restore.sh ${tarball}"
 }
 
 # verify_backup TARBALL STAGING_DIR — true when the archive reads back cleanly

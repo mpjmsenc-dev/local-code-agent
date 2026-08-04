@@ -41,12 +41,12 @@ main() {
   step "Restoring from backup"
   local tarball="${1:-}"
   if [[ -z "${tarball}" ]]; then
-    [[ -d "${BACKUP_DIR}" ]] || die "No tarball given and ${BACKUP_DIR} does not exist. Usage: ./restore.sh <backup.tar.gz>"
+    [[ -d "${BACKUP_DIR}" ]] || die "No tarball given and ${BACKUP_DIR} does not exist. Usage: ${SCRIPT_DIR}/restore.sh <backup.tar.gz>"
     # '|| true' keeps the empty-directory case from aborting the whole
     # script under set -euo pipefail (find exits nonzero) — the explicit
     # emptiness check below emits the helpful message instead.
     tarball="$(find "${BACKUP_DIR}" -maxdepth 1 -name 'local-code-agent-backup-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)"
-    [[ -n "${tarball}" ]] || die "No tarball given and none found in ${BACKUP_DIR}. Usage: ./restore.sh <backup.tar.gz>"
+    [[ -n "${tarball}" ]] || die "No tarball given and none found in ${BACKUP_DIR}. Usage: ${SCRIPT_DIR}/restore.sh <backup.tar.gz>"
     info "Using newest backup: ${tarball}"
   fi
   [[ -f "${tarball}" ]] || die "Backup file not found: ${tarball}"
@@ -92,7 +92,7 @@ main() {
       if ! as_root docker image inspect ghcr.io/open-webui/open-webui:main >/dev/null 2>&1; then
         net_guard "Pulling the Open WebUI image (needed to restore the volume)"
         as_root docker pull ghcr.io/open-webui/open-webui:main \
-          || warn "Could not pull the Open WebUI image — the volume restore below may fail; re-run after 'sudo ./netmode.sh online' or once online."
+          || warn "Could not pull the Open WebUI image — the volume restore below may fail; re-run after 'sudo ${SCRIPT_DIR}/netmode.sh online' or once online."
       fi
       if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
         as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
@@ -111,10 +111,10 @@ main() {
           "${SCRIPT_DIR}/scripts/install_webui.sh"
         fi
       else
-        warn "WebUI volume restore failed — either the image is unavailable (offline?) or the archived volume is corrupt. Your existing WebUI data was NOT wiped (the archive is validated before the volume is replaced). Fix connectivity or use another backup, then re-run ./restore.sh; continuing with the model restore."
+        warn "WebUI volume restore failed — either the image is unavailable (offline?) or the archived volume is corrupt. Your existing WebUI data was NOT wiped (the archive is validated before the volume is replaced). Fix connectivity or use another backup, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
       fi
     else
-      warn "Docker not installed — cannot restore the WebUI volume. Run ./setup.sh first, then re-run restore.sh."
+      warn "Docker not installed — cannot restore the WebUI volume. Run ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh."
     fi
   else
     warn "Backup contains no WebUI volume archive — skipping."
@@ -138,7 +138,7 @@ main() {
         fi
       done < <(tail -n +2 "${workdir}/models.txt" | awk '{print $1}')
     else
-      warn "Ollama not reachable — skipping model re-pull. Run ./setup.sh first, then re-run restore.sh."
+      warn "Ollama not reachable — skipping model re-pull. Run ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh."
     fi
   else
     warn "Backup contains no model list — skipping."
@@ -166,7 +166,7 @@ main() {
   # there is no reason to run the wrong model until then, and nothing said so.
   machine_advice "${workdir}/meta"
 
-  ok "Restore complete. Verify with: ./check-system.sh"
+  ok "Restore complete. Verify with: ${SCRIPT_DIR}/check-system.sh"
 }
 
 # Sourceable so machine_advice() can be tested without performing a restore —

@@ -15,9 +15,9 @@ WEBUI_IMAGE="ghcr.io/open-webui/open-webui:main"
 main() {
   step "Installing Open WebUI"
   if [[ "${SKIP_DOCKER}" == "true" ]]; then
-    die "SKIP_DOCKER=true in .env — Open WebUI needs Docker. Set SKIP_DOCKER=false and re-run scripts/install_docker.sh first."
+    die "SKIP_DOCKER=true in .env — Open WebUI needs Docker. Set SKIP_DOCKER=false and re-run ${REPO_ROOT}/scripts/install_docker.sh first."
   fi
-  have docker || die "Docker is not installed. Run scripts/install_docker.sh first (or ./setup.sh)."
+  have docker || die "Docker is not installed. Run ${REPO_ROOT}/scripts/install_docker.sh first (or ${REPO_ROOT}/setup.sh)."
   docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1 \
     || die "The Docker daemon is not running. Start it with: sudo systemctl start docker"
 
@@ -38,7 +38,7 @@ main() {
   # still make our health probe pass and print a false success. Refuse up
   # front with a clear message. (Our own old container was removed just above.)
   if have ss && ss -ltn 2>/dev/null | grep -qE ":${WEBUI_PORT}[[:space:]]"; then
-    die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+    die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
   fi
 
   # These two settings are read from the environment on every start. Open WebUI

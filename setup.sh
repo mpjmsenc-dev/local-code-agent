@@ -66,7 +66,7 @@ main() {
       die "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
     fi
   else
-    warn "Ollama is not reachable — skipping model pull and smoke test (re-run ./setup.sh once Ollama runs)."
+    warn "Ollama is not reachable — skipping model pull and smoke test (re-run ${SCRIPT_DIR}/setup.sh once Ollama runs)."
     setup_ok=false
   fi
 
@@ -74,7 +74,7 @@ main() {
     # A WebUI failure (e.g. the Docker daemon isn't running on a no-systemd
     # host) must NOT abort the rest of setup — the terminal stack still works.
     if ! "${SCRIPT_DIR}/scripts/install_webui.sh"; then
-      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run scripts/install_webui.sh once Docker is running."
+      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run ${SCRIPT_DIR}/scripts/install_webui.sh once Docker is running."
       setup_ok=false
     fi
   else

@@ -43,7 +43,7 @@ for bin in git curl jq python3 ollama nft; do
   if have "${bin}"; then
     p_pass "binary: ${bin}"
   else
-    p_fail "binary missing: ${bin} (run ./setup.sh)"
+    p_fail "binary missing: ${bin} (run ${SCRIPT_DIR}/setup.sh)"
   fi
 done
 
@@ -70,10 +70,10 @@ else
     elif id -nG "${check_user}" 2>/dev/null | grep -qw docker; then
       p_pass "user '${check_user}' is in the docker group"
     else
-      p_warn "user '${check_user}' not in the docker group (log out/in after setup, or re-run scripts/install_docker.sh)"
+      p_warn "user '${check_user}' not in the docker group (log out/in after setup, or re-run ${SCRIPT_DIR}/scripts/install_docker.sh)"
     fi
   else
-    p_fail "docker not installed (run scripts/install_docker.sh, or set SKIP_DOCKER=true)"
+    p_fail "docker not installed (run ${SCRIPT_DIR}/scripts/install_docker.sh, or set SKIP_DOCKER=true)"
   fi
 fi
 
@@ -89,17 +89,17 @@ AIDER="$(aider_bin)"
 if [[ -x "$(venv_python)" ]]; then
   p_pass "virtualenv exists at ${VENV_PATH}"
 else
-  p_fail "virtualenv missing at ${VENV_PATH} (run scripts/install_python.sh)"
+  p_fail "virtualenv missing at ${VENV_PATH} (run ${SCRIPT_DIR}/scripts/install_python.sh)"
 fi
 if [[ -x "${AIDER}" ]]; then
   aider_version="$("${AIDER}" --version 2>/dev/null)"
   if [[ -n "${aider_version}" ]]; then
     p_pass "aider works: ${aider_version}"
   else
-    p_fail "aider binary exists but --version failed (re-run scripts/install_python.sh)"
+    p_fail "aider binary exists but --version failed (re-run ${SCRIPT_DIR}/scripts/install_python.sh)"
   fi
 else
-  p_fail "aider not installed in the venv (run scripts/install_python.sh)"
+  p_fail "aider not installed in the venv (run ${SCRIPT_DIR}/scripts/install_python.sh)"
 fi
 
 # --- Ollama service + API ---------------------------------------------------
@@ -159,7 +159,7 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
       fi
     fi
   elif [[ "$(netmode_state)" == "offline" ]]; then
-    p_fail "model '${MODEL_NAME}' not downloaded, and netmode is OFFLINE — run 'sudo ./netmode.sh online' then 'ollama pull ${MODEL_NAME}'"
+    p_fail "model '${MODEL_NAME}' not downloaded, and netmode is OFFLINE — run 'sudo ${SCRIPT_DIR}/netmode.sh online' then 'ollama pull ${MODEL_NAME}'"
   else
     p_fail "model '${MODEL_NAME}' not downloaded (ollama pull ${MODEL_NAME})"
   fi
@@ -197,7 +197,7 @@ if [[ "${AUTO_TUNE}" != "true" ]]; then
 elif [[ "${MODEL_NAME}" == "${TUNE_MODEL}" ]]; then
   p_pass "configured model matches the tune recommendation"
 else
-  p_warn "configured model (${MODEL_NAME}) differs from the recommendation (${TUNE_MODEL}) — run scripts/tune.sh"
+  p_warn "configured model (${MODEL_NAME}) differs from the recommendation (${TUNE_MODEL}) — run ${SCRIPT_DIR}/scripts/tune.sh"
 fi
 # AUTO_TUNE only actually adapts to a resized VM if the boot unit runs it.
 # Without this, "resize the droplet and the model follows" is a promise with
@@ -206,7 +206,7 @@ fi
 if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
   if systemctl is-enabled --quiet local-code-agent-tune.service 2>/dev/null; then
     if TUNE_GONE="$(stale_boot_program local-code-agent-tune.service)"; then
-      p_warn "auto-tune's boot service is enabled but runs ${TUNE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — resizing this VM will NOT change the model. Fix: sudo ./setup.sh"
+      p_warn "auto-tune's boot service is enabled but runs ${TUNE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — resizing this VM will NOT change the model. Fix: sudo ${SCRIPT_DIR}/setup.sh"
     else
       p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
     fi
@@ -214,6 +214,11 @@ if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
     p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: $(reenable_hint local-code-agent-tune.service "sudo ${SCRIPT_DIR}/setup.sh")"
   fi
 fi
+# These two are what setup.sh installs OUTSIDE the checkout, and both are
+# symlinks into it. They had been printing under the "Auto-tune" heading,
+# which is where the previous check happened to end — a reader scanning
+# section headings for "why is lca broken" would never look there.
+step "The 'lca' command and the login banner"
 # Every doc, message and banner in this project tells you to type 'lca'. That
 # is a symlink into this checkout, so moving or renaming the directory breaks
 # it — including 'lca check', which is what someone reaches for when the stack
@@ -260,16 +265,16 @@ else
     || { can_root && as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
   case "${webui_status}" in
     running)    p_pass "container '${WEBUI_CONTAINER}' is running" ;;
-    restarting) p_fail "container '${WEBUI_CONTAINER}' is CRASH-LOOPING (restarting) — often port ${WEBUI_PORT} taken or a bad .env; see: ./webui.sh logs" ;;
-    "")         p_fail "container '${WEBUI_CONTAINER}' does not exist (./webui.sh start)" ;;
-    *)          p_fail "container '${WEBUI_CONTAINER}' is '${webui_status}', not running (./webui.sh start)" ;;
+    restarting) p_fail "container '${WEBUI_CONTAINER}' is CRASH-LOOPING (restarting) — often port ${WEBUI_PORT} taken or a bad .env; see: ${SCRIPT_DIR}/webui.sh logs" ;;
+    "")         p_fail "container '${WEBUI_CONTAINER}' does not exist (${SCRIPT_DIR}/webui.sh start)" ;;
+    *)          p_fail "container '${WEBUI_CONTAINER}' is '${webui_status}', not running (${SCRIPT_DIR}/webui.sh start)" ;;
   esac
   # Probe /health (Open WebUI-specific) so a different service squatting the
   # port cannot masquerade as a healthy WebUI.
   if webui_responds; then
     p_pass "Open WebUI /health answering on port ${WEBUI_PORT}"
   else
-    p_fail "Open WebUI /health not answering on port ${WEBUI_PORT} (./webui.sh logs)"
+    p_fail "Open WebUI /health not answering on port ${WEBUI_PORT} (${SCRIPT_DIR}/webui.sh logs)"
   fi
   # Open signups are the one setting where the documented happy path ends with
   # a manual step the user has to remember (YOUR-TURN.md step 4.3). Forget it
@@ -315,7 +320,7 @@ elif [[ "${SKIP_TAILSCALE}" == "true" ]]; then
   # unfixable-warning trap the auto-tune ladder had.
   info "tailscale skipped by configuration (SKIP_TAILSCALE=true) — phone access is via your own private network."
 else
-  p_warn "tailscale not installed (run scripts/install_tailscale.sh for phone access)"
+  p_warn "tailscale not installed (run ${SCRIPT_DIR}/scripts/install_tailscale.sh for phone access)"
 fi
 
 # --- Inbound guard ----------------------------------------------------------
@@ -327,7 +332,7 @@ elif ! have nft; then
 elif ! can_root; then
   p_warn "cannot inspect nftables without root/sudo — re-run as root to verify the inbound guard"
 elif ! as_root nft list table inet lca_inbound >/dev/null 2>&1; then
-  p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ./netmode.sh harden)"
+  p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ${SCRIPT_DIR}/netmode.sh harden)"
 else
   # Existence is not enough: confirm the port the WebUI actually binds is in
   # the drop set. A config change without a re-harden, or a parser mismatch,
@@ -358,12 +363,12 @@ else
       # or renaming this directory leaves a green tick on a boot service that
       # cannot start — and the ports it was guarding become public.
       if NETMODE_GONE="$(stale_boot_program local-code-agent-netmode.service)"; then
-        p_warn "the inbound guard's boot service is enabled but runs ${NETMODE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — it will fail at the next boot and the WebUI/Ollama ports become public. Fix: sudo ./netmode.sh harden"
+        p_warn "the inbound guard's boot service is enabled but runs ${NETMODE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — it will fail at the next boot and the WebUI/Ollama ports become public. Fix: sudo ${SCRIPT_DIR}/netmode.sh harden"
       else
         p_pass "inbound guard will be re-applied on boot (local-code-agent-netmode.service enabled)"
       fi
     else
-      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ./netmode.sh harden"
+      p_warn "the inbound guard is active NOW but its boot service is not enabled — after a reboot the WebUI/Ollama ports would be public. Fix: sudo ${SCRIPT_DIR}/netmode.sh harden"
     fi
   fi
 fi
@@ -374,13 +379,13 @@ NETMODE="$(netmode_state)"
 info "netmode: ${NETMODE}"
 if curl -fsS --max-time 5 https://example.com -o /dev/null 2>/dev/null; then
   if [[ "${NETMODE}" == "offline" ]]; then
-    p_fail "internet reachable although netmode is offline — lockdown NOT active (sudo ./netmode.sh offline)"
+    p_fail "internet reachable although netmode is offline — lockdown NOT active (sudo ${SCRIPT_DIR}/netmode.sh offline)"
   else
     p_pass "internet reachable (probe: https://example.com)"
   fi
 else
   if [[ "${NETMODE}" == "offline" ]]; then
-    p_pass "internet blocked — expected, the kill switch is ON (sudo ./netmode.sh online to restore)"
+    p_pass "internet blocked — expected, the kill switch is ON (sudo ${SCRIPT_DIR}/netmode.sh online to restore)"
   else
     p_warn "no internet (warn-only: local inference still works; installs/pulls will fail)"
   fi
@@ -393,7 +398,7 @@ case "${ARCH}" in
   x86_64|aarch64) p_pass "CPU architecture: ${ARCH}" ;;
   *) p_warn "untested CPU architecture: ${ARCH} (supported: x86_64, aarch64)" ;;
 esac
-info "RAM: ${RAM_GIB} GiB · resizing the VM re-tunes the model on next boot (see scripts/tune.sh)"
+info "RAM: ${RAM_GIB} GiB · resizing the VM re-tunes the model on next boot (see ${SCRIPT_DIR}/scripts/tune.sh)"
 # GPU is optional — Ollama uses a supported one automatically; CPU is the
 # fully-supported default. Report it so slow CPU inference is never a mystery.
 if has_nvidia_gpu; then
@@ -467,7 +472,7 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   # on schedule and failing every time — the one drift you find out about by
   # needing a backup that was never taken.
   if BACKUP_GONE="$(stale_boot_program local-code-agent-backup.service)"; then
-    p_warn "the backup timer runs ${BACKUP_GONE}, which it can no longer execute (was this checkout moved or renamed?) — every scheduled backup since then has failed. Fix: sudo ./backup.sh --install-timer"
+    p_warn "the backup timer runs ${BACKUP_GONE}, which it can no longer execute (was this checkout moved or renamed?) — every scheduled backup since then has failed. Fix: sudo ${SCRIPT_DIR}/backup.sh --install-timer"
   fi
   # The timer keeps the schedule it was installed with, so a BACKUP_SCHEDULE
   # edited in .env and never applied leaves backups running on the old cadence

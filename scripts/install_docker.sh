@@ -83,7 +83,7 @@ main() {
   # init system started dockerd), warn and continue rather than crash the
   # whole setup — the rest of the stack (Ollama, aider) does not need Docker.
   if ! docker_daemon_up; then
-    warn "Docker daemon is not running (no init system started it?) — start it, then re-run scripts/install_webui.sh. Skipping the smoke test."
+    warn "Docker daemon is not running (no init system started it?) — start it, then re-run ${REPO_ROOT}/scripts/install_webui.sh. Skipping the smoke test."
     return 0
   fi
 

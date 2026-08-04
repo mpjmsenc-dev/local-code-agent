@@ -53,7 +53,7 @@ list_recommended() {
     printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
   done
   info "Switch with:  update-model.sh <model>   (pins it, disables auto-tune)"
-  info "Or keep auto-tune and set MODEL_FAMILY=<family> in .env, then: scripts/tune.sh"
+  info "Or keep auto-tune and set MODEL_FAMILY=<family> in .env, then: ${SCRIPT_DIR}/scripts/tune.sh"
 }
 
 main() {
@@ -127,7 +127,7 @@ main() {
   if [[ "${AUTO_TUNE}" == "true" ]]; then
     set_env_var AUTO_TUNE false
     warn "AUTO_TUNE has been set to false — a manual pin would otherwise be overridden by auto-tune on the next boot."
-    info "Re-enable spec-based auto selection anytime with: AUTO_TUNE=true in .env, then scripts/tune.sh"
+    info "Re-enable spec-based auto selection anytime with: AUTO_TUNE=true in .env, then ${SCRIPT_DIR}/scripts/tune.sh"
   fi
 
   if [[ "${remove_old}" == "true" && "${old_model}" != "${new_model}" ]]; then
@@ -143,7 +143,7 @@ main() {
     fi
   fi
 
-  info "aider and Open WebUI pick the new default up automatically (WebUI may need: ./webui.sh restart)."
+  info "aider and Open WebUI pick the new default up automatically (WebUI may need: ${SCRIPT_DIR}/webui.sh restart)."
 }
 
 main "$@"

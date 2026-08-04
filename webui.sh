@@ -93,15 +93,15 @@ main() {
     exit 0
   fi
 
-  have docker || die "Docker is not installed. Run scripts/install_docker.sh first."
-  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it (sudo systemctl start docker), or add yourself to the docker group (scripts/install_docker.sh) and log out/in, or re-run this as root."
+  have docker || die "Docker is not installed. Run ${SCRIPT_DIR}/scripts/install_docker.sh first."
+  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it (sudo systemctl start docker), or add yourself to the docker group (${SCRIPT_DIR}/scripts/install_docker.sh) and log out/in, or re-run this as root."
 
   case "${cmd}" in
     start)
       if container_exists; then
         "${DOCKER[@]}" start "${WEBUI_CONTAINER}" >/dev/null
         info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-        wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ./webui.sh logs"
+        wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
       else
         info "Container '${WEBUI_CONTAINER}' does not exist yet — creating it..."
@@ -114,15 +114,15 @@ main() {
       ok "Open WebUI stopped (data kept in the 'open-webui' volume)."
       ;;
     restart)
-      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh first."
+      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run ${SCRIPT_DIR}/scripts/install_webui.sh first."
       "${DOCKER[@]}" restart "${WEBUI_CONTAINER}" >/dev/null
       info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-      wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ./webui.sh logs"
+      wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
       ok "Open WebUI restarted."
       ;;
     status)
       if ! container_exists; then
-        warn "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh to create it."
+        warn "Container '${WEBUI_CONTAINER}' does not exist — run ${SCRIPT_DIR}/scripts/install_webui.sh to create it."
         exit 1
       fi
       local state live_port key
@@ -158,7 +158,7 @@ main() {
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else
         if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
-          die "No /health answer on port ${WEBUI_PORT} — because the running container is on ${live_port} (see the port drift above). Re-create it with: scripts/install_webui.sh"
+          die "No /health answer on port ${WEBUI_PORT} — because the running container is on ${live_port} (see the port drift above). Re-create it with: ${SCRIPT_DIR}/scripts/install_webui.sh"
         fi
         warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: webui.sh logs)"
         exit 1
