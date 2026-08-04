@@ -3416,6 +3416,74 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# the guard renderer and the guard reader, run against each other"
+# inbound_guard_uncovered is the rule behind two user-facing claims — 'lca
+# check' printing "does NOT cover", and 'lca apply' deciding whether to reload
+# the firewall — and until now the only input it was ever given was a
+# hand-written fixture. Nothing checked it against what netmode.sh actually
+# emits. A renderer that changed its port-set syntax would make the reader
+# report every port uncovered: 'lca check' failing on a healthy machine and
+# 'lca apply' re-hardening on every run, with the unit tests still green
+# because they were reading a copy.
+#
+# Renders for real, in a throwaway checkout, and asserts the reader agrees.
+guard_round_trip() {  # $1 = .env content, $2 = label
+  # Not 'gaps': inbound_guard_uncovered declares a local array by that name and
+  # ShellCheck -x follows the source, so a string here reads as SC2178.
+  local sandbox dump uncovered_out rc=0
+  sandbox="$(mktemp -d)"
+  ( cd "${REPO}" && tar -c --exclude=.venv --exclude=.git --exclude=backups . ) \
+    | tar -x -C "${sandbox}"
+  printf '%s\n' "$1" > "${sandbox}/.env"
+  dump="$("${sandbox}/netmode.sh" render-inbound 2>/dev/null || true)"
+  rm -rf "${sandbox}"
+  [[ -n "${dump}" ]] || {
+    printf '%s: render-inbound produced nothing\n' "$2" >&2; return 1; }
+  # The reader is driven with the SAME .env the renderer just used.
+  # A separate process, not a subshell: sourcing lib.sh inline makes ShellCheck
+  # link this to unrelated subshell assignments elsewhere in the suite (SC2030),
+  # and a child is a cleaner boundary anyway — the reader sees exactly this
+  # .env and nothing the suite happens to have set.
+  uncovered_out="$(bash -c '
+      set -uo pipefail
+      source "$1" >/dev/null 2>&1
+      source <(printf "%s\n" "$2") >/dev/null 2>&1
+      ENABLE_WEBUI="${ENABLE_WEBUI:-true}"
+      inbound_guard_uncovered "$3" || true
+    ' _ "${REPO}/scripts/lib.sh" "$1" "${dump}")" || rc=$?
+  (( rc == 0 )) || { printf '%s: reader errored\n' "$2" >&2; return 1; }
+  [[ -z "${uncovered_out}" ]] || {
+    printf '%s: the reader says these are uncovered in a guard the renderer just wrote for them:\n%s\n' \
+      "$2" "${uncovered_out}" >&2
+    return 1
+  }
+}
+default_ports_round_trip() {
+  guard_round_trip 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"' 'default ports'
+}
+custom_ports_round_trip() {
+  guard_round_trip 'WEBUI_PORT="8080" # moved
+OLLAMA_HOST="0.0.0.0:11500"' 'custom ports'
+}
+webui_off_round_trip() {
+  guard_round_trip 'ENABLE_WEBUI=false
+WEBUI_PORT=3000
+OLLAMA_HOST="0.0.0.0:11434"' 'chat app disabled'
+}
+ssh_port_round_trip() {
+  # WEBUI_PORT=22 is refused by the renderer and excluded by the reader; they
+  # have to agree about that too, or 'lca check' fails forever on a box nobody
+  # can fix.
+  guard_round_trip 'WEBUI_PORT=22
+OLLAMA_HOST="127.0.0.1:11434"' 'WebUI on the SSH port'
+}
+check "the reader agrees with a freshly rendered guard (default ports)" \
+  default_ports_round_trip
+check "...with custom ports"            custom_ports_round_trip
+check "...with the chat app disabled"   webui_off_round_trip
+check "...with WEBUI_PORT=22 refused"   ssh_port_round_trip
+
 echo "# one ladder, not a shared table and a copied staircase"
 # check-system.sh sources tune.sh so the two cannot disagree — and then
 # re-implemented the rung selection inline, dropping choose_for_ram's fallback
