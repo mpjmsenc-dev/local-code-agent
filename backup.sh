@@ -62,7 +62,22 @@ do_backup() {
     # processes) around the tar so the on-disk files are consistent, and
     # guarantee it is unpaused again even if the tar fails.
     local paused=false
-    if as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
+    # Paused is checked FIRST, and it is not the same question as Running.
+    #
+    # A container left paused — by a run killed with a signal the EXIT trap
+    # cannot catch — still reports State.Running=true, and 'docker pause' then
+    # fails on it with "already paused". That failure used to land in the
+    # "could not pause" branch below, which leaves 'paused' false, installs no
+    # trap, and skips the unpause at the end. So every later backup archived
+    # happily and left the chat app frozen, unreachable from the phone, while
+    # the warning claimed it was "archiving live". Adopting the unpause here is
+    # what ends that: whoever finds it paused is responsible for resuming it.
+    if as_root docker container inspect -f '{{.State.Paused}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
+      warn "'${WEBUI_CONTAINER}' was already paused — an earlier backup was probably killed before it could unpause. Archiving it as it is, then unpausing."
+      paused=true
+      # shellcheck disable=SC2064
+      trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; rm -rf \"${workdir:-}\"" EXIT
+    elif as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
       if as_root docker pause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
         paused=true
         # shellcheck disable=SC2064

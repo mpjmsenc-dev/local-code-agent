@@ -3416,6 +3416,43 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# a backup must not leave the chat app frozen for the next one to inherit"
+# backup.sh pauses the WebUI container so the SQLite snapshot is consistent,
+# with an EXIT trap to guarantee the unpause. A signal the trap cannot catch
+# leaves it paused — and a paused container still reports State.Running=true,
+# while 'docker pause' fails on it. The old order asked Running first, so that
+# failure took the "could not pause" branch: no trap, 'paused' left false, no
+# unpause at the end. Every later backup then archived happily and left the
+# chat app frozen and unreachable, with the warning saying it was "archiving
+# live" — the opposite of what was happening.
+#
+# Structural, because the behaviour needs a docker daemon and a container that
+# has been killed mid-pause. The shape is what produces it: Paused has to be
+# asked before Running, or the already-paused case cannot be seen at all.
+backup_checks_paused_before_running() {
+  # Comments stripped first. The comment above this very check explains the bug
+  # by naming State.Running, and the first version of this scanner counted that
+  # sentence as the code — failing on the fixed file. Same trap as every other
+  # whole-file grep in this suite: the explanation matches the pattern.
+  awk '/^[[:space:]]*#/ { next }
+       /State.Paused/   { if (!paused)  paused  = NR }
+       /State.Running/  { if (!running) running = NR }
+       END { exit !(paused && running && paused < running) }' "${REPO}/backup.sh" || {
+    printf 'backup.sh asks State.Running before State.Paused, so a container left paused reads as running\n' >&2
+    return 1
+  }
+  # ...and finding it paused must take responsibility for resuming it.
+  awk '/State.Paused/ { inb = 1 }
+       inb && /paused=true/ { found = 1 }
+       inb && /elif/ { exit }
+       END { exit !found }' "${REPO}/backup.sh" || {
+    printf 'backup.sh sees an already-paused container but does not adopt the unpause\n' >&2
+    return 1
+  }
+}
+check "backup.sh notices a container left paused by an earlier run" \
+  backup_checks_paused_before_running
+
 echo "# the volume restore must know whether it already emptied the volume"
 # restore.sh replaces the WebUI volume by clearing it and unpacking over it.
 # It used to be one '&&' chain, so a failure anywhere landed in a single branch
