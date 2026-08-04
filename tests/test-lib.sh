@@ -47,6 +47,45 @@ check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
 check "default BACKUP_SCHEDULE" test "${BACKUP_SCHEDULE}" = "*-*-* 03:30:00"
 check "default SKIP_TAILSCALE" test "${SKIP_TAILSCALE}" = "false"
 
+echo "# no probe may reach for sudo without checking it is there first"
+# as_root DIES when there is neither root nor sudo. That is right for a step
+# that cannot proceed without root, and wrong for a PROBE whose whole job is to
+# answer "can I talk to docker?" — there, the honest answer is "no" and the
+# caller has a graceful path already written for it.
+#
+# Two scripts fell through to a bare 'as_root docker info': install_docker.sh,
+# in the branch that exists precisely to warn and carry on without Docker, and
+# install_webui.sh, one line above the die() that tells the reader what to do.
+# On a host with neither root nor sudo both died with "Root privileges needed
+# for: docker info" instead. lib.sh's docker_daemon_reachable checks can_root
+# first; check-system.sh has carried a comment saying exactly this for a while,
+# and it was the only one that did.
+sudo_probes_are_guarded() {
+  local hits bad=0 line
+  # Comment lines dropped BEFORE the emptiness guard, not after. The
+  # paragraphs above explaining this rule quote the idiom, so filtering them
+  # out later left the guard counting them: the first version of this passed
+  # while every real call site had been renamed away, which is precisely the
+  # vacuous pass it is supposed to prevent.
+  hits="$(grep -rn --include='*.sh' 'as_root docker info' "${REPO}" \
+    | grep -v '/tests/' \
+    | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+  [[ -n "${hits}" ]] || {
+    echo "no 'as_root docker info' call site anywhere — this gate stopped watching" >&2
+    return 1
+  }
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    grep -q 'can_root' <<<"${line}" || {
+      printf 'unguarded sudo probe: %s\n' "${line}" >&2
+      bad=1
+    }
+  done <<<"${hits}"
+  return "${bad}"
+}
+check "every 'as_root docker info' probe checks can_root first" \
+  sudo_probes_are_guarded
+
 echo "# git_identity() — aider's product is commits, and a commit needs an author"
 # Without a global identity aider still commits, stamping the work with a
 # placeholder ('Your Name <you@example.com>' — measured), while a 'git commit'

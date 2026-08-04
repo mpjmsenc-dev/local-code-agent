@@ -52,9 +52,10 @@ do_backup() {
   #   missed    the volume exists (or docker is down so we cannot tell) and we
   #             did NOT archive it                    -> keep older backups
   local webui_state="none"
+  # lib.sh's probe rather than a fourth hand-written copy of it: this one was
+  # correct, and being correct in four places is how the fifth is not.
   local docker_ok=false
-  if have docker && { docker info >/dev/null 2>&1 \
-      || { can_root && as_root docker info >/dev/null 2>&1; }; }; then
+  if docker_daemon_reachable; then
     docker_ok=true
   fi
 

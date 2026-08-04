@@ -36,11 +36,6 @@ install_docker_repo_and_engine() {
   apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
-# docker_daemon_up — true if a docker daemon is reachable (root or not).
-docker_daemon_up() {
-  docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1
-}
-
 main() {
   step "Installing Docker"
   if [[ "${SKIP_DOCKER}" == "true" ]]; then
@@ -82,7 +77,15 @@ main() {
   # The smoke test needs a running daemon. If none is reachable (e.g. no
   # init system started dockerd), warn and continue rather than crash the
   # whole setup — the rest of the stack (Ollama, aider) does not need Docker.
-  if ! docker_daemon_up; then
+  #
+  # lib.sh's docker_daemon_reachable, not a local copy. The copy that lived
+  # here was one line and one guard short: it fell straight through to
+  # 'as_root docker info', and as_root DIES when there is neither root nor
+  # sudo. So on the one host shape this branch exists for — no init system,
+  # daemon down — a passwordless-sudo-less user got "Root privileges needed
+  # for: docker info" and setup stopped, instead of the warning below and a
+  # stack that carries on without Docker.
+  if ! docker_daemon_reachable; then
     warn "Docker daemon is not running (no init system started it?) — start it, then re-run ${REPO_ROOT}/scripts/install_webui.sh. Skipping the smoke test."
     return 0
   fi

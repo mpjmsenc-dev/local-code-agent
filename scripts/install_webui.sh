@@ -18,8 +18,13 @@ main() {
     die "SKIP_DOCKER=true in .env — Open WebUI needs Docker. Set SKIP_DOCKER=false and re-run ${REPO_ROOT}/scripts/install_docker.sh first."
   fi
   have docker || die "Docker is not installed. Run ${REPO_ROOT}/scripts/install_docker.sh first (or ${REPO_ROOT}/setup.sh)."
-  docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1 \
-    || die "The Docker daemon is not running. Start it with: sudo systemctl start docker"
+  # lib.sh's probe, which checks can_root before reaching for sudo. Written
+  # out here as '... || as_root docker info || die', the as_root fired on a
+  # host with neither root nor sudo and died with "Root privileges needed for:
+  # docker info" — pre-empting the message on the very next line, which is the
+  # one that tells the reader what to actually do.
+  docker_daemon_reachable \
+    || die "The Docker daemon is not reachable. Start it with: sudo systemctl start docker (or re-run this as root if you cannot sudo)."
 
   if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
     net_guard "Pulling the Open WebUI image"
