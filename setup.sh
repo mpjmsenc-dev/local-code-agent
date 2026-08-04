@@ -5,6 +5,8 @@
 #
 # Fully unattended when non-interactive (this is how deploy/do-user-data.sh
 # calls it on a fresh DigitalOcean droplet). Safe to re-run at any time.
+#
+# Usage: sudo ./setup.sh          (from the checkout; takes several minutes)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +15,15 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
 main() {
+  # Above every side effect. This installs packages, services and a model as
+  # root, so answering "--help" by starting is the worst possible reading of
+  # it — and it was the reading: './setup.sh --help' began installing.
+  case "${1:-}" in
+    -h|--help)
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+  esac
   step "local-code-agent setup starting"
   info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
   # bin/ included: that is where the 'lca' command lives.

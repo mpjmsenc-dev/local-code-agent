@@ -3146,6 +3146,34 @@ every_dispatch_target_is_checked() {
 check "the --help list covers everything bin/lca dispatches to" \
   every_dispatch_target_is_checked
 
+# The two that are NOT dispatched, and are the worst of the lot: './install.sh
+# --help' installed packages and cloned into ${LCA_DIR}, and './setup.sh
+# --help' began installing the whole stack as root. Both were found by running
+# them — each had to be killed by a timeout, and the first left a checkout on
+# disk.
+#
+# Structural, not behavioural. Everywhere else the --help check runs the
+# script, because the claim is about what happens; here a failing check would
+# install packages as root on whoever ran the suite, which is worse than the
+# bug it guards. So it asserts the shape that produces the behaviour — the
+# --help branch must be the FIRST thing main() does, above every side effect —
+# and the behaviour itself was verified by hand once the shape was in place.
+installers_answer_help_before_acting() {
+  local f
+  for f in install.sh setup.sh; do
+    awk '/^main\(\) \{/            { inm = 1; next }
+         inm && /^[[:space:]]*#/   { next }
+         inm && /^[[:space:]]*$/   { next }
+         inm                       { first = $0; exit }
+         END { exit !(first ~ /case "\$\{1:-\}" in/) }' "${REPO}/${f}" || {
+      printf '%s: main() does something before it checks for --help\n' "${f}" >&2
+      return 1
+    }
+  done
+}
+check "install.sh and setup.sh explain themselves before they install anything" \
+  installers_answer_help_before_acting
+
 # The scripts answering --help only helps if the flag reaches them. 'chat' was
 # 'exec webui.sh url' with no "$@", so 'lca chat --help' printed the chat
 # address — one line after 'lca help' promises every command explains itself.

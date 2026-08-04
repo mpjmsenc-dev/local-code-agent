@@ -43,6 +43,16 @@ fail() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
 # so nothing happens at all. That is the difference between a failed install
 # and a half-done one nobody knows about.
 main() {
+  # First statement in the function, above every side effect. Asking this
+  # script what it does used to be answered by installing packages and cloning
+  # into ${INSTALL_DIR} — measured, not theorised: './install.sh --help' had to
+  # be killed by a timeout, and left a checkout behind.
+  case "${1:-}" in
+    -h|--help)
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+  esac
   if [[ "${EUID}" -eq 0 ]]; then
     SUDO=()
   elif command -v sudo >/dev/null 2>&1; then
