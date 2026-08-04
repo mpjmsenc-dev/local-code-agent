@@ -214,15 +214,57 @@ So, when you add a setting that gets baked into something:
 next one is caught without anyone noticing it. Prefer that shape of test — one
 that fails for a class — over one more hand-written case.
 
-The same suite does it for advice, too: every `some-script.sh --flag` that
-appears in the README, in `docs/`, in `lca check`'s output or in `bin/lca` must
-be a flag that script documents, or CI fails naming the pair. That gate exists
-because `lca check` spent a while telling people to run
-`netmode.sh --install-service`, which works but appears in no usage text
-anywhere — so a reader who tried to look it up found nothing. A script that
-advertises `[... args...]` is exempt, since it forwards what it does not
-recognise; `run-agent.sh` is the only one, and it is exempt for that reason and
-not by name.
+## Advice is part of the product, and it is tested like it
+
+Half of what this project does is tell someone what to type next. A sentence
+that names the wrong command is a defect in the same way a wrong exit code is,
+and it is worse in one respect: the reader follows it, gets a second failure on
+top of the first, and has no way to tell which of the two was our fault. Five
+gates in `tests/test-lib.sh` enforce that, all of them written after shipping
+the thing they now catch.
+
+**1. Every flag we name must be one that script documents.** Every
+`some-script.sh --flag` in the README, in `docs/`, in `lca check`'s output or
+in `bin/lca` has to appear in that script's header, `usage()` or help text, or
+CI fails naming the pair. `lca check` spent a while recommending
+`netmode.sh --install-service`: it works, and it appears in no usage text
+anywhere, so a reader who tried to look it up before running it as root found
+nothing. A script advertising `[... args...]` is exempt because it forwards
+what it does not recognise — `run-agent.sh` hands everything to aider — and it
+is exempt for that reason, not by name.
+
+**2. Every path we name must resolve from anywhere.** `bin/lca` never `cd`s,
+deliberately: aider has to see *your* project. So the normal way to run any of
+this is `lca check` from `~/my-project`, and the health check answered
+`(./webui.sh start)`. Build paths from `${SCRIPT_DIR}` or `${REPO_ROOT}`. The
+gate erases both before matching, so anything relative still standing is real,
+and it covers `usage()` bodies as well as message helpers — `webui.sh`'s usage
+was where the last one hid.
+
+**3. Docs use the `lca` form, or say where to stand.** `lca backup` works from
+anywhere; `./backup.sh` in a block with no `cd` does not. `./setup.sh` is the
+exception that proves it — there is no `lca setup` and cannot be one before the
+install — so any fenced block running a `./script.sh` must contain a `cd`.
+
+**4. `--help` explains, and does nothing else.** `lca test --help` used to run
+the whole acceptance suite, minutes of real generation, because `selftest.sh`
+never looked at `"$@"`. `lca restore --help` answered "Backup file not found:
+--help" from the command that wipes a docker volume. `lca harden --help`
+applied the firewall, because `netmode.sh` ignored everything after its
+subcommand and `bin/lca` forwards trailing arguments verbatim. Every script
+`bin/lca` dispatches to is now *run* with `--help` in CI and must exit 0 with
+usage inside a timeout — the timeout is part of the assertion, since a script
+that ignores the flag and does its job is the failure being caught.
+
+**5. That list has to stay complete.** A second gate reads `bin/lca`'s dispatch
+table and fails if it names a script the `--help` list does not cover, so a new
+subcommand cannot arrive untested.
+
+When a check like #4 could fail destructively, exercise it through the harmless
+sibling: the `--help` test drives `netmode.sh status`, not `harden`, because a
+test that proved `harden --help` is safe by running `harden` would be its own
+worst outcome. Pair it with a structural check — that the argument validation
+sits *above* the dispatch — to cover what the safe path cannot reach.
 
 ## The system prompt is code, and it has to be measured
 
