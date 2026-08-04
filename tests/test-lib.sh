@@ -9,6 +9,15 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${TESTS_DIR}/.." && pwd)"
 
+# Everything bin/lca dispatches to, i.e. every script that runs in the USER's
+# directory and speaks to them directly. Several gates below share it, so it
+# lives here rather than in whichever section happened to need it first.
+# run-agent.sh is absent on purpose: it forwards to aider.
+LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
+              webui.sh netmode.sh scripts/tune.sh scripts/apply.sh
+              scripts/ask.sh scripts/logs.sh scripts/speed.sh
+              scripts/selftest.sh )
+
 FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
@@ -2251,17 +2260,28 @@ check "no doc names an installer as the way to apply a .env edit" \
 # it has already removed the old container, so 'lca apply' would have nothing
 # to re-create and the installer really is the next step.
 no_status_command_sends_you_to_an_installer() {
-  local hits
-  # Path-agnostic on purpose: these messages name absolute paths now (see the
-  # "advice has to work from where the reader is standing" gate), and a pattern
+  local s hits
+  # Two upgrades, both from finding this rule broken again in a place the old
+  # check could not see.
+  #
+  # Path-agnostic, because these messages name absolute paths now and a pattern
   # tied to the old relative spelling would match nothing ever again — a gate
   # that cannot fail, guarding a rule that still matters.
-  hits="$(grep -nE 'in \.env and re-run [^"]*install_' \
-            "${REPO}/check-system.sh" "${REPO}/webui.sh" 2>/dev/null || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'a status command names an installer instead of lca apply:\n%s\n' "${hits}" >&2
-    return 1
-  }
+  #
+  # And a sliding two-line window, because 'lca speed' broke it across two
+  # info() calls: "...set OLLAMA_KEEP_ALIVE=-1 in .env and re-run" on one line,
+  # the installer path on the next. Each line alone was innocent. Every script
+  # lca dispatches to is scanned now, not just the two that report state —
+  # speed.sh is a report too, and it was not on the list.
+  for s in "${LCA_TARGETS[@]}"; do
+    hits="$(grep -E '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' "${REPO}/${s}" \
+              | awk '{ prev = cur; cur = $0; print prev " " cur }' \
+              | grep -E 'in \.env and re-run.*install_' || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s names an installer instead of lca apply:\n%s\n' "${s}" "${hits}" >&2
+      return 1
+    }
+  done
 }
 check "no status command names an installer to apply a .env edit" \
   no_status_command_sends_you_to_an_installer
@@ -3085,10 +3105,6 @@ echo "# every 'lca' subcommand must answer --help, and only answer it"
 # Run for real, not grepped: the claim is about what happens, and each of those
 # three had a --help-shaped hole that reading the source did not make obvious.
 # run-agent.sh is out — it forwards to aider, whose --help is aider's to print.
-LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
-              webui.sh netmode.sh scripts/tune.sh scripts/apply.sh
-              scripts/ask.sh scripts/logs.sh scripts/speed.sh
-              scripts/selftest.sh )
 help_is_answered_not_performed() {
   local s out rc broken=()
   for s in "${LCA_TARGETS[@]}"; do

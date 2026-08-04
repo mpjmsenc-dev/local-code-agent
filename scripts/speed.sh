@@ -187,8 +187,8 @@ main() {
   if [[ -n "${load_s}" ]] && awk -v s="${load_s}" 'BEGIN { exit !(s > 5) }' \
      && [[ "${OLLAMA_KEEP_ALIVE:-30m}" != -* ]]; then
     info "Every first message after ${OLLAMA_KEEP_ALIVE:-30m} idle waits ${load_s}s for this load."
-    info "To pay it once and never again, set OLLAMA_KEEP_ALIVE=-1 in .env and re-run"
-    info "${REPO_ROOT}/scripts/install_ollama.sh — the model then stays in RAM permanently."
+    info "To pay it once and never again, set OLLAMA_KEEP_ALIVE=-1 in .env, then: sudo lca apply"
+    info "(the model then stays in RAM permanently)"
   fi
 
   if [[ "${swap_mb}" =~ ^[0-9]+$ ]] && (( swap_mb > 256 )); then
