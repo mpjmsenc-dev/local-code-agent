@@ -34,7 +34,7 @@ EOF
 list_recommended() {
   local ram fam small mid big pick note
   ram="$(detect_ram_gib)"
-  step "Models that fit this machine (${ram} GiB RAM detected)"
+  step "What each family gives you on this machine (${ram} GiB RAM detected)"
   # Sourcing tune.sh recomputes SCRIPT_DIR from its own location, repointing
   # ours at scripts/. Harmless today because this function exits straight
   # after, but restoring it keeps the next edit from inheriting a landmine.
@@ -48,8 +48,17 @@ list_recommended() {
     elif (( ram <= 15 )); then pick="${fam}:${mid}"
     else                      pick="${fam}:${big}"
     fi
+    # model_fits_ram is tune.sh's own sizing check, and it rejects some of these
+    # rungs outright — deepseek-coder-v2:16b and codellama:13b on an 8 GiB box.
+    # Listing them under a heading that said "Models that fit this machine" was
+    # a straight contradiction of the code one function away: auto-tune would
+    # refuse them and fall back to qwen2.5-coder.
     note=""
-    if have ollama && model_present "${pick}"; then note="  (already downloaded)"; fi
+    if ! model_fits_ram "${pick}" "${ram}"; then
+      note="  (too big for ${ram} GiB — auto-tune would fall back to qwen2.5-coder)"
+    elif have ollama && model_present "${pick}"; then
+      note="  (already downloaded)"
+    fi
     printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
   done
   info "Switch with:  lca model <model>   (pins it, disables auto-tune)"

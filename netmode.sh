@@ -215,7 +215,21 @@ apply_inbound_guard() {
   as_root mkdir -p "${NETMODE_DIR}"
   render_inbound_rules | as_root tee "${INBOUND_RULES_FILE}" >/dev/null
   as_root nft -f "${INBOUND_RULES_FILE}"
-  ok "Inbound guard active: WebUI (port $(webui_port_from_env)) and Ollama (port $(ollama_port_from_env)) reachable only via loopback and Tailscale."
+  # Name only what was actually put in the drop set. render_inbound_rules
+  # REFUSES port 22 — so a WEBUI_PORT of 22 produced "WebUI (port 22) ...
+  # reachable only via loopback and Tailscale" about a port deliberately left
+  # wide open, which is the one sentence that must never be wrong here.
+  local guard_wp guard_op guarded=()
+  guard_wp="$(webui_port_from_env)"
+  guard_op="$(ollama_port_from_env)"
+  if [[ "${guard_wp}" != "22" ]]; then guarded+=("WebUI ${guard_wp}"); fi
+  if [[ "${guard_op}" != "22" ]]; then guarded+=("Ollama ${guard_op}"); fi
+  if (( ${#guarded[@]} )); then
+    local joined="${guarded[*]}"
+    ok "Inbound guard active: ${joined// /:} — reachable only via loopback and Tailscale."
+  else
+    warn "Inbound guard loaded but it drops nothing: every configured port is 22, which is never guarded so SSH can never be locked out. Change WEBUI_PORT / OLLAMA_HOST in .env, then: sudo lca harden"
+  fi
 }
 
 # Returns 0 loaded, 1 not loaded, 2 cannot tell (no root/sudo). as_root would

@@ -3450,6 +3450,46 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# three claims the code one function away already contradicted"
+guard_message_names_only_guarded_ports() {
+  # render_inbound_rules REFUSES port 22, and the success line said "WebUI
+  # (port 22) ... reachable only via loopback and Tailscale" about a port
+  # deliberately left wide open — the one sentence here that must never be
+  # wrong. It builds the list from what was actually guarded now.
+  awk '/^apply_inbound_guard\(\) \{/ { inb = 1 }
+       inb && /^\}/ { exit }
+       inb && /^[[:space:]]*#/ { next }
+       inb && /guard_wp}" != "22"/ { found = 1 }
+       END { exit !found }' "${REPO}/netmode.sh" || {
+    echo 'the guard success message names ports without checking 22 was refused' >&2
+    return 1; }
+}
+listing_flags_models_that_do_not_fit() {
+  # 'lca model --list-recommended' printed deepseek-coder-v2:16b and
+  # codellama:13b under "Models that fit this machine" on an 8 GiB box, both
+  # of which tune.sh's own model_fits_ram rejects outright.
+  # Comments stripped: the comment explaining this fix quotes the old heading,
+  # and the first version of this check failed on the corrected file because of
+  # it. Third time today — a whole-file grep always finds its own explanation.
+  local body
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/update-model.sh")"
+  grep -q 'model_fits_ram' <<<"${body}" || {
+    echo 'update-model.sh lists rungs without applying tune.sh sizing check' >&2; return 1; }
+  ! grep -q 'Models that fit this machine' <<<"${body}"
+}
+faq_does_not_overclaim_offline() {
+  # The FAQ called offline a "provable guarantee" that the stack "physically
+  # cannot reach the internet", which the ruleset (DNS, STUN, WireGuard) and
+  # the README's own Honest limitations both contradict.
+  ! grep -qi 'physically cannot reach the internet' "${REPO}/docs/FAQ.md"
+}
+check "the guard success line names only the ports it guarded" \
+  guard_message_names_only_guarded_ports
+check "the model listing flags rungs that do not fit this RAM" \
+  listing_flags_models_that_do_not_fit
+check "the FAQ does not promise more than the ruleset delivers" \
+  faq_does_not_overclaim_offline
+
 echo "# five failure paths that reported the wrong thing, or nothing"
 # Each of these was verified by running the mechanism, not by reading it.
 errexit_survives_sourcing_tune() {

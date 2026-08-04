@@ -5,8 +5,12 @@ Yes. Models run on your VM; prompts and code never leave it. Aider is configured
 with telemetry/analytics off (`config/aider.conf.yml`), and Open WebUI is started
 with `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS` and `ANONYMIZED_TELEMETRY` set so it
 does not phone home either. Phone access rides an encrypted Tailscale tunnel, and
-`netmode.sh offline` gives you a provable guarantee: the stack physically cannot
-reach the internet, and chat still works.
+`sudo lca offline` drops every **new** outbound connection the stack makes — apt,
+curl, docker pulls, telemetry — and chat still works, because the models are on
+your disk. It is not a claim that the NIC is dead: the ruleset deliberately
+still allows DNS, the WireGuard and STUN ports, DHCP and IPv6 neighbour
+discovery, because Tailscale needs them to keep your phone connected. The
+README's "Honest limitations" lists exactly what stays open.
 
 **Is this as good as Claude?**
 No — see "Honest expectations" in the [README](../README.md). A 7b/14b local
