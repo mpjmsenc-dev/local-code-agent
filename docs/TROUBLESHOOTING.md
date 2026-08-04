@@ -214,6 +214,29 @@ reach the model (1 and 2 above) or something else was in the request (3).
 `scripts/prompt-bench.sh` counts tool calls now, so a prompt change can be
 judged against this failure rather than only against the tutorial.
 
+## aider wrote the files, but the code does not work
+
+That is the expected shape of this stack on a small model, not a fault to
+diagnose. Measured on `qwen2.5-coder:3b`, five identical runs of a two-file
+request (a module plus unittest tests for it): **5/5** wrote and applied both
+files with no malformed edits, in about a minute each — and **0/5** produced
+tests that passed first time. In every run the tests it wrote caught its own
+bug, which is the useful part.
+
+So iterate rather than re-prompt from scratch:
+
+```bash
+python3 -m unittest            # or however your project runs its tests
+lca                            # aider again, in the same directory
+# > test_budget.py fails with TypeError: 'int' object is not iterable
+```
+
+Pasting the actual error back is usually enough, and costs a minute. Asking for
+one file at a time works better than one big request. If you want stronger
+first-draft code, that is what more RAM buys — 7b from ~12 GB, 14b from 16 GB —
+unlike the chat's handover behaviour, which a bigger model does **not** improve
+(see [PHONE.md](PHONE.md)).
+
 ## I changed a setting in .env and nothing happened
 
 Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,

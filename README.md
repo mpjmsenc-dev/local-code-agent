@@ -362,6 +362,31 @@ exchange: total privacy, zero per-token cost, no quotas, and offline operation.
 The stack scales with hardware — resize to more RAM and auto-tune upgrades the
 model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
 
+### What "builds an app" actually looks like on 3b
+
+Measured, five identical runs on the base droplet's rung — *"create budget.py
+with `add_expense(amount, category)` and `total_by_category()`, and
+test_budget.py with unittest tests for both"*:
+
+| | Result |
+|---|---|
+| Both files written and applied | **5 / 5** |
+| Malformed edits aider had to reject | **0 / 5** |
+| Time per run | ~1 minute |
+| The tests it wrote passed first time | **0 / 5** |
+
+The last row is the honest one, and the failure is worth seeing: `add_expense`
+accumulated a running total per category while `total_by_category` called
+`sum()` on it, so one of the two tests it wrote caught its own bug. A one-line
+fix, and the test that finds it comes free in the same run.
+
+So: it reliably produces a working shape and rarely one-shots correct logic.
+Ask for one file at a time, keep the tests it writes, and run them — telling
+aider "test_budget.py fails with TypeError: 'int' object is not iterable" is a
+minute of its time and usually enough. If you expect to type one sentence and
+get a finished app, no local model on a 8 GB droplet will do that, and neither
+will anything else on this hardware.
+
 ## Docs
 
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
