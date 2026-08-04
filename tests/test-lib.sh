@@ -3206,6 +3206,77 @@ help_prints_no_verdict() {
   [[ "${setup_help_rc}" == "0" ]] && ! grep -qF 'SETUP ' <<<"${setup_help_out}"
 }
 check "a failing setup still prints its verdict"  failing_setup_prints_verdict
+
+# The composite of the two changes above, driven end to end: a model pull that
+# fails must not cost the user everything that comes after it.
+#
+# It used to die() there. On a droplet that ran out of disk during the
+# download that meant no chat app, no Tailscale, no 'lca' command, no login
+# banner, no boot services — and no 'netmode.sh harden', so Ollama was left
+# installed and running with nothing in front of it. None of those steps needs
+# a model. The guard is the one that matters most, and it is the assertion this
+# test exists for.
+#
+# Every script setup.sh shells out to is a stub that records that it ran, so
+# nothing here installs, downloads or firewalls anything; the shims put Ollama
+# up, the model absent, and the pull refusing.
+POST_SB="${SANDBOX}/pullfail"
+mkdir -p "${POST_SB}/scripts" "${POST_SB}/bin"
+cp "${REPO}/setup.sh" "${POST_SB}/setup.sh"
+cp "${REPO}/.env.example" "${POST_SB}/.env.example"
+cp "${REPO}/scripts/lib.sh" "${POST_SB}/scripts/lib.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${POST_SB}/bin/lca"
+# Quoted heredocs, and the log path arrives through the environment: a stub
+# needs a literal "$1" in its body, and writing that inside a single-quoted
+# printf format is what ShellCheck flags as SC2016.
+export RAN_LOG="${POST_SB}/ran.log"
+for step_script in install_dependencies install_git install_docker install_python \
+                   install_ollama install_webui install_tailscale tune motd; do
+  cat > "${POST_SB}/scripts/${step_script}.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'scripts/%s\n' "${0##*/}" >> "${RAN_LOG}"
+exit 0
+STUB
+done
+cat > "${POST_SB}/netmode.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'netmode.sh %s\n' "$1" >> "${RAN_LOG}"
+exit 0
+STUB
+cat > "${POST_SB}/check-system.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'check-system.sh\n' >> "${RAN_LOG}"
+exit 1
+STUB
+chmod +x "${POST_SB}"/*.sh "${POST_SB}"/scripts/*.sh "${POST_SB}"/bin/*
+cat >> "${POST_SB}/scripts/lib.sh" <<'SHIM'
+ensure_ollama_up_announced() { return 0; }
+model_present() { return 1; }
+pull_model() { return 1; }
+net_guard() { :; }
+can_root() { return 1; }
+sync_env_keys() { :; }
+SHIM
+pullfail_rc=0
+pullfail_out="$(cd "${POST_SB}" && ./setup.sh </dev/null 2>&1)" || pullfail_rc=$?
+pullfail_ran="$(cat "${POST_SB}/ran.log" 2>/dev/null || true)"
+
+pullfail_ran_step() {
+  grep -qxF "$1" <<<"${pullfail_ran}" || {
+    printf 'a failed model pull skipped: %s\nwhat did run:\n%s\n' "$1" "${pullfail_ran}" >&2
+    return 1
+  }
+}
+# The security one first, because it is the reason this is not just tidiness.
+check "a failed model pull still applies the inbound guard" \
+  pullfail_ran_step "netmode.sh harden"
+check "...still installs the boot services"  pullfail_ran_step "netmode.sh --install-service"
+check "...still installs the login banner"   pullfail_ran_step "scripts/motd.sh"
+check "...still runs the final check"        pullfail_ran_step "check-system.sh"
+pullfail_reports_failure() {
+  [[ "${pullfail_rc}" == "1" ]] && grep -qF 'SETUP FINISHED WITH ERRORS' <<<"${pullfail_out}"
+}
+check "...and still reports the install as failed" pullfail_reports_failure
 check "a failing setup keeps its exit status"     failing_setup_keeps_status
 check "setup.sh --help prints no verdict"         help_prints_no_verdict
 # update.sh takes a backup specifically so it can be restored when the update
