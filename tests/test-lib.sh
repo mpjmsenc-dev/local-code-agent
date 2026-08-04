@@ -825,12 +825,13 @@ echo "# an optional component may not abort the whole install"
 # The list is derived from .env.example's own off-switches — SKIP_X / ENABLE_X
 # become install_x.sh — so a future SKIP_FOO is covered without editing this.
 optional_installers_are_not_fatal() {
-  local key name script bad=0 line
+  local key name script bad=0 line found=0
   while read -r key; do
     [[ -n "${key}" ]] || continue
     name="$(printf '%s' "${key#*_}" | tr '[:upper:]' '[:lower:]')"
     script="install_${name}.sh"
     [[ -f "${REPO}/scripts/${script}" ]] || continue
+    found=$(( found + 1 ))
     # The call has to be a tested one: 'if ! .../install_x.sh' or '|| warn'.
     line="$(sed 's/#.*//' "${REPO}/setup.sh" | grep -F "scripts/${script}" | head -1)"
     [[ -n "${line}" ]] || {
@@ -843,6 +844,12 @@ optional_installers_are_not_fatal() {
       bad=1
     fi
   done < <(grep -oE '^(SKIP|ENABLE)_[A-Z_]+' "${REPO}/.env.example" | sort -u)
+  # An extractor that matched nothing passes every gate built on it. Measured:
+  # stripping the SKIP_/ENABLE_ keys out of .env.example left this reporting ok.
+  (( found > 0 )) || {
+    echo 'no SKIP_/ENABLE_ switch in .env.example resolves to an installer — this stopped watching anything' >&2
+    return 1
+  }
   return "${bad}"
 }
 check "an optional component's installer cannot abort setup" \
@@ -1627,7 +1634,7 @@ echo "# every path a message tells you to run must actually be there"
 # ${SCRIPT_DIR} resolves per file: the repo root for a top-level script, and
 # scripts/ for the rest. ${REPO_ROOT} is always the root.
 every_advised_path_exists() {
-  local f base path prefix resolved missing=()
+  local f base path prefix resolved missing=() seen=0
   for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}/bin/lca"; do
     base="$(dirname "${f}")"
     while read -r path; do
@@ -1642,9 +1649,13 @@ every_advised_path_exists() {
       elif [[ "${prefix}" == *REPO*       ]]; then resolved="${REPO}/${path#*/}"
       else continue
       fi
+      seen=$(( seen + 1 ))
       [[ -e "${resolved}" ]] || missing+=("${f##*/}: ${path}")
     done < <(grep -ohE '\$\{(SCRIPT_DIR|REPO_ROOT|REPO)\}/[A-Za-z0-9_/.-]+(\.sh|/lca)' "${f}" | sort -u)
   done
+  (( seen >= 10 )) || {
+    printf 'only %s advised path(s) found — the scan stopped matching\n' "${seen}" >&2
+    return 1; }
   (( ${#missing[@]} == 0 )) || {
     printf 'these messages send the reader to something that is not there:\n' >&2
     printf '  %s\n' "${missing[@]}" >&2
@@ -3145,7 +3156,7 @@ check "every marker motd.sh matches on is really printed" motd_markers_are_real
 # the part that stays constant, and whitespace is normalised because the banner
 # pads for alignment and prose does not.
 banner_states_are_documented() {
-  local doc line stable bad=0
+  local doc line stable bad=0 seen=0
   doc="$(tr -s '[:space:]' ' ' < "${REPO}/docs/TROUBLESHOOTING.md")"
   while IFS= read -r line; do
     stable="${line%%\$\{*}"
@@ -3154,6 +3165,7 @@ banner_states_are_documented() {
     stable="$(tr -s '[:space:]' ' ' <<<"${stable}")"
     stable="${stable# }"; stable="${stable% }"
     [[ -n "${stable}" ]] || continue
+    seen=$(( seen + 1 ))
     grep -qF -- "${stable}" <<<"${doc}" || {
       printf 'the banner can print "%s" but TROUBLESHOOTING.md does not explain it\n' \
         "${stable}" >&2
@@ -3161,6 +3173,12 @@ banner_states_are_documented() {
     }
   done < <(grep -oE 'headline "[^"]*"' "${REPO}/scripts/motd.sh" \
              | sed -E 's/^headline "//; s/"$//' | sort -u)
+  # Same trap as everywhere else in this file: renaming headline() left this
+  # finding no states at all and reporting ok. Measured.
+  (( seen >= 3 )) || {
+    printf 'only %s banner state(s) found in motd.sh — this stopped watching them\n' "${seen}" >&2
+    return 1
+  }
   return "${bad}"
 }
 check "every banner state is explained in TROUBLESHOOTING.md" \
@@ -4112,10 +4130,11 @@ check "every script 'lca' dispatches to explains itself on --help" \
 # option added later is covered without touching this. Every one of them fails
 # before doing any work, which is what makes running them safe.
 value_options_explain_a_missing_value() {
-  local f flag out rc broken=()
+  local f flag out rc broken=() options=0
   for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
     while IFS= read -r flag; do
       [[ -n "${flag}" ]] || continue
+      options=$(( options + 1 ))
       out="$(timeout 20 "${f}" "${flag%%|*}" 2>&1)"; rc=$?
       if (( rc == 0 )); then
         broken+=("${f##*/} ${flag%%|*}: accepted a missing value")
@@ -4140,6 +4159,9 @@ value_options_explain_a_missing_value() {
       lbl != "" && /[$]\{?2[^0-9]/ { takes = 1 }
       lbl != "" && /;;/             { if (takes) print lbl; lbl = "" }')
   done
+  (( options >= 4 )) || {
+    printf 'only %s value-taking option(s) found — the extractor stopped matching\n' "${options}" >&2
+    return 1; }
   (( ${#broken[@]} == 0 )) || {
     printf 'these take a value and say nothing when it is missing:\n' >&2
     printf '  %s\n' "${broken[@]}" >&2
@@ -4557,10 +4579,11 @@ prompt_check_is_not_claimed_when_skipped() {
   # first version of this passed while selftest.sh was reverted to its own
   # live-value probe, because the comment explaining the fix says the helper's
   # name. Fourth time in this file.
-  local f code
+  local f code claimants=0
   for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
     [[ "${f}" == "${REPO}/scripts/lib.sh" ]] && continue
     grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" || continue
+    claimants=$(( claimants + 1 ))
     code="$(sed 's/#.*//' "${f}")"
     grep -q 'webui_prompt_comparable' <<<"${code}" || {
       printf '%s claims the prompt matched without checking it could compare it\n' \
@@ -4571,6 +4594,14 @@ prompt_check_is_not_claimed_when_skipped() {
         "${f##*/}" >&2
       return 1; }
   done
+  # A file list that matched nothing passes silently. The claim this guards is
+  # made by check-system.sh and selftest.sh; if neither still makes it,
+  # somebody reworded the success line and this stopped watching.
+  (( claimants >= 2 )) || {
+    printf 'only %s file(s) still claim the prompt matched — this stopped watching them\n' \
+      "${claimants}" >&2
+    return 1
+  }
 }
 prompt_comparable_needs_both_sides() {
   local out
@@ -4842,12 +4873,13 @@ echo "# PERFORMANCE.md may state one baseline for 7b, not three"
 # The measured table is the source of truth; every bold tokens/second figure
 # claimed for a model must be the one that table gives for it.
 perf_baseline_is_stated_once() {
-  local model measured claimed wrong=() perf_bt
+  local model measured claimed wrong=() perf_bt rows=0
   perf_bt="$(printf '\140')"
   local perf_flat
   perf_flat="$(tr '\n' ' ' < "${REPO}/docs/PERFORMANCE.md" | tr -s ' ')"
   while read -r model measured; do
     [[ -n "${model}" ]] || continue
+    rows=$(( rows + 1 ))
     # Matched against the file FLATTENED to one line. Prose wraps, so the bold
     # figure routinely straddles a line break — "measures **6.1\ntokens/second**"
     # — and a line-based scan sees only the ones that happen not to. Caught in
@@ -4864,6 +4896,8 @@ perf_baseline_is_stated_once() {
   done < <(sed -n '/^| Model | Measured |/,/^$/p' "${REPO}/docs/PERFORMANCE.md" \
              | grep -E "^[|] ${perf_bt}" \
              | sed -E "s/^[|] ${perf_bt}([^${perf_bt}]+)${perf_bt} [|] [*][*]([0-9.]+) tokens.*/\\1 \\2/")
+  (( rows > 0 )) || {
+    echo 'the measured-speeds table could not be read from PERFORMANCE.md' >&2; return 1; }
   (( ${#wrong[@]} == 0 )) || {
     printf 'PERFORMANCE.md quotes more than one speed for the same model:\n' >&2
     printf '  %s\n' "${wrong[@]}" >&2
@@ -4877,7 +4911,7 @@ check "PERFORMANCE.md quotes one measured speed per model" perf_baseline_is_stat
 # documents, one of them checked; this ties the second to the first rather
 # than leaving it to drift on its own.
 perf_vram_within_the_computed_maximum() {
-  local row gb biggest maxfit wrong=()
+  local row gb biggest maxfit wrong=() rows=0
   while IFS= read -r row; do
     [[ -n "${row}" ]] || continue
     gb="$(cut -d'|' -f2 <<<"${row}" | grep -oE '[0-9]+' | head -1)"
@@ -4886,10 +4920,14 @@ perf_vram_within_the_computed_maximum() {
     maxfit="$(bash -c 'source "$1" >/dev/null 2>&1; largest_model_for_vram "$2"' \
       _ "${REPO}/scripts/lib.sh" "$(( gb * 1024 ))" || true)"
     [[ -n "${maxfit}" ]] || continue
+    rows=$(( rows + 1 ))
     (( biggest <= maxfit )) \
       || wrong+=("${gb} GB: PERFORMANCE.md is comfortable with ${biggest}B, but only ${maxfit}B fits at all")
   done < <(sed -n '/^| VRAM | Fits comfortably/,/^$/p' "${REPO}/docs/PERFORMANCE.md" \
              | grep -E '^\| [0-9]')
+  (( rows >= 3 )) || {
+    printf 'only %s row(s) read from the comfortable-VRAM table — it changed shape\n' "${rows}" >&2
+    return 1; }
   (( ${#wrong[@]} == 0 )) || {
     printf 'PERFORMANCE.md recommends more than fits:\n' >&2
     printf '  %s\n' "${wrong[@]}" >&2
