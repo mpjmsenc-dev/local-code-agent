@@ -390,11 +390,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
+      - name: Pin the smallest model this project actually ships (3b)
+        # This pinned 0.5b, "because runners are small". It kept the job fast
+        # and it proved nothing about the one thing the product does: 0.5b
+        # answers with a bare fenced code block carrying no filename, so aider
+        # has nothing to apply and no file is ever written. The acceptance test
+        # only asked for a reply, so this stayed green anyway.
+        #
+        # Measured on a 4-vCPU 15 GiB box — the same class as this runner —
+        # asking for one file: 0.5b wrote it 0 times out of 10, 3b wrote it 10
+        # times out of 10 in about 25 seconds each. 3b is also the smallest
+        # rung scripts/tune.sh will ever auto-select, so this job now runs on
+        # the floor of what real deployments get, not below it.
         run: |
           cp .env.example .env
           sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
-          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:0.5b/' .env
+          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:3b/' .env
           sed -i 's/^ENABLE_WEBUI=.*/ENABLE_WEBUI=false/' .env
       - name: install_ollama.sh for real (installer, drop-in, service, API)
         run: sudo scripts/install_ollama.sh
@@ -451,11 +462,19 @@ jobs:
           pull_model "${MODEL_NAME}"
           model_responds "${MODEL_NAME}" 300
           echo "real generation OK from ${MODEL_NAME}"
-      - name: update-model.sh end-to-end (pull -> validate -> pin)
+      - name: update-model.sh end-to-end (pull -> validate -> pin, and back)
+        # Switching DOWN to the tiny model is the cheap way to exercise a real
+        # pull-validate-pin. Switching back is not tidying-up: update-model.sh
+        # rewrites .env, so every step after this one — aider, the acceptance
+        # test — runs on whatever this leaves behind, and on 0.5b the
+        # acceptance test cannot pass. The second switch costs nothing; 3b is
+        # already pulled.
         run: |
           ./update-model.sh qwen2.5-coder:0.5b
           grep -q '^MODEL_NAME=qwen2.5-coder:0.5b' .env
           grep -q '^AUTO_TUNE=false' .env
+          ./update-model.sh qwen2.5-coder:3b
+          grep -q '^MODEL_NAME=qwen2.5-coder:3b' .env
       - name: Idempotency — re-running the installer must be safe
         run: |
           sudo scripts/install_ollama.sh

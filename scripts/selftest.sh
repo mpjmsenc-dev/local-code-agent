@@ -59,6 +59,10 @@ p_fail() { err "$*"; FAIL=$((FAIL+1)); }
 # "disabled — nothing to apply" and its UNCHECKED count.
 p_skip() { warn "$*"; SKIP=$((SKIP+1)); }
 gpu_proc=""
+# The smallest model this project will ever put a user on by itself — see the
+# aider step below, and scripts/tune.sh's family table, which a gate keeps in
+# step with this number.
+EDIT_FLOOR_B=3
 
 step "local-code-agent self-test (live end-to-end round-trip)"
 info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · model ${MODEL_NAME} · ctx ${OLLAMA_CONTEXT_LENGTH}"
@@ -125,9 +129,16 @@ else
   # stopped applying, a model that answers but cannot produce a diff, a broken
   # --yes-always: every one of them kept this green.
   #
-  # Safe to demand on the smallest rung. Measured before adding it: three of
-  # three on qwen2.5-coder:0.5b — the model CI pins — and on 3b and 7b, which
-  # also wrote a second file and committed both.
+  # Measured on the smallest rung auto-tune will ever select, on a 4-vCPU
+  # 15 GiB box: qwen2.5-coder:3b wrote the file 10 times out of 10, taking
+  # about 25 seconds each.
+  #
+  # The first version of this comment claimed three-of-three on 0.5b as well.
+  # That was wrong, and CI caught it within the hour: 0.5b answers with a bare
+  # fenced code block carrying no filename, so aider has nothing to apply. Ten
+  # further runs on this box: zero files, ten times "The LLM did not conform to
+  # the edit format". The branch below exists because of it — that failure is
+  # the model, not the stack, and saying so is not the same as excusing it.
   info "Running aider on a scratch project: it must WRITE a file, not just reply (CPU inference is slow — allow a minute or two)..."
   out="${tmp}/aider-out.txt"
   want="${tmp}/hello.py"
@@ -145,7 +156,21 @@ else
     tail -n 15 "${out}" 2>/dev/null | sed 's/^/    /' >&2 || true
     trap - EXIT   # keep the log for debugging when it failed
   elif [[ ! -f "${want}" ]] || ! grep -qi hello "${want}" 2>/dev/null; then
-    p_fail "aider answered but wrote no file — and writing files is the only thing 'lca' does that 'lca ask' does not. Check LCA_EDIT_FORMAT in .env and the context window. Full log: ${out}"
+    # Still a FAIL when the model is simply too small: the stack as configured
+    # cannot do the thing it exists for, and that is exactly what this test is
+    # for. But the fix is a different one, so it gets a different sentence —
+    # "check your edit format" is useless advice to someone whose model was
+    # never going to emit a filename.
+    #
+    # EDIT_FLOOR_B is 3 because that is the smallest rung scripts/tune.sh will
+    # ever auto-select for qwen2.5-coder (3b/7b/14b). A gate in
+    # tests/test-lib.sh fails if that table moves without this moving with it.
+    params="$(model_params_b "${MODEL_NAME}" 2>/dev/null || echo 0)"
+    if [[ "${params}" =~ ^[0-9]+$ ]] && (( params > 0 && params < EDIT_FLOOR_B )); then
+      p_fail "aider answered but wrote no file, and '${MODEL_NAME}' is below the smallest model this project auto-selects (${EDIT_FLOOR_B}b). Measured: qwen2.5-coder:0.5b wrote the requested file 0 times out of 10 — it replies with a code block carrying no filename, so aider has nothing to apply. Fix: sudo ${REPO_ROOT}/bin/lca model qwen2.5-coder:3b. Full log: ${out}"
+    else
+      p_fail "aider answered but wrote no file — and writing files is the only thing 'lca' does that 'lca ask' does not. Check LCA_EDIT_FORMAT in .env and the context window. Full log: ${out}"
+    fi
     tail -n 15 "${out}" 2>/dev/null | sed 's/^/    /' >&2 || true
     trap - EXIT
   else

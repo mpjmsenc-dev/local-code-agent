@@ -1375,6 +1375,75 @@ selftest_demands_aider_write_a_file() {
 check "'lca test' fails when aider replies but writes nothing" \
   selftest_demands_aider_write_a_file
 
+echo "# ...and CI must run that test on a model that can actually write one"
+# qwen_rungs — the sizes scripts/tune.sh will auto-select for the default
+# family. One source of truth, read out of the table itself.
+qwen_rungs() {
+  grep -oE "qwen2\.5-coder\)[[:space:]]*printf '[0-9b. ]+" "${REPO}/scripts/tune.sh" \
+    | sed "s/.*printf '//"
+}
+# The E2E job pinned qwen2.5-coder:0.5b "because runners are small". Measured
+# on a 4-vCPU 15 GiB box, the same class as the runner: 0.5b wrote the file it
+# was asked for 0 times out of 10 — it answers with a bare fenced code block
+# carrying no filename, so aider has nothing to apply — while 3b wrote it 10
+# times out of 10. A CI job that proves the stack works, on a model that
+# cannot do the thing the stack is for, is a job that cannot fail for the
+# reason anybody cares about.
+#
+# .env is rewritten as the job runs (update-model.sh does exactly that), so
+# the model that matters is the one in effect at the acceptance test, not the
+# one the pin step set. This walks the file in order to find it.
+ci_runs_the_acceptance_test_on_a_shipped_model() {
+  local ci="${REPO}/.github/workflows/ci.yml" model rungs size
+  model="$(awk '
+    match($0, /MODEL_NAME=[A-Za-z0-9._-]+:[A-Za-z0-9._-]+/) {
+      m = substr($0, RSTART, RLENGTH); sub(/^MODEL_NAME=/, "", m); cur = m
+    }
+    match($0, /update-model\.sh[ ]+[A-Za-z0-9._-]+:[A-Za-z0-9._-]+/) {
+      m = substr($0, RSTART, RLENGTH); sub(/^update-model\.sh[ ]+/, "", m); cur = m
+    }
+    /^[[:space:]]*run:[[:space:]]*.*selftest\.sh/ { print cur; found = 1; exit }
+    END { exit !found }' "${ci}")"
+  [[ -n "${model}" ]] || {
+    echo "could not tell which model CI runs scripts/selftest.sh on — this gate stopped watching" >&2
+    return 1
+  }
+  rungs="$(qwen_rungs)"
+  [[ -n "${rungs}" ]] || {
+    echo "could not read the rung table out of scripts/tune.sh" >&2
+    return 1
+  }
+  size="${model##*:}"
+  grep -qwF "${size}" <<<"${rungs}" || {
+    printf 'CI runs the acceptance test on %s, which auto-tune never selects (rungs: %s)\n' \
+      "${model}" "${rungs}" >&2
+    return 1
+  }
+}
+check "CI runs the acceptance test on a model auto-tune would really pick" \
+  ci_runs_the_acceptance_test_on_a_shipped_model
+# selftest.sh explains a no-file result differently below that floor — "your
+# model is too small" instead of "check your edit format" — and the floor is a
+# literal in one file and a table in another. Two copies of a number is how one
+# of them ends up telling a user to switch to a model they already have.
+selftest_floor_matches_the_rung_table() {
+  local floor smallest
+  floor="$(grep -oE '^EDIT_FLOOR_B=[0-9]+' "${REPO}/scripts/selftest.sh" | head -1 | cut -d= -f2)"
+  smallest="$(qwen_rungs | awk '{ print $1 }')"
+  smallest="${smallest%b}"
+  [[ -n "${floor}" && -n "${smallest}" ]] || {
+    echo "could not read the floor from selftest.sh or the smallest rung from tune.sh" >&2
+    return 1
+  }
+  [[ "${floor}" == "${smallest}" ]] || {
+    printf "selftest.sh's floor is %sb but tune.sh's smallest rung is %sb\n" \
+      "${floor}" "${smallest}" >&2
+    return 1
+  }
+}
+check "the self-test's 'too small to write files' floor is the smallest rung" \
+  selftest_floor_matches_the_rung_table
+
 echo "# a restore replaces .env wholesale — the system must be reconciled with it"
 # Every other member of the applied-settings class was found by someone editing
 # one key. Restore changes ALL of them at once, and nothing in it re-rendered
