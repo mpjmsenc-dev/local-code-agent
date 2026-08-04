@@ -188,6 +188,30 @@ sudo lca apply     # re-creates the container; chats and accounts survive
 The container keeps a copy of the prompt from the moment it was created, so
 pulling a better one is not enough on its own — see the table below.
 
+**How to tell which of the three it is**, quickest first:
+
+1. `lca check` names `chat app config drift: SYSTEM_PROMPT` → the container is
+   older than the prompt. `sudo lca apply` and you are done.
+2. It happens in a **long** chat but not a brand-new one → the conversation
+   outgrew the context window and the instructions dropped off the front. Start
+   a new chat; see "Why does it forget earlier messages" in
+   [FAQ.md](FAQ.md).
+3. It happens in a brand-new chat on a current container → something is
+   advertising tools to the model. Check the model's **Function Calling**
+   setting and any enabled Tools in Open WebUI's workspace; a tool schema in
+   the request beats an instruction in the prompt.
+
+Measured on `qwen2.5-coder:3b` — the rung an 8 GB box runs, and the one the
+report came from — with the current prompt and no tools attached: eight
+samples of "build me an income and expense tracker", four in a fresh chat and
+four behind ~6,000 tokens of history. **Zero produced a tool call**, six of
+eight opened with the handover, two wrote a tutorial. So the prompt does its
+job when it reaches the model tool-free; a tool call means either it did not
+reach the model (1 and 2 above) or something else was in the request (3).
+
+`scripts/prompt-bench.sh` counts tool calls now, so a prompt change can be
+judged against this failure rather than only against the tutorial.
+
 ## I changed a setting in .env and nothing happened
 
 Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,
