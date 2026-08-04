@@ -87,6 +87,7 @@ parse_args() {
 # deployment; the rest are the cases that broke while fixing it.
 #   build    must hand over — the reported bug
 #   wishlist must hand over — the SECOND reported one, and harder
+#   terminal must hand over — a starter question the empty screen offers
 #   backup   must NOT hand over — it has a one-word answer, 'lca backup'
 #   explain  must NOT hand over — a language question is what the chat is FOR
 BENCH_BUILD="build me a whole functioning income and expense tracker app"
@@ -104,11 +105,23 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # Baseline, 3b rung, current prompt, n=6, through /api/chat (see ask() below):
 #   build     hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
 #   wishlist  hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
+#   terminal  hands over 9/10 says where 10/10               tool-call 0/10
 #   backup    handover-fired 0/6                            tool-call 0/6
 #   explain   handover-fired 0/6                            tool-call 0/6
-# Unchanged from the same measurement through /api/generate, which is what
-# made the endpoint switch safe to make without resetting the baseline.
+#
+# The four unchanged rows are the same figures the /api/generate era produced,
+# which is what made the endpoint switch safe without resetting the baseline.
+# 'terminal' is quoted at n=10 because it is the one that moved: 6/10 on the
+# wording shipped before this, 9/10 after a single clause was added. See
+# lca_system_prompt for the variant that made it 1/10.
 BENCH_WISHLIST="build me an income and expense tracker app with categories, a monthly summary, search and filter, CSV export, local storage, a responsive UI, unit tests and a README. After finishing, review the code and suggest improvements."
+# The fifth is not hypothetical either: it is verbatim the last entry in
+# config/prompt-suggestions.json, i.e. one of five things a phone user can tap
+# on the empty screen without typing anything. It asks, in as many words, for
+# "the exact command for the terminal case" — and measured 6 in 10 on the 3b
+# rung, with the misses handing out 'lca apply', a real command that does
+# something else entirely and needs sudo.
+BENCH_TERMINAL="What kinds of task can you help with in this chat, and which ones need the terminal agent instead? Answer briefly and give me the exact command for the terminal case."
 BENCH_BACKUP="how do I take a backup right now?"
 BENCH_EXPLAIN="explain the difference between a list and a tuple in python"
 
@@ -230,12 +243,13 @@ main() {
 
   local chars; chars="$(wc -c <<<"${SYSTEM}")"
   info "Prompt is ${chars} chars, roughly $(( chars / 4 )) tokens of the ${OLLAMA_CONTEXT_LENGTH} context — spent on every message."
-  info "This asks the model $(( SAMPLES * 4 )) times; on a CPU box that is minutes, not seconds."
+  info "This asks the model $(( SAMPLES * 5 )) times; on a CPU box that is minutes, not seconds."
   echo
 
-  ok "WANTED: 'build' hands over and says where; tutorial and tool-call stay 0"
+  ok "WANTED: these hand over and say where; tutorial and tool-call stay 0"
   bench build "${BENCH_BUILD}"
   bench wishlist "${BENCH_WISHLIST}"
+  bench terminal "${BENCH_TERMINAL}"
   echo
   ok "WANTED: these answer the question — 'handover-fired' and 'tool-call' must stay 0"
   bench backup  "${BENCH_BACKUP}"

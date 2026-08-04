@@ -350,8 +350,10 @@ scripts/prompt-bench.sh -n 6 -f candidate.txt   # a change, same -n
 scripts/prompt-bench.sh -n 6 -m qwen2.5-coder:3b   # pin the smallest rung
 ```
 
-One question must hand over (`build me an app`) and two must **not** (`how do I
-take a backup`, `explain list vs tuple` — the second is what the chat is *for*).
+Three questions must hand over (`build me an app`, the same with a feature
+list, and the starter question the chat's own empty screen offers) and two must
+**not** (`how do I take a backup`, `explain list vs tuple` — the second is what
+the chat is *for*).
 A change has to hold all three columns at once, which is the difficulty: the
 guard that fixed the backup hijack had to be checked against the build case,
 and the line that made answers say *where* had to be checked against both.
@@ -367,6 +369,21 @@ not fire on questions it should not — a handover rule strong enough to beat
 the tutorial reflex can easily hijack "what does this error mean?", and a chat
 that answers everything with `cd ~/my-project && lca` has been made useless in
 the course of making it honest.
+
+**Do not name the wrong answer, even to rule it out.** Measured on the 3b
+rung, n=10 each, against the starter question that asks for "the exact command
+for the terminal case":
+
+| Wording | Names the bare command |
+|---|---|
+| `the bare word 'lca' — not 'lca ask'` (shipped) | 6/10 |
+| adding `with nothing after it` | **9/10** |
+| `every 'lca <word>' is a server command… 'lca apply' changes settings` | **1/10** |
+
+The last row is the lesson: mentioning `lca apply` as a counter-example taught
+the model to answer `lca apply`. State what the command **is**; do not
+enumerate what it is not. The winning change was one clause, and the other
+four bench questions were re-run at n=6 to prove it cost nothing elsewhere.
 
 **A command you put in the prompt is a command you are shipping — run it.**
 Once the handover fired reliably, it was reliably handing out

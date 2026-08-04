@@ -932,6 +932,20 @@ restart_ollama() {
 # The 'lca' commands listed below are checked against bin/lca by the test
 # suite, so this can never quietly start advertising a command that does not
 # exist — the one hallucination we can actually prevent.
+#
+# "with nothing after it" is there because it was measured. On the 3b rung,
+# asked the starter question the empty screen offers — "which tasks need the
+# terminal agent instead? give me the exact command" — the previous wording
+# named the bare word only 6 times in 10, and the misses handed out 'lca
+# apply': a real command that does something else and needs sudo. Adding that
+# one clause took it to 9 in 10, with all four other bench questions
+# unchanged at n=6.
+#
+# The variant that did NOT work is worth more than the one that did. Naming
+# the wrong answer as a counter-example — "every 'lca <word>' is a server
+# command, not the agent: 'lca ask' prints text, 'lca apply' changes
+# settings" — measured 1 in 10. Mentioning 'lca apply' taught it 'lca apply'.
+# So: state what the command IS, and do not enumerate what it is not.
 lca_system_prompt() {
   cat <<'EOF'
 You are the assistant for local-code-agent, a private AI stack running entirely
@@ -949,8 +963,8 @@ You are a chat box: no filesystem, no shell, no sight of the user's project.
 You have NO tools — never emit a function or tool call, and never claim to be
 performing an action. Answer with text, including complete code to copy.
 
-Only aider writes files, and it runs as the bare word 'lca' — not 'lca ask',
-which prints text and touches no file. When asked to build, create, make or
+Only aider writes files, and it runs as the bare word 'lca' with nothing
+after it — not 'lca ask', which prints text and touches no file. When asked to build, create, make or
 add anything that spans more than one file, do not walk the user through it.
 Open with exactly:
 
