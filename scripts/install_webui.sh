@@ -27,18 +27,32 @@ main() {
   info "Pulling ${WEBUI_IMAGE} (uses the cached image if offline)..."
   as_root docker pull "${WEBUI_IMAGE}" || warn "Could not pull the image — will try the locally cached copy."
 
-  if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
-    info "Recreating existing container '${WEBUI_CONTAINER}' with current .env settings..."
-    as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
-  fi
-
   # With --network=host the container binds ${WEBUI_PORT} directly. If another
   # process already holds it, Open WebUI's backend can't bind and crash-loops
   # under --restart unless-stopped — but a squatter answering the port would
   # still make our health probe pass and print a false success. Refuse up
-  # front with a clear message. (Our own old container was removed just above.)
-  if have ss && ss -ltn 2>/dev/null | grep -qE ":${WEBUI_PORT}[[:space:]]"; then
-    die "Port ${WEBUI_PORT} is already in use by another process. Change WEBUI_PORT in .env and re-run ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+  # front with a clear message.
+  #
+  # Checked BEFORE the old container is removed. The removal used to come
+  # first, so our own listener could not trip the check — at the cost that a
+  # port held by anyone ELSE meant a working chat app was destroyed and then
+  # not replaced, by the one command whose job is to replace it. Whose listener
+  # it is can be decided without destroying anything: if our container is
+  # running it is the one holding the port, and if it is not running then any
+  # listener belongs to someone else.
+  local webui_running=false
+  if as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+     | grep -q true; then
+    webui_running=true
+  fi
+  if [[ "${webui_running}" != "true" ]] \
+     && have ss && ss -ltn 2>/dev/null | grep -qE ":${WEBUI_PORT}[[:space:]]"; then
+    die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+  fi
+
+  if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
+    info "Recreating existing container '${WEBUI_CONTAINER}' with current .env settings..."
+    as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
   fi
 
   # These two settings are read from the environment on every start. Open WebUI

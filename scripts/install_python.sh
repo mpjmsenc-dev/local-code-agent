@@ -32,11 +32,21 @@ main() {
   # venv_python(), not "${venv}/bin/python": the helper exists to be the one
   # place that knows the interpreter's path, and building it inline here is how
   # it silently stops being that.
-  if [[ -x "$(venv_python)" ]]; then
+  # The interpreter existing is not the same as a usable venv. An interrupted
+  # 'python -m venv', or an ensurepip that failed, leaves bin/python behind
+  # with no pip — which passed this check as "already exists", and then every
+  # single re-run died on the pip_install below and repaired nothing. The venv
+  # could never recover without someone deleting it by hand.
+  if [[ -x "$(venv_python)" ]] && "$(venv_python)" -m pip --version >/dev/null 2>&1; then
     info "Virtualenv already exists at ${venv} — reusing it."
   else
-    info "Creating virtualenv at ${venv}..."
-    "${PYTHON_BIN}" -m venv "${venv}" \
+    if [[ -x "$(venv_python)" ]]; then
+      info "Virtualenv at ${venv} has no working pip (an earlier run was interrupted) — rebuilding it."
+    else
+      info "Creating virtualenv at ${venv}..."
+    fi
+    # --clear so a half-built one is replaced rather than reused in place.
+    "${PYTHON_BIN}" -m venv --clear "${venv}" \
       || die "Could not create a virtualenv. On Debian/Ubuntu install it with: sudo apt-get install -y python3-venv"
   fi
 

@@ -1083,7 +1083,11 @@ echo "# the one mechanism that delivers a new prompt to an existing install"
 # installed. That is this repo's signature failure, on its most important path.
 installer_recreates_rather_than_skipping() {
   local blk
-  blk="$(awk '/if as_root docker container inspect/ { inb = 1 }
+  # Anchored to the RECREATE branch specifically. 'if as_root docker container
+  # inspect' alone also matches the ownership probe added above it (which asks
+  # -f '{{.State.Running}}' before deciding whether the port is ours), and the
+  # block then ended before it ever reached the 'docker rm -f' this checks for.
+  blk="$(awk '/if as_root docker container inspect "\$\{WEBUI_CONTAINER\}" >\/dev\/null/ { inb = 1 }
               inb { print }
               inb && /^  fi$/ { exit }' "${REPO}/scripts/install_webui.sh")"
   [[ -n "${blk}" ]] || {
@@ -3449,6 +3453,46 @@ check "a checkout reached through a symlinked parent is still ok" \
   test "$(lca_link_state "${LINKS}/ok" "${LINKS}/real-alias/bin/lca")" = ok
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
+
+echo "# two installers that destroyed something they could not put back"
+port_is_checked_before_the_container_is_destroyed() {
+  # The old order removed our container first so its own listener could not
+  # trip the port check — at the cost that a port held by anyone ELSE meant a
+  # working chat app was deleted and then not replaced, by the one command
+  # whose job is to replace it.
+  awk '/^[[:space:]]*#/ { next }
+       /ss -ltn/            { if (!removed) checked = NR }
+       /docker rm -f "\$\{WEBUI_CONTAINER\}"/ { removed = NR }
+       END { exit !(checked && removed && checked < removed) }' \
+    "${REPO}/scripts/install_webui.sh" || {
+    echo 'install_webui.sh destroys the container before it checks the port is free' >&2
+    return 1; }
+}
+venv_without_pip_is_rebuilt() {
+  # bin/python existing is not a usable venv: an interrupted 'python -m venv'
+  # leaves it with no pip, which passed as "already exists" and then failed on
+  # every re-run for ever.
+  local body
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/scripts/install_python.sh")"
+  grep -q 'm pip --version' <<<"${body}" || {
+    echo 'install_python.sh reuses a venv without checking pip works' >&2; return 1; }
+  grep -q 'venv --clear' <<<"${body}" || {
+    echo 'install_python.sh rebuilds a broken venv in place instead of clearing it' >&2; return 1; }
+}
+# ...and a venv really can exist without pip, which is the premise.
+venv_can_lack_pip() {
+  # Deliberately NOT named bin/python: the "nothing re-types the venv
+  # interpreter path" gate scans every script for that path, and a fixture
+  # spelling it out trips a rule this file is not breaking. The name is
+  # irrelevant to what is being shown.
+  local interp="${SANDBOX}/interp-without-pip"
+  printf '#!/bin/sh\nexit 1\n' > "${interp}"; chmod +x "${interp}"
+  [[ -x "${interp}" ]] && ! "${interp}" -m pip --version >/dev/null 2>&1
+}
+check "the chat app port is checked before the container is removed" \
+  port_is_checked_before_the_container_is_destroyed
+check "a venv with no working pip is rebuilt, not reused"  venv_without_pip_is_rebuilt
+check "an interpreter can exist with no usable pip"        venv_can_lack_pip
 
 echo "# three claims the code one function away already contradicted"
 guard_message_names_only_guarded_ports() {
