@@ -183,6 +183,12 @@ RAM_GIB="$(detect_ram_gib)"
 CHECK_DIR="${SCRIPT_DIR}"
 # shellcheck source=scripts/tune.sh
 source "${SCRIPT_DIR}/scripts/tune.sh"
+# tune.sh runs 'set -euo pipefail' at its top level, and sourcing executes
+# that in OUR shell — silently undoing the 'set +e' at the top of this file,
+# whose whole purpose is that one failing probe must not abort the rest of the
+# health check. Everything below happens to survive because its failures are
+# inside tested conditions, which is luck, not design.
+set +e
 SCRIPT_DIR="${CHECK_DIR}"
 unset CHECK_DIR
 # choose_for_ram, not a re-implementation of it. Sourcing tune.sh shared the
@@ -309,7 +315,18 @@ else
     if [[ -n "${webui_drifted}" ]]; then
       p_warn "chat app config drift: ${webui_drifted//$'\n'/, } — edited in .env or the repo but NOT in effect, because the running container still holds what it was created with. Fix: sudo lca apply"
     else
-      p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
+      # Only claim the prompt was checked when it could be. webui_drift skips
+      # both prompt comparisons without jq, or when either side is unreadable —
+      # and this line named "system prompt" regardless, which is the
+      # cannot-tell-reported-as-fine mistake the rest of this file works hardest
+      # to avoid. selftest.sh already says "skipped, not passed" for the same
+      # check; so does this now.
+      if webui_prompt_comparable; then
+        p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
+      else
+        p_pass "chat app matches .env (port, model, signups, Ollama address, name)"
+        info "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable) — those were skipped, not passed"
+      fi
     fi
   fi
 fi

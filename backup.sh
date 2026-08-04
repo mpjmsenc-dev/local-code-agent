@@ -133,6 +133,11 @@ do_backup() {
     if ollama list > "${workdir}/models.txt" 2>/dev/null; then
       ok "Model list captured: $(tail -n +2 "${workdir}/models.txt" | { grep -c . || true; }) model(s)."
     else
+      # '>' created the file before ollama failed, so a zero-byte models.txt
+      # would ship in the archive — and restore.sh reads a models.txt that
+      # exists as an authoritative "no models", re-pulling nothing on a machine
+      # that had a dozen. An absent file is the honest record of not knowing.
+      rm -f "${workdir}/models.txt"
       warn "Could not list models (is Ollama running?) — skipping the model list."
     fi
   else

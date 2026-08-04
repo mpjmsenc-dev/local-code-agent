@@ -86,10 +86,15 @@ main() {
       ok "Backup complete — restore with ${SCRIPT_DIR}/restore.sh if this update goes wrong."
     else
       warn "Backup FAILED. Continuing would leave you without a restore point."
-      if [[ "${assume_yes}" != "true" ]]; then
+      # '-t 0' as well as --yes: confirm() auto-answers YES when stdin is not a
+      # terminal, which is right for an install prompt and exactly wrong here.
+      # A cron'd or piped update without --yes therefore sailed past a FAILED
+      # backup and updated with no restore point — the precise case the --yes
+      # branch refuses. Unattended is unattended, however it got that way.
+      if [[ "${assume_yes}" != "true" && -t 0 ]]; then
         confirm "Continue updating anyway?" || die "Update cancelled — nothing was changed."
       else
-        die "Backup failed and --yes was given; refusing to update unattended without a restore point. Fix the backup, or re-run with --no-backup if you accept the risk."
+        die "Backup failed and this is not an interactive session; refusing to update unattended without a restore point. Fix the backup, or re-run with --no-backup if you accept the risk."
       fi
     fi
   else

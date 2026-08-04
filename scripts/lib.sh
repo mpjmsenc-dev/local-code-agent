@@ -988,6 +988,17 @@ webui_drift() {
   printf '%s\n' "${drifted[@]}"
 }
 
+# webui_prompt_comparable — true when webui_drift could actually compare the
+# assistant prompt and starter questions. It skips both without jq, and when
+# either side cannot be read; a caller that reports "matches" without knowing
+# this is claiming a check it never made.
+webui_prompt_comparable() {
+  have jq || return 1
+  [[ -n "$(lca_system_prompt 2>/dev/null || true)" ]] || return 1
+  [[ -n "$(webui_container_env DEFAULT_MODEL_PARAMS 2>/dev/null || true)" ]] || return 1
+  return 0
+}
+
 # --- the inbound guard's idea of .env vs .env's ------------------------------
 #
 # The guard bakes the ports in when it is applied, so it is drift in exactly

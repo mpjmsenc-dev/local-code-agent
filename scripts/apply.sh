@@ -119,7 +119,14 @@ apply_webui() {
   local pretty="${drifted//$'\n'/, }"
   would "re-create the chat app container to apply: ${pretty}." && return 0
   info "Chat app: re-creating the container to apply ${pretty} (chats and accounts live in a docker volume and survive)..."
-  "${SCRIPT_DIR}/install_webui.sh"
+  # Not bare under 'set -e'. A failed re-create aborted 'lca apply' right here:
+  # the inbound guard was never reconciled, no summary was printed, and the
+  # exit status said "apply failed" without saying what still needed applying.
+  if ! "${SCRIPT_DIR}/install_webui.sh"; then
+    warn "Chat app: could not be re-created, so ${pretty} is still not in effect — see the error above. Continuing with the rest."
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
   ok "Chat app: applied."
   CHANGED=$((CHANGED+1))
 }

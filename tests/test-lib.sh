@@ -3450,6 +3450,79 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# five failure paths that reported the wrong thing, or nothing"
+# Each of these was verified by running the mechanism, not by reading it.
+errexit_survives_sourcing_tune() {
+  # check-system.sh runs 'set +e' so one failing probe cannot abort the rest —
+  # then sources tune.sh, whose top-level 'set -euo pipefail' executes in the
+  # SAME shell and turns it straight back on. Everything after it survived only
+  # because those failures happen inside tested conditions, which is luck.
+  awk '/^[[:space:]]*#/ { next }
+       /source "\$\{SCRIPT_DIR\}\/scripts\/tune.sh"/ { src = NR }
+       src && /^set \+e$/ && NR > src { found = 1 }
+       END { exit !found }' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh does not restore set +e after sourcing tune.sh' >&2; return 1; }
+}
+prompt_check_is_not_claimed_when_skipped() {
+  # webui_drift skips both prompt comparisons without jq, or when either side
+  # is unreadable; the pass line named "system prompt" regardless.
+  grep -q 'webui_prompt_comparable' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh claims the prompt matched without checking it could compare it' >&2
+    return 1; }
+  grep -q 'skipped, not passed' "${REPO}/check-system.sh"
+}
+prompt_comparable_needs_both_sides() {
+  local out
+  out="$(bash -c 'source "$1" >/dev/null 2>&1
+                  have() { [[ "$1" != jq ]]; }           # no jq
+                  webui_prompt_comparable && echo yes || echo no' _ "${REPO}/scripts/lib.sh")"
+  [[ "${out}" == no ]] || { echo "webui_prompt_comparable said yes without jq" >&2; return 1; }
+  out="$(bash -c 'source "$1" >/dev/null 2>&1
+                  have() { return 0; }
+                  webui_container_env() { return 1; }    # container unreadable
+                  webui_prompt_comparable && echo yes || echo no' _ "${REPO}/scripts/lib.sh")"
+  [[ "${out}" == no ]] || { echo "webui_prompt_comparable said yes with the container unreadable" >&2; return 1; }
+}
+apply_survives_a_failed_rebuild() {
+  # A bare install_webui.sh under errexit aborted 'lca apply' before the guard
+  # was reconciled and before any summary was printed.
+  awk '/^apply_webui\(\) \{/ { inb = 1 }
+       inb && /^\}/ { exit }
+       inb && /^[[:space:]]*#/ { next }
+       # Anchored to a bare INVOCATION line. Matching "install_webui.sh\"$"
+       # anywhere also matched the info() a few lines up that merely names the
+       # script — the message about the thing, counted as the thing.
+       inb && /^[[:space:]]*"\$\{SCRIPT_DIR\}\/install_webui\.sh"$/ { bare = 1 }
+       inb && /if ! "\$\{SCRIPT_DIR\}\/install_webui\.sh"/ { guarded = 1 }
+       END { exit !(guarded && !bare) }' "${REPO}/scripts/apply.sh" || {
+    echo 'apply.sh runs install_webui.sh unguarded, so a failed rebuild aborts the apply' >&2
+    return 1; }
+}
+update_refuses_unattended_after_a_failed_backup() {
+  # confirm() auto-answers YES off a terminal, so a cron'd update without --yes
+  # sailed past a FAILED backup — the case the --yes branch refuses outright.
+  grep -q 'assume_yes}" != "true" && -t 0' "${REPO}/update.sh" || {
+    echo 'update.sh still asks confirm() after a failed backup when nobody can answer' >&2
+    return 1; }
+}
+backup_stages_no_empty_model_list() {
+  # '>' creates models.txt before ollama fails, and restore.sh reads a file
+  # that exists as an authoritative "no models".
+  awk '/ollama list > "\$\{workdir\}\/models.txt"/ { inb = 1 }
+       inb && /rm -f "\$\{workdir\}\/models.txt"/ { found = 1 }
+       inb && /^  fi$/ { exit }
+       END { exit !found }' "${REPO}/backup.sh" || {
+    echo 'backup.sh ships a zero-byte models.txt when ollama list fails' >&2; return 1; }
+}
+check "check-system restores set +e after sourcing tune.sh" errexit_survives_sourcing_tune
+check "the prompt check is reported as skipped, not passed"  prompt_check_is_not_claimed_when_skipped
+check "webui_prompt_comparable needs jq AND a readable container" \
+  prompt_comparable_needs_both_sides
+check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_failed_rebuild
+check "an unattended update refuses to continue past a failed backup" \
+  update_refuses_unattended_after_a_failed_backup
+check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list
+
 echo "# 'already tuned' has to mean the model is on disk, not named in .env"
 # tune.sh has two exits that write .env before anything is pulled — Ollama not
 # installed yet, and its API unreachable on a host with no systemd — and both
