@@ -114,18 +114,42 @@ else
     git config user.email selftest@local            # repo-local only, never global
     git config user.name  "local-code-agent selftest"
   )
-  info "Running aider on a scratch project (CPU inference is slow — allow a minute or two)..."
+  # It must WRITE A FILE, not merely reply.
+  #
+  # This asked for "the single word: ready" and passed on any non-empty output.
+  # That proves the pipe — aider to litellm to Ollama — and nothing else, while
+  # the line printed at the end of this script says the stack "works
+  # end-to-end". Writing files is the ONLY thing that distinguishes 'lca' from
+  # 'lca ask'; it is what the chat's handover sends people to, and it was the
+  # one capability the acceptance test never exercised. An edit format that
+  # stopped applying, a model that answers but cannot produce a diff, a broken
+  # --yes-always: every one of them kept this green.
+  #
+  # Safe to demand on the smallest rung. Measured before adding it: three of
+  # three on qwen2.5-coder:0.5b — the model CI pins — and on 3b and 7b, which
+  # also wrote a second file and committed both.
+  info "Running aider on a scratch project: it must WRITE a file, not just reply (CPU inference is slow — allow a minute or two)..."
   out="${tmp}/aider-out.txt"
-  # timeout guards against a wedged model; aider itself exits after --message.
-  runner=(); have timeout && runner=(timeout 300)
-  if ( cd "${tmp}" && "${runner[@]}" "${REPO_ROOT}/run-agent.sh" \
-         --message "Reply with the single word: ready" \
-         --yes-always --no-stream ) >"${out}" 2>&1 && [[ -s "${out}" ]]; then
-    p_pass "aider connected through litellm and got a response from Ollama"
-  else
-    p_fail "aider round-trip failed — last lines below; full log: ${out}"
+  want="${tmp}/hello.py"
+  # 420s, not the 300 a one-word reply needed: producing and applying an edit is
+  # a bigger generation, and a false failure here is expensive.
+  runner=(); have timeout && runner=(timeout 420)
+  ( cd "${tmp}" && "${runner[@]}" "${REPO_ROOT}/run-agent.sh" \
+       --message 'Create a file called hello.py containing exactly: print("hello")' \
+       --yes-always --no-stream ) >"${out}" 2>&1 || true
+  # Three outcomes, not two: "no answer" and "answered but wrote nothing" are
+  # different faults with different fixes, and collapsing them sent the reader
+  # to the wrong half of the stack.
+  if [[ ! -s "${out}" ]]; then
+    p_fail "aider produced no output at all — the path to Ollama is broken, not the model. Full log: ${out}"
     tail -n 15 "${out}" 2>/dev/null | sed 's/^/    /' >&2 || true
     trap - EXIT   # keep the log for debugging when it failed
+  elif [[ ! -f "${want}" ]] || ! grep -qi hello "${want}" 2>/dev/null; then
+    p_fail "aider answered but wrote no file — and writing files is the only thing 'lca' does that 'lca ask' does not. Check LCA_EDIT_FORMAT in .env and the context window. Full log: ${out}"
+    tail -n 15 "${out}" 2>/dev/null | sed 's/^/    /' >&2 || true
+    trap - EXIT
+  else
+    p_pass "aider wrote a real file through litellm and Ollama"
   fi
 fi
 

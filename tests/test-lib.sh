@@ -1334,6 +1334,47 @@ selftest_checks_the_live_prompt() {
 check "'lca test' checks the chat app's assistant prompt is current" \
   selftest_checks_the_live_prompt
 
+echo "# 'lca test' must prove aider WRITES, not merely that it replies"
+# The acceptance test's 3rd check asked for "the single word: ready" and passed
+# on any non-empty output. That proves the pipe — aider to litellm to Ollama —
+# and nothing else, while the last line of the script says the stack works
+# end-to-end. Writing files is the ONLY thing 'lca' does that 'lca ask' does
+# not, and it is what the chat's handover sends people to. A dead edit format,
+# a model that answers but cannot produce a diff, a broken --yes-always: every
+# one of them kept the old assertion green.
+selftest_demands_aider_write_a_file() {
+  local body want
+  # Scoped to the aider step, and comment-stripped: a whole-file grep would be
+  # satisfied by the paragraph above the fix that quotes the broken version.
+  body="$(awk '/step "3\/4/ { s = 1 } /step "4\/4/ { s = 0 } s' \
+            "${REPO}/scripts/selftest.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find selftest.sh's aider step — this gate stopped watching" >&2
+    return 1
+  }
+  # The pass must come after a look at the filesystem, never before one.
+  awk '/-f .*want/ { checked = 1 }
+       /p_pass/    { if (!checked) exit 1 }
+       END         { exit !checked }' <<<"${body}" || {
+    echo "selftest.sh's aider check can pass without a file being written" >&2
+    return 1
+  }
+  # ...and the file it waits for must be the file it asked for. Changing one
+  # side alone gives an acceptance test that can never pass, or one that passes
+  # on a file the run never mentioned.
+  want="$(grep -o 'want="[^"]*"' <<<"${body}" | head -n1 | sed 's|.*/||; s|"$||')"
+  [[ -n "${want}" ]] || {
+    echo "could not find the file selftest.sh expects aider to write" >&2
+    return 1
+  }
+  grep -q -- "--message.*${want}" <<<"${body}" || {
+    echo "selftest.sh waits for '${want}' but never asks aider to create it" >&2
+    return 1
+  }
+}
+check "'lca test' fails when aider replies but writes nothing" \
+  selftest_demands_aider_write_a_file
+
 echo "# a restore replaces .env wholesale — the system must be reconciled with it"
 # Every other member of the applied-settings class was found by someone editing
 # one key. Restore changes ALL of them at once, and nothing in it re-rendered
