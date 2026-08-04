@@ -1974,12 +1974,62 @@ resync_rule_is_shared() {
   calls="$(grep -c 'resync_dropin_if_drifted' "${REPO}/scripts/tune.sh" || true)"
   [[ "${defs}" == "1" ]] || { printf 'convergence rule defined %s times in lib.sh\n' "${defs}" >&2; return 1; }
   (( calls >= 2 )) || { printf 'convergence rule called from only %s place(s)\n' "${calls}" >&2; return 1; }
-  # Nowhere may re-implement it: a second copy is how the pinned path was
-  # forgotten, and how 'lca apply' would drift from what tune.sh does on boot.
-  ! grep -q 'render_ollama_dropin' "${REPO}/scripts/apply.sh" && return 1
-  grep -q 'resync_dropin_if_drifted\|render_ollama_dropin' "${REPO}/scripts/apply.sh"
 }
 check "the drift rule is defined once and used by both paths" resync_rule_is_shared
+
+# Nowhere may re-implement the drift DECISION. A second copy is how the pinned
+# path was forgotten, and how 'lca apply' would drift from what tune.sh does on
+# boot. "Has it drifted?" is one question with one answer — ollama_dropin_matches,
+# which diffs the installed file against render_ollama_dropin_content — and both
+# halves live in lib.sh. Everyone else asks; nobody reads the file themselves.
+#
+# This replaces two lines that could not enforce it. The first required apply.sh
+# to CONTAIN render_ollama_dropin, which is the opposite of "may not
+# re-implement"; the second was then reachable only when that was already true,
+# so it could never fail. A whole-file grep for a name the file was required to
+# have is not a test of anything.
+drift_decision_is_shared() {
+  local f stripped
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ "${f}" == "${REPO}/scripts/lib.sh" ]] && continue
+    # Comments stripped first: three scanners in this file have been satisfied
+    # by their own explanatory prose, and this one names every symbol it bans.
+    stripped="$(sed 's/#.*//' "${f}")"
+    if grep -q 'render_ollama_dropin_content' <<<"${stripped}"; then
+      printf '%s renders the expected drop-in itself\n' "${f##*/}" >&2
+      return 1
+    fi
+    # Naming the path is fine — check-system.sh tells the user where the file
+    # is. Reading its CONTENTS is the drift decision, hand-rolled.
+    if grep -qE '\b(grep|sed|awk|diff|cmp|cat|head|tail)\b.*OLLAMA_DROPIN' <<<"${stripped}"; then
+      printf '%s reads the drop-in itself instead of asking ollama_dropin_matches\n' "${f##*/}" >&2
+      return 1
+    fi
+  done
+  # Both halves defined exactly once, and only in lib.sh.
+  local n
+  for f in ollama_dropin_matches render_ollama_dropin_content; do
+    n="$(grep -c "^${f}() {" "${REPO}/scripts/lib.sh" || true)"
+    [[ "${n}" == "1" ]] || { printf '%s defined %s times in lib.sh\n' "${f}" "${n}" >&2; return 1; }
+  done
+  return 0
+}
+check "nothing outside lib.sh re-implements the drop-in drift decision" \
+  drift_decision_is_shared
+
+# 'lca apply' must ASK before it writes. Rendering the drop-in unconditionally
+# restarts Ollama — unloading the model, so the next question pays the load
+# again — on every run of a command whose whole promise is "applies whatever has
+# fallen behind and nothing that has not".
+apply_asks_before_rendering() {
+  awk '/^apply_ollama\(\) \{/ { inb = 1 }
+       inb && /ollama_dropin_matches/ { asked = NR }
+       inb && /^  render_ollama_dropin$/ { wrote = NR }
+       inb && /^\}/ { exit }
+       END { exit !(asked > 0 && wrote > asked) }' "${REPO}/scripts/apply.sh"
+}
+check "apply.sh checks for drift before re-rendering the drop-in" \
+  apply_asks_before_rendering
 
 echo "# 'lca apply' — one command for every setting that needs applying"
 # Three separate silent failures came from .env settings that are baked into
