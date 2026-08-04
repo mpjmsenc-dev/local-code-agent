@@ -63,7 +63,9 @@ Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
 
 `scripts/tune.sh` runs during setup **and on every boot**. It detects the VM's
 RAM and picks the best model + context length, pulls and validates the new model,
-reconfigures Ollama, and keeps the old model on disk as a rollback. Resize your
+reconfigures Ollama, brings the chat app onto the new model too (its model is
+fixed when the container is created, so that means re-creating it), and keeps
+the old model on disk as a rollback. Resize your
 droplet (or change your hypervisor VM's specs) and reboot — that's the whole
 upgrade procedure. More vCPUs need no configuration at all: Ollama automatically
 uses every core.

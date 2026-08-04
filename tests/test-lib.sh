@@ -4584,6 +4584,57 @@ tune_checks_the_model_is_downloaded() {
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
 
+echo "# the README's RAM ladder must be the one choose_for_ram walks"
+# The MODEL_FAMILY table below is gated; the table above it — the headline
+# feature's own "resize and it adapts" ladder, naming a model and a context
+# length per RAM band — was not. It is the first table a reader meets and the
+# claim the whole feature rests on.
+#
+# Both EDGES of every band are probed, not a midpoint. A ladder's classic
+# failure is an off-by-one at a boundary, and "16-23 -> 14b" is satisfied by
+# code that starts the 14b rung at 17.
+readme_ram_ladder_matches_the_code() {
+  local row band model ctx n probes wrong=() bt tbl
+  # Backticks around the model names: a matched pair inside single quotes reads
+  # to ShellCheck as a command substitution (SC2016), as the family gate below
+  # already records.
+  bt="$(printf '\140')"
+  tbl="$(sed -n '/^| RAM (GiB, detected)/,/^$/p' "${REPO}/README.md" | grep -E '^\| [^-]')"
+  # Header row out; what is left must be the four bands.
+  tbl="$(grep -v 'RAM (GiB' <<<"${tbl}")"
+  (( $(grep -c . <<<"${tbl}") >= 4 )) || {
+    echo 'the RAM ladder table could not be found in README.md' >&2; return 1; }
+  while IFS= read -r row; do
+    [[ -n "${row}" ]] || continue
+    band="$(cut -d'|' -f2 <<<"${row}")"
+    model="$(cut -d'|' -f3 <<<"${row}" | tr -d " ${bt}")"
+    ctx="$(cut -d'|' -f4 <<<"${row}" | tr -d ' ')"
+    [[ -n "${model}" && -n "${ctx}" ]] || continue
+    # "< N" means the band ends below N, so N-1 is its top edge; every other
+    # band is probed at each number it names.
+    if [[ "${band}" == *"<"* ]]; then
+      probes="$(( $(grep -oE '[0-9]+' <<<"${band}" | head -1) - 1 ))"
+    else
+      probes="$(grep -oE '[0-9]+' <<<"${band}" | paste -sd' ' -)"
+    fi
+    for n in ${probes}; do
+      read -r got_model got_ctx < <(bash -c '
+        source "$1" >/dev/null 2>&1; source "$2" >/dev/null 2>&1
+        choose_for_ram "$3"; printf "%s %s\n" "${TUNE_MODEL}" "${TUNE_CTX}"' \
+        _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "${n}")
+      [[ "${got_model}" == "${model}" && "${got_ctx}" == "${ctx}" ]] \
+        || wrong+=("${n} GiB: README says ${model}/${ctx}, choose_for_ram gives ${got_model}/${got_ctx}")
+    done
+  done <<<"${tbl}"
+  (( ${#wrong[@]} == 0 )) || {
+    printf "the README's RAM ladder does not match the code:\\n" >&2
+    printf '  %s\n' "${wrong[@]}" >&2
+    return 1
+  }
+}
+check "the README's RAM ladder matches choose_for_ram" \
+  readme_ram_ladder_matches_the_code
+
 echo "# the README's family table must be the ladder the code actually walks"
 # MODEL_FAMILY is the one .env key whose entire purpose is "one line changes
 # the model everywhere", so its table is the interface. It promised
