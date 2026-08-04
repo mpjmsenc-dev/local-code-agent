@@ -1616,6 +1616,43 @@ makefile_header_matches_targets() {
 check "the Makefile documents exactly the targets it has" \
   makefile_header_matches_targets
 
+echo "# every path a message tells you to run must actually be there"
+# The README gate below checks that every script is documented. Nothing checked
+# the other direction: that a script named in a message still exists. These
+# messages are the recovery instructions — "Run ${REPO_ROOT}/scripts/install_*",
+# "re-run ${SCRIPT_DIR}/backup.sh" — and they are handed to someone whose stack
+# is already broken. A renamed or moved script leaves them pointing at nothing,
+# and the person following them has no way to tell that from their own mistake.
+#
+# ${SCRIPT_DIR} resolves per file: the repo root for a top-level script, and
+# scripts/ for the rest. ${REPO_ROOT} is always the root.
+every_advised_path_exists() {
+  local f base path prefix resolved missing=()
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}/bin/lca"; do
+    base="$(dirname "${f}")"
+    while read -r path; do
+      [[ -n "${path}" ]] || continue
+      # Matched on the NAME alone. Writing the pattern as '${REPO_ROOT}/*'
+      # trips SC2016 quoted and SC1083 unquoted; the variable's name carries
+      # all the information either form did.
+      # SCRIPT_DIR first, because REPO_ROOT and bin/lca's REPO both mean the
+      # checkout root and would otherwise need two near-identical arms.
+      prefix="${path%%/*}"
+      if   [[ "${prefix}" == *SCRIPT_DIR* ]]; then resolved="${base}/${path#*/}"
+      elif [[ "${prefix}" == *REPO*       ]]; then resolved="${REPO}/${path#*/}"
+      else continue
+      fi
+      [[ -e "${resolved}" ]] || missing+=("${f##*/}: ${path}")
+    done < <(grep -ohE '\$\{(SCRIPT_DIR|REPO_ROOT|REPO)\}/[A-Za-z0-9_/.-]+(\.sh|/lca)' "${f}" | sort -u)
+  done
+  (( ${#missing[@]} == 0 )) || {
+    printf 'these messages send the reader to something that is not there:\n' >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    return 1
+  }
+}
+check "every script path a message names really exists" every_advised_path_exists
+
 echo "# the README's file tree must list every script that exists"
 # It had drifted by five: apply.sh, ask.sh, logs.sh, speed.sh and motd.sh were
 # all shipped, all user-facing, and none of them appeared in the tree a reader
