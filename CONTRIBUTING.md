@@ -93,9 +93,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Four shell traps that turn a gate into decoration
+## Six shell traps that turn a gate into decoration
 
-All four were shipped here at least once. They matter more in an assertion
+All six were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -157,6 +157,35 @@ condition before pushing:
 ```bash
 mv .env /tmp/ && make lint; mv /tmp/.env .
 ```
+
+**5. A whole-file scan that finds its own explanatory comment.** The most
+repeated mistake in this repository, by a distance. You
+write a check that greps for `webui_prompt_comparable`, and directly above it
+you write a comment explaining that the fix was to call
+`webui_prompt_comparable`. The grep finds the comment. The gate now passes on
+code that has none of the thing it is checking for, and it will pass forever.
+
+It is invisible in review because both halves are correct on their own, and it
+survives mutation testing unless the mutation happens to remove the comment
+too. Strip comments before scanning:
+
+```bash
+code="$(sed 's/#.*//' "${file}")"
+grep -q 'the_helper' <<<"${code}"
+```
+
+Where a scan must run over the whole file, spell the needle so it cannot match
+itself — `'/bin/pyth[o]n'`, `'[$]{...}'` — and say in a comment that that is
+why it is written oddly, or the next person will "fix" it.
+
+**6. A multi-byte character in a regex, under a locale you did not choose.**
+`grep`'s `.` matches a *byte* under the POSIX/C locale, and these docs are full
+of en and em dashes at three bytes each. `[0-9]{4,5}.[0-9]{4,5}` matched
+`4096–16384` in an interactive shell and matched nothing inside the suite,
+where `LC_CTYPE=POSIX`. Use a range wide enough for the encoding — `.{1,3}` —
+or match on the digits alone and never on what sits between them. A bracket
+expression containing a multi-byte character is worse still: `[–-]` is three
+bytes inside `[]`, not one character.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.

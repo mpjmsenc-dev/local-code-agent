@@ -4703,6 +4703,46 @@ tune_checks_the_model_is_downloaded() {
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
 
+echo "# a heading that counts its own list has to count it correctly"
+# CONTRIBUTING.md's "Six shell traps that turn a gate into decoration" states a
+# number in words and then lists that many bold-numbered items. Adding a trap
+# means editing both, and the heading is the half a writer forgets — leaving a
+# section that says four while listing six, in the file whose entire subject is
+# checks that quietly stop matching reality.
+#
+# Derived, not listed: any heading that opens with a number word is found and
+# its items counted.
+counted_headings_match_their_lists() {
+  local out wrong
+  out="$(awk '
+    function num(w) {
+      split("one two three four five six seven eight nine ten", a, " ")
+      for (i in a) if (tolower(w) == a[i]) return i
+      return 0
+    }
+    /^## / {
+      if (heading != "" && stated != items) printf "%s: says %s, lists %s\n", heading, stated, items
+      heading = ""; stated = 0; items = 0
+      split($0, f, " ")
+      n = num(f[2])
+      if (n > 0) { heading = $0; stated = n }
+      next
+    }
+    heading != "" && /^\*\*[0-9]+\./ { items++ }
+    END { if (heading != "" && stated != items) printf "%s: says %s, lists %s\n", heading, stated, items }
+  ' "${REPO}/CONTRIBUTING.md")"
+  # The scan has to have found at least one such heading, or it proves nothing.
+  grep -qE '^## (One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten) ' "${REPO}/CONTRIBUTING.md" || {
+    echo 'CONTRIBUTING.md no longer has a heading that counts its own list' >&2; return 1; }
+  wrong="${out}"
+  [[ -z "${wrong}" ]] || {
+    printf 'a heading miscounts its own list:\n%s\n' "${wrong}" >&2
+    return 1
+  }
+}
+check "CONTRIBUTING's counted headings match their lists" \
+  counted_headings_match_their_lists
+
 echo "# every doc that repeats the RAM ladder must repeat it correctly"
 # There are FOUR copies of the auto-tune ladder in prose: README's table (gated
 # below), INSTALL.md's sizing table, TROUBLESHOOTING.md's inline list, and
