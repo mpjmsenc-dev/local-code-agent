@@ -309,22 +309,50 @@ load_env_readonly() {
 # write made today is byte-for-byte what it was before and the boot path cannot
 # change behaviour.
 set_env_var() {
-  local key="$1" value="$2" written="$2"
-  # A '"', '$' or newline would break or expand inside the quoting below, so a
-  # value that would not survive the round-trip is refused rather than written
-  # as something that reads back differently.
-  if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *$'\n'* ]]; then
-    err "Refusing to write ${key} to .env: the value contains a quote, '\$' or newline."
+  local key="$1" value="$2" written="$2" bt bs
+  # Built with printf rather than written inline: a literal backtick or
+  # backslash inside a quoted pattern is either unreadable or SC1003.
+  bt="$(printf '\140')"          # `
+  bs="$(printf '\134')"          # \
+  # Characters that cannot survive the round trip through the double quotes
+  # below, or that would RUN inside them: a quote ends the string, '$' and a
+  # backtick both expand, a backslash is eaten by 'source' ("a\\b" reads back
+  # as a\b), and a newline is a second line. Refused rather than written as
+  # something that reads back differently — or executes.
+  #
+  # The backtick and the backslash were not on this list. Nothing writes either
+  # today, so this was never live; but the whole point of the list is that the
+  # next caller does not have to know, and .env is a file load_env SOURCES.
+  if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *"${bt}"* \
+     || "${value}" == *"${bs}"* || "${value}" == *$'\n'* ]]; then
+    err "Refusing to write ${key} to .env: the value contains a quote, backtick, backslash, '\$' or newline."
     return 1
   fi
-  if [[ "${value}" =~ [[:space:]] ]]; then
+  # Quoted unless EVERY character is one 'source' reads back literally.
+  #
+  # The trigger was whitespace alone, and that is not the same question. An
+  # unquoted A&B is two commands to the shell, not a value; so are A;B and A|B.
+  # Every value written today — model tags, true/false, numbers, host:port — is
+  # made only of the characters below, so each is still written unquoted, byte
+  # for byte as before.
+  if [[ "${value}" =~ [^A-Za-z0-9_.:/,@%+-] ]]; then
     written="\"${value}\""
   fi
   if [[ ! -f "${ENV_FILE}" ]]; then
     touch "${ENV_FILE}"
   fi
   if grep -q "^${key}=" "${ENV_FILE}"; then
-    sed -i "s|^${key}=.*|${key}=${written}|" "${ENV_FILE}"
+    # sed's REPLACEMENT has its own two special characters, and '&' is the one
+    # that bites: it means "everything the pattern matched". Measured before
+    # this escaping existed —
+    #     set_env_var WEBUI_NAME 'A&B'
+    #     WEBUI_NAME=AWEBUI_NAME=local-code-agentB
+    # — written, returned 0, and read back as that. A '|' would instead end the
+    # s||| expression early and fail the write outright. A backslash cannot
+    # reach here: it is refused above.
+    local escaped="${written//&/\\&}"
+    escaped="${escaped//|/\\|}"
+    sed -i "s|^${key}=.*|${key}=${escaped}|" "${ENV_FILE}"
   else
     printf '%s=%s\n' "${key}" "${written}" >> "${ENV_FILE}"
   fi

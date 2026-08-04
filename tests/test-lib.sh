@@ -2147,6 +2147,70 @@ refuses() { ! set_env_var TEST_KEY "$1" >/dev/null 2>&1; }
 DOLLAR='$'
 check "a value containing a quote is refused" refuses 'has"quote'
 check "a value containing a dollar sign is refused" refuses "has${DOLLAR}dollar"
+# A backtick RUNS inside the double quotes this function writes, and a
+# backslash is eaten by 'source' ("a\\b" reads back as a\b). Neither was on
+# the refusal list; nothing writes either today, which is exactly the state
+# the quote and dollar cases were in before someone hit them.
+BACKTICK="$(printf '\140')"
+BACKSLASH="$(printf '\134')"
+check "a value containing a backtick is refused" \
+  refuses "has${BACKTICK}id${BACKTICK}tick"
+check "a value containing a backslash is refused" \
+  refuses "has${BACKSLASH}slash"
+# ...and the values that ARE written must come back byte for byte.
+#
+# '&' in a sed REPLACEMENT means "everything the pattern matched". Measured
+# before this was handled:
+#     set_env_var WEBUI_NAME 'A&B'  ->  WEBUI_NAME=AWEBUI_NAME=local-code-agentB
+# written, returning 0, and read back as that. Two failures at once: the sed
+# replacement was unescaped, and the quoting trigger asked "does it contain
+# whitespace?" when the question is "will 'source' read this back literally?" —
+# an unquoted A&B is two commands to the shell, not a value.
+# Both write paths, every time. set_env_var APPENDS a key that is not there
+# yet and SEDs one that is, and only the sed path can be bitten by '&' — the
+# first draft of this test wrote each value once, so the ampersand case took
+# the append path and passed with the escaping deleted.
+survives() {
+  local want="$1" got stage
+  set_env_var ROUNDTRIP_KEY placeholder >/dev/null 2>&1 || true
+  for stage in append update; do
+    if [[ "${stage}" == "append" ]]; then
+      # Start from a file without the key, so this write is the append branch.
+      grep -v '^ROUNDTRIP_KEY=' "${SANDBOX}/.env" > "${SANDBOX}/.env.tmp"
+      mv "${SANDBOX}/.env.tmp" "${SANDBOX}/.env"
+    fi
+    set_env_var ROUNDTRIP_KEY "${want}" >/dev/null 2>&1 || {
+      printf 'set_env_var (%s) refused a value it should have written: %s\n' "${stage}" "${want}" >&2
+      return 1
+    }
+    got="$(env_value ROUNDTRIP_KEY)"
+    [[ "${got}" == "${want}" ]] || {
+      printf '%s: wrote [%s] but read back [%s]\n' "${stage}" "${want}" "${got}" >&2
+      return 1
+    }
+  done
+}
+check "an ampersand round-trips"        survives 'A&B'
+check "a pipe round-trips"              survives 'A|B'
+check "a semicolon round-trips"         survives 'A;B'
+check "a hash round-trips"              survives 'a#b'
+check "an apostrophe round-trips"       survives "it's"
+check "a glob round-trips"              survives '*-*-* 03:30:00'
+# Taken back out: later blocks count and compare the keys in this .env, and a
+# scratch key left behind would be a test changing another test's fixture.
+grep -v '^ROUNDTRIP_KEY=' "${SANDBOX}/.env" > "${SANDBOX}/.env.tmp"
+mv "${SANDBOX}/.env.tmp" "${SANDBOX}/.env"
+# ...while every value today's callers actually write stays bare, so the boot
+# path's output is byte-identical to what it was before the trigger widened.
+set_env_var MODEL_NAME "qwen2.5-coder:7b"
+set_env_var OLLAMA_CONTEXT_LENGTH 8192
+set_env_var AUTO_TUNE false
+check "a model tag is still written bare" \
+  grep -qx 'MODEL_NAME=qwen2.5-coder:7b' "${SANDBOX}/.env"
+check "a number is still written bare" \
+  grep -qx 'OLLAMA_CONTEXT_LENGTH=8192' "${SANDBOX}/.env"
+check "a boolean is still written bare" \
+  grep -qx 'AUTO_TUNE=false' "${SANDBOX}/.env"
 set_env_var BACKUP_SCHEDULE "*-*-* 03:30:00"
 
 echo "# sync_env_keys() backfills settings an old install predates"
