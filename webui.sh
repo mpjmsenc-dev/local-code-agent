@@ -44,6 +44,24 @@ container_exists() {
   "${DOCKER[@]}" container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
+# port_mismatch_reason — print why a health probe on WEBUI_PORT cannot succeed,
+# or return 1 when the ports agree and the probe is worth making.
+#
+# Every wait here polls .env's WEBUI_PORT, while the container listens on the
+# port it was CREATED with. When those differ — someone edited .env and has not
+# applied it yet — 'start' and 'restart' each spent 120 seconds probing a port
+# nothing was ever going to answer on, then said "check the logs", where a
+# perfectly healthy app is logging happily on another port. The mismatch is
+# readable off the container in a millisecond, and 'status' already read it;
+# one copy of the sentence, used by all three.
+port_mismatch_reason() {
+  local live
+  live="$(webui_container_env PORT || true)"
+  [[ -n "${live}" && "${live}" != "${WEBUI_PORT}" ]] || return 1
+  printf 'it listens on port %s, not the %s now in .env — it was created before that edit. Apply it with: sudo %s/bin/lca apply' \
+    "${live}" "${WEBUI_PORT}" "${REPO_ROOT}"
+}
+
 main() {
   local cmd="${1:-}"
   [[ -n "${cmd}" ]] || { usage; exit 1; }
@@ -116,6 +134,9 @@ main() {
     start)
       if container_exists; then
         "${DOCKER[@]}" start "${WEBUI_CONTAINER}" >/dev/null
+        local why
+        why="$(port_mismatch_reason || true)"
+        [[ -z "${why}" ]] || die "The container is started, but ${why}"
         info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
         wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
@@ -132,6 +153,9 @@ main() {
     restart)
       container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run ${SCRIPT_DIR}/scripts/install_webui.sh first."
       "${DOCKER[@]}" restart "${WEBUI_CONTAINER}" >/dev/null
+      local restart_why
+      restart_why="$(port_mismatch_reason || true)"
+      [[ -z "${restart_why}" ]] || die "The container is restarted, but ${restart_why}"
       info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
       wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
       ok "Open WebUI restarted."
@@ -173,9 +197,13 @@ main() {
       if webui_responds; then
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else
-        if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
-          die "No /health answer on port ${WEBUI_PORT} — because the running container is on ${live_port} (see the port drift above). Re-create it with: ${SCRIPT_DIR}/scripts/install_webui.sh"
-        fi
+        # The same sentence the other two branches use, and it names 'lca
+        # apply'. This used to send the reader to install_webui.sh — a second
+        # answer to a problem the port-drift warning four lines above had
+        # already answered with 'lca apply', in the output of one command.
+        local status_why
+        status_why="$(port_mismatch_reason || true)"
+        [[ -z "${status_why}" ]] || die "No /health answer on port ${WEBUI_PORT}, because ${status_why}"
         warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: lca webui logs)"
         exit 1
       fi
@@ -195,4 +223,8 @@ main() {
   esac
 }
 
-main "$@"
+# Sourceable so port_mismatch_reason can be tested without a docker daemon —
+# same pattern as restore.sh, uninstall.sh and scripts/apply.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

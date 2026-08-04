@@ -2499,6 +2499,45 @@ no_restart_as_apply_instruction() {
 check "no command offers a chat-app restart as the way to apply a setting" \
   no_restart_as_apply_instruction
 
+echo "# a 120-second wait is the wrong answer to a port read off the container"
+# Every health wait polls .env's WEBUI_PORT; the container listens on the port
+# it was CREATED with. When those differ — someone edited .env and has not
+# applied it — 'lca webui start' and 'lca webui restart' each spent two minutes
+# probing a port nothing would ever answer on, then said "check the logs",
+# where a perfectly healthy app is logging on another port. 'status' already
+# detected the mismatch; the other two never asked.
+#
+# Driven against a stubbed container, so no docker daemon is needed. The third
+# case is the one that keeps this honest: an unreadable container is "cannot
+# tell", not "mismatch", or every box without docker access would be told its
+# ports disagree.
+webui_mismatch() {  # live-port -> the reason, or empty
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    WEBUI_PORT=3000
+    if [[ "$2" == "__unreadable__" ]]; then webui_container_env() { return 1; }
+    else LIVE="$2"; webui_container_env() { printf "%s" "${LIVE}"; }; fi
+    port_mismatch_reason || true' _ "${REPO}/webui.sh" "$2" 2>/dev/null
+}
+mismatch_says() { grep -qF -- "$1" <<<"$(webui_mismatch _ "$2")"; }
+no_mismatch()   { [[ -z "$(webui_mismatch _ "$1")" ]]; }
+check "matching ports are not a mismatch"        no_mismatch 3000
+check "a different live port is explained"       mismatch_says "listens on port 8080" 8080
+check "...and points at the one command that fixes it" \
+  mismatch_says "lca apply" 8080
+check "an unreadable container is not a mismatch" no_mismatch __unreadable__
+# ...and every wait must consult it, not just the one that always did.
+every_health_wait_checks_the_port() {
+  awk '/^[[:space:]]*#/ { next }
+       /port_mismatch_reason/ { seen = NR }
+       /wait_for_webui/ {
+         if (seen == 0 || NR - seen > 6) { print "unguarded wait at line " NR; bad = 1 }
+       }
+       END { exit bad }' "${REPO}/webui.sh"
+}
+check "every health wait explains a port mismatch instead of timing out" \
+  every_health_wait_checks_the_port
+
 echo "# auto-tune must apply its own decision to everything that holds a copy"
 # tune.sh runs on every boot; a droplet resize is the headline reason. When the
 # ladder moves it writes MODEL_NAME, re-renders the Ollama drop-in, restarts
