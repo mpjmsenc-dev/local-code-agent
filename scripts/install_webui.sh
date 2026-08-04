@@ -96,6 +96,8 @@ main() {
     -e WEBUI_NAME="${WEBUI_NAME}" \
     ${params_env[@]+"${params_env[@]}"} \
     ${suggestions_env[@]+"${suggestions_env[@]}"} \
+    -e ENABLE_OPENAI_API=false \
+    -e ENABLE_VERSION_UPDATE_CHECK=false \
     -e DO_NOT_TRACK=true \
     -e SCARF_NO_ANALYTICS=true \
     -e ANONYMIZED_TELEMETRY=false \

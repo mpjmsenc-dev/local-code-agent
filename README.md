@@ -143,8 +143,13 @@ What "private" means here, precisely — and what it doesn't.
   (re)created.
 - **Phone access** rides Tailscale — an encrypted, private WireGuard network.
   Nothing is port-forwarded; you reach WebUI at `http://<tailscale-ip>:3000`.
-- **No telemetry**: aider has analytics/update checks off; Open WebUI runs with
-  `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS`, `ANONYMIZED_TELEMETRY` set.
+- **No telemetry, and no other outbound chatter**: aider has analytics/update
+  checks off; Open WebUI runs with `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS` and
+  `ANONYMIZED_TELEMETRY` set, plus `ENABLE_OPENAI_API=false` and
+  `ENABLE_VERSION_UPDATE_CHECK=false` so it neither probes `api.openai.com`
+  nor asks GitHub whether it is out of date; and Ollama runs with
+  `OLLAMA_NO_CLOUD=1`, which turns off its remote inference and web search —
+  both of which are ON by default and talk to `ollama.com`.
 
 **The kill switch** (`netmode.sh offline`) adds an egress lockdown: new
 outbound connections — locally-generated *and* docker-forwarded — are dropped

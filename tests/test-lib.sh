@@ -2111,7 +2111,12 @@ every_baked_setting_is_compared() {
   while read -r key; do
     [[ -n "${key}" ]] || continue
     case "${key}" in
+      # Constants, not .env-derived, so there is nothing for them to drift
+      # FROM. ENABLE_OPENAI_API and ENABLE_VERSION_UPDATE_CHECK join them:
+      # both are off unconditionally because this stack has no cloud API and
+      # no business calling github.com to see if it is out of date.
       DO_NOT_TRACK|SCARF_NO_ANALYTICS|ANONYMIZED_TELEMETRY) continue ;;
+      ENABLE_OPENAI_API|ENABLE_VERSION_UPDATE_CHECK) continue ;;
     esac
     grep -qF "webui_container_env ${key}" "${REPO}/scripts/lib.sh" || {
       printf 'install_webui.sh bakes in %s but nothing ever compares it\n' "${key}" >&2
