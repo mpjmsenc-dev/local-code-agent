@@ -3830,6 +3830,55 @@ help_is_answered_not_performed() {
 }
 check "every script 'lca' dispatches to explains itself on --help" \
   help_is_answered_not_performed
+
+# The three that 'lca' does NOT dispatch to are the three where this bug costs
+# most, and none of them was covered: setup.sh installs packages and a model as
+# root, install.sh clones over a directory, uninstall.sh deletes Ollama and
+# every model. Two of the three are on record as having had exactly this hole —
+# "'./setup.sh --help' began installing", "'./install.sh --help' had to be
+# killed by a timeout, and left a checkout behind".
+#
+# install.sh runs for real but bounded: LCA_DIR and LCA_REPO_URL point into the
+# sandbox, so a regression clones locally instead of into /opt. motd.sh is safe
+# to run outright — it is gated elsewhere to write nothing at all.
+HELP_SB="${SANDBOX}/helpsb"
+mkdir -p "${HELP_SB}"
+cp "${REPO}/install.sh" "${HELP_SB}/install.sh"
+chmod +x "${HELP_SB}/install.sh"
+answers_help() {  # description-only: runs CMD --help and checks it explains itself
+  local out rc=0
+  out="$(timeout 20 "$@" --help 2>&1)" || rc=$?
+  (( rc == 0 )) || { printf '%s --help exited %s\n' "$1" "${rc}" >&2; return 1; }
+  grep -qi 'usage' <<<"${out}" || {
+    printf '%s --help exited 0 but printed no usage\n' "$1" >&2; return 1; }
+}
+install_answers_help() {
+  LCA_DIR="${HELP_SB}/target" LCA_REPO_URL="${HELP_SB}/nonexistent.git" \
+    answers_help "${HELP_SB}/install.sh"
+}
+check "setup.sh explains itself on --help"   answers_help "${REPO}/setup.sh"
+check "install.sh explains itself on --help" install_answers_help
+check "the login banner explains itself on --help" \
+  answers_help "${REPO}/scripts/motd.sh"
+# ...and nothing was cloned or installed while proving it.
+check "install.sh --help touched nothing" test ! -e "${HELP_SB}/target"
+
+# uninstall.sh is asserted statically, deliberately. Running it cannot be
+# bounded the way install.sh can: it does not act on a directory this test
+# could redirect, it acts on the machine — nft tables, systemd units, the
+# Docker volume. A regression there would delete the tester's own stack, which
+# is too high a price for the coverage. So: the option is answered, and it is
+# answered before anything else in main.
+uninstall_answers_help_first() {
+  awk '/^main\(\) \{/ { inb = 1; next }
+       inb && /^[[:space:]]*#/ { next }
+       inb && /-h\|--help/ { found = NR; exit }
+       inb && /(as_root|rm -rf|docker|systemctl|nft )/ { exit }
+       END { exit !found }' "${REPO}/uninstall.sh" || {
+    echo 'uninstall.sh reaches a side effect before it answers --help' >&2
+    return 1; }
+}
+check "uninstall.sh answers --help before any side effect" uninstall_answers_help_first
 # ...and the list above has to stay the list. bin/lca gaining a subcommand
 # whose script is never asked is how the next selftest.sh happens.
 every_dispatch_target_is_checked() {

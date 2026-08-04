@@ -294,10 +294,19 @@ offline_row() {
 }
 
 main() {
-  if [[ "${1:-}" == "--install" ]]; then
-    install_motd
-    return 0
-  fi
+  case "${1:-}" in
+    --install) install_motd; return 0 ;;
+    -h|--help)
+      # The header block above is the help text, as everywhere else here.
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      return 0
+      ;;
+    "") ;;
+    # Anything else printed the banner and said nothing — so a typo'd
+    # '--instal' silently did not install the banner and looked like it had.
+    # run-parts invokes this with no arguments, so it never reaches here.
+    *) printf 'Unknown option: %s (try: %s --help)\n' "$1" "${BASH_SOURCE[0]}" >&2; return 1 ;;
+  esac
   load_env_readonly
 
   local state

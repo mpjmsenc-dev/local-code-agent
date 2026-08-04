@@ -13,6 +13,14 @@
 # All this script does is install git, clone the repository, and hand over to
 # setup.sh — which is the same thing docs/INSTALL.md asks you to do by hand.
 #
+# Usage:
+#   curl -fsSL <url>/install.sh | bash    install straight from the web
+#   bash install.sh                       install from a downloaded copy
+#   bash install.sh --help                this text; changes nothing
+#
+# Root is required (it writes ${LCA_DIR} and installs packages); the script
+# uses sudo itself when you are not already root.
+#
 # Environment overrides:
 #   LCA_DIR=/opt/local-code-agent   where to install
 #   LCA_BRANCH=main                 branch to check out
