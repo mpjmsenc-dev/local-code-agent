@@ -11,8 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 
 usage() {
-  # This file's header block (lines 2-6) is the help text.
-  sed -n '2,6p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # This file's header comment block is the help text — read to the first
+  # non-comment line, so editing the header cannot silently truncate it.
+  sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
 }
 
 BACKUP_DIR="${REPO_ROOT}/backups"

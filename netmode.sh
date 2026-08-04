@@ -23,7 +23,8 @@
 # a droplet's public IP would expose them; the guard makes the private-only
 # guarantee real without touching SSH (port 22) or any other port, so it can
 # never lock you out. It is applied at setup, whenever WebUI is (re)created,
-# and re-applied on every boot.
+# by 'lca apply' when .env moves a port out from under it, and re-applied on
+# every boot.
 #
 # The mode persists across reboots (ruleset + state file in
 # /etc/local-code-agent, re-applied by a systemd oneshot).

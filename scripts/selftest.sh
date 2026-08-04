@@ -14,7 +14,10 @@
 #      prompt (a stale one is why the only real bug report ever filed here
 #      would have seen every other check pass)
 #
-# Non-mutating: it pulls nothing, edits no .env, and cleans up its scratch repo.
+# Non-mutating: it pulls nothing and edits no .env. The scratch project is
+# removed on the way out, with one deliberate exception — a failed aider
+# round-trip keeps its log, and prints the path, because that log is the only
+# record of why it failed.
 # Exit 0 only if every non-skipped check passed.
 #
 # Usage: lca test        (no options; takes minutes — it generates for real)
@@ -29,7 +32,7 @@ source "${SCRIPT_DIR}/lib.sh"
 # is certainly wrong — and it was the answer, because nothing looked at "$@".
 case "${1:-}" in
   -h|--help)
-    sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") ;;

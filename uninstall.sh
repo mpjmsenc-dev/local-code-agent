@@ -18,8 +18,9 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
 usage() {
-  # Print this file's header comment block (lines 2-12) as the help text.
-  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Print this file's header comment block as the help text — read to the
+  # first non-comment line, so editing the header cannot truncate it.
+  sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
 }
 
 main() {
