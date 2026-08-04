@@ -38,6 +38,11 @@ do_backup() {
   # could read all of it. Applied to an existing directory too, since the ones
   # already out there were created wide open.
   chmod 700 "${BACKUP_DIR}" 2>/dev/null || true
+  # ...and the archives inside it, which the directory mode alone was covering.
+  local tightened
+  tightened="$(tighten_backup_modes "${BACKUP_DIR}")"
+  [[ -z "${tightened}" ]] \
+    || info "Made ${tightened} older backup(s) owner-only (they hold password hashes, the session key and your .env)."
   # The timer runs backup.sh as root. If root created backups/ first, a later
   # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
   # and set -e would abort with no explanation — say what's wrong instead.
@@ -213,6 +218,33 @@ do_backup() {
   fi
 
   info "Copy it off the machine (e.g. scp) — restore with: ${SCRIPT_DIR}/restore.sh ${tarball}"
+}
+
+# tighten_backup_modes DIR — make every archive in DIR owner-only, and say how
+# many needed it. Prints nothing when there was nothing to do.
+#
+# The umask around tar makes NEW archives 0600. Older ones, written before that
+# existed, are still 0644 — and this run is the moment we are looking at the
+# directory anyway. The directory being 0700 is what protects them today, and
+# "safe because of the directory it happens to be in" stops being true the
+# moment one is copied, moved, or the directory's mode drifts. Each of these
+# holds the Open WebUI database — account password hashes and the JWT signing
+# key that mints valid sessions — plus a verbatim copy of .env.
+#
+# Its own function so it can be exercised on a scratch directory, the same
+# reason verify_backup and webui_data_state are.
+tighten_backup_modes() {
+  local dir="${1:-}" f mode tightened=0
+  [[ -d "${dir}" ]] || return 0
+  for f in "${dir}"/local-code-agent-backup-*.tar.gz; do
+    [[ -f "${f}" ]] || continue
+    mode="$(stat -c %a "${f}" 2>/dev/null || echo 600)"
+    [[ "${mode}" == "600" ]] && continue
+    if chmod 600 "${f}" 2>/dev/null; then
+      tightened=$((tightened+1))
+    fi
+  done
+  (( tightened == 0 )) || printf '%s\n' "${tightened}"
 }
 
 # webui_data_state DOCKER_USABLE DOCKER_INSTALLED VOLUME_PRESENT — which of the

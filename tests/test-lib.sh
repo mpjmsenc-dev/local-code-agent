@@ -395,6 +395,37 @@ check "archive missing a staged file is rejected" vb_rejects "${VB_PARTIAL}" "${
 : > "${SANDBOX}/empty.tar.gz"
 check "empty file is rejected"             vb_rejects "${SANDBOX}/empty.tar.gz" "${VB_STAGE}"
 
+echo "# every archive must be owner-only, not just the directory holding it"
+# The umask around tar makes NEW archives 0600. Ones written before that
+# existed are still 0644, and the 0700 directory is all that protects them —
+# which stops being true the moment one is copied, moved, or the directory's
+# mode drifts. Each holds the Open WebUI database (account password hashes and
+# the JWT signing key that mints valid sessions) plus a verbatim copy of .env.
+TBM="${SANDBOX}/tighten"
+rm -rf "${TBM}"; mkdir -p "${TBM}"
+: > "${TBM}/local-code-agent-backup-20260101-000000.tar.gz"
+: > "${TBM}/local-code-agent-backup-20260102-000000.tar.gz"
+: > "${TBM}/notes.txt"
+chmod 644 "${TBM}/local-code-agent-backup-20260101-000000.tar.gz"
+chmod 600 "${TBM}/local-code-agent-backup-20260102-000000.tar.gz"
+chmod 644 "${TBM}/notes.txt"
+TBM_OUT="$(tighten_backup_modes "${TBM}")"
+mode_of() { stat -c %a "$1" 2>/dev/null; }
+check "a world-readable archive is tightened" \
+  test "$(mode_of "${TBM}/local-code-agent-backup-20260101-000000.tar.gz")" = "600"
+check "an already-tight archive is left alone" \
+  test "$(mode_of "${TBM}/local-code-agent-backup-20260102-000000.tar.gz")" = "600"
+# Only archives. Something else the user parked in the directory is theirs.
+check "an unrelated file is not touched" \
+  test "$(mode_of "${TBM}/notes.txt")" = "644"
+check "it reports how many it had to change" test "${TBM_OUT}" = "1"
+# Idempotent, and silent when there is nothing to do — otherwise every backup
+# from here on would announce work it did not do.
+check "a second pass says nothing" test -z "$(tighten_backup_modes "${TBM}")"
+# A directory that does not exist is not an error: backup.sh calls this before
+# it is certain the directory could be created.
+check "a missing directory is not an error" test -z "$(tighten_backup_modes "${SANDBOX}/no-such-dir")"
+
 echo "# retention must never prune on the strength of a look nobody took"
 # Three states, and the middle one is the whole point: "docker did not answer"
 # is not "there is no data". Get it wrong in that direction and BACKUP_KEEP

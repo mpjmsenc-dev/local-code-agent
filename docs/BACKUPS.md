@@ -16,6 +16,13 @@ Backups are gzipped tarballs in `backups/`, named
 `local-code-agent-backup-YYYYMMDD-HHMMSS.tar.gz`. The WebUI container is briefly
 paused around the volume archive so its SQLite database is captured consistently.
 
+**Treat an archive as a secret.** It contains the Open WebUI database — account
+password hashes and the signing key that mints valid sessions — plus a verbatim
+copy of `.env`. `backups/` is `0700` and every archive is `0600`; each run also
+tightens any older archive that predates that rule. When you copy one off the
+machine, it stops being protected by this directory, so put it somewhere with
+the same care.
+
 `meta` is there so a restore can tell you something useful rather than
 something generic. `.env` carries the **source** machine's model and context
 length, so restoring an 8 GB droplet's backup onto a 32 GB VM would otherwise
