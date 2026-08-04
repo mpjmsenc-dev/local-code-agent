@@ -161,24 +161,42 @@ is_tutorial() {
     && grep -qiE 'npm init|python3? -m venv|pip install|npx create|mkdir' <<<"${body}"
 }
 
+# Rates are over the samples that ANSWERED, not over the samples requested.
+#
+# A request can come back empty — Ollama still loading a model, a dropped
+# connection, a 500 — and the loop already skips those. But the denominator was
+# SAMPLES, so every skip silently deflated every rate. Measured on the 7b rung:
+# one empty sample in six printed "hands over 5/6", which reads as a one-in-six
+# failure and was actually five out of five. In a tool whose entire output is
+# rates, and whose stated purpose is judging small differences between prompts,
+# that is the number lying about exactly what it is for.
 bench() {
   local label="$1" question="$2" i out
-  local over=0 where=0 tut=0 hij=0 tool=0
+  local over=0 where=0 tut=0 hij=0 tool=0 got=0
   for (( i = 0; i < SAMPLES; i++ )); do
     out="$(ask "${question}" "$(( 1000 + i ))" || true)"
     if [[ -z "${out}" ]]; then
       warn "empty answer for '${label}' sample ${i} — is '${MODEL}' pulled?"
       continue
     fi
+    got=$(( got + 1 ))
     hands_over  "${out}" && over=$(( over + 1 ))
     says_where  "${out}" && where=$(( where + 1 ))
     is_tutorial "${out}" && tut=$(( tut + 1 ))
     hijacked    "${out}" && hij=$(( hij + 1 ))
     tool_called "${out}" && tool=$(( tool + 1 ))
   done
+  if (( got == 0 )); then
+    warn "  ${label}: NO sample answered — nothing was measured. Is '${MODEL}' pulled and Ollama up?"
+    return 0
+  fi
   printf '  %-8s hands over %s/%s   says where %s/%s   tutorial %s/%s   handover-fired %s/%s   tool-call %s/%s\n' \
-    "${label}" "${over}" "${SAMPLES}" "${where}" "${SAMPLES}" \
-    "${tut}" "${SAMPLES}" "${hij}" "${SAMPLES}" "${tool}" "${SAMPLES}"
+    "${label}" "${over}" "${got}" "${where}" "${got}" \
+    "${tut}" "${got}" "${hij}" "${got}" "${tool}" "${got}"
+  # Said out loud, because a denominator quietly smaller than the -n you asked
+  # for is the difference between two runs you can compare and two you cannot.
+  (( got == SAMPLES )) \
+    || warn "  ^ ${label}: ${got} of ${SAMPLES} samples answered; the rates above are over ${got}, not ${SAMPLES}"
 }
 
 main() {

@@ -196,6 +196,21 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
 - The small model still behaves like *your* assistant rather than a generic
   one — 3b was checked against the same system prompt and answers "how do I
   take a backup?" with `lca backup`, not a lecture about `tar`.
+- **A bigger rung does not buy better obedience.** `scripts/prompt-bench.sh`
+  run at `-n 6` against both rungs, same prompt, same questions:
+
+  | | 3b | 7b |
+  |---|---|---|
+  | "build me an app" hands over | 6/6 | 6/6 |
+  | the same with a feature list and a follow-up | 6/6 | 6/6 |
+  | wrote a doomed tutorial instead | 0/6 | 0/6 |
+  | invented a tool call | 0/6 | 0/6 |
+  | handover fired on "how do I take a backup?" | 0/6 | 0/6 |
+
+  Identical on every behaviour measured. What the bigger model buys is the
+  quality of the code it writes once aider is running, not whether it hands
+  over — so if the chat is misbehaving, more RAM is not the fix. Check
+  `lca check` for `chat app config drift: SYSTEM_PROMPT` first.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
 - The first message after a quiet period is slower — the model reloads into RAM.
