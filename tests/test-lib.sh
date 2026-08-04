@@ -3267,15 +3267,32 @@ advice_paths_are_absolute() {
   # past the scan above. Scoped to what 'lca' dispatches to, because that is
   # the rule: those run in the user's directory. scripts/prompt-bench.sh names
   # itself relatively and may, being a 'make bench' tool run from the checkout.
-  local s
+  # A one-line 'usage() { ...; }' closes on its own line, so the extractor has
+  # to stop there. Without that branch it ran on to main()'s closing brace and
+  # scanned the whole function as if it were help text — update.sh is written
+  # that way, and it passed only because nothing in main() happened to match.
+  local s body
   for s in "${LCA_TARGETS[@]}"; do
-    hits="$(awk '/^usage\(\) *\{/ { inu = 1; next }
-                 inu && /^\}/     { inu = 0 }
+    body="$(awk '/^usage\(\) *\{/ { if ($0 ~ /\}[[:space:]]*$/) { print; next }
+                                    inu = 1; next }
+                 inu && /^\}/     { inu = 0; next }
                  inu              { print }' "${REPO}/${s}" \
-              | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g' \
-              | grep -E '(\./|[[:space:]("]scripts/)[a-z_-]+\.sh' || true)"
+              | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g')"
+    hits="$(grep -E '(\./|[[:space:]("]scripts/)[a-z_-]+\.sh' <<<"${body}" || true)"
     [[ -z "${hits}" ]] || {
       printf '%s prints usage text naming a path that only resolves inside the checkout:\n%s\n' \
+        "${s}" "${hits}" >&2
+      return 1
+    }
+    # Bare names too. 'lca model' opened with "Usage: update-model.sh <model>",
+    # six times over, for a file that is not on PATH — and neither the path
+    # rule (no './' or 'scripts/' to match) nor the message-helper rule (usage
+    # is a heredoc, not a warn) could see it. Imperative phrasings only, so
+    # "(or webui.sh directly)" stays legal: that tells you what the script is
+    # called, it does not ask you to type it.
+    hits="$(grep -iE "(run|re-run|check|try|with|usage)['\":]? +[a-z][a-z_-]*\.sh" <<<"${body}" || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s prints usage text telling the reader to run a bare script name:\n%s\n' \
         "${s}" "${hits}" >&2
       return 1
     }

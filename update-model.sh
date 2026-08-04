@@ -18,13 +18,13 @@ load_env
 
 usage() {
   cat <<EOF
-Usage: update-model.sh <model> [--remove-old]
-       update-model.sh --list               models already downloaded
-       update-model.sh --list-recommended   what fits THIS machine's RAM
+Usage: lca model <model> [--remove-old]   (or update-model.sh directly)
+       lca model --list               models already downloaded
+       lca model --list-recommended   what fits THIS machine's RAM
 
 Examples:
-  update-model.sh qwen2.5-coder:14b
-  update-model.sh qwen2.5-coder:32b --remove-old
+  lca model qwen2.5-coder:14b
+  lca model qwen2.5-coder:32b --remove-old
 EOF
 }
 
