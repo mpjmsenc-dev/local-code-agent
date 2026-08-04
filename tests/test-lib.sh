@@ -3763,10 +3763,37 @@ errexit_survives_sourcing_tune() {
 prompt_check_is_not_claimed_when_skipped() {
   # webui_drift skips both prompt comparisons without jq, or when either side
   # is unreadable; the pass line named "system prompt" regardless.
-  grep -q 'webui_prompt_comparable' "${REPO}/check-system.sh" || {
-    echo 'check-system.sh claims the prompt matched without checking it could compare it' >&2
-    return 1; }
-  grep -q 'skipped, not passed' "${REPO}/check-system.sh"
+  #
+  # Every reporter that makes the CLAIM, not just check-system.sh. selftest.sh
+  # had the same bug and was not covered by this: it rolled its own probe,
+  # reading the LIVE value alone, so on a box without jq the drift list could
+  # not contain SYSTEM_PROMPT and it printed "the chat app carries this repo's
+  # assistant prompt" — while install_webui.sh, on that same box, warns that the
+  # chat was started WITHOUT our prompt.
+  #
+  # Keyed on the success line, because that is the thing being made honest. A
+  # file that only reports drift when it finds it needs no guard: webui.sh
+  # warns per drifted key and never gives the prompt a clean bill of health, so
+  # its silence on a jq-less box is silence, not a false claim.
+  #
+  # Comments stripped before looking for the guard. Caught in mutation: the
+  # first version of this passed while selftest.sh was reverted to its own
+  # live-value probe, because the comment explaining the fix says the helper's
+  # name. Fourth time in this file.
+  local f code
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ "${f}" == "${REPO}/scripts/lib.sh" ]] && continue
+    grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" || continue
+    code="$(sed 's/#.*//' "${f}")"
+    grep -q 'webui_prompt_comparable' <<<"${code}" || {
+      printf '%s claims the prompt matched without checking it could compare it\n' \
+        "${f##*/}" >&2
+      return 1; }
+    grep -q 'skipped, not passed' "${f}" || {
+      printf '%s does not say the prompt check was skipped rather than passed\n' \
+        "${f##*/}" >&2
+      return 1; }
+  done
 }
 prompt_comparable_needs_both_sides() {
   local out
@@ -3819,6 +3846,54 @@ check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_
 check "an unattended update refuses to continue past a failed backup" \
   update_refuses_unattended_after_a_failed_backup
 check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list
+
+echo "# the self-test may not claim 'end-to-end' over a check it could not run"
+# 'lca test' printed "SELF-TEST PASSED — your local-code-agent stack works
+# end-to-end" whenever nothing had actively failed, including when the chat
+# app's assistant prompt could not be compared at all. That is the rule 'lca
+# apply' already follows for a component it could not look at, applied to the
+# one command whose entire output is a claim about every part.
+#
+# Driven, not grepped. The self-test itself does real generations and takes
+# minutes, so the verdict lives in lib.sh — like setup_verdict, and testable
+# for the same reason.
+verdict_says() {  # want-substring pass fail skip
+  local out
+  out="$(selftest_verdict "$2" "$3" "$4" 2>&1 || true)"
+  grep -qF -- "$1" <<<"${out}" || {
+    printf 'selftest_verdict %s %s %s printed: %s\n' "$2" "$3" "$4" "${out}" >&2
+    return 1
+  }
+}
+verdict_status_is() {  # want-status pass fail skip
+  local rc=0
+  selftest_verdict "$2" "$3" "$4" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" == "$1" ]] || { printf 'expected status %s, got %s\n' "$1" "${rc}" >&2; return 1; }
+}
+check "a clean run claims end-to-end" \
+  verdict_says "works end-to-end" 4 0 0
+# The whole point: the same zero failures, one unexaminable check, and the
+# claim is gone.
+check "a skipped check withdraws the end-to-end claim" \
+  verdict_status_is 0 4 0 1
+skipped_run_makes_no_claim() { ! verdict_says "works end-to-end" 4 0 1 2>/dev/null; }
+check "...without turning a skip into a failure" skipped_run_makes_no_claim
+check "a skipped check is still reported"       verdict_says "SKIPPED" 4 0 1
+# docs/YOUR-TURN.md tells the reader to look for 'SELF-TEST PASSED', so the
+# skipped-but-passing line has to still contain it.
+check "the skipped run still reads as a pass"   verdict_says "SELF-TEST PASSED" 4 0 1
+check "a failure exits non-zero"                verdict_status_is 1 4 1 0
+# A failure outranks a skip: 'lca update' offers a rollback on this status.
+check "a failure outranks a skip"               verdict_says "SELF-TEST FAILED" 4 1 1
+# ...and selftest.sh must actually use it, or the wording it promises the docs
+# would be one hand-written printf away from drifting again.
+selftest_uses_the_verdict() {
+  grep -qE '^selftest_verdict "\$\{PASS\}" "\$\{FAIL\}" "\$\{SKIP\}"' "${REPO}/scripts/selftest.sh" || {
+    echo 'selftest.sh no longer ends on selftest_verdict' >&2; return 1; }
+  # And may not re-hardcode either line: that is how the two drifted before.
+  ! grep -qF 'SELF-TEST PASSED' "${REPO}/scripts/selftest.sh"
+}
+check "selftest.sh reports through selftest_verdict" selftest_uses_the_verdict
 
 echo "# 'already tuned' has to mean the model is on disk, not named in .env"
 # tune.sh has two exits that write .env before anything is pulled — Ollama not

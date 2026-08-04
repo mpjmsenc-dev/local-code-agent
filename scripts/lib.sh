@@ -254,6 +254,35 @@ setup_verdict() {
   return 1
 }
 
+# selftest_verdict PASS FAIL SKIP — the self-test's final line AND its exit
+# status, here for the same reason setup_verdict is: docs/YOUR-TURN.md tells the
+# reader to look for the line, 'lca update' rolls back on the status, and the
+# two must not drift apart. Living in lib.sh also makes all three arms testable
+# without doing the real generations the self-test does.
+#
+# The SKIP arm is why this exists. "Works end-to-end" is a claim about every
+# part, and it may not be made while a part went unexamined — the rule 'lca
+# apply' already follows when a component could not be checked. It still exits
+# 0: a check that could not RUN is not a failed check, and update.sh treats a
+# non-zero self-test as reason to offer a rollback.
+selftest_verdict() {
+  local pass="${1:-0}" fail="${2:-0}" skip="${3:-0}"
+  info "PASS=${pass}  FAIL=${fail}  SKIPPED=${skip}"
+  if (( fail > 0 )); then
+    printf '%b%s%b\n' "${C_YELLOW}${C_BOLD}" \
+      "SELF-TEST FAILED (${fail}) — see the failing checks above and docs/TROUBLESHOOTING.md." "${C_RESET}"
+    return 1
+  fi
+  if (( skip > 0 )); then
+    printf '%b%s%b\n' "${C_YELLOW}${C_BOLD}" \
+      "SELF-TEST PASSED, WITH ${skip} CHECK(S) SKIPPED — everything that could be tested works; see the skipped one(s) above before trusting this end-to-end." "${C_RESET}"
+    return 0
+  fi
+  printf '%b%s%b\n' "${C_GREEN}${C_BOLD}" \
+    "SELF-TEST PASSED — your local-code-agent stack works end-to-end." "${C_RESET}"
+  return 0
+}
+
 # load_env_readonly — load_env's values without load_env's side effect.
 #
 # load_env creates .env from .env.example when it is missing, which is right

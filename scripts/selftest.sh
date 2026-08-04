@@ -46,8 +46,18 @@ set +e
 
 PASS=0
 FAIL=0
+SKIP=0
 p_pass() { ok "$*";  PASS=$((PASS+1)); }
 p_fail() { err "$*"; FAIL=$((FAIL+1)); }
+# p_skip — a check that could not be MADE. Counted, because the last line of
+# this script says the stack works end-to-end, and a check nobody could run is
+# not evidence for that. Deliberately not p_fail: "could not look" is not
+# "broken", and failing an update on it would be wrong.
+#
+# A component switched off in .env is not this. That is a choice with nothing
+# to look at, and it stays an info() — the same line 'lca apply' draws between
+# "disabled — nothing to apply" and its UNCHECKED count.
+p_skip() { warn "$*"; SKIP=$((SKIP+1)); }
 gpu_proc=""
 
 step "local-code-agent self-test (live end-to-end round-trip)"
@@ -131,10 +141,15 @@ elif webui_responds; then
   # "works end-to-end" to the person filing the bug. The assistant's own
   # instructions are baked into the container at creation, so a repo update
   # that fixes its behaviour does not reach a running one until it is rebuilt.
-  SELFTEST_LIVE_PROMPT="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
-  if [[ -z "${SELFTEST_LIVE_PROMPT}" ]]; then
-    # Cannot look is not the same as fine. Say which it was.
-    info "could not read the chat app's assistant prompt (no docker access here?) — that check was skipped, not passed"
+  # webui_prompt_comparable, not a hand-rolled probe. This used to read the
+  # live value alone, and webui_drift skips the whole prompt comparison without
+  # jq — so on a box without jq the drift list could not contain SYSTEM_PROMPT,
+  # the grep below found nothing, and this printed "the chat app carries this
+  # repo's assistant prompt". install_webui.sh warns, on that same box, that
+  # the chat was started WITHOUT our prompt. A pass for a check that could not
+  # run, contradicting the installer that ran an hour earlier.
+  if ! webui_prompt_comparable; then
+    p_skip "could not compare the chat app's assistant prompt (needs jq and docker access here) — that check was skipped, not passed"
   elif webui_drift | grep -q SYSTEM_PROMPT; then
     p_fail "the chat app is running an OLDER assistant prompt than this repo's — the chat keeps its previous behaviour, including anything an update was meant to fix. Apply it with: sudo ${REPO_ROOT}/bin/lca apply"
   else
@@ -146,11 +161,8 @@ fi
 
 # --- Summary ----------------------------------------------------------------
 step "Self-test summary"
-info "PASS=${PASS}  FAIL=${FAIL}"
-if (( FAIL == 0 )); then
-  printf '%b%s%b\n' "${C_GREEN}${C_BOLD}" "SELF-TEST PASSED — your local-code-agent stack works end-to-end." "${C_RESET}"
-  exit 0
-else
-  printf '%b%s%b\n' "${C_YELLOW}${C_BOLD}" "SELF-TEST FAILED (${FAIL}) — see the failing checks above and docs/TROUBLESHOOTING.md." "${C_RESET}"
-  exit 1
-fi
+# Wording and exit status together, in lib.sh — the same arrangement as
+# setup_verdict, and for the same reason: docs/YOUR-TURN.md tells the reader to
+# watch for the line while 'lca update' branches on the status.
+selftest_verdict "${PASS}" "${FAIL}" "${SKIP}"
+exit $?
