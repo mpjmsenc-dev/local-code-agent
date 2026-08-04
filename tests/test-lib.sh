@@ -3416,6 +3416,42 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# one ladder, not a shared table and a copied staircase"
+# check-system.sh sources tune.sh so the two cannot disagree — and then
+# re-implemented the rung selection inline, dropping choose_for_ram's fallback
+# for a family whose smallest size will not fit the machine. Measured with
+# MODEL_FAMILY=deepseek-coder-v2 (16b only) at 8 GiB: tune.sh chooses
+# qwen2.5-coder:3b, the inline copy demanded deepseek-coder-v2:16b, and the
+# health check told the reader to run the script that had just chosen right.
+ladder_agrees_with_tune() {
+  local fam ram real
+  # Drive the real chooser exactly as check-system now does.
+  for fam in qwen2.5-coder deepseek-coder-v2 qwen3; do
+    for ram in 4 8 12 16 24 64; do
+      real="$(MODEL_FAMILY="${fam}" bash -c '
+                set -uo pipefail
+                source "$1" >/dev/null 2>&1
+                source "$2" >/dev/null 2>&1
+                TUNE_MODEL=""; choose_for_ram "$3" 2>/dev/null
+                printf "%s" "${TUNE_MODEL}"' _ \
+                "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "${ram}")"
+      [[ -n "${real}" ]] || {
+        printf 'choose_for_ram returned nothing for %s at %s GiB\n' "${fam}" "${ram}" >&2
+        return 1
+      }
+    done
+  done
+  # ...and check-system must call it rather than keep its own staircase.
+  grep -q 'choose_for_ram "[$]{RAM_GIB}"' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh does not use choose_for_ram' >&2; return 1; }
+  awk '/^[[:space:]]*#/ { next }
+       /RAM_GIB < 9/ || /RAM_GIB <= 15/ { found = 1 }
+       END { exit found }' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh still has its own copy of the RAM ladder' >&2; return 1; }
+}
+check "check-system uses tune.sh's chooser instead of a copy of the ladder" \
+  ladder_agrees_with_tune
+
 echo "# backups hold the session-signing key, so they cannot be world-readable"
 # Every archive contains the Open WebUI database — account password hashes and
 # the JWT signing key, which mints valid sessions for any account — plus a copy

@@ -185,12 +185,20 @@ CHECK_DIR="${SCRIPT_DIR}"
 source "${SCRIPT_DIR}/scripts/tune.sh"
 SCRIPT_DIR="${CHECK_DIR}"
 unset CHECK_DIR
-TUNE_FAMILY="$(model_family)"
-read -r TUNE_SMALL TUNE_MID TUNE_BIG <<<"$(family_sizes "${TUNE_FAMILY}")"
-if   (( RAM_GIB < 9 ));   then TUNE_MODEL="${TUNE_FAMILY}:${TUNE_SMALL}"
-elif (( RAM_GIB <= 15 )); then TUNE_MODEL="${TUNE_FAMILY}:${TUNE_MID}"
-else                           TUNE_MODEL="${TUNE_FAMILY}:${TUNE_BIG}"
-fi
+# choose_for_ram, not a re-implementation of it. Sourcing tune.sh shared the
+# family TABLE and nothing else: the rung selection was copied inline here and
+# the copy dropped choose_for_ram's fallback for a family whose smallest size
+# cannot fit this machine. Measured with MODEL_FAMILY=deepseek-coder-v2, which
+# ships only 16b:
+#
+#    8 GiB   tune.sh picks qwen2.5-coder:3b   this said deepseek-coder-v2:16b
+#   12 GiB   both agree
+#
+# — so on a base droplet the health check warned that the model differed from
+# the recommendation and told the reader to run the very script that had just
+# chosen correctly. Which is precisely the bug the comment above says was
+# fixed by sourcing. It was only half fixed; this is the other half.
+choose_for_ram "${RAM_GIB}"
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"
 if [[ "${AUTO_TUNE}" != "true" ]]; then
   info "AUTO_TUNE=false — model manually pinned to ${MODEL_NAME}; drift check skipped."
