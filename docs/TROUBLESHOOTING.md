@@ -192,10 +192,12 @@ pulling a better one is not enough on its own — see the table below.
 
 1. `lca check` names `chat app config drift: SYSTEM_PROMPT` → the container is
    older than the prompt. `sudo lca apply` and you are done.
-2. It happens in a **long** chat but not a brand-new one → the conversation
-   outgrew the context window and the instructions dropped off the front. Start
-   a new chat; see "Why does it forget earlier messages" in
-   [FAQ.md](FAQ.md).
+2. It happens in a **long** chat but not a brand-new one → far less likely
+   than it used to be. Re-measured on Ollama 0.32.5, an overflowing chat drops
+   the old TURNS and keeps the system prompt — 4/4 still answered correctly
+   with the history trimmed from ~5,400 tokens to 559. See "Why does it forget
+   earlier messages" in [FAQ.md](FAQ.md) for the numbers. Worth ruling out by
+   starting a new chat, but do 1 first.
 3. It happens in a brand-new chat on a current container → something is
    advertising tools to the model. Check the model's **Function Calling**
    setting and any enabled Tools in Open WebUI's workspace; a tool schema in

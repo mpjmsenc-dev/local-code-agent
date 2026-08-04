@@ -61,19 +61,39 @@ system prompt, chat history, open files, aider's repo map, and the reply.
 history to stay within budget instead of letting Ollama silently drop it.
 `lca ask` bounds what it sends for the same reason, and says so when it trims.
 
-**The phone chat has no such bound**, and this is worth knowing because the
-symptom is confusing. Open WebUI sends the whole conversation back every turn,
-so a long enough chat overflows the window — and Ollama drops from the *front*,
-which is where the assistant's instructions live. Measured on the 3b rung
-(4096 tokens), four runs at each size: with ~3,000 tokens of history it answers
-"which command writes files?" with `lca` **4 times out of 4**; at ~6,000 it
-answers *"typically `echo`…"* — **0 out of 4** still knew. Same model, same
-question. It had simply stopped being told what it is.
+**The phone chat has no such bound**: Open WebUI sends the whole conversation
+back every turn, so a long enough chat overflows the window and something has
+to go.
 
-So if the chat starts behaving like a generic model halfway through a long
-conversation, **start a new chat**. Nothing is broken and nothing needs
-re-applying; the instructions come back with the shorter history. More RAM
-raises the rung and the window with it.
+This entry used to say the *instructions* go — that Ollama drops from the
+front, where the system prompt lives, and the assistant quietly becomes a
+generic model. **Re-measured on Ollama 0.32.5 and it no longer does.** On the
+3b rung (4096 tokens), asking "which command writes files?" four times at each
+size:
+
+| History | Prompt tokens actually evaluated | Answered `lca` |
+|---|---|---|
+| none | 551 | 4 / 4 |
+| ~2,400 tokens (fits) | 2,385 | 4 / 4 |
+| ~5,400 tokens (overflows) | **559** | 4 / 4 |
+
+The third row is the interesting one. The prompt evaluated collapses from
+~5,400 tokens to 559 — the old turns were dropped — and the answer is still
+`lca`. The system prompt is what survived; the conversation is what was
+trimmed. The control confirms what losing it would look like: with no system
+prompt at all, the same model answers `touch` and `echo "..." > filename`,
+which is exactly the symptom this entry was written about.
+
+So a chat that starts behaving like a generic model is **not** explained by
+its own length any more. Suspect the container instead: it keeps the system
+prompt it was created with, and `lca check` reports
+`chat app config drift: SYSTEM_PROMPT` when the repo has moved on. `sudo lca
+apply` re-creates it.
+
+A very long chat still costs you — every turn re-reads the whole history at a
+few tokens per second, and the trimmed turns really are gone — so keeping
+sessions focused is still worth doing. More RAM raises the rung and the window
+with it.
 
 Keep sessions focused (aider's `/clear`, close finished files); for a bigger
 window, add RAM and auto-tune raises the rung on the next boot.
