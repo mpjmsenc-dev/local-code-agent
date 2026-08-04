@@ -14,6 +14,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
+# Every failing exit has to carry a verdict line, not just the orderly one at
+# the end of main.
+#
+# Three separate things read setup.sh's OUTPUT rather than its status:
+# deploy/do-user-data.sh promises the log "always ends with exactly one of
+# three lines" and then says "its verdict line is above"; docs/YOUR-TURN.md
+# step 2 tells the user to watch the log for exactly one of two lines; and
+# scripts/motd.sh classifies the install by grepping for them. A die() printed
+# none of the three. Measured on a log ending in "Model pull failed": with the
+# verdict line install_state says 'failed'; without it, 'running' for fifteen
+# minutes and 'stalled' after that. So the SSH banner told someone whose
+# install was over that it was still going, and do-user-data.sh pointed at a
+# verdict line that did not exist.
+#
+# An EXIT trap rather than fixing the die() calls one by one, because most of
+# these exits are not die() at all: the nine installer scripts main runs are
+# bare under 'set -e', and any of them aborting exits setup.sh with no verdict
+# by exactly the same route.
+VERDICT_PRINTED=false
+verdict_on_exit() {
+  local rc=$?
+  # Only on failure, and only when main did not get to say it itself. '--help'
+  # exits 0 before any side effect and must stay silent.
+  if (( rc != 0 )) && [[ "${VERDICT_PRINTED}" != "true" ]]; then
+    setup_verdict false || true
+  fi
+  return 0
+}
+trap verdict_on_exit EXIT
+
 main() {
   # Above every side effect. This installs packages, services and a model as
   # root, so answering "--help" by starting is the worst possible reading of
@@ -62,19 +92,36 @@ main() {
   # wait gave up after 30 silent seconds and marked the whole install failed,
   # when restarting the service it had just installed would usually have fixed
   # it — a worse outcome reached more slowly, and with nothing on screen.
+  # A missing model is recorded, not fatal — the same treatment the 'Ollama is
+  # not reachable' branch below already gives the identical outcome.
+  #
+  # Dying here skipped everything after this point: the 'lca' command, the
+  # login banner that would have reported the failure, the boot services, and
+  # 'netmode.sh harden' — so a droplet that ran out of disk during the pull was
+  # left with Ollama installed and running and no inbound guard in front of it.
+  # None of those steps need a model. Setup still reports failure at the end,
+  # and check-system.sh names the missing model in the summary above it.
+  local have_model=true
   if have ollama && ensure_ollama_up_announced 30; then
     if model_present "${MODEL_NAME}"; then
       ok "Model '${MODEL_NAME}' already downloaded."
     else
       net_guard "Downloading ${MODEL_NAME}"
-      pull_model "${MODEL_NAME}" || die "Model pull failed — cannot continue without a model."
+      if ! pull_model "${MODEL_NAME}"; then
+        warn "Could not download '${MODEL_NAME}' — the rest of the stack is still being installed, but nothing can answer a question until this succeeds. Common cause: no disk space (df -h). Retry with: sudo ${SCRIPT_DIR}/setup.sh"
+        have_model=false
+        setup_ok=false
+      fi
     fi
-    info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
-    if model_responds "${MODEL_NAME}"; then
-      ok "Model '${MODEL_NAME}' generates text — inference works."
-      smoke_tested=true
-    else
-      die "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
+    if [[ "${have_model}" == "true" ]]; then
+      info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
+      if model_responds "${MODEL_NAME}"; then
+        ok "Model '${MODEL_NAME}' generates text — inference works."
+        smoke_tested=true
+      else
+        warn "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
+        setup_ok=false
+      fi
     fi
   else
     warn "Ollama is not reachable — skipping model pull and smoke test (re-run ${SCRIPT_DIR}/setup.sh once Ollama runs)."
@@ -165,6 +212,10 @@ main() {
   # returns the matching status, and because this is main's last command that
   # becomes setup.sh's exit code — which is what deploy/do-user-data.sh and
   # update.sh branch on.
+  #
+  # Set first, so the EXIT trap does not print a second, contradictory verdict
+  # underneath this one when setup_ok is false.
+  VERDICT_PRINTED=true
   setup_verdict "${setup_ok}"
 }
 

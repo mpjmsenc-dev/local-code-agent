@@ -2510,6 +2510,56 @@ setup_uses_verdict() {
   ! grep -qF 'SETUP FINISHED WITH ERRORS' "${REPO}/setup.sh"
 }
 check "setup.sh reports through setup_verdict" setup_uses_verdict
+
+# ...on EVERY failing exit, not only the orderly one at the end of main.
+#
+# Three things read setup.sh's output rather than its status: do-user-data.sh
+# promises the log "always ends with exactly one of three lines" and then says
+# "its verdict line is above"; docs/YOUR-TURN.md step 2 tells the user to watch
+# for one of two lines; and motd.sh's install_state greps for them. A die() —
+# or any of the nine installer scripts main runs bare under 'set -e' — printed
+# none of the three. Measured on a log ending in "Model pull failed": with the
+# verdict line install_state says 'failed'; without it, 'running' for fifteen
+# minutes and 'stalled' after that, so the banner told someone whose install
+# was over that it was still going.
+#
+# Driven, not grepped. The bug is about an exit path nobody wrote code for, and
+# a scan for the word 'trap' would pass on a trap that fires on the wrong
+# statuses. So: run the real setup.sh in a throwaway copy of the repo whose
+# first installer is stubbed to fail. Nothing here needs root or a network —
+# setup.sh dies at that stub, three steps in.
+SETUP_SB="${SANDBOX}/setupfail"
+mkdir -p "${SETUP_SB}/scripts"
+cp "${REPO}/setup.sh" "${SETUP_SB}/setup.sh"
+cp "${REPO}/scripts/lib.sh" "${SETUP_SB}/scripts/lib.sh"
+cp "${REPO}/.env.example" "${SETUP_SB}/.env.example"
+printf '#!/usr/bin/env bash\nexit 9\n' > "${SETUP_SB}/scripts/install_dependencies.sh"
+chmod +x "${SETUP_SB}/setup.sh" "${SETUP_SB}/scripts/install_dependencies.sh"
+setup_fail_rc=0
+setup_fail_out="$(cd "${SETUP_SB}" && ./setup.sh </dev/null 2>&1)" || setup_fail_rc=$?
+setup_help_rc=0
+setup_help_out="$(cd "${SETUP_SB}" && ./setup.sh --help </dev/null 2>&1)" || setup_help_rc=$?
+
+failing_setup_prints_verdict() {
+  grep -qF 'SETUP FINISHED WITH ERRORS' <<<"${setup_fail_out}" || {
+    printf 'setup.sh died with no verdict line. Its output was:\n%s\n' \
+      "${setup_fail_out}" >&2
+    return 1
+  }
+}
+# The status is half the contract: do-user-data.sh and update.sh branch on it,
+# and a trap that swallowed the installer's code would report a generic 1 for a
+# specific failure.
+failing_setup_keeps_status() { [[ "${setup_fail_rc}" == "9" ]]; }
+# Never a verdict on a run that did nothing. '--help' exits 0 before the first
+# side effect, and a trap firing there would write SETUP FINISHED WITH ERRORS
+# into the log of a machine nobody had installed yet.
+help_prints_no_verdict() {
+  [[ "${setup_help_rc}" == "0" ]] && ! grep -qF 'SETUP ' <<<"${setup_help_out}"
+}
+check "a failing setup still prints its verdict"  failing_setup_prints_verdict
+check "a failing setup keeps its exit status"     failing_setup_keeps_status
+check "setup.sh --help prints no verdict"         help_prints_no_verdict
 # update.sh takes a backup specifically so it can be restored when the update
 # goes wrong. Dying bare under 'set -e' would never mention it.
 # Scoped to the "Re-running setup" section and stopped at the next step: the
