@@ -13,6 +13,13 @@
 #   tutorial     the FAILURE: a doomed multi-file setup walkthrough
 #   hijack       the OTHER failure: the handover fired on a question that
 #                should simply have been answered
+#   tool-call    the THIRD failure, reported from a real phone: instead of
+#                answering, the model emits a function-call envelope —
+#                {"name": ..., "arguments": {...}} — which Open WebUI renders
+#                as a JSON block and which does nothing whatsoever. The prompt
+#                has told it "You have NO tools" since 2026-08-03; this is
+#                whether the model listens. Nothing here could see it before,
+#                so a prompt change could not be judged against it.
 #
 # Sampling matters. Generation is stochastic, so one run proves nothing and
 # small differences at N=3 are noise — a 2-in-3 "regression" here measured
@@ -119,6 +126,16 @@ ask() {
 # used while developing this quietly missed "run lca in your project" — so
 # every rate it reported was a floor. A doomed tutorial has one shape.
 hands_over()  { grep -qE '(^|[^a-z])lca([^a-z ]|$)|&& lca$' <<<"$1"; }
+# Matched on the ENVELOPE, not on the word "tool": an answer may legitimately
+# discuss tools, and a small model's failure is structural — either qwen's own
+# <tool_call> tags, or the OpenAI-shaped object carrying both a name and its
+# arguments. Requiring both keys keeps a code sample that merely prints
+# "arguments" from counting.
+tool_called() {
+  grep -q '<tool_call>' <<<"$1" && return 0
+  grep -q '"tool_calls"' <<<"$1" && return 0
+  grep -q '"name"' <<<"$1" && grep -q '"arguments"' <<<"$1"
+}
 says_where()  { grep -qiE 'terminal|ssh|on (your|the|this) server' <<<"$1"; }
 hijacked()    { grep -qE 'mkdir -p [^&]*&&|cd [^&]*&& *lca' <<<"$1"; }
 is_tutorial() {
@@ -133,7 +150,7 @@ is_tutorial() {
 
 bench() {
   local label="$1" question="$2" i out
-  local over=0 where=0 tut=0 hij=0
+  local over=0 where=0 tut=0 hij=0 tool=0
   for (( i = 0; i < SAMPLES; i++ )); do
     out="$(ask "${question}" "$(( 1000 + i ))" || true)"
     if [[ -z "${out}" ]]; then
@@ -144,10 +161,11 @@ bench() {
     says_where  "${out}" && where=$(( where + 1 ))
     is_tutorial "${out}" && tut=$(( tut + 1 ))
     hijacked    "${out}" && hij=$(( hij + 1 ))
+    tool_called "${out}" && tool=$(( tool + 1 ))
   done
-  printf '  %-8s hands over %s/%s   says where %s/%s   tutorial %s/%s   handover-fired %s/%s\n' \
+  printf '  %-8s hands over %s/%s   says where %s/%s   tutorial %s/%s   handover-fired %s/%s   tool-call %s/%s\n' \
     "${label}" "${over}" "${SAMPLES}" "${where}" "${SAMPLES}" \
-    "${tut}" "${SAMPLES}" "${hij}" "${SAMPLES}"
+    "${tut}" "${SAMPLES}" "${hij}" "${SAMPLES}" "${tool}" "${SAMPLES}"
 }
 
 main() {
@@ -164,10 +182,10 @@ main() {
   info "This asks the model $(( SAMPLES * 3 )) times; on a CPU box that is minutes, not seconds."
   echo
 
-  ok "WANTED: 'build' hands over and says where; tutorial stays 0"
+  ok "WANTED: 'build' hands over and says where; tutorial and tool-call stay 0"
   bench build "${BENCH_BUILD}"
   echo
-  ok "WANTED: these answer the question — 'handover-fired' must stay 0"
+  ok "WANTED: these answer the question — 'handover-fired' and 'tool-call' must stay 0"
   bench backup  "${BENCH_BACKUP}"
   bench explain "${BENCH_EXPLAIN}"
   echo
