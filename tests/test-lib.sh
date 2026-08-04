@@ -594,6 +594,42 @@ check "model not resident -> unknown"     gpu_is unknown   true  true  ""
 # plainly working.
 check "driver works though lspci sees nothing -> classified by placement" \
   gpu_is active false true "100% GPU"
+# The case that actually bit. Ollama 0.32.5 prints a CPU/GPU split on a machine
+# with NO card: measured on a host with no /dev/dri, no display device and no
+# nvidia-smi, 'qwen2.5-coder:7b  5.1 GB  13%/87% CPU/GPU', running at 5.3
+# tokens/second — CPU speed for 7b there. classify_gpu has always answered this
+# correctly; both reporters decided from the string instead and told the reader
+# to size a model to VRAM that does not exist.
+check "no card, no driver, but ollama prints a split -> still none" \
+  gpu_is none false false "13%/87% CPU/GPU"
+check "no card, no driver, and ollama says GPU -> still none" \
+  gpu_is none false false "100% GPU"
+# ...and both reporters must ASK it rather than reading the string themselves.
+# gpu_state_for_placement is classify_gpu plus this machine's card and driver,
+# taking a placement the caller has already read — so one 'ollama ps' each, and
+# the string a message quotes is the one that was classified.
+check_classifies_the_placement() {
+  awk '/^[[:space:]]*#/ { next }
+       /gpu_state_for_placement/ { seen = NR }
+       /only partially on the GPU/ {
+         if (seen == 0 || NR - seen > 20) { print "unclassified GPU verdict at line " NR; bad = 1 }
+         found = 1
+       }
+       END { exit (bad || !found || !seen) }' "${REPO}/check-system.sh"
+}
+check "'lca check' classifies placement instead of matching the string" \
+  check_classifies_the_placement
+speed_classifies_the_placement() {
+  awk '/^[[:space:]]*#/ { next }
+       /gpu_state_for_placement/ { seen = NR }
+       /where="(split|gpu)"/ {
+         if (seen == 0 || NR - seen > 6) { print "unclassified placement at line " NR; bad = 1 }
+         found = 1
+       }
+       END { exit (bad || !found || !seen) }' "${REPO}/scripts/speed.sh"
+}
+check "'lca speed' classifies placement instead of matching the string" \
+  speed_classifies_the_placement
 
 echo "# vram_mib_from_smi() — picks the LARGEST card, not the first"
 smi_gives() { test "$(printf '%s\n' "$2" | vram_mib_from_smi)" = "$1"; }

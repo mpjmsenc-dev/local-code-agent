@@ -663,12 +663,38 @@ classify_gpu() {
   esac
 }
 
-# gpu_state — classify_gpu against this machine.
-gpu_state() {
+# gpu_state_for_placement PLACEMENT — classify_gpu against this machine, for a
+# placement string the caller has ALREADY read out of 'ollama ps'.
+#
+# Both reporters used to read that string themselves and then decide what it
+# meant from its shape alone: "it contains a slash, therefore the model is
+# split across CPU and GPU". On a machine with no NVIDIA card that is a
+# conclusion about a device which does not exist — and Ollama 0.32.5 prints
+# exactly that string on a CPU-only box. Measured here, on a host with no
+# /dev/dri, no display device and no nvidia-smi:
+#
+#   qwen2.5-coder:7b   5.1 GB   13%/87% CPU/GPU   4096
+#
+# at 5.3 tokens/second, which is CPU speed for 7b on this machine and matches
+# docs/PERFORMANCE.md's CPU-only figure. 'lca check' printed "no NVIDIA GPU —
+# CPU inference" and then, three lines later, told the reader their model was
+# "only partially on the GPU" and to pick one that fits their VRAM. 'lca speed'
+# said the same. classify_gpu has always got this right — it refuses to reach
+# the placement branches without a card AND a driver — and neither caller
+# asked it.
+#
+# Taking the placement as an argument keeps each caller to one 'ollama ps', and
+# means the string a message quotes is the same one that was classified.
+gpu_state_for_placement() {
   local card=false driver=false
   gpu_hardware_present && card=true
   have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && driver=true
-  classify_gpu "${card}" "${driver}" "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
+  classify_gpu "${card}" "${driver}" "${1:-}"
+}
+
+# gpu_state — the same, reading the placement for MODEL itself.
+gpu_state() {
+  gpu_state_for_placement "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
 }
 
 # largest_model_for_vram VRAM_MIB — the biggest parameter count that fits

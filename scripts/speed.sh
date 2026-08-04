@@ -118,13 +118,19 @@ main() {
 
   # Placement is the single biggest determinant of what "normal" means here, so
   # everything below is interpreted through it.
+  # Classified against the hardware, not off the string. "It contains a slash,
+  # therefore split across CPU and GPU" is a statement about a card, and this
+  # asked no question about whether one exists — so on a CPU-only box, where
+  # Ollama 0.32.5 prints "13%/87% CPU/GPU", the verdict below told the reader
+  # their model was partly offloaded and offered to size one to their VRAM.
+  # Measured here at 5.3 tokens/second on 7b: plain CPU inference.
   local placement="" where="cpu"
   placement="$(ollama_processor "${MODEL_NAME}" 2>/dev/null || true)"
-  if [[ "${placement}" == *"/"* ]]; then
-    where="split"
-  elif [[ "${placement}" == *GPU* ]]; then
-    where="gpu"
-  fi
+  case "$(gpu_state_for_placement "${placement}")" in
+    split)  where="split" ;;
+    active) where="gpu" ;;
+    *)      where="cpu" ;;
+  esac
 
   step "Results"
   printf '  generation      %s tokens/second\n' "${tps}"
@@ -138,6 +144,12 @@ main() {
       "${load_s}" "${OLLAMA_KEEP_ALIVE:-30m}"
   fi
   printf '  running on      %s\n' "${placement:-unknown (model not resident — run again)}"
+  # Ollama's own words, quoted verbatim above — and on a machine with no card
+  # they name a device that is not there. Say so on the line below rather than
+  # leaving the reader to reconcile "87% GPU" with a CPU verdict further down.
+  if [[ "${where}" == "cpu" && "${placement}" == *GPU* ]]; then
+    printf '                  (no NVIDIA GPU on this machine — that is Ollama'"'"'s own memory split, not a card)\n'
+  fi
 
   # On CPU, generation is memory-bandwidth bound: every token reads the whole
   # model out of RAM. Reporting the implied bandwidth turns an abstract

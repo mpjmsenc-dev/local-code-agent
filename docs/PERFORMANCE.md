@@ -129,6 +129,20 @@ lca speed --tokens 200     # longer sample, steadier number
 ollama ps                  # raw PROCESSOR column, if you want to see it yourself
 ```
 
+### `ollama ps` can say "GPU" on a machine that has none
+
+On a CPU-only box, Ollama 0.32.5 will happily print a `PROCESSOR` column like
+`13%/87% CPU/GPU`. Measured on a host with no `/dev/dri`, no display device and
+no `nvidia-smi`, at 5.3 tokens/second on 7B — exactly CPU speed. The percentages
+are Ollama's own accounting for memory it manages; they are not evidence of a
+card.
+
+`lca check` and `lca speed` therefore classify placement against the hardware
+and not against that string. On a machine with no usable NVIDIA GPU they say so
+plainly and skip the VRAM advice, which would otherwise be a recommendation to
+size a model against a device that is not there. If you see the raw split in
+`ollama ps` on a droplet, that is the explanation.
+
 Run `lca speed` before and after a change. It prints the delta against your
 last run, and ignores swings under 10% because back-to-back runs on the same
 machine vary by a few percent anyway. A change you cannot measure is not an
