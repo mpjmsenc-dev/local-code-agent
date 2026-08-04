@@ -14,6 +14,11 @@ FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
 
+# What every render-* must put on its first line, and nothing may precede.
+# Shared, so the purity check inside render_with_env and the one applied to the
+# two renders below cannot drift apart.
+NFT_SHEBANG='#!/usr/sbin/nft -f'
+
 RULES="$(mktemp)"
 INBOUND="$(mktemp)"
 trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}"' EXIT
@@ -51,6 +56,17 @@ render_with_env() {
   # here, once, so every caller inherits the check.
   if [[ -z "${rendered}" ]]; then
     t_fail "render_with_env produced nothing — 'netmode.sh render-inbound' failed for this .env, so the assertions below would pass on an empty string"
+  # Stdout purity, here and not only on the two default renders below.
+  #
+  # These are the renders with an UNUSUAL .env, so they are the ones that make
+  # netmode.sh say something: WEBUI_PORT=22 takes the refusal branch, which
+  # warns. That warning goes to stderr precisely so the ruleset on stdout stays
+  # byte-clean for nft — and this function discards stderr, so nothing else in
+  # the suite could tell if it moved. Every assertion downstream is a grep,
+  # which a prepended line does not disturb; nft is not so forgiving, and the
+  # boot service re-renders this file on every reboot.
+  elif [[ "$(head -1 <<<"${rendered}")" != "${NFT_SHEBANG}" ]]; then
+    t_fail "render_with_env: stdout is not pure nft syntax — first line is '$(head -1 <<<"${rendered}")', not '${NFT_SHEBANG}'"
   fi
   printf '%s\n' "${rendered}"
 }
@@ -66,7 +82,7 @@ echo "# stdout purity: render-* must emit nft syntax and nothing else"
 # (CI caught load_env's '[info] Created .env' notice leaking into the rules
 # on a fresh checkout — this guards against any such stdout contamination.)
 shebang_ok() {  # desc file
-  if [[ "$(head -1 "$2")" == "#!/usr/sbin/nft -f" ]]; then
+  if [[ "$(head -1 "$2")" == "${NFT_SHEBANG}" ]]; then
     t_ok "$1"
   else
     t_fail "$1 (got: $(head -1 "$2"))"
