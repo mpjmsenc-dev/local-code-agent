@@ -35,7 +35,7 @@ main() {
 
   have git || die "git is not installed — cannot update."
   [[ -d "${SCRIPT_DIR}/.git" ]] \
-    || die "${SCRIPT_DIR} is not a git checkout, so there is nothing to update from. Re-install with install.sh if you unpacked a tarball."
+    || die "${SCRIPT_DIR} is not a git checkout, so there is nothing to update from. If you unpacked a tarball, re-install over it with the one-liner from the README: curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash"
 
   step "Checking for updates"
   local branch

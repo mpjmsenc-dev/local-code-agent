@@ -59,7 +59,7 @@ if ensure_ollama_up 60; then
   p_pass "Ollama API answering at $(ollama_url)"
   ollama_reachable=true
 else
-  p_fail "Ollama API not reachable at $(ollama_url) — try: sudo systemctl restart ollama (see check-system.sh)"
+  p_fail "Ollama API not reachable at $(ollama_url) — try: sudo systemctl restart ollama (see: lca check)"
   ollama_reachable=false
 fi
 

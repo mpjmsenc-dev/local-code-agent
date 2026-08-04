@@ -97,7 +97,7 @@ choose_for_ram() {
   # first use is the worst outcome; fall back to a family that does fit and say
   # so, rather than honouring MODEL_FAMILY into a wall.
   if ! model_fits_ram "${fam}:${small}" "${ram}"; then
-    warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with update-model.sh if you have the RAM."
+    warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with 'lca model <name>' if you have the RAM."
     fam="qwen2.5-coder"
     read -r small mid big <<<"$(family_sizes "${fam}")"
   fi
@@ -118,7 +118,7 @@ choose_for_ram() {
 
 install_service() {
   if ! systemd_available; then
-    warn "systemd is not available here — skipping the on-boot auto-tune service. Run tune.sh manually after spec changes."
+    warn "systemd is not available here — skipping the on-boot auto-tune service. Run 'lca tune' manually after spec changes."
     return 0
   fi
   info "Installing on-boot auto-tune service (${TUNE_SERVICE})..."
@@ -156,7 +156,7 @@ main() {
       exit 0
       ;;
     *)
-      die "Usage: tune.sh [--dry-run|--install-service]"
+      die "Unknown option: ${1} — usage: lca tune [--dry-run]  (see: lca tune --help)"
       ;;
   esac
 
@@ -233,10 +233,10 @@ main() {
       # instead of dying with a systemctl hint that cannot work here.
       set_env_var MODEL_NAME "${TUNE_MODEL}"
       set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
-      warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run tune.sh to apply."
+      warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run 'lca tune' to apply."
       exit 0
     fi
-    die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then re-run tune.sh."
+    die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then re-run 'lca tune'."
   fi
 
   # Nothing is persisted to .env or applied to the service until AFTER the
@@ -256,7 +256,7 @@ main() {
         warn "netmode is OFFLINE — cannot pull ${TUNE_MODEL}; using already-downloaded ${chosen_model} for this RAM tier."
       else
         chosen_model="${MODEL_NAME}"
-        warn "netmode is OFFLINE and no fitting model is downloaded — will lower context to ${TUNE_CTX} but keep ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then tune.sh to finish."
+        warn "netmode is OFFLINE and no fitting model is downloaded — will lower context to ${TUNE_CTX} but keep ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then 'lca tune' to finish."
       fi
     else
       # Online: try for the ideal model. A persistent failure falls back to

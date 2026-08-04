@@ -52,8 +52,8 @@ list_recommended() {
     if have ollama && model_present "${pick}"; then note="  (already downloaded)"; fi
     printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
   done
-  info "Switch with:  update-model.sh <model>   (pins it, disables auto-tune)"
-  info "Or keep auto-tune and set MODEL_FAMILY=<family> in .env, then: ${SCRIPT_DIR}/scripts/tune.sh"
+  info "Switch with:  lca model <model>   (pins it, disables auto-tune)"
+  info "Or keep auto-tune and set MODEL_FAMILY=<family> in .env, then: lca tune"
 }
 
 main() {

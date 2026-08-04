@@ -176,7 +176,7 @@ main() {
         if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
           die "No /health answer on port ${WEBUI_PORT} — because the running container is on ${live_port} (see the port drift above). Re-create it with: ${SCRIPT_DIR}/scripts/install_webui.sh"
         fi
-        warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: webui.sh logs)"
+        warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: lca webui logs)"
         exit 1
       fi
       ;;

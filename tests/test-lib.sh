@@ -3219,6 +3219,21 @@ advice_paths_are_absolute() {
     printf 'these name a path that only resolves inside the checkout:\n%s\n' "${hits}" >&2
     return 1
   }
+  # A bare script name is the same defect wearing no prefix. 'lca model
+  # --list-recommended' answered "Switch with:  update-model.sh <model>",
+  # which matches neither './' nor 'scripts/' and so read as ordinary prose to
+  # the scan above — while being a command, for a file that is not on PATH and
+  # not in the reader's directory. Only imperative phrasings count: "setup.sh
+  # will pull ${MODEL}" describes what happens and is not an instruction.
+  hits="$(grep -nE '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh 2>/dev/null \
+          | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
+          | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g' \
+          | grep -oiE "(run|re-run|check|try|with|usage)['\":]? +[a-z][a-z_-]*\.sh" || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these tell the reader to run a bare script name:\n%s\n' "${hits}" >&2
+    return 1
+  }
   # Usage text is advice too, and it is not written with a message helper —
   # webui.sh's ended with "run: scripts/install_webui.sh" and slipped straight
   # past the scan above. Scoped to what 'lca' dispatches to, because that is
