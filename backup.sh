@@ -32,6 +32,12 @@ do_backup() {
   workdir="$(mktemp -d)"
   trap 'rm -rf "${workdir:-}"' EXIT
   mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
+  # Owner-only. Every archive in here holds the Open WebUI database — account
+  # password hashes and the JWT signing key that mints valid sessions — plus a
+  # copy of .env. It was 755, holding 644 files, so any other login on the box
+  # could read all of it. Applied to an existing directory too, since the ones
+  # already out there were created wide open.
+  chmod 700 "${BACKUP_DIR}" 2>/dev/null || true
   # The timer runs backup.sh as root. If root created backups/ first, a later
   # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
   # and set -e would abort with no explanation — say what's wrong instead.
@@ -157,10 +163,17 @@ do_backup() {
   # file then becomes the newest tarball in backups/ — which is precisely what
   # restore.sh picks by default. Remove it so a broken archive can never be
   # restored over good data.
+  # umask, not a chmod after the fact: tar creates the file the moment it
+  # starts, so a chmod afterwards leaves the whole write world-readable and
+  # only closes it once the secrets are already on disk.
+  local prev_umask; prev_umask="$(umask)"
+  umask 077
   if ! tar czf "${tarball}" -C "${workdir}" .; then
+    umask "${prev_umask}"
     rm -f "${tarball}"
     die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
   fi
+  umask "${prev_umask}"
   # Only needed when root created the file (the timer runs as root). Guard with
   # can_root: for an unprivileged user without sudo the file is already theirs,
   # and an unguarded as_root would die() here — aborting a backup that had
@@ -251,6 +264,7 @@ install_timer() {
   # created it first it would be root-owned, and every later non-root
   # './backup.sh' would fail on tar with a permission error.
   as_root mkdir -p "${BACKUP_DIR}"
+  as_root chmod 700 "${BACKUP_DIR}"
   as_root chown "${SUDO_USER:-$(id -un)}" "${BACKUP_DIR}" 2>/dev/null || true
   {
     echo "[Unit]"

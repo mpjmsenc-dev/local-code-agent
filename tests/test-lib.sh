@@ -3416,6 +3416,46 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# backups hold the session-signing key, so they cannot be world-readable"
+# Every archive contains the Open WebUI database — account password hashes and
+# the JWT signing key, which mints valid sessions for any account — plus a copy
+# of .env. On this box they were found as -rw-r--r-- inside a drwxr-xr-x
+# backups/, so any other login could read all of it. The directory permission
+# is what actually gates access; the umask is defence in depth on the file.
+umask_really_gives_owner_only() {
+  local f="${SANDBOX}/umask.probe" mode
+  ( umask 077; : > "${f}" )
+  mode="$(stat -c '%a' "${f}")"; rm -f "${f}"
+  [[ "${mode}" == 600 ]]
+}
+check "umask 077 produces a 600 file" umask_really_gives_owner_only
+backup_is_not_world_readable() {
+  local body
+  # Scoped to do_backup, not a whole-file grep. install_timer also chmods the
+  # directory, and the first version of this check was satisfied by that one
+  # alone — deleting the chmod from do_backup, which is the one that runs on
+  # every single backup, passed a full green suite. Proved by mutation, which
+  # is the only reason it was noticed.
+  awk '/^do_backup\(\) \{/            { inb = 1; next }
+       inb && /^\}/                   { exit }
+       inb && /^[[:space:]]*#/        { next }
+       inb && /chmod 700 "\$\{BACKUP_DIR\}"/ { found = 1 }
+       END { exit !found }' "${REPO}/backup.sh" || {
+    echo 'do_backup does not restrict backups/ to its owner' >&2; return 1; }
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/backup.sh")"
+  (( $(grep -c 'chmod 700 "[$]{BACKUP_DIR}"' <<<"${body}") >= 2 )) || {
+    echo 'the timer install no longer restricts backups/ either' >&2; return 1; }
+  # umask BEFORE the tar, not a chmod after it: tar creates the file the moment
+  # it starts, so a later chmod only closes it once the secrets are on disk.
+  awk '/^[[:space:]]*#/ { next }
+       /umask 077/       { if (!tarred) umasked = NR }
+       /tar czf .*tarball/ { tarred = NR }
+       END { exit !(umasked && tarred && umasked < tarred) }' "${REPO}/backup.sh" || {
+    echo 'backup.sh writes the tarball before narrowing the umask' >&2; return 1; }
+}
+check "backup.sh keeps backups/ and new archives owner-only" \
+  backup_is_not_world_readable
+
 echo "# a backup must not leave the chat app frozen for the next one to inherit"
 # backup.sh pauses the WebUI container so the SQLite snapshot is consistent,
 # with an EXIT trap to guarantee the unpause. A signal the trap cannot catch
