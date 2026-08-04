@@ -255,7 +255,8 @@ an interrupted install often leaves a perfectly working stack behind. So:
 | `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run it: `cd /opt/local-code-agent && sudo ./setup.sh`. |
 | `the install did NOT finish` | The log reached an explicit failure verdict. Start with `lca logs setup`. |
 | `installed, but the model engine is not running` | Ollama is not answering. `lca check`, then `lca logs ollama`. |
-| `ready` | Ollama answered. This wins over anything the log says. |
+| `engine running, but model … is NOT downloaded` | Ollama answers, but the model in `.env` is not on disk — so nothing can reply yet. It is a download, not a fault: `sudo /opt/local-code-agent/setup.sh` finishes it. |
+| `ready · model …` | Ollama answered **and** the model is there. This wins over anything the log says. |
 
 Not seeing a banner at all? `lca check` reports whether it is installed, and
 `sudo /opt/local-code-agent/scripts/motd.sh --install` puts it back. Systems

@@ -2969,6 +2969,39 @@ motd_markers_are_real() {
 }
 check "every marker motd.sh matches on is really printed" motd_markers_are_real
 
+# ...and every state the banner can PRINT must be in the table that explains
+# them. docs/TROUBLESHOOTING.md lists what each banner means, by hand, and
+# adding "engine running, but model X is NOT downloaded" to motd.sh left that
+# table describing six states out of seven — with its 'ready' row still saying
+# "Ollama answered. This wins over anything the log says", which had stopped
+# being the whole rule.
+#
+# The list is read out of motd.sh, so the next state is covered without editing
+# this. Each headline is cut at the first expansion, bracket or dash, which is
+# the part that stays constant, and whitespace is normalised because the banner
+# pads for alignment and prose does not.
+banner_states_are_documented() {
+  local doc line stable bad=0
+  doc="$(tr -s '[:space:]' ' ' < "${REPO}/docs/TROUBLESHOOTING.md")"
+  while IFS= read -r line; do
+    stable="${line%%\$\{*}"
+    stable="${stable%%(*}"
+    stable="${stable%%—*}"
+    stable="$(tr -s '[:space:]' ' ' <<<"${stable}")"
+    stable="${stable# }"; stable="${stable% }"
+    [[ -n "${stable}" ]] || continue
+    grep -qF -- "${stable}" <<<"${doc}" || {
+      printf 'the banner can print "%s" but TROUBLESHOOTING.md does not explain it\n' \
+        "${stable}" >&2
+      bad=1
+    }
+  done < <(grep -oE 'headline "[^"]*"' "${REPO}/scripts/motd.sh" \
+             | sed -E 's/^headline "//; s/"$//' | sort -u)
+  return "${bad}"
+}
+check "every banner state is explained in TROUBLESHOOTING.md" \
+  banner_states_are_documented
+
 # do-user-data.sh runs before the clone exists, so it cannot source lib.sh and
 # keeps its own copy of the log path. If the two drift, the banner watches a
 # file the installer never writes and reports 'none' during every install.
