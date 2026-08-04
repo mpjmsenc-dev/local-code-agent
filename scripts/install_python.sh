@@ -9,13 +9,24 @@ source "${SCRIPT_DIR}/lib.sh"
 load_env
 
 # pip_install ARGS... — run venv pip, retrying once (PyPI can be flaky).
+#
+# '$(venv_python) -m pip', not "${venv}/bin/pip". Two reasons, and the comment
+# in main() already states the first: venv_python() is meant to be the one
+# place that knows this layout, and building a sibling path by hand is how it
+# stops being that. The second is a real failure: a pip wrapper is a script
+# whose shebang holds the absolute interpreter path, and Linux truncates a
+# shebang at 127 characters — a checkout under a long enough path leaves
+# bin/pip with "bad interpreter: No such file or directory" while the
+# interpreter itself is perfectly fine. The version check in main() has always
+# used the '-m pip' form; only the two lines that actually installed anything
+# used the fragile one.
 pip_install() {
-  local venv
-  venv="$(venv_dir)"
-  if ! "${venv}/bin/pip" install --upgrade "$@"; then
+  local py
+  py="$(venv_python)"
+  if ! "${py}" -m pip install --upgrade "$@"; then
     warn "pip install $* failed — retrying once in 5 seconds..."
     sleep 5
-    "${venv}/bin/pip" install --upgrade "$@"
+    "${py}" -m pip install --upgrade "$@"
   fi
 }
 
@@ -67,7 +78,11 @@ main() {
   aider="$(aider_bin)"
   [[ -x "${aider}" ]] || die "aider binary not found at ${aider} after install."
   ok "aider installed: $("${aider}" --version)"
-  info "Run it from any project directory with: ${REPO_ROOT}/run-agent.sh"
+  # bin/lca, not run-agent.sh. This runs before setup.sh has put 'lca' on PATH,
+  # so the full path is right — but the WORD has to be the same one setup's
+  # next steps and the assistant's handover recipe both use, or the install
+  # teaches three names for one command before it has finished.
+  info "Run it from any project directory with: ${REPO_ROOT}/bin/lca"
 }
 
 main "$@"

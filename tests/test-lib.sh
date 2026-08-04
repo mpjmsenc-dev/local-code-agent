@@ -1106,25 +1106,39 @@ echo "# the venv interpreter's path must come from venv_python(), not be re-type
 # the shape that has bitten this repo repeatedly: the helper is the single
 # source of truth right up until the moment it is not, and then it is updated
 # while the hand-rolled copies quietly keep the old layout.
+#
+# The whole bin/ layout, not the interpreter alone. install_python.sh kept the
+# rule for python and broke it for pip — twice, in the two lines that actually
+# install anything — while the comment stating the rule sat four lines below.
+# And bin/pip is the worse one to hand-build: a pip wrapper is a script whose
+# shebang carries the absolute interpreter path, and Linux truncates a shebang
+# at 127 characters, so a checkout under a long enough path leaves bin/pip
+# reporting "bad interpreter" while the interpreter is fine. '$(venv_python)
+# -m pip' has neither problem, and the version check in that same file always
+# used it.
 venv_python_is_the_only_source() {
   local hits
-  # The needle is written '/bin/pyth[o]n' so this line does not match itself.
+  # Needles written with a bracketed letter so this line does not match itself.
   # A whole-file scan for a literal always finds the scanner — the same trap
   # that made the ci.yml gate flag its own explanatory comment, and that
   # tests/long-wait.awk hit before either. Excluding this file wholesale would
   # work and would also blind the check to the rest of it.
-  hits="$(grep -rn '/bin/pyth[o]n' --include='*.sh' --include='lca' \
+  #
+  # A line that goes THROUGH a helper is fine wherever it appears, which is
+  # both the definitions in lib.sh and the assertion about aider_bin above —
+  # so the exemption is "mentions the helper", not a list of blessed lines.
+  hits="$(grep -rnE '/bin/(pyth[o]n|p[i]p|aid[e]r)' --include='*.sh' --include='lca' \
             "${REPO}" 2>/dev/null \
             | grep -v '/\.venv/' \
-            | grep -v 'venv_python()' \
+            | grep -vE 'venv_python|aider_bin' \
             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
   [[ -z "${hits}" ]] || {
-    printf 'these build the venv interpreter path by hand instead of calling venv_python():\n%s\n' \
+    printf 'these build a path into the venv by hand instead of calling venv_python()/aider_bin():\n%s\n' \
       "${hits}" >&2
     return 1
   }
 }
-check "nothing re-types the venv interpreter path" venv_python_is_the_only_source
+check "nothing re-types a path into the venv" venv_python_is_the_only_source
 
 echo "# the README's privacy claim about the inbound guard must stay true"
 # README's "How your services are kept private" states the guard is re-applied
