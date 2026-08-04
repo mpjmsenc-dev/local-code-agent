@@ -2537,29 +2537,64 @@ readme_documents_every_command() {
 check "the README table documents every 'lca help' command" \
   readme_documents_every_command
 
-echo "# every setting in .env.example must be documented in the README"
+echo "# the README's settings table must match .env.example, both ways and with defaults"
 # Same class as the command table above. This one caught its own author:
 # SKIP_TAILSCALE was added to .env.example and lib.sh in an earlier change
 # tonight and never reached the README's settings table, so the only way to
 # discover it was to read .env.example — which is precisely what the table
 # exists to save people from.
 readme_documents_every_setting() {
-  local key bad=0 documented
+  local key bad=0 documented shipped want got
   # The backtick is built rather than written literally: a matched PAIR inside
   # single quotes reads to ShellCheck as a command substitution (SC2016).
   local bt; bt="$(printf '\140')"
-  documented="$(grep -oE "^\| ${bt}[A-Z_]+${bt}" "${REPO}/README.md" | tr -d "|${bt} " | sort -u)"
+  # Scoped to the '.env reference' section, not the whole file. The AUTO-TUNE
+  # section has its own table whose first column is also a backticked KEY —
+  # 'MODEL_FAMILY | small / mid / big' — so a whole-file read pairs a real
+  # setting with a default it never had. Harmless while only key NAMES were
+  # compared; not once the DEFAULT is read out of the row.
+  local section
+  section="$(sed -n "/^## ${bt}[.]env${bt} reference/,/^## Repository/p" "${REPO}/README.md")"
+  [[ -n "${section}" ]] || { echo "no '.env reference' section found in README.md" >&2; return 1; }
+  documented="$(grep -oE "^\| ${bt}[A-Z_]+${bt}" <<<"${section}" | tr -d "|${bt} " | sort -u)"
   [[ -n "${documented}" ]] || { echo "no settings table found in README.md" >&2; return 1; }
+  shipped="$(grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u)"
+  [[ -n "${shipped}" ]] || { echo "no settings found in .env.example" >&2; return 1; }
   while read -r key; do
     [[ -n "${key}" ]] || continue
     grep -qx -- "${key}" <<<"${documented}" || {
       printf '%s is in .env.example but missing from the README settings table\n' "${key}" >&2
       bad=1
     }
-  done < <(grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u)
+  done <<<"${shipped}"
+  # The other direction, which nothing checked. A row for a key that no longer
+  # exists is worse than a missing one: someone sets it, nothing happens, and
+  # the file that told them to do it is the project's own front page.
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qx -- "${key}" <<<"${shipped}" || {
+      printf '%s is in the README settings table but not in .env.example\n' "${key}" >&2
+      bad=1
+    }
+  done <<<"${documented}"
+  # ...and the DEFAULT each row states is a promise about behaviour, checked
+  # here against the value the file actually ships.
+  while IFS=$'\t' read -r key want; do
+    [[ -n "${key}" ]] || continue
+    want="${want#"${bt}"}"; want="${want%"${bt}"}"
+    [[ "${want}" == '*(empty)*' ]] && want=""
+    got="$(grep -E "^${key}=" "${REPO}/.env.example" | head -1 | cut -d= -f2-)"
+    [[ "${want}" == "${got}" ]] || {
+      printf 'README says %s defaults to [%s]; .env.example ships [%s]\n' \
+        "${key}" "${want}" "${got}" >&2
+      bad=1
+    }
+  done < <(grep -E "^\| ${bt}[A-Z_]+${bt}" <<<"${section}" \
+    | sed -E "s/^\| ${bt}([A-Z_]+)${bt} \| ([^|]*)\|.*/\1\t\2/" \
+    | sed 's/[[:space:]]*$//')
   return "${bad}"
 }
-check "the README documents every .env.example setting" \
+check "the README settings table matches .env.example, defaults included" \
   readme_documents_every_setting
 
 echo "# starter questions for the phone chat match Open WebUI's expected shape"
