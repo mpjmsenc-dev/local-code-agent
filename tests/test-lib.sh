@@ -3416,6 +3416,37 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# 'already tuned' has to mean the model is on disk, not named in .env"
+# tune.sh has two exits that write .env before anything is pulled — Ollama not
+# installed yet, and its API unreachable on a host with no systemd — and both
+# tell the reader to re-run tune. The fast path compared .env against the
+# ladder and nothing else, so that re-run said "Already tuned for this machine
+# ... Nothing to do" and fetched nothing. The script's own advice about itself
+# could not work, and the machine was left with .env naming a model that is not
+# there, which is what 'lca ask' and 'lca speed' then die on.
+#
+# Structural: reproducing it needs a real Ollama, a real pull and a real
+# interruption. The shape is the fix — both decisions have to consult the disk.
+tune_checks_the_model_is_downloaded() {
+  # 1. the fast path
+  awk '/^[[:space:]]*#/ { next }
+       /TUNE_MODEL.*==.*MODEL_NAME.*TUNE_CTX.*==.*OLLAMA_CONTEXT_LENGTH/ { fast = NR }
+       fast && NR >= fast && NR <= fast + 2 && /model_present/ { found = 1 }
+       END { exit !found }' "${REPO}/scripts/tune.sh" || {
+    echo 'tune.sh takes the "already tuned" fast path without checking the model is downloaded' >&2
+    return 1
+  }
+  # 2. the pull decision
+  awk '/^[[:space:]]*#/ { next }
+       /TUNE_MODEL.*!=.*MODEL_NAME.*\|\|.*model_present/ { found = 1 }
+       END { exit !found }' "${REPO}/scripts/tune.sh" || {
+    echo 'tune.sh only fetches when the model NAME changed, so a missing model is never pulled' >&2
+    return 1
+  }
+}
+check "tune.sh will not call a machine tuned when the model is missing" \
+  tune_checks_the_model_is_downloaded
+
 echo "# the README's family table must be the ladder the code actually walks"
 # MODEL_FAMILY is the one .env key whose entire purpose is "one line changes
 # the model everywhere", so its table is the interface. It promised

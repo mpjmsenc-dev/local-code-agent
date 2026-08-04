@@ -199,7 +199,15 @@ main() {
     exit 0
   fi
 
-  if [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+  # "Already tuned" has to mean the model is ON DISK, not merely named in .env.
+  # Two exits above write .env before anything is pulled — when Ollama is not
+  # installed yet, and when its API cannot be reached on a host without systemd
+  # — and both tell the reader to re-run tune. Trusting .env alone made that
+  # re-run answer "Already tuned ... Nothing to do" and fetch nothing, so the
+  # advice this script gives about itself could never work: .env names a model
+  # that is not there, and 'lca ask' and 'lca speed' then fail on it.
+  if [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]] \
+     && { ! have ollama || model_present "${MODEL_NAME}"; }; then
     # .env already matches the ladder — but an earlier run may have written
     # .env and then been interrupted before re-rendering the drop-in, leaving
     # the running service on stale settings that the .env-only check can't
@@ -244,8 +252,15 @@ main() {
   # the drop-in and the running service consistent — never a phantom context.
   local old_model="${MODEL_NAME}" old_ctx="${OLLAMA_CONTEXT_LENGTH}"
   local chosen_model="${TUNE_MODEL}" validate=false
-  if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
-    info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
+  # Not just "the name changed": a model that is already named in .env but
+  # missing from disk has to be fetched too, or the fast path above would be
+  # the only thing that could have pulled it — and it cannot.
+  if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]] || ! model_present "${TUNE_MODEL}"; then
+    if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
+      info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
+    else
+      info "'${TUNE_MODEL}' is the right model for this machine but is not downloaded — fetching it."
+    fi
     if model_present "${TUNE_MODEL}"; then
       validate=true
     elif [[ "$(netmode_state)" == "offline" ]]; then
