@@ -109,8 +109,29 @@ else
 fi
 
 echo "# OFFLINE also covers forwarded (docker-bridge) traffic"
+# Scoped to the forward chain. These read the WHOLE file, and the egress chain
+# emits the identical 'oifname "tailscale0" accept' — so deleting it from the
+# forward chain, which is what carries docker-bridge container traffic, left
+# this assertion passing on the egress copy. The one rule that keeps a
+# container reachable over Tailscale while offline was guarded by a grep that
+# could not tell the two chains apart.
+chain_block() {  # file chain-name
+  awk -v want="$2" '
+    $0 ~ ("chain " want " \\{") { inb = 1; next }
+    inb && /^  \}/               { exit }
+    inb                          { print }' "$1"
+}
+in_chain() {  # desc file chain needle
+  if grep -qF "$4" <<<"$(chain_block "$2" "$3")"; then
+    t_ok "$1"
+  else
+    t_fail "$1 — missing from the $3 chain: $4"
+  fi
+}
 contains "forward hook present"             "${RULES}" 'hook forward'
-contains "forward allows tailscale0"        "${RULES}" 'oifname "tailscale0" accept'
+in_chain  "forward allows tailscale0"       "${RULES}" forward 'oifname "tailscale0" accept'
+in_chain  "forward drops new connections"   "${RULES}" forward 'ct state new counter drop'
+in_chain  "egress still allows tailscale0"  "${RULES}" egress  'oifname "tailscale0" accept'
 
 echo "# INBOUND guard: private-only services, SSH untouched"
 contains "inbound input hook present"       "${INBOUND}" 'type filter hook input'
