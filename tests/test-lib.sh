@@ -3368,30 +3368,38 @@ echo "# a script that rewrites its own file must not let bash read on"
 # line would be read at that same stale offset and never run.
 self_rewriting_scripts_exit_explicitly() {
   local f rewriters=() last
-  for f in "${REPO}"/*.sh; do
-    if grep -qE 'git .*(merge --ff-only|reset --hard)' "${f}"; then
+  # deploy/ is in the search now, and so is 'pull --ff-only'. The first version
+  # looked only at "${REPO}"/*.sh for 'merge --ff-only|reset --hard', and missed
+  # deploy/do-user-data.sh on both counts: it lives one directory down, and it
+  # updates itself with 'git pull --ff-only'. Its last line is a pipeline, which
+  # makes no difference — measured: the replacement's tail runs just the same.
+  for f in "${REPO}"/*.sh "${REPO}"/deploy/*.sh; do
+    if grep -qE 'git .*(merge --ff-only|reset --hard|pull --ff-only)' "${f}"; then
       rewriters+=("${f}")
     fi
   done
   # Assert the search found something, so a regex that quietly stops matching
   # cannot pass as "nothing to check".
-  (( ${#rewriters[@]} >= 2 )) || {
-    printf 'expected install.sh and update.sh to be found, got %s\n' "${#rewriters[@]}" >&2
+  (( ${#rewriters[@]} >= 3 )) || {
+    printf 'expected install.sh, update.sh and do-user-data.sh, got %s\n' "${#rewriters[@]}" >&2
     return 1
   }
   for f in "${rewriters[@]}"; do
     last="$(tail -1 "${f}")"
-    # Exact, because SAME LINE is the entire property. An 'exit $?' on the
-    # next line satisfies "the file ends with an exit" and fixes nothing: that
-    # line is read at the stale offset too, and never runs. The first version
-    # of this check looked for the substring and passed on exactly that.
-    [[ "${last}" == 'main "$@"; exit $?' ]] || {
+    # The property is that the call and the exit come out of ONE parse, so the
+    # last line must both invoke main and END with the exit. An 'exit $?' on
+    # the next line satisfies "the file ends with an exit" and fixes nothing:
+    # that line is read at the stale offset too, and never runs. The first
+    # version of this check looked for the substring anywhere and passed on
+    # exactly that; the second demanded the literal 'main "$@"; exit $?', which
+    # was right until do-user-data.sh arrived invoking main through a pipeline.
+    [[ "${last}" == *main* && "${last}" == *'; exit $?' ]] || {
       printf '%s can replace itself mid-run but ends with: %s\n' "${f##*/}" "${last}" >&2
       return 1
     }
   done
 }
-check "install.sh and update.sh stop bash reading a file they replaced" \
+check "the self-rewriting scripts stop bash reading a file they replaced" \
   self_rewriting_scripts_exit_explicitly
 
 echo

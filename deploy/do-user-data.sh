@@ -106,4 +106,14 @@ main() {
 # 'if main | tee', because using main as an 'if' condition disables 'set -e'
 # inside it, which let a failing clone sail on and report success. Here set -e
 # stays active in main and pipefail carries main's status, not tee's.
-main 2>&1 | tee -a "${LOG_FILE}"
+#
+# 'exit $?' on the SAME line, as in install.sh and update.sh. This script is
+# documented as safe to re-run from ${INSTALL_DIR}, and re-running it does
+# 'git pull --ff-only' on the checkout it is being read from — so an update
+# that touches this file replaces it mid-run, and bash then reads whatever now
+# sits at its old byte offset. Measured with a stand-in: "SETUP COMPLETE"
+# printed, then a fragment of a comment executed and the script exited 127.
+# For a file whose stated purpose is to "always end with exactly one of three
+# lines", a trailing "command not found" and a false failure status is the
+# precise opposite.
+main 2>&1 | tee -a "${LOG_FILE}"; exit $?
