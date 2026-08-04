@@ -23,6 +23,32 @@ usage() {
   sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
 }
 
+# report_ollama_removal WAS_INSTALLED — say what actually happened, having
+# looked, rather than announcing the outcome the code hoped for.
+#
+# The line this replaces printed unconditionally. It said "Ollama removed
+# (including all downloaded models)" on a machine where Ollama was never
+# installed, and — worse — on one where it still is: the official installer
+# picks the first writable directory on PATH, so a host where /usr/local/bin
+# was not writable has the binary somewhere none of the rm's above name. Being
+# told the thing is gone when it still starts on every boot is the kind of
+# wrong that only surfaces months later.
+#
+# Its own function so all three answers can be exercised without uninstalling
+# anything — the same reason restore.sh's machine_advice is one.
+report_ollama_removal() {
+  # bash caches command locations; without this the check reports on a binary
+  # that was removed a few lines ago.
+  hash -r 2>/dev/null || true
+  if [[ "${1:-false}" != "true" ]]; then
+    info "Ollama was not installed here — nothing to remove."
+  elif have ollama; then
+    warn "Ollama is STILL on PATH at $(command -v ollama) — that copy lives somewhere this script does not manage (it removes /usr/local/bin/ollama, /usr/local/lib/ollama and /usr/share/ollama). Remove it yourself if you meant to; its models are still on disk."
+  else
+    ok "Ollama removed (including all downloaded models)."
+  fi
+}
+
 main() {
   local force=false keep_data=false arg
   for arg in "$@"; do
@@ -93,7 +119,18 @@ main() {
     fi
   fi
 
+  # Homes to clean. Under sudo, ${HOME} is root's while the files that matter
+  # were written by the human's own runs, so both are in scope. Computed here
+  # because two later steps need the same list.
+  local homes=( "${HOME:-/root}" ) sudo_home d
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    sudo_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "${sudo_home:-}" && "${sudo_home}" != "${HOME:-}" ]] && homes+=( "${sudo_home}" )
+  fi
+
   # 4. Ollama — service, drop-in, binary, libraries, models, user.
+  local ollama_was_installed=false
+  have ollama && ollama_was_installed=true
   if systemd_available; then
     as_root systemctl disable --now ollama >/dev/null 2>&1 || true
   fi
@@ -106,10 +143,22 @@ main() {
   if getent group ollama >/dev/null 2>&1; then
     as_root groupdel ollama 2>/dev/null || true
   fi
+  # Models live wherever the SERVER ran. Under systemd that is the 'ollama'
+  # system account, whose home (/usr/share/ollama) went with the line above.
+  # Without systemd — containers and WSL, where install_ollama.sh deliberately
+  # falls back to start_ollama_bg — the server runs as the invoking user and
+  # every blob lands in THEIR home instead. Nothing touched that, so the
+  # confirmation prompt promised "incl. ALL models" and then left the
+  # gigabytes behind on exactly the hosts this project supports specially.
+  for d in "${homes[@]}"; do
+    [[ -d "${d}/.ollama" ]] || continue
+    as_root rm -rf "${d}/.ollama"
+    ok "Removed ${d}/.ollama (where models go when Ollama runs without systemd)."
+  done
   if systemd_available; then
     as_root systemctl daemon-reload
   fi
-  ok "Ollama removed (including all downloaded models)."
+  report_ollama_removal "${ollama_was_installed}"
 
   # 5. Project virtualenv.
   local venv
@@ -147,17 +196,13 @@ main() {
   fi
 
   # 7. Generated state outside the repo: run-agent.sh writes an aider
-  # model-metadata file under ~/.cache. Under sudo, $HOME is root's, while the
-  # file was written by the human's own run — clean up both.
-  local cache_dirs=( "${HOME}/.cache/local-code-agent" ) sudo_home d
-  if [[ -n "${SUDO_USER:-}" ]]; then
-    sudo_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)"
-    [[ -n "${sudo_home:-}" ]] && cache_dirs+=( "${sudo_home}/.cache/local-code-agent" )
-  fi
-  for d in "${cache_dirs[@]}"; do
-    if [[ -d "${d}" ]]; then
-      rm -rf "${d}"
-      ok "Removed generated cache ${d}."
+  # model-metadata file under ~/.cache. Same two homes as the model blobs
+  # above, for the same reason — under sudo, ${HOME} is root's while the file
+  # was written by the human's own run.
+  for d in "${homes[@]}"; do
+    if [[ -d "${d}/.cache/local-code-agent" ]]; then
+      as_root rm -rf "${d}/.cache/local-code-agent"
+      ok "Removed generated cache ${d}/.cache/local-code-agent."
     fi
   done
 
@@ -166,4 +211,8 @@ main() {
   info "To finish completely:  sudo tailscale logout   and delete this directory:  ${REPO_ROOT}"
 }
 
-main "$@"
+# Sourceable so report_ollama_removal can be tested without uninstalling
+# anything — same pattern as restore.sh, scripts/apply.sh and scripts/tune.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

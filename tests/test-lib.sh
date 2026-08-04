@@ -766,6 +766,56 @@ every_installed_unit_is_removed() {
 check "uninstall.sh removes every systemd unit the installers create" \
   every_installed_unit_is_removed
 
+echo "# uninstall may not announce a removal it never checked"
+# "Ollama removed (including all downloaded models)" printed unconditionally.
+# It said that on a machine where Ollama was never installed, and on one where
+# it still is: the official installer picks the first WRITABLE directory on
+# PATH, so a host where /usr/local/bin was not writable keeps its binary
+# somewhere none of uninstall.sh's rm's name. The confirmation prompt the user
+# just answered says "incl. ALL models".
+#
+# Driven, not grepped — uninstall.sh is sourceable for exactly this, the way
+# restore.sh is for machine_advice. Each arm runs against a stubbed 'have'.
+uninstall_says() {  # want-substring was-installed have-ollama-after
+  local out
+  out="$(bash -c '
+    source "$1" >/dev/null 2>&1
+    if [[ "$3" == "yes" ]]; then have() { return 0; }; else have() { [[ "$1" != ollama ]]; }; fi
+    command() { printf /usr/bin/ollama; }
+    report_ollama_removal "$2" 2>&1' _ "${REPO}/uninstall.sh" "$2" "$3")"
+  grep -qF -- "$1" <<<"${out}" || {
+    printf 'report_ollama_removal was=%s still=%s printed: %s\n' "$2" "$3" "${out}" >&2
+    return 1
+  }
+}
+check "a real removal is announced as one" \
+  uninstall_says "Ollama removed (including all downloaded models)" true no
+check "a binary that survived is reported, not celebrated" \
+  uninstall_says "STILL on PATH" true yes
+still_makes_no_removal_claim() { ! uninstall_says "Ollama removed" true yes 2>/dev/null; }
+check "...and the removal line is withheld"    still_makes_no_removal_claim
+check "nothing installed means nothing removed" \
+  uninstall_says "was not installed here" false no
+
+# Models follow the SERVER, not the binary. Under systemd that is the 'ollama'
+# system account, whose home went with /usr/share/ollama. Without systemd —
+# containers and WSL, where install_ollama.sh deliberately falls back to
+# start_ollama_bg — the server runs as the invoking user and every blob lands
+# in THEIR home. Nothing removed that, so on the hosts this project supports
+# specially the prompt promised "incl. ALL models" and left the gigabytes.
+uninstall_clears_user_model_dirs() {
+  sed 's/#.*//' "${REPO}/uninstall.sh" | grep -qE 'rm -rf +"\$\{d\}/\.ollama"' || {
+    echo 'uninstall.sh leaves per-user model blobs (~/.ollama) on disk' >&2
+    return 1
+  }
+  # Both homes, not just the one sudo happens to expose.
+  sed 's/#.*//' "${REPO}/uninstall.sh" | grep -q 'SUDO_USER' || {
+    echo 'uninstall.sh only cleans the invoking home, not the human who sudo-ed' >&2
+    return 1
+  }
+}
+check "uninstall clears models pulled without systemd" uninstall_clears_user_model_dirs
+
 echo "# install.sh is piped into bash — a partial download must do nothing"
 # It is advertised as 'curl -fsSL ... | bash', which streams the file and runs
 # each statement as it arrives. A connection dropping part-way would otherwise
