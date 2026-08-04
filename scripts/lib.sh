@@ -55,6 +55,13 @@ SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
 # shellcheck disable=SC2034
 MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
 
+# The Open WebUI image, named once. Three scripts use it and only one owned
+# the string: install_webui.sh created the container with it, while backup.sh
+# and restore.sh hardcoded the same literal to borrow a tar binary next to the
+# volume. Pin or move that tag and two of the three would go on using the old
+# one — tarring a volume with a different image than the app runs.
+WEBUI_IMAGE="${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
+
 # ---------------------------------------------------------------------------
 # Colors — tput when stdout is a terminal, plain text when piped/redirected.
 # ---------------------------------------------------------------------------

@@ -123,9 +123,9 @@ main() {
       # The tar/untar helper needs the open-webui image; on a fresh machine
       # it isn't cached, so guard the implicit pull the way every other
       # download path does instead of dropping a raw registry error.
-      if ! as_root docker image inspect ghcr.io/open-webui/open-webui:main >/dev/null 2>&1; then
+      if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
         net_guard "Pulling the Open WebUI image (needed to restore the volume)"
-        as_root docker pull ghcr.io/open-webui/open-webui:main \
+        as_root docker pull "${WEBUI_IMAGE}" \
           || warn "Could not pull the Open WebUI image — the volume restore below may fail; re-run after 'sudo ${SCRIPT_DIR}/netmode.sh online' or once online."
       fi
       if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
@@ -150,7 +150,7 @@ main() {
       #   5 = the unpack failed AFTER the volume was emptied
       local vol_rc=0
       as_root docker run --rm --entrypoint sh -v open-webui:/to -v "${workdir}":/from:ro \
-          ghcr.io/open-webui/open-webui:main \
+          "${WEBUI_IMAGE}" \
           -c 'tar tzf /from/open-webui-volume.tar.gz >/dev/null || exit 3
               rm -rf /to/* || exit 4
               tar xzf /from/open-webui-volume.tar.gz -C /to || exit 5' \

@@ -395,6 +395,45 @@ check "archive missing a staged file is rejected" vb_rejects "${VB_PARTIAL}" "${
 : > "${SANDBOX}/empty.tar.gz"
 check "empty file is rejected"             vb_rejects "${SANDBOX}/empty.tar.gz" "${VB_STAGE}"
 
+echo "# the Open WebUI image is named once, and its pull is never implicit"
+# Three scripts use that image and only one owned the string: install_webui.sh
+# created the container with it, while backup.sh and restore.sh hardcoded the
+# same literal to borrow a tar binary next to the volume. Pin or move the tag
+# and two of the three would go on tarring with an image the app no longer
+# runs.
+image_is_named_once() {
+  local hits
+  hits="$(grep -rn --include='*.sh' 'ghcr.io/open-webui' "${REPO}" | grep -v '/tests/' || true)"
+  [[ -n "${hits}" ]] || {
+    echo "the image name is nowhere — this gate stopped watching" >&2
+    return 1
+  }
+  [[ "$(grep -c . <<<"${hits}")" == "1" ]] || {
+    printf 'the image literal appears more than once:\n%s\n' "${hits}" >&2
+    return 1
+  }
+  grep -q '/scripts/lib.sh:' <<<"${hits}" || {
+    printf 'the one definition is not in lib.sh:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "the Open WebUI image name lives in exactly one place" image_is_named_once
+# ...and neither script may reach 'docker run <image>' without having checked
+# the image is there. Docker pulls a missing one silently: several gigabytes,
+# and in backup.sh's case with the chat app frozen, during a command the user
+# expects to take seconds.
+image_pulls_are_never_implicit() {
+  local f bad=0
+  for f in backup.sh restore.sh; do
+    grep -qF -- 'docker image inspect' "${REPO}/${f}" || {
+      printf '%s runs the image without checking it is cached first\n' "${f}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "no script pulls gigabytes by accident" image_pulls_are_never_implicit
+
 echo "# every archive must be owner-only, not just the directory holding it"
 # The umask around tar makes NEW archives 0600. Ones written before that
 # existed are still 0644, and the 0700 directory is all that protects them —

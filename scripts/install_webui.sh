@@ -10,7 +10,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_env
 
-WEBUI_IMAGE="ghcr.io/open-webui/open-webui:main"
 
 main() {
   step "Installing Open WebUI"

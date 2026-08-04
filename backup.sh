@@ -75,6 +75,20 @@ do_backup() {
   if [[ "${data_state}" == "present" ]]; then
     webui_state="missed"   # promoted to "captured" only if the archive succeeds
     info "Archiving the 'open-webui' docker volume..."
+    # The helper image, checked BEFORE the pause below. The archive step runs
+    # 'docker run ${WEBUI_IMAGE}' purely to get a tar binary next to the
+    # volume, and docker pulls a missing image silently — several gigabytes,
+    # with the chat app FROZEN, during what the user asked for as a quick
+    # backup. It is normally cached (it is what the container runs), so this
+    # bites exactly where it hurts: after an image prune, or on a machine
+    # rebuilt from a backup. restore.sh has guarded the identical call since it
+    # was written; this one did not.
+    if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
+      warn "The ${WEBUI_IMAGE} image is not cached, and the volume is archived with the tar inside it — pulling it now (this is a download, not a hang)."
+      net_guard "Pulling the Open WebUI image (needed to archive the volume)"
+      as_root docker pull "${WEBUI_IMAGE}" \
+        || warn "Could not pull it — the archive step below will fail and this backup will keep older ones rather than prune them."
+    fi
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
     # while the container is writing yields a torn, possibly-corrupt snapshot
     # that only surfaces at restore time. Pause the container (freezes its
@@ -106,7 +120,7 @@ do_backup() {
       fi
     fi
     if as_root docker run --rm --entrypoint tar -v open-webui:/from:ro -v "${workdir}":/to \
-        ghcr.io/open-webui/open-webui:main \
+        "${WEBUI_IMAGE}" \
         czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
       webui_state="captured"
