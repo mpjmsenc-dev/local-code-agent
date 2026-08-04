@@ -2568,6 +2568,56 @@ missing_log_is_none() {
 }
 check "no log at all is 'none'" missing_log_is_none
 
+echo "# 'ready' has to mean a question can be answered, not that a port replies"
+# The banner's strongest word meant only that the Ollama API responded. An
+# engine with no model responds to /api/version perfectly and then fails every
+# question the very next banner line invites. Two things make that reachable:
+# setup no longer dies when the model pull fails — deliberately, so the rest of
+# the stack still installs — and a hand-installed box writes no first-boot log,
+# so install_state returns 'none' and this probe decides 'ready' alone.
+#
+# Asymmetric on purpose, and both directions are asserted. Only a positive
+# answer that does NOT list the model counts; no curl, no reply, or an
+# unparseable body is "could not tell". A banner that cried "not ready" on a
+# slow box at every login would be worse than one that says nothing.
+motd_missing() {  # stubbed /api/tags body -> "missing" | "no"
+  # The body goes through a variable, not through quick()'s own positional
+  # parameters: inside the stub "$3" is quick's third ARGUMENT (curl's URL),
+  # not the script's. Written that way first, and three of the five checks
+  # below passed on it — because a URL contains no '"models"' either.
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    MODEL_NAME=qwen2.5-coder:7b
+    BODY="$2"
+    if [[ "${BODY}" == "__fail__" ]]; then quick() { return 1; }
+    else quick() { printf "%s" "${BODY}"; }; fi
+    model_missing && echo missing || echo no' _ "${MOTD}" "$1" 2>/dev/null
+}
+missing_is() { [[ "$(motd_missing "$2")" == "$1" ]]; }
+check "a listed model is not reported missing" \
+  missing_is no      '{"models":[{"name":"qwen2.5-coder:7b"}]}'
+check "another model listed instead IS missing" \
+  missing_is missing '{"models":[{"name":"llama3.1:8b"}]}'
+check "an empty model list IS missing" \
+  missing_is missing '{"models":[]}'
+check "no answer is not evidence of missing" \
+  missing_is no      '__fail__'
+check "an unparseable answer is not evidence of missing" \
+  missing_is no      '<html>502 Bad Gateway</html>'
+# ...and the ready banner has to consult it, or the probe is decoration.
+ready_banner_asks_about_the_model() {
+  # Comments stripped: the note above banner_ready names the helper, and a
+  # whole-file grep would be satisfied by that alone.
+  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
+    | awk '/^banner_ready\(\) \{/ { inb = 1 }
+           inb && /model_missing/  { found = 1 }
+           inb && /^\}/            { exit }
+           END { exit !found }'
+}
+check "the ready banner asks whether the model is there" \
+  ready_banner_asks_about_the_model
+
 echo "# the login banner must never write anything"
 # It runs as ROOT on every SSH login. load_env creates .env from .env.example
 # when missing, so the plain loader would leave a root-owned .env behind merely

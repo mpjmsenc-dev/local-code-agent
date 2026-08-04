@@ -233,8 +233,42 @@ banner_stalled() {
   printf '\n'
 }
 
+# model_missing — a POSITIVE answer that the configured model is not on this
+# box. Anything else (no curl, no answer, an unparseable body) is "could not
+# tell" and returns non-zero.
+#
+# That asymmetry is deliberate. A banner that cried "not ready" on a slow box,
+# at every login, would be worse than one that says nothing — but "ready" is
+# the strongest claim this file makes and it currently means only that the API
+# answered. An engine with no model answers /api/version perfectly and then
+# fails every question the next line invites. That is not hypothetical: setup
+# no longer dies when the model pull fails, deliberately, so the rest of the
+# stack can finish installing; and on a hand-installed box there is no
+# first-boot log for install_state to read, so 'ready' is decided here alone.
+model_missing() {
+  have curl || return 1
+  local tags
+  tags="$(quick curl -fsS "$(ollama_url)/api/tags" || true)"
+  [[ "${tags}" == *'"models"'* ]] || return 1
+  grep -qF "\"${MODEL_NAME}\"" <<<"${tags}" && return 1
+  return 0
+}
+
+banner_no_model() {
+  headline "engine running, but model ${MODEL_NAME} is NOT downloaded"
+  row "Nothing can answer" "until it is pulled — this is a download, not a bug"
+  row "Finish it" "sudo ${REPO_ROOT}/setup.sh"
+  row "Details" "lca check"
+  offline_row
+  printf '\n'
+}
+
 banner_ready() {
   local addr url hint
+  if model_missing; then
+    banner_no_model
+    return 0
+  fi
   headline "ready   ·   model ${MODEL_NAME}"
   addr="$(chat_address || true)"
   url="${addr%%$'\t'*}"
