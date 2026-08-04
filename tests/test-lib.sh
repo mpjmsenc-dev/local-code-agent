@@ -4703,6 +4703,92 @@ tune_checks_the_model_is_downloaded() {
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
 
+echo "# every doc that repeats the RAM ladder must repeat it correctly"
+# There are FOUR copies of the auto-tune ladder in prose: README's table (gated
+# below), INSTALL.md's sizing table, TROUBLESHOOTING.md's inline list, and
+# FAQ.md's context range. Only the first was checked, and INSTALL.md's is the
+# one somebody sizes a VM on before spending money.
+#
+# Read per line, and format-agnostic: take every RAM figure and every context
+# figure on a line and pair them — one context figure applies to all the RAM
+# figures beside it (INSTALL.md's "9-15 GB ... ctx 8192 ... for 12-16 GB VMs"),
+# equal counts zip (TROUBLESHOOTING.md's arrow list). A line that fits neither
+# shape is counted, not silently dropped, and the gate insists it found pairs
+# at all — an extractor that quietly matches nothing is the failure mode these
+# doc gates are most prone to.
+docs_repeat_the_ladder_correctly() {
+  local f line i r want checked=0 skipped=0 wrong=()
+  local -a rams ctxs
+  for f in "${REPO}/docs/INSTALL.md" "${REPO}/docs/TROUBLESHOOTING.md"; do
+    while IFS= read -r line; do
+      mapfile -t rams < <(grep -oE '[0-9]+\+? ?(GB|GiB)' <<<"${line}" | grep -oE '^[0-9]+' || true)
+      mapfile -t ctxs < <(grep -oE '\b(4096|8192|16384)\b' <<<"${line}" || true)
+      (( ${#rams[@]} && ${#ctxs[@]} )) || continue
+      if (( ${#ctxs[@]} == 1 )); then
+        for r in "${rams[@]}"; do
+          want="$(tune_ctx_for "${r}")"
+          checked=$(( checked + 1 ))
+          [[ "${ctxs[0]}" == "${want}" ]] \
+            || wrong+=("${f##*/}: ${r} GiB shown as ctx ${ctxs[0]}, ladder gives ${want}")
+        done
+      elif (( ${#ctxs[@]} == ${#rams[@]} )); then
+        for i in "${!rams[@]}"; do
+          want="$(tune_ctx_for "${rams[$i]}")"
+          checked=$(( checked + 1 ))
+          [[ "${ctxs[$i]}" == "${want}" ]] \
+            || wrong+=("${f##*/}: ${rams[$i]} GiB shown as ctx ${ctxs[$i]}, ladder gives ${want}")
+        done
+      else
+        skipped=$(( skipped + 1 ))
+      fi
+    done < "${f}"
+  done
+  (( checked >= 6 )) || {
+    printf 'the ladder extractor found only %s pair(s) — the docs changed shape and this stopped watching them\n' \
+      "${checked}" >&2
+    return 1
+  }
+  (( skipped == 0 )) || {
+    printf '%s line(s) pair RAM and context figures in a shape this cannot read\n' "${skipped}" >&2
+    return 1
+  }
+  (( ${#wrong[@]} == 0 )) || {
+    printf 'a doc repeats the ladder wrongly:\n' >&2
+    printf '  %s\n' "${wrong[@]}" >&2
+    return 1
+  }
+}
+tune_ctx_for() {
+  bash -c 'source "$1" >/dev/null 2>&1; source "$2" >/dev/null 2>&1
+           choose_for_ram "$3"; printf "%s" "${TUNE_CTX}"' \
+    _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "$1"
+}
+check "INSTALL.md and TROUBLESHOOTING.md repeat the ladder correctly" \
+  docs_repeat_the_ladder_correctly
+
+# FAQ.md states the ladder as a RANGE rather than a table — "4096-16384
+# tokens" — so its two endpoints are the ladder's smallest and largest context.
+faq_context_range_matches_the_ladder() {
+  local range lo hi want_lo want_hi
+  # '.{1,3}' for the separator. The file uses an en dash (U+2013) there, which
+  # is one character and THREE bytes — and under the POSIX locale these tests
+  # can run in, grep's '.' matches a byte. A single '.' matched interactively
+  # and then failed inside the suite, which is the whole reason for the range.
+  range="$(grep -oE '[0-9]{4,5}.{1,3}[0-9]{4,5} tokens' "${REPO}/docs/FAQ.md" | head -1)"
+  [[ -n "${range}" ]] || { echo 'FAQ.md no longer states a context range' >&2; return 1; }
+  lo="$(grep -oE '[0-9]+' <<<"${range}" | head -1)"
+  hi="$(grep -oE '[0-9]+' <<<"${range}" | sed -n 2p)"
+  want_lo="$(tune_ctx_for 1)"
+  want_hi="$(tune_ctx_for 512)"
+  [[ "${lo}" == "${want_lo}" && "${hi}" == "${want_hi}" ]] || {
+    printf 'FAQ.md says %s-%s tokens; the ladder spans %s-%s\n' \
+      "${lo}" "${hi}" "${want_lo}" "${want_hi}" >&2
+    return 1
+  }
+}
+check "FAQ.md's context range spans exactly what the ladder produces" \
+  faq_context_range_matches_the_ladder
+
 echo "# PERFORMANCE.md may state one baseline for 7b, not three"
 # It gave the same figure — CPU-only x86_64, 16 GiB, qwen2.5-coder:7b — three
 # times as 5.5, ~6 and 6.1. The 6.1 is what was measured; the 5.5 came from the
