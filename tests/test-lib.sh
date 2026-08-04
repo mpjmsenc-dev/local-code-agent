@@ -4099,6 +4099,56 @@ help_is_answered_not_performed() {
 check "every script 'lca' dispatches to explains itself on --help" \
   help_is_answered_not_performed
 
+# An option that takes a value must SAY SO when the value is missing.
+#
+# prompt-bench.sh read the value with "${2:-}" and shifted two arguments off a
+# list holding one. shift failed, errexit ended the script, and the check that
+# would have explained it sat two lines further down, unreachable. Measured
+# before the fix: '-n', '-m' and '-f' each exited 1 with completely empty
+# output, while '-n abc' explained itself perfectly — the guard existed and
+# could not be got to.
+#
+# Driven, and the flags derived from the 'shift 2' arms themselves, so an
+# option added later is covered without touching this. Every one of them fails
+# before doing any work, which is what makes running them safe.
+value_options_explain_a_missing_value() {
+  local f flag out rc broken=()
+  for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
+    while IFS= read -r flag; do
+      [[ -n "${flag}" ]] || continue
+      out="$(timeout 20 "${f}" "${flag%%|*}" 2>&1)"; rc=$?
+      if (( rc == 0 )); then
+        broken+=("${f##*/} ${flag%%|*}: accepted a missing value")
+      elif [[ -z "${out//[[:space:]]/}" ]]; then
+        broken+=("${f##*/} ${flag%%|*}: exited ${rc} saying nothing at all")
+      elif ! grep -qF -- "${flag%%|*}" <<<"${out}"; then
+        # Non-zero with SOME message is not enough: a flag that quietly took a
+        # default and let the script die further along on an unrelated cause
+        # also exits non-zero and also prints something. The message has to
+        # name the option the reader got wrong.
+        broken+=("${f##*/} ${flag%%|*}: failed without naming the option — ${out%%$'\n'*}")
+      fi
+    # "Takes a value" is derived from the arm READING $2, not from the
+    # 'shift 2' idiom that usually accompanies it. Keyed on the idiom, a
+    # mutation that changes the shift form drops the option out of the list
+    # and the gate quietly stops watching it — which is exactly what happened
+    # while proving this one.
+    done < <(sed 's/#.*//' "${f}" | awk '
+      match($0, /^[[:space:]]*-[A-Za-z|-]+\)/) {
+        lbl = substr($0, RSTART, RLENGTH); gsub(/[[:space:])]/, "", lbl); takes = 0
+      }
+      lbl != "" && /[$]\{?2[^0-9]/ { takes = 1 }
+      lbl != "" && /;;/             { if (takes) print lbl; lbl = "" }')
+  done
+  (( ${#broken[@]} == 0 )) || {
+    printf 'these take a value and say nothing when it is missing:\n' >&2
+    printf '  %s\n' "${broken[@]}" >&2
+    return 1
+  }
+}
+check "an option that needs a value says so when it is missing" \
+  value_options_explain_a_missing_value
+
 # The three that 'lca' does NOT dispatch to are the three where this bug costs
 # most, and none of them was covered: setup.sh installs packages and a model as
 # root, install.sh clones over a directory, uninstall.sh deletes Ollama and

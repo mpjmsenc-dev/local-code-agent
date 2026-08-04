@@ -57,9 +57,18 @@ EOF
 parse_args() {
   while (( $# )); do
     case "$1" in
-      -n) SAMPLES="${2:-}"; shift 2 ;;
-      -m) MODEL="${2:-}";   shift 2 ;;
-      -f) PROMPT_FILE="${2:-}"; shift 2 ;;
+      # Validated BEFORE the shift, like ask.sh, logs.sh and speed.sh. Written
+      # the other way round, 'prompt-bench.sh -n' shifted two arguments off a
+      # list holding one: shift failed, errexit took the script out with no
+      # message at all, and the check below — which does say what is wrong —
+      # was never reached. Measured: exit 1, empty output, for -n, -m and -f
+      # alike, while '-n abc' explained itself perfectly.
+      -n) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "-n needs a number of samples (e.g. -n 6)"
+          SAMPLES="$2"; shift 2 ;;
+      -m) [[ -n "${2:-}" ]] || die "-m needs a model name"
+          MODEL="$2"; shift 2 ;;
+      -f) [[ -n "${2:-}" ]] || die "-f needs a path to a prompt file"
+          PROMPT_FILE="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) usage; die "Unknown option: $1" ;;
     esac
