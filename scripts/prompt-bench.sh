@@ -85,10 +85,23 @@ parse_args() {
 
 # The questions are the real ones. 'build' is verbatim what a user asked a real
 # deployment; the rest are the cases that broke while fixing it.
-#   build   must hand over — the reported bug
-#   backup  must NOT hand over — it has a one-word answer, 'lca backup'
-#   explain must NOT hand over — a language question is what the chat is FOR
+#   build    must hand over — the reported bug
+#   wishlist must hand over — the SECOND reported one, and harder
+#   backup   must NOT hand over — it has a one-word answer, 'lca backup'
+#   explain  must NOT hand over — a language question is what the chat is FOR
 BENCH_BUILD="build me a whole functioning income and expense tracker app"
+# The second real one, photographed from a phone on 2026-08-04: the same
+# request carrying a feature list AND a trailing follow-up instruction ("After
+# finishing, review the code and suggest improvements"), which is how people
+# actually type it.
+#
+# It is here because it is a real shape, NOT because it is harder. A four-sample
+# run of it looked worse than the bare question — 3/4 with a tutorial — and at
+# n=6 through this bench it is 6/6, tutorial 0. That is the noise this file's
+# own header warns about, caught by re-running rather than by shipping the
+# first number. Baseline on the 3b rung, current prompt, both build questions:
+# hands over 6/6, says where 6/6, tutorial 0/6, tool-call 0/6.
+BENCH_WISHLIST="build me an income and expense tracker app with categories, a monthly summary, search and filter, CSV export, local storage, a responsive UI, unit tests and a README. After finishing, review the code and suggest improvements."
 BENCH_BACKUP="how do I take a backup right now?"
 BENCH_EXPLAIN="explain the difference between a list and a tuple in python"
 
@@ -179,11 +192,12 @@ main() {
 
   local chars; chars="$(wc -c <<<"${SYSTEM}")"
   info "Prompt is ${chars} chars, roughly $(( chars / 4 )) tokens of the ${OLLAMA_CONTEXT_LENGTH} context — spent on every message."
-  info "This asks the model $(( SAMPLES * 3 )) times; on a CPU box that is minutes, not seconds."
+  info "This asks the model $(( SAMPLES * 4 )) times; on a CPU box that is minutes, not seconds."
   echo
 
   ok "WANTED: 'build' hands over and says where; tutorial and tool-call stay 0"
   bench build "${BENCH_BUILD}"
+  bench wishlist "${BENCH_WISHLIST}"
   echo
   ok "WANTED: these answer the question — 'handover-fired' and 'tool-call' must stay 0"
   bench backup  "${BENCH_BACKUP}"
