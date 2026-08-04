@@ -326,10 +326,15 @@ main() {
       # oneshot. apply.sh is drift-driven, so the drop-in this function just
       # rendered costs nothing there, and it degrades on its own when docker is
       # down or root is unavailable instead of failing a boot.
-      if ! "${SCRIPT_DIR}/apply.sh"; then
-        warn "Auto-tune moved to ${chosen_model}, but the rest of the system could not be reconciled with it — the chat app may still offer '${old_model}'. Fix it with: sudo ${REPO_ROOT}/bin/lca apply"
-      fi
+      # The 'ok' goes FIRST and the reconciliation after it, so the last thing
+      # printed is whichever is true. Ordered the other way, a failed
+      # reconciliation warned and was then immediately followed by "Auto-tune
+      # applied" — which is true of the tune and reads as the final word on the
+      # whole thing.
       ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
+      if ! "${SCRIPT_DIR}/apply.sh"; then
+        warn "…but the rest of the system could not be reconciled with it — the chat app may still offer '${old_model}'. Fix it with: sudo ${REPO_ROOT}/bin/lca apply"
+      fi
     else
       ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."
     fi
