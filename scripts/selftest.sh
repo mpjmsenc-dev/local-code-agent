@@ -16,11 +16,26 @@
 #
 # Non-mutating: it pulls nothing, edits no .env, and cleans up its scratch repo.
 # Exit 0 only if every non-skipped check passed.
+#
+# Usage: lca test        (no options; takes minutes — it generates for real)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+
+# Answered BEFORE anything runs. This test does real generations and takes
+# minutes, so reading '--help' as "go ahead and do it" is the one answer that
+# is certainly wrong — and it was the answer, because nothing looked at "$@".
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "") ;;
+  *) die "Unknown option: ${1} — 'lca test' takes none. Try: lca test --help" ;;
+esac
+
 load_env
 
 # Run every check even if one fails, like check-system.sh.

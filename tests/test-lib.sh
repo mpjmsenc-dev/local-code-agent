@@ -3044,6 +3044,62 @@ every_advised_flag_is_real() {
 check "every flag we tell a human to run is one that script documents" \
   every_advised_flag_is_real
 
+echo "# every 'lca' subcommand must answer --help, and only answer it"
+# 'lca test --help' ran the whole acceptance suite: minutes of real generation,
+# because selftest.sh never looked at "$@". 'lca restore --help' answered
+# "Backup file not found: --help" — true, useless, and from a command that
+# wipes a docker volume when it does work. 'lca webui --help' needed a running
+# Docker daemon to print a page of text, on the machine where the daemon being
+# down is what sent you looking for help in the first place.
+#
+# Run for real, not grepped: the claim is about what happens, and each of those
+# three had a --help-shaped hole that reading the source did not make obvious.
+# run-agent.sh is out — it forwards to aider, whose --help is aider's to print.
+LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
+              webui.sh netmode.sh scripts/tune.sh scripts/apply.sh
+              scripts/ask.sh scripts/logs.sh scripts/speed.sh
+              scripts/selftest.sh )
+help_is_answered_not_performed() {
+  local s out rc broken=()
+  for s in "${LCA_TARGETS[@]}"; do
+    # A timeout is part of the assertion: a script that ignores --help and does
+    # its job is exactly the failure this catches, and some jobs take minutes.
+    out="$(timeout 20 "${REPO}/${s}" --help 2>&1)"; rc=$?
+    if (( rc != 0 )); then
+      broken+=("${s}: --help exited ${rc}")
+    elif ! grep -qi 'usage' <<<"${out}"; then
+      # Not decoration: printing usage is how we tell "explained itself" from
+      # "went and did the thing, successfully, and said so".
+      broken+=("${s}: --help exited 0 but printed no usage")
+    fi
+  done
+  (( ${#broken[@]} == 0 )) || {
+    printf 'these do not answer --help:\n' >&2
+    printf '  %s\n' "${broken[@]}" >&2
+    return 1
+  }
+}
+check "every script 'lca' dispatches to explains itself on --help" \
+  help_is_answered_not_performed
+# ...and the list above has to stay the list. bin/lca gaining a subcommand
+# whose script is never asked is how the next selftest.sh happens.
+every_dispatch_target_is_checked() {
+  local target missing=()
+  while read -r target; do
+    [[ -n "${target}" ]] || continue
+    [[ "${target}" == "run-agent.sh" ]] && continue
+    printf '%s\n' "${LCA_TARGETS[@]}" | grep -qx "${target}" || missing+=("${target}")
+  done < <(grep -oE '\$\{REPO\}/[a-z/-]+\.sh' "${REPO}/bin/lca" \
+             | sed 's|[$]{REPO}/||' | sort -u)
+  (( ${#missing[@]} == 0 )) || {
+    printf 'bin/lca dispatches to these, and no --help test covers them:\n' >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    return 1
+  }
+}
+check "the --help list covers everything bin/lca dispatches to" \
+  every_dispatch_target_is_checked
+
 echo "# advice has to work from where the reader is standing"
 # bin/lca never cd's — that is the whole point, aider must see YOUR project —
 # so 'lca check' from ~/my-project ran a health check that answered
@@ -3065,6 +3121,24 @@ advice_paths_are_absolute() {
     printf 'these name a path that only resolves inside the checkout:\n%s\n' "${hits}" >&2
     return 1
   }
+  # Usage text is advice too, and it is not written with a message helper —
+  # webui.sh's ended with "run: scripts/install_webui.sh" and slipped straight
+  # past the scan above. Scoped to what 'lca' dispatches to, because that is
+  # the rule: those run in the user's directory. scripts/prompt-bench.sh names
+  # itself relatively and may, being a 'make bench' tool run from the checkout.
+  local s
+  for s in "${LCA_TARGETS[@]}"; do
+    hits="$(awk '/^usage\(\) *\{/ { inu = 1; next }
+                 inu && /^\}/     { inu = 0 }
+                 inu              { print }' "${REPO}/${s}" \
+              | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g' \
+              | grep -E '(\./|[[:space:]("]scripts/)[a-z_-]+\.sh' || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s prints usage text naming a path that only resolves inside the checkout:\n%s\n' \
+        "${s}" "${hits}" >&2
+      return 1
+    }
+  done
 }
 check "every path a message names resolves from any directory" \
   advice_paths_are_absolute

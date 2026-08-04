@@ -3,12 +3,17 @@
 #   - restores .env (backing up any existing one first)
 #   - restores the Open WebUI docker volume and recreates the container
 #   - re-pulls the models recorded in the backup
-# Usage: ./restore.sh [backup-tarball]   (default: newest in backups/)
+# Usage: lca restore [backup-tarball]   (default: newest in backups/)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+
+usage() {
+  # This file's header block (lines 2-6) is the help text.
+  sed -n '2,6p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
 
 BACKUP_DIR="${REPO_ROOT}/backups"
 
@@ -38,6 +43,13 @@ machine_advice() {
 }
 
 main() {
+  # Before the step banner, and before anything is chosen to restore: asking
+  # a destructive command what it does must never be answered by doing it.
+  # '--help' used to fall through as a filename — "Backup file not found:
+  # --help" — which is a true sentence and a useless one.
+  case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+  esac
   step "Restoring from backup"
   local tarball="${1:-}"
   if [[ -z "${tarball}" ]]; then

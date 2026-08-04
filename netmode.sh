@@ -391,19 +391,12 @@ show_status() {
   fi
 }
 
-main() {
-  case "${1:-}" in
-    offline)          go_offline ;;
-    online)           go_online ;;
-    status)           show_status ;;
-    harden)           do_harden ;;
-    apply-saved)      apply_saved ;;
-    render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
-    render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
-    --install-service) require_service ;;
-    *)
-      cat <<EOF
-Usage: sudo netmode.sh <offline|online|status|harden>
+# usage — printed for --help (exit 0) and for anything unrecognised (exit 1).
+# One copy, because the two used to be the same branch: asking a command that
+# edits the firewall what it does came back as an error.
+usage() {
+  cat <<EOF
+Usage: sudo lca <offline|online|status|harden>       (or netmode.sh directly)
 
   offline   Kill-switch ON:  the AI stack loses ALL internet access, but your
             phone keeps reaching WebUI/SSH over Tailscale. Inference still
@@ -416,8 +409,20 @@ Usage: sudo netmode.sh <offline|online|status|harden>
 
 The chosen mode and the inbound guard persist across reboots.
 EOF
-      exit 1
-      ;;
+}
+
+main() {
+  case "${1:-}" in
+    offline)          go_offline ;;
+    online)           go_online ;;
+    status)           show_status ;;
+    harden)           do_harden ;;
+    apply-saved)      apply_saved ;;
+    render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
+    render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
+    --install-service) require_service ;;
+    -h|--help)       usage; exit 0 ;;
+    *)               usage; exit 1 ;;
   esac
 }
 

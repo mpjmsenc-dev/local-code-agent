@@ -19,7 +19,7 @@ Commands:
   url       Print the address to open on your phone
   logs      Follow the container logs (Ctrl-C to stop)
 
-To (re)create the container after editing .env, run: scripts/install_webui.sh
+To (re)create the container after editing .env, run: sudo lca apply
 EOF
 }
 
@@ -47,6 +47,14 @@ container_exists() {
 main() {
   local cmd="${1:-}"
   [[ -n "${cmd}" ]] || { usage; exit 1; }
+  # Answered here, above everything else, for the same reason 'url' is special
+  # below: the dispatch further down runs select_docker first, so 'lca webui
+  # --help' died with "Cannot reach the Docker daemon" — needing a running
+  # daemon to print a page of text, on precisely the machine where the daemon
+  # being down is what sent you looking for help.
+  case "${cmd}" in
+    -h|--help) usage; exit 0 ;;
+  esac
   # 'url' only reads .env and Tailscale — it must keep working when Docker is
   # down or the container was never created, since that is exactly when someone
   # is trying to work out where their chat app lives.
@@ -167,6 +175,10 @@ main() {
     logs)
       container_exists || die "Container '${WEBUI_CONTAINER}' does not exist."
       "${DOCKER[@]}" logs -f "${WEBUI_CONTAINER}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
       ;;
     *)
       usage

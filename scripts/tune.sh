@@ -150,6 +150,11 @@ main() {
       install_service
       exit 0
       ;;
+    -h|--help)
+      # The header block above is the help text.
+      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
     *)
       die "Usage: tune.sh [--dry-run|--install-service]"
       ;;
