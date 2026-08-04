@@ -116,16 +116,51 @@ main() {
       # would destroy the existing accounts and chat history and then fail to
       # replace them. Validating first means a bad archive aborts while the
       # current data is still intact.
-      if as_root docker run --rm --entrypoint sh -v open-webui:/to -v "${workdir}":/from:ro \
+      # Distinct exit codes per stage, because the failure message has to say
+      # whether the live volume still exists — and the '&&' chain this used to
+      # be could not tell. Validation failing and the unpack failing landed in
+      # the same branch, which asserted "Your existing WebUI data was NOT
+      # wiped" either way. After 'rm -rf /to/*' has run, that sentence is false
+      # on the one path where the reader most needs it to be true: a disk that
+      # fills during the unpack empties the volume and then says nothing was
+      # lost.
+      #   3 = the archive would not read; nothing was touched
+      #   4 = clearing the volume failed; nothing was lost
+      #   5 = the unpack failed AFTER the volume was emptied
+      local vol_rc=0
+      as_root docker run --rm --entrypoint sh -v open-webui:/to -v "${workdir}":/from:ro \
           ghcr.io/open-webui/open-webui:main \
-          -c 'tar tzf /from/open-webui-volume.tar.gz >/dev/null && rm -rf /to/* && tar xzf /from/open-webui-volume.tar.gz -C /to'; then
-        ok "WebUI data restored."
-        if [[ "${ENABLE_WEBUI}" == "true" ]]; then
-          "${SCRIPT_DIR}/scripts/install_webui.sh"
-        fi
-      else
-        warn "WebUI volume restore failed — either the image is unavailable (offline?) or the archived volume is corrupt. Your existing WebUI data was NOT wiped (the archive is validated before the volume is replaced). Fix connectivity or use another backup, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
-      fi
+          -c 'tar tzf /from/open-webui-volume.tar.gz >/dev/null || exit 3
+              rm -rf /to/* || exit 4
+              tar xzf /from/open-webui-volume.tar.gz -C /to || exit 5' \
+        || vol_rc=$?
+      case "${vol_rc}" in
+        0)
+          ok "WebUI data restored."
+          if [[ "${ENABLE_WEBUI}" == "true" ]]; then
+            # Not bare under 'set -e': a failed re-create would abort restore.sh
+            # here, before the models are re-pulled and before apply.sh puts the
+            # restored .env into effect. A recovery command must finish
+            # everything it still can and report what it could not.
+            "${SCRIPT_DIR}/scripts/install_webui.sh" \
+              || warn "The chat app container could not be re-created — its data IS restored. Fix the cause and run: sudo lca apply. Continuing with the rest of the restore."
+          fi
+          ;;
+        3|125|126|127)
+          # 125/126/127 are docker's own: the image is missing or the container
+          # never started, so the script inside never ran either.
+          warn "WebUI volume NOT restored — the image is unavailable (offline?) or the archived volume is unreadable. Your existing WebUI data was NOT wiped: nothing is replaced until the archive has been read back. Fix connectivity or use another backup, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
+          ;;
+        4)
+          warn "WebUI volume NOT restored — the old contents could not be cleared, so your existing WebUI data is still there and unchanged. Check disk and permissions, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
+          ;;
+        5)
+          err "WebUI volume restore FAILED PART-WAY: the volume was emptied and the archive did not finish unpacking, so the old accounts and chat history are gone and the new ones are incomplete. A full disk is the usual cause — free space, then re-run ${SCRIPT_DIR}/restore.sh with the same backup. Continuing with the model restore."
+          ;;
+        *)
+          warn "WebUI volume restore failed with an unrecognised status (${vol_rc}) — this cannot say whether the volume was emptied. Check it with: sudo docker run --rm -v open-webui:/v alpine ls /v. Continuing with the model restore."
+          ;;
+      esac
     else
       warn "Docker not installed — cannot restore the WebUI volume. Run ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh."
     fi

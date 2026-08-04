@@ -365,7 +365,16 @@ show_status() {
     else
       info "nftables: no egress lockdown table loaded (egress unrestricted)."
     fi
-    inbound_loaded; inbound_rc=$?
+    # '|| inbound_rc=$?', not 'inbound_loaded; inbound_rc=$?'. The second form
+    # leaves inbound_loaded as an untested command, so under 'set -e' a
+    # non-zero return kills the script HERE — before the case below that exists
+    # to report it, and before the live probe. inbound_loaded returns 1 for
+    # "not loaded" and 2 for "cannot tell", which means 'netmode.sh status'
+    # printed three lines and stopped, with exit 1 and no explanation, in
+    # exactly the two situations anyone runs it for. Observed on a box with no
+    # guard loaded: the "inbound guard NOT loaded" warning never appeared.
+    inbound_rc=0
+    inbound_loaded || inbound_rc=$?
     case "${inbound_rc}" in
       0) info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)." ;;
       2) warn "Cannot inspect nftables without root or sudo — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;

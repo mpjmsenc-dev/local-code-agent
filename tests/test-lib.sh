@@ -2922,6 +2922,48 @@ echo "REQUIRE-RETURNED-0"
 PROBE
 chmod +x "${SANDBOX}/harden-probe.sh" "${SANDBOX}/require-probe.sh"
 harden_probe()  { bash "${SANDBOX}/harden-probe.sh"  "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1; }
+
+# 'netmode.sh status' is what the README and TROUBLESHOOTING tell you to run to
+# find out whether the guard is up. It said 'inbound_loaded; inbound_rc=$?' —
+# leaving inbound_loaded an UNTESTED command, so under errexit a non-zero
+# return killed the script right there, before the case that reports it and
+# before the live probe. inbound_loaded returns 1 for "not loaded" and 2 for
+# "cannot tell without root", so status printed three lines and stopped, exit
+# 1, no explanation, in exactly the two situations it exists for. Observed on a
+# box with no guard: the "NOT loaded" warning never appeared.
+cat > "${SANDBOX}/status-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+# $1 = function definitions, $2 = what inbound_loaded should return.
+set -euo pipefail
+RC="$2"
+source "$1"
+have()           { [[ "$1" == nft ]]; }
+table_loaded()   { return 1; }
+netmode_state()  { printf 'online'; }
+inbound_loaded() { return "${RC}"; }
+curl()           { return 0; }
+show_status
+echo "STATUS-REACHED-THE-END"
+PROBE
+status_probe() { bash "${SANDBOX}/status-probe.sh" "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1; }
+status_survives() {  # $1 = inbound_loaded's return, $2 = text it must report
+  local out rc=0
+  out="$(status_probe "$1")" || rc=$?
+  (( rc == 0 )) || {
+    printf 'status exited %s when inbound_loaded returned %s:\n%s\n' "${rc}" "$1" "${out}" >&2
+    return 1
+  }
+  grep -q "$2" <<<"${out}" || {
+    printf 'status did not report "%s":\n%s\n' "$2" "${out}" >&2; return 1; }
+  grep -q 'STATUS-REACHED-THE-END' <<<"${out}" || {
+    printf 'status stopped before the live probe:\n%s\n' "${out}" >&2; return 1; }
+}
+status_reports_a_missing_guard() { status_survives 1 'inbound guard NOT loaded'; }
+status_reports_an_unknown_guard() { status_survives 2 'UNKNOWN'; }
+check "'netmode status' reports a MISSING guard instead of dying" \
+  status_reports_a_missing_guard
+check "'netmode status' reports an UNKNOWN guard instead of dying" \
+  status_reports_an_unknown_guard
 require_probe() { bash "${SANDBOX}/require-probe.sh" "${SANDBOX}/netmode-funcs.sh" "$1" 2>&1; }
 
 harden_reports_a_failed_service_as_a_warning() {
@@ -3373,6 +3415,97 @@ check "a checkout reached through a symlinked parent is still ok" \
   test "$(lca_link_state "${LINKS}/ok" "${LINKS}/real-alias/bin/lca")" = ok
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
+
+echo "# the volume restore must know whether it already emptied the volume"
+# restore.sh replaces the WebUI volume by clearing it and unpacking over it.
+# It used to be one '&&' chain, so a failure anywhere landed in a single branch
+# that said "Your existing WebUI data was NOT wiped (the archive is validated
+# before the volume is replaced)". True if the archive would not read. False —
+# on the one path where the reader most needs the truth — if the unpack died
+# after 'rm -rf' had run, which is what a disk filling mid-restore does.
+#
+# The SHIPPED script is extracted from restore.sh and run against fixtures, so
+# this tests the string that actually reaches the container, not a copy of it.
+VOL="${SANDBOX}/vol"; mkdir -p "${VOL}/from" "${VOL}/to" "${VOL}/bin"
+vol_payload() {
+  local p
+  p="$(awk "/-c 'tar tzf/,/exit 5'/" "${REPO}/restore.sh" | sed 's/^[[:space:]]*//')"
+  p="${p#-c \'}"
+  p="${p%\' \\}"
+  p="${p//\/from/${VOL}\/from}"
+  p="${p//\/to/${VOL}\/to}"
+  printf '%s' "${p}"
+}
+# If restore.sh is rewritten so this stops matching, say THAT rather than
+# letting three behaviour tests fail for a reason none of them is about.
+payload_was_extracted() {
+  local p; p="$(vol_payload)"
+  [[ "${p}" == *'tar tzf'* && "${p}" == *'exit 5'* ]] || {
+    printf 'could not extract the container script from restore.sh; got:\n%s\n' "${p}" >&2
+    return 1
+  }
+}
+check "the container script can still be read out of restore.sh" payload_was_extracted
+vol_run() {  # $1 = a directory to put first on PATH, or empty; echoes the status
+  local rc=0 prefix=""
+  # The PATH change goes INSIDE the sh -c string, where it is the inner
+  # shell's business. Written out here — as a 'PATH=... env' prefix or by
+  # reading "${PATH}" — ShellCheck calls it SC2031, because this suite does
+  # modify PATH in a subshell elsewhere and cannot know the read is safe.
+  if [[ -n "$1" ]]; then
+    prefix="PATH=\"$1:\$PATH\"; export PATH; "
+  fi
+  sh -c "${prefix}$(vol_payload)" >/dev/null 2>&1 || rc=$?
+  printf '%s' "${rc}"
+}
+vol_reset() {
+  rm -rf "${VOL}/to"; mkdir -p "${VOL}/to"; printf 'live-accounts-and-chats\n' > "${VOL}/to/keep.txt"
+}
+# 1. An unreadable archive must stop BEFORE anything is cleared.
+vol_reset; printf 'not a gzip archive' > "${VOL}/from/open-webui-volume.tar.gz"
+corrupt_stops_before_clearing() {
+  [[ "$(vol_run '')" == 3 ]] && [[ -f "${VOL}/to/keep.txt" ]]
+}
+check "an unreadable archive exits 3 and leaves the live volume alone" \
+  corrupt_stops_before_clearing
+# 2. A good archive replaces the contents.
+vol_reset
+( cd "${VOL}" && mkdir -p src && printf 'restored\n' > src/restored.txt \
+  && tar czf from/open-webui-volume.tar.gz -C src . )
+good_archive_restores() {
+  [[ "$(vol_run '')" == 0 ]] && [[ -f "${VOL}/to/restored.txt" ]] && [[ ! -f "${VOL}/to/keep.txt" ]]
+}
+check "a good archive exits 0 and replaces the volume contents" good_archive_restores
+# 3. The case the old message lied about: the unpack fails AFTER the clear.
+#    A stub tar that lists happily and refuses to extract puts us exactly there.
+cat > "${VOL}/bin/tar" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  tzf) exit 0 ;;
+  xzf) exit 1 ;;
+esac
+exit 0
+FAKE
+chmod +x "${VOL}/bin/tar"
+vol_reset
+unpack_failure_is_distinguishable() {
+  # 5, not 3: the volume IS empty now, and the message must be able to say so.
+  [[ "$(vol_run "${VOL}/bin")" == 5 ]] && [[ ! -f "${VOL}/to/keep.txt" ]]
+}
+check "an unpack that fails after clearing exits 5, not 3" \
+  unpack_failure_is_distinguishable
+# ...and restore.sh must actually tell those apart rather than share a branch.
+restore_distinguishes_the_stages() {
+  grep -q 'existing WebUI data was NOT wiped' "${REPO}/restore.sh" || return 1
+  grep -q 'FAILED PART-WAY' "${REPO}/restore.sh" || return 1
+  # the "not wiped" sentence must not live in the same arm as the wiped case
+  ! awk '/^ *5\)/ { inarm = 1; next }
+         inarm && /^ *;;/ { inarm = 0 }
+         inarm && /NOT wiped/ { found = 1 }
+         END { exit !found }' "${REPO}/restore.sh"
+}
+check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
+  restore_distinguishes_the_stages
 
 echo "# a big piped input must not kill the command that exists to read it"
 # 'lca logs | lca ask "why did this fail?"' is the first thing
