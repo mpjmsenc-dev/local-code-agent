@@ -40,6 +40,18 @@ render_with_env() {
   printf '%s\n' "$1" > "${sandbox}/.env"
   rendered="$("${sandbox}/netmode.sh" render-inbound 2>/dev/null || true)"
   rm -rf "${sandbox}"
+  # The '|| true' above keeps a failed render from aborting the suite, which
+  # means an empty string flows into assertions that are mostly of the form
+  # "this must NOT appear" — and those pass for the wrong reason. Measured
+  # against an empty render: of the three SSH-lockout checks, "WEBUI_PORT=22 is
+  # refused" and "no drop rule when every port is 22" both pass vacuously, and
+  # only "the other configured port is still guarded" notices. The invariant
+  # stays guarded, but by an incidental assertion rather than the two named for
+  # it, and it would go unguarded the moment that one was reworded. Say it
+  # here, once, so every caller inherits the check.
+  if [[ -z "${rendered}" ]]; then
+    t_fail "render_with_env produced nothing — 'netmode.sh render-inbound' failed for this .env, so the assertions below would pass on an empty string"
+  fi
   printf '%s\n' "${rendered}"
 }
 
