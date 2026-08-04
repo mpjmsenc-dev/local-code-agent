@@ -126,7 +126,14 @@ install_service() {
     echo "[Unit]"
     echo "Description=local-code-agent auto-tune (adapt model to current RAM)"
     echo "Wants=network-online.target"
-    echo "After=network-online.target ollama.service"
+    # docker.service too, now that a model change reconciles the chat app
+    # container: ordered after network and Ollama alone, this ran while the
+    # Docker daemon was still starting, apply.sh correctly reported it could
+    # not look, and the container kept the old model until someone noticed.
+    # 'After=' on a unit that does not exist is a no-op, so a SKIP_DOCKER box
+    # is unaffected — and it is deliberately not Wants=, because this must not
+    # pull Docker onto a machine that chose not to have it.
+    echo "After=network-online.target ollama.service docker.service"
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
@@ -308,6 +315,20 @@ main() {
     restart_ollama
     if [[ "${old_model}" != "${chosen_model}" ]]; then
       info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
+      # "Auto-tune applied" was applied to Ollama and to nothing else. The chat
+      # app is created with '-e DEFAULT_MODELS=', and a container's environment
+      # is fixed for its lifetime, so after a droplet resize — the headline
+      # reason this runs on every boot — the phone went on offering the OLD
+      # model while .env, the drop-in and this very line all said the new one.
+      # Only 'lca check' knew, and only if someone ran it.
+      #
+      # Reconciled rather than reported, because nobody is watching a boot
+      # oneshot. apply.sh is drift-driven, so the drop-in this function just
+      # rendered costs nothing there, and it degrades on its own when docker is
+      # down or root is unavailable instead of failing a boot.
+      if ! "${SCRIPT_DIR}/apply.sh"; then
+        warn "Auto-tune moved to ${chosen_model}, but the rest of the system could not be reconciled with it — the chat app may still offer '${old_model}'. Fix it with: sudo ${REPO_ROOT}/bin/lca apply"
+      fi
       ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
     else
       ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."

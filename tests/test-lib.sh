@@ -2463,6 +2463,70 @@ drift_messages_name_apply() {
 }
 check "every drift message points at 'lca apply'" drift_messages_name_apply
 
+# ...and nothing may offer a container RESTART as the way to make a setting
+# take effect. 'lca model' did: "aider and Open WebUI pick the new default up
+# automatically (WebUI may need: webui.sh restart)". Half of that is true —
+# aider reads .env on every run — and the other half cannot work. MODEL_NAME is
+# baked into the container as '-e DEFAULT_MODELS=', a container's environment
+# is fixed for its lifetime, and 'restart' is stop+start of the SAME container.
+# So the one script whose entire purpose is changing that setting was the one
+# script pointing at a command that could not apply it, while webui_drift,
+# 'lca check' and 'webui.sh status' all said 'lca apply'.
+#
+# Keyed on the container, not on 'restart' generally: 'systemctl restart ollama'
+# IS how the drop-in takes effect, because those settings live in a unit file
+# rather than baked into an image.
+#
+# No carve-outs, because none turned out to be needed: naming the command as a
+# command reads 'lca webui <cmd>' or a 'restart)' case arm, neither of which
+# matches "restart the chat app to make X take effect". The one exemption kept
+# is a line that ALSO says 'lca apply' — a message may well need to explain
+# that a restart is not enough.
+no_restart_as_apply_instruction() {
+  local f hits bad=0
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/README.md "${REPO}"/docs/*.md; do
+    hits="$(sed 's/^[[:space:]]*#.*//' "${f}" \
+      | grep -nE '(webui\.sh|lca webui|docker) restart' \
+      | grep -vF 'lca apply' || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s offers a container restart as the way to apply a setting:\n%s\n' \
+        "${f##*/}" "${hits}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "no command offers a chat-app restart as the way to apply a setting" \
+  no_restart_as_apply_instruction
+
+echo "# auto-tune must apply its own decision to everything that holds a copy"
+# tune.sh runs on every boot; a droplet resize is the headline reason. When the
+# ladder moves it writes MODEL_NAME, re-renders the Ollama drop-in, restarts
+# Ollama and prints "Auto-tune applied" — and stopped there. The chat app was
+# created with the OLD model baked in, so the phone went on offering it while
+# .env, the drop-in and that very line all said otherwise. Only 'lca check'
+# knew, and only if someone ran it.
+#
+# Reconciled rather than reported, because nobody watches a boot oneshot.
+tune_reconciles_after_a_model_change() {
+  awk '/^[[:space:]]*#/ { next }
+       /old_model.*!=.*chosen_model/ { inb = 1 }
+       inb && /apply\.sh/ { found = 1 }
+       inb && /^    else$/ { exit }
+       END { exit !found }' "${REPO}/scripts/tune.sh" || {
+    echo 'tune.sh changes the model without reconciling anything that baked the old one in' >&2
+    return 1; }
+}
+check "auto-tune reconciles the rest of the system when the model changes" \
+  tune_reconciles_after_a_model_change
+# ...and the boot unit has to be ordered after Docker, or that reconciliation
+# runs while the daemon is still starting: apply.sh then correctly reports it
+# could not look, and the container keeps the old model anyway.
+tune_unit_waits_for_docker() {
+  grep -qE '^[[:space:]]*echo "After=.*docker\.service' "${REPO}/scripts/tune.sh"
+}
+check "the auto-tune boot unit is ordered after Docker" tune_unit_waits_for_docker
+
 echo "# no document may tell you to re-run an installer to apply a .env change"
 # 'lca apply' replaced a lookup table of "which script applies which setting",
 # but seven instructions across README.md, YOUR-TURN.md, PHONE.md and

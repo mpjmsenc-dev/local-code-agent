@@ -152,7 +152,18 @@ main() {
     fi
   fi
 
-  info "aider and Open WebUI pick the new default up automatically (WebUI may need: ${SCRIPT_DIR}/webui.sh restart)."
+  # aider does read .env on every run, so that half is true. The chat app does
+  # not: MODEL_NAME is baked in at creation as '-e DEFAULT_MODELS=', and a
+  # container's environment is fixed for its lifetime — 'webui.sh restart' is
+  # stop+start of the SAME container and cannot change it. This line sent
+  # people to a command that could not do what it promised, while webui_drift
+  # listed MODEL_NAME, 'lca check' reported it, and both of them said 'lca
+  # apply'. Three surfaces, one of them wrong, on the one setting this script
+  # exists to change.
+  info "aider picks the new default up on its own — it reads .env on every run."
+  if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+    info "The chat app does not: it was created with the old model baked in, and only re-creating it changes that. Apply it with: sudo ${REPO_ROOT}/bin/lca apply"
+  fi
 }
 
 main "$@"
