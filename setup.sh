@@ -76,11 +76,22 @@ main() {
   # skipped only when we have already proved inference works ourselves.
   local smoke_tested=false
 
+  # Bare on purpose: without these there is no stack at all, so stopping is the
+  # honest outcome and the EXIT trap above still prints a verdict.
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
-  "${SCRIPT_DIR}/scripts/install_docker.sh"
   "${SCRIPT_DIR}/scripts/install_python.sh"
   "${SCRIPT_DIR}/scripts/install_ollama.sh"
+
+  # Docker is not one of those. Its only job here is to run the chat app, which
+  # .env can switch off and which setup already treats as non-fatal — so a
+  # Docker failure was aborting the install over precisely the component the
+  # next block is happy to continue without, taking the model pull, the 'lca'
+  # command, the boot services and the inbound guard with it.
+  if ! "${SCRIPT_DIR}/scripts/install_docker.sh"; then
+    warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
+    setup_ok=false
+  fi
 
   # Auto-tune BEFORE the model pull so we download the right model for this
   # machine's RAM straight away.
@@ -139,7 +150,15 @@ main() {
     info "Open WebUI disabled (ENABLE_WEBUI=${ENABLE_WEBUI}, SKIP_DOCKER=${SKIP_DOCKER}) — skipping."
   fi
 
-  "${SCRIPT_DIR}/scripts/install_tailscale.sh"
+  # Guarded for the same reason as the chat app two lines up, and it is the
+  # same reason: Tailscale is the phone-access half of this stack, and the
+  # terminal half works without it. Bare, a transient network failure here
+  # aborted setup before the 'lca' command, the login banner, the boot services
+  # and the inbound guard — none of which need Tailscale — had been installed.
+  if ! "${SCRIPT_DIR}/scripts/install_tailscale.sh"; then
+    warn "Tailscale did not install — continuing without private phone access; the terminal stack is unaffected. Re-run ${SCRIPT_DIR}/scripts/install_tailscale.sh when the network is stable, or set SKIP_TAILSCALE=true in .env if you reach this box over a private network of your own."
+    setup_ok=false
+  fi
 
   step "Installing the 'lca' command"
   # Daily use should be 'cd ~/project && lca', not the full path to a script in

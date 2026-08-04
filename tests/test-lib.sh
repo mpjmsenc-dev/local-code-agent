@@ -739,6 +739,66 @@ help_examples_are_dispatched() {
 check "'lca <aider-flag>' reaches aider, as 'lca help' promises" \
   help_examples_are_dispatched
 
+echo "# an optional component may not abort the whole install"
+# setup.sh already said this about the chat app: "A WebUI failure must NOT
+# abort the rest of setup — the terminal stack still works". Tailscale and
+# Docker were bare, and both are optional by the same argument — .env has a
+# switch for each, and neither is needed by aider, 'lca ask', the boot
+# services or the inbound guard. So a transient network blip during the
+# Tailscale installer, or a Docker repo hiccup, ended the install before the
+# 'lca' command, the login banner, the boot services and 'netmode.sh harden'
+# were in place. Setup still reports failure at the end; it just finishes
+# everything it can first.
+#
+# The list is derived from .env.example's own off-switches — SKIP_X / ENABLE_X
+# become install_x.sh — so a future SKIP_FOO is covered without editing this.
+optional_installers_are_not_fatal() {
+  local key name script bad=0 line
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    name="$(printf '%s' "${key#*_}" | tr '[:upper:]' '[:lower:]')"
+    script="install_${name}.sh"
+    [[ -f "${REPO}/scripts/${script}" ]] || continue
+    # The call has to be a tested one: 'if ! .../install_x.sh' or '|| warn'.
+    line="$(sed 's/#.*//' "${REPO}/setup.sh" | grep -F "scripts/${script}" | head -1)"
+    [[ -n "${line}" ]] || {
+      printf 'setup.sh never runs %s, though .env has a %s switch for it\n' "${script}" "${key}" >&2
+      bad=1; continue
+    }
+    if [[ "${line}" != *'if !'* && "${line}" != *'||'* ]]; then
+      printf '%s aborts the whole install on failure, but %s makes it optional:\n  %s\n' \
+        "${script}" "${key}" "${line}" >&2
+      bad=1
+    fi
+  done < <(grep -oE '^(SKIP|ENABLE)_[A-Z_]+' "${REPO}/.env.example" | sort -u)
+  return "${bad}"
+}
+check "an optional component's installer cannot abort setup" \
+  optional_installers_are_not_fatal
+
+# ...and no remote installer may be streamed into a shell without a retry.
+# install_ollama.sh has retried since a CDN reset cost a whole run; the note
+# beside it says so. install_tailscale.sh ran the identical 'curl | sh' bare,
+# under 'set -o pipefail', so one blip exited the script with no message and,
+# until the change above, took the rest of setup with it. Two copies of a
+# pattern, one of them carrying the lesson.
+remote_installers_retry() {
+  local f hits bad=0
+  for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
+    hits="$(sed 's/#.*//' "${f}" | awk '
+      /for attempt in/ { loop = NR }
+      /curl .*\| *(as_root )?sh$/ {
+        if (loop == 0 || NR - loop > 8) printf "  %d: %s\n", NR, $0 }')"
+    [[ -z "${hits}" ]] || {
+      printf '%s streams a remote installer into a shell with no retry:\n%s\n' \
+        "${f##*/}" "${hits}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every remote installer piped into a shell is retried" remote_installers_retry
+
 echo "# the four places that make a checkout runnable must agree on what to chmod"
 # setup.sh, update.sh, install.sh and deploy/do-user-data.sh each re-apply the
 # executable bit after obtaining the code. install.sh was the only one that
