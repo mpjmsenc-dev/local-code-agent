@@ -38,7 +38,7 @@ wanted the one you just took.
    ```bash
    git clone https://github.com/mpjmsenc-dev/local-code-agent.git /opt/local-code-agent
    cd /opt/local-code-agent
-   chmod +x *.sh scripts/*.sh
+   chmod +x *.sh scripts/*.sh bin/*
    ./setup.sh
    ```
 
@@ -81,7 +81,7 @@ wanted the one you just took.
    Your phone setup doesn't change — only the Tailscale IP is new
    (`tailscale ip -4`). Update the home-screen bookmark, done.
 
-6. Verify: `./check-system.sh`, then send a chat message from the phone.
+6. Verify: `lca check`, then send a chat message from the phone.
 
 ## Afterwards
 

@@ -854,18 +854,26 @@ echo "# the four places that make a checkout runnable must agree on what to chmo
 # LCA_RUN_SETUP=false path hands over to a setup.sh the user runs by hand, so
 # nothing else was going to re-apply it. Derived and compared, because four
 # copies of a glob list is four chances to fix three of them.
+#
+# The docs are in the list too, and they are where it bit twice more:
+# README.md's manual-install recipe said bin/*, INSTALL.md's and MIGRATE.md's
+# did not — the same instruction, typed by a human, in three places, two of
+# them short. Seven copies now, all compared.
 chmod_lists_agree() {
-  local f line first="" list bad=0
-  for f in setup.sh update.sh install.sh deploy/do-user-data.sh; do
+  local f line first="" first_file="" list bad=0
+  for f in setup.sh update.sh install.sh deploy/do-user-data.sh \
+           README.md docs/INSTALL.md docs/MIGRATE.md; do
     line="$(grep -hE 'chmod \+x .*\.sh' "${REPO}/${f}" | head -1)"
     [[ -n "${line}" ]] || { printf '%s no longer re-applies the executable bit\n' "${f}" >&2; return 1; }
-    # Normalise away the variable name and the sudo prefix; what is compared is
-    # WHICH directories get the bit.
-    list="$(printf '%s\n' "${line}" \
-      | grep -oE '/(\*\.sh|scripts/\*\.sh|bin/\*)' | sort -u | paste -sd' ' -)"
-    if [[ -z "${first}" ]]; then first="${list}"
+    # Normalise away the variable prefix and any sudo/redirect noise; what is
+    # compared is WHICH directories get the bit. Written so a shell line
+    # ("${SCRIPT_DIR}"/scripts/*.sh) and a doc line (scripts/*.sh) reduce to
+    # the same thing.
+    list="$(printf '%s\n' "${line}" | sed 's/"\${[A-Za-z_]*}"//g' \
+      | grep -oE '(scripts/\*\.sh|bin/\*|\*\.sh)' | sort -u | paste -sd' ' -)"
+    if [[ -z "${first}" ]]; then first="${list}"; first_file="${f}"
     elif [[ "${list}" != "${first}" ]]; then
-      printf '%s chmods {%s}, but the first one chmods {%s}\n' "${f}" "${list}" "${first}" >&2
+      printf '%s chmods {%s}, but %s chmods {%s}\n' "${f}" "${list}" "${first_file}" "${first}" >&2
       bad=1
     fi
   done

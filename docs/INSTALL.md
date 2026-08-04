@@ -22,7 +22,7 @@ hypervisor VM (VMware / Proxmox / KVM), or a spare machine.
 ```bash
 git clone https://github.com/mpjmsenc-dev/local-code-agent.git
 cd local-code-agent
-chmod +x *.sh scripts/*.sh
+chmod +x *.sh scripts/*.sh bin/*
 ./setup.sh
 ```
 
