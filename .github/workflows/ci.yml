@@ -607,6 +607,26 @@ jobs:
           grep -q 'Downloading the model' <<<"${inflight}" \
             || { echo "FAIL: banner does not report how far the install got"; exit 1; }
           echo "login banner: installed, listed by run-parts, and truthful in both states"
+      - name: The installed 'lca' must read as this checkout
+        # That check compares the installed symlink against check-system.sh's
+        # own path, and the two are spelled differently the moment anything
+        # above the checkout is itself a symlink — 'cd && pwd' keeps the
+        # symlinked spelling, readlink -f does not. Getting it wrong fails
+        # nothing: it prints a confident warning about a healthy machine, and
+        # nobody reads a health check that does that twice. So assert it here,
+        # in the job where setup.sh has actually created the symlink.
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(./check-system.sh --quick 2>&1 || true)"
+          if ! grep -q "'lca' on PATH runs this checkout" <<<"${out}"; then
+            grep -i "lca' on PATH" <<<"${out}" || echo "(no lca line at all)"
+            echo "FAIL: the installed lca symlink was not recognised as this checkout"; exit 1
+          fi
+          if grep -q 'DIFFERENT checkout' <<<"${out}"; then
+            echo "FAIL: a healthy install was reported as a foreign checkout"; exit 1
+          fi
+          echo "lca symlink: recognised as this checkout"
       - name: lca apply agrees with a freshly-installed stack
         # setup.sh has just run, so by definition nothing has drifted. If apply
         # reports work here it disagrees with the installer about what .env
