@@ -2360,18 +2360,50 @@ echo "# no document may tell you to re-run an installer to apply a .env change"
 # well as shorter.
 # Naming an installer for what it IS (docs/INSTALL.md) is fine; this only
 # forbids naming it as the way to APPLY an edit.
+#
+# The shape, not the sentence. What is wrong is the PAIRING — text about .env
+# next to an instruction to run an installer, with no mention of 'lca apply' —
+# so that is what both gates below look for, over a sliding two-line window
+# because prose wraps and an instruction routinely spans two lines.
+#
+# The version this replaces matched two literal strings: "re-run
+# `scripts/install_" and "re-running `scripts/install_". Measured against two
+# phrasings a person would plausibly write — "then run\n`scripts/install_webui.sh`"
+# and "execute /opt/local-code-agent/scripts/install_ollama.sh again" — it
+# matched neither. The relative-path spelling was baked in too, and these
+# messages moved to absolute paths a few commits ago.
+#
+# The '.env' in the window is the load-bearing half, not decoration. Without it
+# the scan cannot tell "apply your edit" from "install the missing thing", and
+# the latter is correct advice: measured across the scripts lca dispatches to,
+# sixteen windows say things like "docker not installed (run
+# .../install_docker.sh)" and "virtualenv missing (run .../install_python.sh)".
+# 'lca apply' has nothing to offer any of them.
+#
+# APPLY_ADVICE_RE is the run-verb governing an installer path. A closed set of
+# verbs is still hand-written, but it is a much smaller thing to keep complete
+# than a set of English sentences, and it is what separates advice from the two
+# legitimate mentions in the tree: docs/INSTALL.md naming the installer for what
+# it IS, and TROUBLESHOOTING.md saying manual drop-in edits are overwritten "on
+# the next ... run" — a verb AFTER the path, not before it.
+APPLY_ADVICE_RE='(run|re-run|rerun|execute|invoke|call)[^.]{0,60}install_[a-z_]*\.sh'
+# pairs_env_with_installer FILE — print each two-line window that reads as
+# "edit .env, then run an installer", skipping any that names lca apply.
+pairs_env_with_installer() {
+  awk -v pat="${APPLY_ADVICE_RE}" '
+    { prev = cur; cur = $0; w = prev " " cur }
+    w ~ /\.env/ && w ~ pat && w !~ /lca apply/ { printf "%d: %s\n", NR, substr(w, 1, 200) }' "$@"
+}
 no_installer_as_apply_instruction() {
-  local hits
-  # printf for the backtick: a matched PAIR inside single quotes reads to
-  # ShellCheck as a command substitution (SC2016). Predicted this in the last
-  # commit and then wrote it literally anyway — hence the note here.
-  local bt; bt="$(printf '\140')"
-  hits="$(grep -rn "re-run ${bt}scripts/install_\|re-running ${bt}scripts/install_" \
-            "${REPO}"/README.md "${REPO}"/docs/*.md 2>/dev/null || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'these tell the reader to re-run an installer instead of lca apply:\n%s\n' "${hits}" >&2
-    return 1
-  }
+  local f hits
+  for f in "${REPO}/README.md" "${REPO}"/docs/*.md; do
+    hits="$(pairs_env_with_installer "${f}" || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s tells the reader to run an installer instead of lca apply:\n%s\n' \
+        "${f##*/}" "${hits}" >&2
+      return 1
+    }
+  done
 }
 check "no doc names an installer as the way to apply a .env edit" \
   no_installer_as_apply_instruction
@@ -2400,10 +2432,18 @@ no_status_command_sends_you_to_an_installer() {
   # the installer path on the next. Each line alone was innocent. Every script
   # lca dispatches to is scanned now, not just the two that report state —
   # speed.sh is a report too, and it was not on the list.
+  #
+  # Third upgrade, same as the docs gate above: the pattern was the literal
+  # phrase 'in \.env and re-run.*install_', so a message reading "edit
+  # WEBUI_PORT in .env, then run .../install_webui.sh" — the same mistake,
+  # differently worded — went straight through. It matches the pairing now, not
+  # a sentence.
+  local msgs
   for s in "${LCA_TARGETS[@]}"; do
-    hits="$(grep -E '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' "${REPO}/${s}" \
-              | awk '{ prev = cur; cur = $0; print prev " " cur }' \
-              | grep -E 'in \.env and re-run.*install_' || true)"
+    msgs="${SANDBOX}/msgs-${s//\//_}"
+    grep -E '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' "${REPO}/${s}" \
+      > "${msgs}" || true
+    hits="$(pairs_env_with_installer "${msgs}" || true)"
     [[ -z "${hits}" ]] || {
       printf '%s names an installer instead of lca apply:\n%s\n' "${s}" "${hits}" >&2
       return 1
