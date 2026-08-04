@@ -2985,6 +2985,37 @@ appliers_check_the_scripts_they_call() {
 }
 check "no applier runs a sub-script without checking it worked" \
   appliers_check_the_scripts_they_call
+
+echo "# setup.sh may only die on the four steps without which there is no stack"
+# Same rule, one script over. setup.sh already knows the distinction — it
+# guards Docker, the chat app and Tailscale with "continuing without it" and
+# says so in a comment — but three other steps were bare: the initial
+# auto-tune, and both boot-service installs. Auto-tune only chooses a model
+# tag, and .env already holds a usable one; the two --install-service calls
+# sit two lines above the inbound guard and three above the final check. A
+# failure in any of them ended a first-boot install with the ports unguarded
+# and nothing verified, having already done everything else correctly.
+#
+# Bare and fatal is right for exactly four: base packages, git, the venv that
+# holds aider, and Ollama. Without any one of them there is no stack.
+setup_only_dies_on_core_steps() {
+  local core='install_dependencies|install_git|install_python|install_ollama'
+  local bare found
+  # Lines that START with the quoted path and carry no '||' fallback.
+  bare="$(grep -nE '^[[:space:]]*"[$][{]SCRIPT_DIR[}]/[^"]*"' "${REPO}/setup.sh" \
+    | grep -v '||' | grep -vE "(${core})[.]sh" || true)"
+  [[ -z "${bare}" ]] || {
+    printf 'setup.sh dies on a step it could carry on without:\n%s\n' "${bare}" >&2
+    return 1
+  }
+  found="$(grep -cE "^[[:space:]]*\"[$][{]SCRIPT_DIR[}]/scripts/(${core})[.]sh\"" "${REPO}/setup.sh")"
+  [[ "${found}" == "4" ]] || {
+    printf 'expected the 4 core installers to run bare, found %s — this gate stopped watching\n' "${found}" >&2
+    return 1
+  }
+}
+check "setup.sh only aborts on the steps that leave no stack at all" \
+  setup_only_dies_on_core_steps
 # The dry run must be incapable of changing anything: every mutating call has
 # to sit behind the 'would' guard that returns early.
 dry_run_guards_every_change() {

@@ -76,8 +76,12 @@ main() {
   # skipped only when we have already proved inference works ourselves.
   local smoke_tested=false
 
-  # Bare on purpose: without these there is no stack at all, so stopping is the
-  # honest outcome and the EXIT trap above still prints a verdict.
+  # Bare on purpose, and only these four: base packages, git, the venv that
+  # holds aider, and Ollama itself. Without any one of them there is no stack
+  # at all, so stopping is the honest outcome and the EXIT trap above still
+  # prints a verdict. Every OTHER step below is something the install can
+  # finish without, and each is guarded accordingly — a gate in
+  # tests/test-lib.sh fails if a new bare call joins this list.
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
   # Docker is not one of those. Its only job here is to run the chat app, which
@@ -94,7 +98,16 @@ main() {
 
   # Auto-tune BEFORE the model pull so we download the right model for this
   # machine's RAM straight away.
-  "${SCRIPT_DIR}/scripts/tune.sh"
+  #
+  # Not fatal, though: all this step does is choose a model tag, and .env
+  # already holds a usable one. Bare, a failure here took the model pull, the
+  # chat app, the 'lca' command, the login banner, both boot services, the
+  # inbound guard and the final check with it — over the choice between two
+  # model names.
+  if ! "${SCRIPT_DIR}/scripts/tune.sh"; then
+    warn "Auto-tune could not pick a model for this machine — continuing with .env's current MODEL_NAME. Re-run later with: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+    setup_ok=false
+  fi
   load_env  # tune.sh may have rewritten MODEL_NAME / OLLAMA_CONTEXT_LENGTH
 
   step "Ensuring model '${MODEL_NAME}' is available"
@@ -179,8 +192,19 @@ main() {
   "${SCRIPT_DIR}/scripts/motd.sh" --install || warn "Could not install the login banner — everything else is unaffected."
 
   step "Installing boot services (auto-tune + netmode persistence)"
-  "${SCRIPT_DIR}/scripts/tune.sh" --install-service
-  "${SCRIPT_DIR}/netmode.sh" --install-service
+  # Neither is fatal, and both were. They install systemd units, which can fail
+  # on a masked unit or a systemd a container will not let us enable — and they
+  # sit two lines above the inbound guard and three above the final check, so
+  # a bare failure here left the ports unguarded and the install unverified,
+  # having already done everything else correctly.
+  if ! "${SCRIPT_DIR}/scripts/tune.sh" --install-service; then
+    warn "The on-boot auto-tune service could not be installed — resizing this VM will not re-pick the model until you run 'sudo lca tune' yourself. Continuing."
+    setup_ok=false
+  fi
+  if ! "${SCRIPT_DIR}/netmode.sh" --install-service; then
+    warn "The netmode boot service could not be installed — the kill switch's state will not survive a reboot. Continuing."
+    setup_ok=false
+  fi
   # Apply the always-on inbound guard now so the WebUI/Ollama ports are not
   # publicly reachable even before the first reboot.
   "${SCRIPT_DIR}/netmode.sh" harden || warn "Could not apply the inbound guard now — it will be applied on the next boot."
