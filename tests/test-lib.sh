@@ -4703,6 +4703,76 @@ tune_checks_the_model_is_downloaded() {
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
 
+echo "# PERFORMANCE.md may state one baseline for 7b, not three"
+# It gave the same figure — CPU-only x86_64, 16 GiB, qwen2.5-coder:7b — three
+# times as 5.5, ~6 and 6.1. The 6.1 is what was measured; the 5.5 came from the
+# bandwidth arithmetic a few lines above and was written up as what the box
+# "measures". Two baselines 10% apart matter here specifically: lca speed calls
+# anything under 10% no real change, so a reader calibrating against 5.5 and a
+# reader calibrating against 6.1 get opposite verdicts from the same run. In
+# the one document whose thesis is "a change you cannot measure is not an
+# improvement".
+#
+# The measured table is the source of truth; every bold tokens/second figure
+# claimed for a model must be the one that table gives for it.
+perf_baseline_is_stated_once() {
+  local model measured claimed wrong=() perf_bt
+  perf_bt="$(printf '\140')"
+  local perf_flat
+  perf_flat="$(tr '\n' ' ' < "${REPO}/docs/PERFORMANCE.md" | tr -s ' ')"
+  while read -r model measured; do
+    [[ -n "${model}" ]] || continue
+    # Matched against the file FLATTENED to one line. Prose wraps, so the bold
+    # figure routinely straddles a line break — "measures **6.1\ntokens/second**"
+    # — and a line-based scan sees only the ones that happen not to. Caught in
+    # mutation: reintroducing the 5.5 baseline was invisible until this.
+    while read -r claimed; do
+      [[ -n "${claimed}" ]] || continue
+      [[ "${claimed}" == "${measured}" ]] \
+        || wrong+=("${model}: the table says ${measured} but the text says ${claimed}")
+    done < <(grep -oE "${model}[^|]{0,120}[*][*][0-9.]+ tokens/second[*][*]" <<<"${perf_flat}" \
+               | grep -oE '[0-9.]+ tokens' | grep -oE '^[0-9.]+' | sort -u)
+  # Backticks through a variable: a matched pair inside single quotes reads to
+  # ShellCheck as a command substitution (SC2016), and the table's model column
+  # is nothing but backticks.
+  done < <(sed -n '/^| Model | Measured |/,/^$/p' "${REPO}/docs/PERFORMANCE.md" \
+             | grep -E "^[|] ${perf_bt}" \
+             | sed -E "s/^[|] ${perf_bt}([^${perf_bt}]+)${perf_bt} [|] [*][*]([0-9.]+) tokens.*/\\1 \\2/")
+  (( ${#wrong[@]} == 0 )) || {
+    printf 'PERFORMANCE.md quotes more than one speed for the same model:\n' >&2
+    printf '  %s\n' "${wrong[@]}" >&2
+    return 1
+  }
+}
+check "PERFORMANCE.md quotes one measured speed per model" perf_baseline_is_stated_once
+
+# ...and its "fits comfortably" figures may never exceed what GPU.md's table —
+# now derived from the code — says fits at all. Two VRAM tables in two
+# documents, one of them checked; this ties the second to the first rather
+# than leaving it to drift on its own.
+perf_vram_within_the_computed_maximum() {
+  local row gb biggest maxfit wrong=()
+  while IFS= read -r row; do
+    [[ -n "${row}" ]] || continue
+    gb="$(cut -d'|' -f2 <<<"${row}" | grep -oE '[0-9]+' | head -1)"
+    biggest="$(cut -d'|' -f3 <<<"${row}" | grep -oE '[0-9]+' | sort -n | tail -1)"
+    [[ -n "${gb}" && -n "${biggest}" ]] || continue
+    maxfit="$(bash -c 'source "$1" >/dev/null 2>&1; largest_model_for_vram "$2"' \
+      _ "${REPO}/scripts/lib.sh" "$(( gb * 1024 ))" || true)"
+    [[ -n "${maxfit}" ]] || continue
+    (( biggest <= maxfit )) \
+      || wrong+=("${gb} GB: PERFORMANCE.md is comfortable with ${biggest}B, but only ${maxfit}B fits at all")
+  done < <(sed -n '/^| VRAM | Fits comfortably/,/^$/p' "${REPO}/docs/PERFORMANCE.md" \
+             | grep -E '^\| [0-9]')
+  (( ${#wrong[@]} == 0 )) || {
+    printf 'PERFORMANCE.md recommends more than fits:\n' >&2
+    printf '  %s\n' "${wrong[@]}" >&2
+    return 1
+  }
+}
+check "PERFORMANCE.md never recommends a model bigger than fits" \
+  perf_vram_within_the_computed_maximum
+
 echo "# docs/GPU.md's VRAM table must be the arithmetic lca speed actually does"
 # The same shape as the RAM ladder below: a table of numbers a reader sizes a
 # purchase on, and a function that computes them. GPU.md even says "lca speed

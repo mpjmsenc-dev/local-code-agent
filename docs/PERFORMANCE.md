@@ -16,16 +16,17 @@ tokens/second, whether the model is on the CPU or the GPU, how much of a delay
 the first message after an idle period costs, and what is actually limiting you.
 It remembers the last run, so after any change you can see whether it helped.
 
-On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures about
-**5.5 tokens/second**. That is the baseline to compare against; if you are far
-below it, something else is wrong and `lca speed` will usually say what.
+On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures **6.1
+tokens/second** (the measured table further down has the rest). That is the
+baseline to compare against; if you are far below it, something else is wrong
+and `lca speed` will usually say what.
 
 It also reports **memory traffic** in GB/s. On CPU that is the number that
 really matters: generating one token means reading the entire model out of RAM,
 so speed is set by memory bandwidth, not by how many cores you have. A 7B model
-at ~4 GB per pass and 23 GB/s of bandwidth gives ~5.5 tokens/second, and that
-arithmetic is most of the story. It is also comparable across model sizes in a
-way that tokens/second is not.
+at ~4 GB per pass and 23 GB/s of bandwidth *predicts* ~5.5 tokens/second, which
+is within noise of the 6.1 measured — that agreement is the story. It is also
+comparable across model sizes in a way that tokens/second is not.
 
 `./check-system.sh` and `lca test` report CPU vs GPU placement too, as part of
 their wider checks.
@@ -42,10 +43,9 @@ pace and a response that feels immediate.
 | GPU, model fits in VRAM (`100% GPU`) | tens of tokens/second |
 | GPU, model too big (`38%/62% CPU/GPU`) | barely better than CPU — the CPU part dominates |
 
-A real measurement, not a guess: on a CPU-only x86_64 box with 16 GiB RAM,
-`qwen2.5-coder:7b` produced **~6 tokens/second** (`lca speed`). Use that as a
-rough baseline — your CPU differs, so if you measure much *less* than that,
-something else is usually wrong: swap, a too-large model, or a busy machine.
+Your CPU differs from the box the 6.1 tokens/second above was measured on, so
+treat it as a rough baseline: measuring much *less* than that usually means
+something else is wrong — swap, a too-large model, or a busy machine.
 
 That last row is the trap. A partially-offloaded model is **not** "most of the
 speed". If you have a GPU, prefer a model that fits its VRAM completely:
