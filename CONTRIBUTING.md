@@ -99,6 +99,12 @@ All four were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
+That framing was itself a trap. This section said "more than in ordinary code"
+for months while trap #1 sat in `scripts/ask.sh`, killing
+`lca logs | lca ask` — the first command TROUBLESHOOTING.md recommends —
+with exit 141 and no output at all, on every input over 64 KiB. Read these as
+rules about bash, not as rules about tests.
+
 **1. `cmd | grep -q PATTERN` under `set -o pipefail`.** `grep -q` exits the
 instant it matches, closing the pipe; the writer is killed by SIGPIPE and the
 pipeline reports 141. So the check fails *because* the pattern was found —
@@ -109,6 +115,12 @@ look intermittent. Capture first, then match a herestring:
 out="$(some_command 2>&1)"
 grep -q 'expected' <<<"${out}" || { echo "FAIL: ..."; exit 1; }
 ```
+
+The same shape with `head -c` instead of `grep -q` is how `lca ask` lost its
+piped input: `printf '%s' "${var}" | head -c 12000` returns 141 as soon as
+`${var}` outgrows the pipe buffer, and errexit exits mid-assignment. To take a
+prefix of a variable, slice it — `"${var:0:12000}"` — and never build a pipe
+you only intend to half-read.
 
 **2. `grep -q PATTERN && { echo FAIL; exit 1; }` under `set -e`.** Here a
 *non*-matching grep is the passing case, and the AND-list's non-zero status
