@@ -107,7 +107,12 @@ main() {
   [[ -f "${INSTALL_DIR}/setup.sh" ]] \
     || fail "Cloned ${REPO_URL} (branch ${BRANCH}) but it contains no setup.sh — that is not a local-code-agent checkout. Check LCA_BRANCH / LCA_REPO_URL."
 
-  "${SUDO[@]}" chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh 2>/dev/null || true
+  # bin/ included, like setup.sh, update.sh and deploy/do-user-data.sh: that is
+  # where the 'lca' command lives. This was the only one of the four that left
+  # it out, which matters exactly on the path where nothing else re-applies it —
+  # LCA_RUN_SETUP=false hands over to a setup.sh the user runs by hand, on a
+  # checkout made under whatever umask or filesystem dropped the bit.
+  "${SUDO[@]}" chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh "${INSTALL_DIR}"/bin/* 2>/dev/null || true
 
   if [[ "${RUN_SETUP}" != "true" ]]; then
     say "Clone complete (LCA_RUN_SETUP=${RUN_SETUP} — setup was NOT run)"
@@ -121,11 +126,17 @@ main() {
   # script text, and setup.sh's prompts would otherwise eat it.
   "${SUDO[@]}" "${INSTALL_DIR}/setup.sh" </dev/null
 
-  say "Done"
-  info "Health check   : ${INSTALL_DIR}/check-system.sh"
-  info "Prove it works : ${INSTALL_DIR}/scripts/selftest.sh"
-  info "Code with it   : cd <your-project> && ${INSTALL_DIR}/run-agent.sh"
-  info "Phone access   : sudo tailscale up   (then see ${INSTALL_DIR}/docs/PHONE.md)"
+  # Deliberately NOT a second next-steps list.
+  #
+  # This is only reached after a setup.sh that exited 0, and setup.sh has just
+  # printed nine numbered next steps in the 'lca' vocabulary. Four more lines
+  # here, in the vocabulary of repo script paths, were a second and different
+  # answer to the same question, immediately below the first — in the very
+  # first thing a new user ever reads. The last of them, "cd <your-project> &&
+  # run-agent.sh", also contradicted the handover recipe the assistant is gated
+  # to emit ('cd ~/my-project && lca'), so the installer and the chat app
+  # taught different commands for the same job.
+  say "Done — the numbered next steps are just above, from setup"
 }
 
 # Same one-line exit as update.sh, for the same reason: re-running this

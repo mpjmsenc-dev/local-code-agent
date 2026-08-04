@@ -739,6 +739,56 @@ help_examples_are_dispatched() {
 check "'lca <aider-flag>' reaches aider, as 'lca help' promises" \
   help_examples_are_dispatched
 
+echo "# the four places that make a checkout runnable must agree on what to chmod"
+# setup.sh, update.sh, install.sh and deploy/do-user-data.sh each re-apply the
+# executable bit after obtaining the code. install.sh was the only one that
+# left out bin/ — where the 'lca' command lives — and it is the one whose
+# LCA_RUN_SETUP=false path hands over to a setup.sh the user runs by hand, so
+# nothing else was going to re-apply it. Derived and compared, because four
+# copies of a glob list is four chances to fix three of them.
+chmod_lists_agree() {
+  local f line first="" list bad=0
+  for f in setup.sh update.sh install.sh deploy/do-user-data.sh; do
+    line="$(grep -hE 'chmod \+x .*\.sh' "${REPO}/${f}" | head -1)"
+    [[ -n "${line}" ]] || { printf '%s no longer re-applies the executable bit\n' "${f}" >&2; return 1; }
+    # Normalise away the variable name and the sudo prefix; what is compared is
+    # WHICH directories get the bit.
+    list="$(printf '%s\n' "${line}" \
+      | grep -oE '/(\*\.sh|scripts/\*\.sh|bin/\*)' | sort -u | paste -sd' ' -)"
+    if [[ -z "${first}" ]]; then first="${list}"
+    elif [[ "${list}" != "${first}" ]]; then
+      printf '%s chmods {%s}, but the first one chmods {%s}\n' "${f}" "${list}" "${first}" >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+check "every installer makes the same files executable" chmod_lists_agree
+
+# ...and only ONE of them may teach what to do next. install.sh printed four
+# lines of its own after setup.sh returned — "Health check :
+# <dir>/check-system.sh", "Code with it : cd <your-project> &&
+# <dir>/run-agent.sh" — directly below setup.sh's nine numbered steps, which
+# say 'lca check' and 'cd <your-project> && lca'. Two vocabularies for the same
+# commands, side by side, in the first thing a new user ever reads. The last of
+# them also contradicted the handover recipe the assistant is gated to emit.
+installer_does_not_reteach_next_steps() {
+  local after t
+  after="$(awk '/setup\.sh" <\/dev\/null/ { inb = 1; next } inb' "${REPO}/install.sh" \
+    | sed 's/#.*//')"
+  [[ -n "${after}" ]] || {
+    echo 'install.sh no longer hands over to setup.sh' >&2; return 1; }
+  for t in "${LCA_TARGETS[@]}" run-agent.sh; do
+    if grep -qF "${t}" <<<"${after}"; then
+      printf 'install.sh names %s after setup.sh has already printed its next steps\n' \
+        "${t}" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+check "only setup.sh teaches the next steps" installer_does_not_reteach_next_steps
+
 echo "# saving state may not kill the command that already did its work"
 # ~/.cache/local-code-agent is created by whichever of 'lca ask' and 'lca speed'
 # runs first, and becomes root-owned the moment either is run once under sudo.

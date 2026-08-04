@@ -378,6 +378,11 @@ jobs:
             LCA_RUN_SETUP=false bash install.sh
           test -x /tmp/lca-bootstrap/setup.sh
           test -x /tmp/lca-bootstrap/scripts/selftest.sh
+          # bin/ too. install.sh was the only one of the four re-chmod sites
+          # that left it out, and LCA_RUN_SETUP=false — this very path — is
+          # where nothing else re-applies the bit before the user runs setup by
+          # hand. 'lca' not being executable is the whole command gone.
+          test -x /tmp/lca-bootstrap/bin/lca
           echo "install.sh bootstrapped a working checkout on a bare image"
 
   e2e:
