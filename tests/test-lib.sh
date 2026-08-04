@@ -3100,6 +3100,43 @@ every_dispatch_target_is_checked() {
 check "the --help list covers everything bin/lca dispatches to" \
   every_dispatch_target_is_checked
 
+# netmode.sh takes its subcommand as $1 and used to ignore everything after
+# it, while bin/lca forwards trailing arguments verbatim. So 'lca harden
+# --help' arrived as 'netmode.sh harden --help' and APPLIED THE FIREWALL —
+# the same bug as selftest.sh, on the one command where doing the thing
+# instead of describing it changes the machine's network.
+#
+# Exercised through 'status', which only reads. That is deliberate: if this
+# check ever fails it must fail harmlessly, and a test that proves 'harden
+# --help' is safe by running 'harden' would be its own worst outcome. The
+# guard is one branch, so status proves it for all four.
+netmode_help_is_not_an_action() {
+  local out rc
+  out="$(timeout 20 "${REPO}/netmode.sh" status --help 2>&1)"; rc=$?
+  (( rc == 0 )) || {
+    printf 'netmode.sh status --help exited %s:\n%s\n' "${rc}" "${out}" >&2
+    return 1
+  }
+  grep -q 'Kill-switch ON' <<<"${out}" || {
+    printf 'netmode.sh status --help did not print usage:\n%s\n' "${out}" >&2
+    return 1
+  }
+  # 'netmode:' is what show_status prints; usage never does. Its presence means
+  # the flag was ignored and the subcommand ran.
+  ! grep -q 'netmode:' <<<"${out}"
+}
+# ...and the check has to sit ABOVE the dispatch, or it guards nothing.
+netmode_checks_args_before_acting() {
+  awk '/^main\(\) \{/                 { inm = 1 }
+       inm && /case "\$\{2:-\}" in/   { second = NR }
+       inm && /case "\$\{1:-\}" in/   { first = NR; exit }
+       END { exit !(second && first && second < first) }' "${REPO}/netmode.sh"
+}
+check "'lca harden --help' explains the firewall instead of applying it" \
+  netmode_help_is_not_an_action
+check "netmode validates its extra argument before it dispatches" \
+  netmode_checks_args_before_acting
+
 echo "# advice has to work from where the reader is standing"
 # bin/lca never cd's — that is the whole point, aider must see YOUR project —
 # so 'lca check' from ~/my-project ran a health check that answered

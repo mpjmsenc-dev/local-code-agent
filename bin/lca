@@ -45,6 +45,9 @@ Usage: lca [command] [args...]
   lca webui <cmd>         start|stop|restart|status|url|logs
   lca help                this text
 
+Every command explains itself, and only explains itself:
+  lca <command> --help
+
 Anything after the command is passed straight through, e.g.
   lca --no-auto-commits          (arguments for aider)
   lca model qwen2.5-coder:14b --remove-old

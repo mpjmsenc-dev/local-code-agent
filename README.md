@@ -207,6 +207,10 @@ lca                 # starts aider on the local model, right here
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
 
+`lca <command> --help` explains any of them — and only explains it. That is
+tested: `lca test --help` used to run the whole acceptance suite, and
+`lca harden --help` used to apply the firewall.
+
 Quick answers without leaving what you are doing:
 
 ```bash

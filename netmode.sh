@@ -412,6 +412,16 @@ EOF
 }
 
 main() {
+  # Everything after the subcommand used to be ignored, and bin/lca forwards
+  # trailing arguments verbatim — so 'lca harden --help' reached
+  # 'netmode.sh harden --help' and APPLIED THE FIREWALL, which is the one
+  # answer a question must never get. 'lca offline --typo' went the same way.
+  # No subcommand here takes an argument, so a second one is always a mistake.
+  case "${2:-}" in
+    "") ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "Unknown extra argument: ${2}" ;;
+  esac
   case "${1:-}" in
     offline)          go_offline ;;
     online)           go_online ;;
