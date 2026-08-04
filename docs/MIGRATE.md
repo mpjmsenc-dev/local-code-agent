@@ -10,7 +10,7 @@ need to match the droplet's size.
 
 ```bash
 cd /opt/local-code-agent
-./backup.sh
+lca backup
 ```
 
 This writes `backups/local-code-agent-backup-<timestamp>.tar.gz` containing the
@@ -52,7 +52,7 @@ wanted the one you just took.
 
    ```bash
    cd /opt/local-code-agent
-   ./restore.sh
+   lca restore
    ```
 
    This restores `.env` and the WebUI volume, recreates the container, re-pulls

@@ -5,7 +5,7 @@ server and your phone, nothing to port-forward. The WebUI port is kept private b
 an always-on nftables inbound guard (installed by `setup.sh`) that blocks ports
 3000 and 11434 on every interface except loopback and Tailscale, while leaving SSH
 open. **Never add a firewall rule that exposes ports 3000 or 11434 publicly** —
-that would defeat the guard. (Verify with `sudo ./netmode.sh status`.)
+that would defeat the guard. (Verify with `sudo lca status`.)
 
 ## 1. Connect the server to Tailscale (once)
 

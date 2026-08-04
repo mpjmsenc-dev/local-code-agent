@@ -87,8 +87,8 @@ lca ask -m qwen2.5-coder:3b "explain this error: ..."
 ```
 
 ```bash
-./update-model.sh --list-recommended    # what fits this machine
-./update-model.sh qwen2.5-coder:3b      # pin a smaller one
+lca model --list-recommended           # what fits this machine
+lca model qwen2.5-coder:3b              # pin a smaller one
 ```
 
 **2. Keep the context small.** Every token in the prompt is work. `run-agent.sh`

@@ -55,16 +55,16 @@ sudo ss -tlnp | grep :3000
 ```
 
 Then either stop that service, or pick a free port: set `WEBUI_PORT` in `.env`
-to something else and run `sudo lca apply`. If `./webui.sh status`
+to something else and run `sudo lca apply`. If `lca webui status`
 or `check-system.sh` reports the container "CRASH-LOOPING (restarting)", this
 port conflict (or a bad `.env` value) is the usual cause — check
-`./webui.sh logs`.
+`lca webui logs`.
 
 ## Out of memory / model gets killed / responses never finish
 
 The model + context don't fit in RAM. In order:
 
-1. `scripts/tune.sh` — if RAM shrank (resize down), this downgrades the model
+1. `lca tune` — if RAM shrank (resize down), this downgrades the model
    to the right rung of the ladder.
 2. Still tight? Lower `OLLAMA_CONTEXT_LENGTH` in `.env` (e.g. 8192 → 4096) and
    run `sudo lca apply` to re-render + restart.
@@ -100,7 +100,7 @@ silently drop it. If replies start losing the thread or getting cut off:
 aider reaches Ollama via litellm, which needs two things `run-agent.sh` sets for
 you: the `ollama_chat/` model prefix and `OLLAMA_API_BASE`. So: always start
 aider through `run-agent.sh`, not bare `aider`. If it still fails:
-`./check-system.sh` (is the API up? is the model pulled?), and make sure `.env`'s
+`lca check` (is the API up? is the model pulled?), and make sure `.env`'s
 `MODEL_NAME` appears in `ollama list`.
 
 ## docker: "permission denied ... /var/run/docker.sock"
@@ -113,17 +113,17 @@ applies to **new** logins. Log out and back in (or `newgrp docker`). Still broke
 
 Check in this order:
 
-1. Container: `./webui.sh status` (and `./webui.sh logs` for errors).
+1. Container: `lca webui status` (and `lca webui logs` for errors).
 2. Tailscale: phone app toggle ON? `tailscale status` on the server logged in?
    Using the right IP (`tailscale ip -4`) and port (3000)?
-3. Netmode: `sudo ./netmode.sh status` — offline mode does NOT block Tailscale,
-   but a half-applied experiment might; `sudo ./netmode.sh online` to reset.
-4. Inbound guard: `sudo ./netmode.sh status` also shows the always-on inbound
+3. Netmode: `sudo lca status` — offline mode does NOT block Tailscale,
+   but a half-applied experiment might; `sudo lca online` to reset.
+4. Inbound guard: `sudo lca status` also shows the always-on inbound
    guard. **By design it allows the WebUI port only over loopback and
    `tailscale0`** — so reaching WebUI by the server's public or LAN IP
    (without Tailscale) is *supposed* to fail. Always go through the Tailscale
    IP. If `status` reports the guard is NOT loaded, re-apply it with
-   `sudo ./netmode.sh harden`.
+   `sudo lca harden`.
 
 ### I actually want direct LAN access (advanced, reduces privacy)
 
@@ -139,8 +139,8 @@ on the next boot/`harden` unless you also stop running `harden`).
 **First check the kill switch** — this is expected behavior when offline mode is on:
 
 ```bash
-sudo ./netmode.sh status
-sudo ./netmode.sh online     # if you want internet back
+sudo lca status
+sudo lca online              # if you want internet back
 ```
 
 Only if mode is `online` and the probe still fails is it a real network problem
@@ -207,8 +207,8 @@ The long answer, if you want to know what it is doing:
 | `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fixed by `lca apply`, `sudo scripts/tune.sh`, or a reboot |
 | `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP`, `OLLAMA_HOST`, `WEBUI_NAME` | the WebUI container | `lca check` says `chat app config drift`. Fixed by `lca apply` |
 | the assistant's system prompt and starter questions | the WebUI container | same — and these come from the **repo**, not `.env`, so a `git pull` that improves the prompt still needs `sudo lca apply` |
-| `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo ./backup.sh --install-timer` |
-| `WEBUI_PORT`, `OLLAMA_HOST` (the port half) | the inbound guard's nftables ruleset | `lca check` says the guard `does NOT cover` a port. Fixed by `lca apply` or `sudo ./netmode.sh harden` |
+| `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo lca backup --install-timer` |
+| `WEBUI_PORT`, `OLLAMA_HOST` (the port half) | the inbound guard's nftables ruleset | `lca check` says the guard `does NOT cover` a port. Fixed by `lca apply` or `sudo lca harden` |
 
 That second row was the longest-lived hole in this table: nothing compared the
 system prompt, so `lca apply` answered *"already matches .env"* after a repo

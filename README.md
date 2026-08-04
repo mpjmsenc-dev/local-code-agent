@@ -44,7 +44,7 @@ chmod +x *.sh scripts/*.sh bin/*
 ./setup.sh
 ```
 
-Then verify with `./check-system.sh`. For a zero-terminal DigitalOcean install,
+Then verify with `lca check`. For a zero-terminal DigitalOcean install,
 paste `deploy/do-user-data.sh` when creating the droplet — see
 [docs/DO.md](docs/DO.md) and the step-by-step [docs/YOUR-TURN.md](docs/YOUR-TURN.md).
 
@@ -52,7 +52,7 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 
 1. `sudo tailscale up` on the server, log in via the printed URL.
 2. Install the Tailscale app on your phone, log in to the same account.
-3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
+3. Open `http://<tailscale-ip>:3000` — or run `lca chat` on the server to
    print the exact address. Create the **first** account (it becomes admin).
    Your model is already selected, so you can just start typing.
 4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, then `sudo lca apply`.
@@ -90,15 +90,15 @@ everywhere, and a resize still re-tunes it:
 An unrecognised value falls back to the default instead of failing a pull.
 
 `qwen2.5-coder:32b` is deliberately a manual choice for big machines (≥ 32 GB):
-`./update-model.sh qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
-reboot won't override you. Preview what tune would do: `scripts/tune.sh --dry-run`.
+`lca model qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
+reboot won't override you. Preview what tune would do: `lca tune --dry-run`.
 
 ## Headline feature 2: NET SWITCH — the internet kill switch
 
 ```bash
-sudo ./netmode.sh offline   # AI stack loses ALL internet; phone access keeps working
-sudo ./netmode.sh status    # shows mode + proves it with a live probe
-sudo ./netmode.sh online    # back to normal
+sudo lca offline             # AI stack loses ALL internet; phone access keeps working
+sudo lca status               # shows mode + proves it with a live probe
+sudo lca online               # back to normal
 ```
 
 Offline mode drops every **new** outbound connection (locally-generated and
@@ -110,21 +110,20 @@ caveat: the encrypted Tailscale tunnel still uses the network as transport;
 Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
 every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
-with `sudo ./netmode.sh harden` / `status`; `harden` also (re)installs the boot
+with `sudo lca harden` / `sudo lca status`; `harden` also (re)installs the boot
 service, so one command closes the ports for good rather than until the next
 reboot.
 
 ## Updating
 
 ```bash
-cd /opt/local-code-agent
-./update.sh --check     # what would change? (touches nothing)
-./update.sh             # back up → pull → re-run setup → self-test
+lca update --check      # what would change? (touches nothing)
+lca update              # back up → pull → re-run setup → self-test
 ```
 
 The backup happens **first**, on purpose: the update refreshes OS packages,
 aider, Ollama and possibly the model, so the restore point has to predate all of
-it. If the self-test fails afterwards, `./restore.sh` puts you back. Your `.env`
+it. If the self-test fails afterwards, `lca restore` puts you back. Your `.env`
 is untracked, so your settings survive updates untouched.
 
 ## Security model
@@ -179,7 +178,7 @@ offline because the models are local.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
   internet, and keep `OLLAMA_HOST` on loopback.
 - Verify the posture any time with `./check-system.sh` and
-  `sudo ./netmode.sh status`. On DigitalOcean, the **Recovery Console** is the
+  `sudo lca status`. On DigitalOcean, the **Recovery Console** is the
   unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
 
 ## Daily usage: aider (the coding agent)

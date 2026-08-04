@@ -88,8 +88,8 @@ loopback). To make the "reached only over Tailscale/loopback" promise real,
 `netmode.sh`, re-applied every boot) that **drops new inbound connections to
 3000 and 11434 on every interface except loopback and `tailscale0`**. SSH
 (port 22) and all other ports are untouched, so the guard can never lock you
-out. Check it any time with `sudo ./netmode.sh status` (look for "inbound
-guard ... LOADED"); re-apply with `sudo ./netmode.sh harden`.
+out. Check it any time with `sudo lca status` (look for "inbound
+guard ... LOADED"); re-apply with `sudo lca harden`.
 
 With that guard in place there is **nothing to open**: reach WebUI over
 Tailscale. **Never** add a DO cloud firewall rule (or any other rule)

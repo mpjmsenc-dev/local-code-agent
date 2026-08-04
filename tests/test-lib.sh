@@ -3069,6 +3069,34 @@ advice_paths_are_absolute() {
 check "every path a message names resolves from any directory" \
   advice_paths_are_absolute
 
+# The same rule for the docs, where it takes a different shape: a fenced block
+# may say './setup.sh' — there is no 'lca' equivalent and there cannot be one
+# before the install — but then the block has to put the reader in the right
+# directory first. Everything with an 'lca' subcommand uses that instead, which
+# needs no cd at all.
+doc_blocks_establish_their_directory() {
+  local hits
+  hits="$(awk '
+    FNR == 1 { inb = 0; usesrel = 0; hascd = 0 }
+    /^```/ {
+      if (inb) {
+        if (usesrel && !hascd)
+          printf "%s:%d: this block runs ./script.sh without a cd\n", FILENAME, start
+        inb = 0; usesrel = 0; hascd = 0
+      } else { inb = 1; start = FNR }
+      next
+    }
+    inb && /(^|[[:space:]])\.\/[a-z_-]+\.sh/ { usesrel = 1 }
+    inb && /^[[:space:]]*cd /                { hascd = 1 }
+  ' "${REPO}/README.md" "${REPO}"/docs/*.md)"
+  [[ -z "${hits}" ]] || {
+    printf 'a reader following these would be in the wrong directory:\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "every doc block that runs a script says where to stand" \
+  doc_blocks_establish_their_directory
+
 echo "# the 'lca' command is a symlink, and a moved checkout leaves it dangling"
 # Every doc and message here says "type lca". Move the checkout and the symlink
 # dangles — including 'lca check', which is exactly what someone reaches for

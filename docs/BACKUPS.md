@@ -38,7 +38,7 @@ prints nothing useful.)
 ## Make one now
 
 ```bash
-./backup.sh
+lca backup
 ```
 
 Then copy it **off the machine** — a backup on the same disk won't survive a disk
@@ -58,8 +58,8 @@ it deliberately, with `scp -r .../backups/ .`, rather than by accident.
 On a fresh install (after `setup.sh`):
 
 ```bash
-./restore.sh                 # newest backup in backups/
-./restore.sh path/to/backup.tar.gz
+lca restore                  # newest backup in backups/
+lca restore path/to/backup.tar.gz
 ```
 
 Restore brings back the WebUI volume and `.env`, re-pulls the models listed in
@@ -94,8 +94,8 @@ normally — there is nothing to lose.
 Opt in to a systemd timer that runs the backup for you:
 
 ```bash
-sudo ./backup.sh --install-timer     # enable
-sudo ./backup.sh --uninstall-timer   # disable
+sudo lca backup --install-timer     # enable
+sudo lca backup --uninstall-timer   # disable
 ```
 
 - Schedule: `BACKUP_SCHEDULE` in `.env` (systemd `OnCalendar` syntax). **Quote the
