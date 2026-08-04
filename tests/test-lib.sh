@@ -4703,6 +4703,39 @@ tune_checks_the_model_is_downloaded() {
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
 
+echo "# docs/GPU.md's VRAM table must be the arithmetic lca speed actually does"
+# The same shape as the RAM ladder below: a table of numbers a reader sizes a
+# purchase on, and a function that computes them. GPU.md even says "lca speed
+# does this arithmetic for your card and tells you the number" — so the table
+# and the number are the same claim made twice, and only one of them was ever
+# checked.
+#
+# The stakes are a graphics card. A model that spills out of VRAM runs at close
+# to CPU speed, which is the entire point of the page.
+gpu_doc_vram_table_matches_the_code() {
+  local row gb claimed got wrong=() rows
+  rows="$(sed -n '/^| VRAM | Fits entirely/,/^$/p' "${REPO}/docs/GPU.md" | grep -E '^\| [0-9]')"
+  (( $(grep -c . <<<"${rows}") >= 3 )) || {
+    echo 'could not find the VRAM table in docs/GPU.md' >&2; return 1; }
+  while IFS= read -r row; do
+    [[ -n "${row}" ]] || continue
+    gb="$(cut -d'|' -f2 <<<"${row}" | grep -oE '[0-9]+' | head -1)"
+    claimed="$(cut -d'|' -f3 <<<"${row}" | grep -oE '[0-9]+' | head -1)"
+    [[ -n "${gb}" && -n "${claimed}" ]] || continue
+    got="$(bash -c 'source "$1" >/dev/null 2>&1; largest_model_for_vram "$2"' \
+      _ "${REPO}/scripts/lib.sh" "$(( gb * 1024 ))" || true)"
+    [[ "${claimed}" == "${got}" ]] \
+      || wrong+=("${gb} GB: GPU.md says ~${claimed}B, largest_model_for_vram gives ${got:-nothing}B")
+  done <<<"${rows}"
+  (( ${#wrong[@]} == 0 )) || {
+    printf 'the VRAM table and the code disagree:\n' >&2
+    printf '  %s\n' "${wrong[@]}" >&2
+    return 1
+  }
+}
+check "docs/GPU.md's VRAM table matches largest_model_for_vram" \
+  gpu_doc_vram_table_matches_the_code
+
 echo "# the README's RAM ladder must be the one choose_for_ram walks"
 # The MODEL_FAMILY table below is gated; the table above it — the headline
 # feature's own "resize and it adapts" ladder, naming a model and a context
