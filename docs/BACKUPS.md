@@ -81,13 +81,17 @@ ones so they can't slowly fill the disk — the same disk headroom
 to keep every backup instead.
 
 Pruning is deliberately **skipped** when a run could not capture WebUI data it
-believes exists — the volume is there but the archive failed, or Docker is down
-so its contents can't be verified. Without that guard, a week of unattended runs
-with Docker broken would quietly delete every backup that still held your
-accounts and chat history. When that happens the run warns and keeps the older
-backups; fix Docker and re-run `lca backup`. A machine with no WebUI data at all
-(`ENABLE_WEBUI=false`, or Docker running with no `open-webui` volume) prunes
-normally — there is nothing to lose.
+believes exists — the volume is there but the archive failed, or Docker is
+installed and its daemon is down, so nothing could look. Without that guard, a
+week of unattended runs with Docker broken would quietly delete every backup
+that still held your accounts and chat history. When that happens the run warns
+and keeps the older backups; fix Docker and re-run `lca backup`. A machine that
+genuinely has nothing to lose — no Docker at all, or Docker answering with no
+`open-webui` volume — prunes normally.
+
+`ENABLE_WEBUI` has no say in this, deliberately. The volume outlives the
+setting: turn the chat app off in `.env` and every account and chat is still
+sitting in `open-webui`, which is why a backup archives it either way.
 
 ## Automatic (scheduled) backups
 

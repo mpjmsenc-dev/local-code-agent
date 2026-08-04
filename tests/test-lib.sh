@@ -300,6 +300,57 @@ check "archive missing a staged file is rejected" vb_rejects "${VB_PARTIAL}" "${
 : > "${SANDBOX}/empty.tar.gz"
 check "empty file is rejected"             vb_rejects "${SANDBOX}/empty.tar.gz" "${VB_STAGE}"
 
+echo "# retention must never prune on the strength of a look nobody took"
+# Three states, and the middle one is the whole point: "docker did not answer"
+# is not "there is no data". Get it wrong in that direction and BACKUP_KEEP
+# unattended nights delete every backup that still holds the accounts and chat
+# history — while each run reports success.
+#
+# webui_data_state USABLE INSTALLED VOLUME. Its own name, not the 'state_is'
+# the motd block further down uses — two helpers with one name in one file is
+# a test that silently stops testing the moment the second definition loads.
+data_state_is() { [[ "$(webui_data_state "$2" "$3" "$4")" == "$1" ]]; }
+check "daemon up and the volume is there -> archive it" \
+  data_state_is present true true true
+check "daemon up and no volume -> nothing to lose" \
+  data_state_is none    true true false
+# The regression this exists for. The volume outlives ENABLE_WEBUI, so the
+# setting was never evidence about the data — but it sat in this condition, and
+# with the daemon down and the chat app switched off in .env the old code
+# reported "no volume found" and pruned. Nothing had looked.
+check "docker installed but the daemon is down -> we cannot tell, keep them" \
+  data_state_is unknown false true false
+check "...and still cannot tell even if a stale flag says a volume was there" \
+  data_state_is unknown false true true
+# ...while a machine with no docker at all genuinely has no volume, and must
+# still prune. Getting THIS wrong disables retention for ever and fills the
+# disk, which is the opposite failure and just as real.
+check "no docker on the machine -> nothing to lose" \
+  data_state_is none    false false false
+# And the decision must not consult .env's chat-app switch again.
+retention_ignores_enable_webui() {
+  sed 's/#.*//' "${REPO}/backup.sh" \
+    | awk '/^webui_data_state\(\) \{/ { inb = 1 }
+           inb && /ENABLE_WEBUI/ { bad = 1 }
+           inb && /^\}/ { exit }
+           END { exit bad }'
+}
+check "the retention decision never reads ENABLE_WEBUI" \
+  retention_ignores_enable_webui
+# ...and do_backup must actually branch on the answer. A pure helper that
+# nothing consults is decoration, and the five checks above would all still
+# pass while backup.sh went on deciding for itself.
+backup_asks_the_state_helper() {
+  sed 's/#.*//' "${REPO}/backup.sh" \
+    | awk '/^do_backup\(\) \{/ { inb = 1 }
+           inb && /webui_data_state/       { called = 1 }
+           inb && /data_state.*"present"/  { branched = 1 }
+           inb && /^\}/ { exit }
+           END { exit !(called && branched) }'
+}
+check "backup.sh decides retention through that helper, not its own reading" \
+  backup_asks_the_state_helper
+
 echo "# backups_to_prune() keeps the newest KEEP; prints the older ones to delete"
 # Timestamped names sort chronologically; the helper sorts internally, so the
 # order they are fed in must not matter.

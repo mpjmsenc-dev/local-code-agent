@@ -59,7 +59,14 @@ do_backup() {
   fi
 
   # 1. Open WebUI docker volume (accounts + chat history).
+  local docker_installed=false volume_present=false data_state
+  have docker && docker_installed=true
   if [[ "${docker_ok}" == "true" ]] && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    volume_present=true
+  fi
+  data_state="$(webui_data_state "${docker_ok}" "${docker_installed}" "${volume_present}")"
+
+  if [[ "${data_state}" == "present" ]]; then
     webui_state="missed"   # promoted to "captured" only if the archive succeeds
     info "Archiving the 'open-webui' docker volume..."
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
@@ -111,13 +118,11 @@ do_backup() {
         warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
       fi
     fi
-  elif [[ "${docker_ok}" != "true" && "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
-    # Docker is unusable, so we cannot tell whether a WebUI volume with real
-    # data exists. Assume it might: keep older backups rather than risk them.
+  elif [[ "${data_state}" == "unknown" ]]; then
     webui_state="missed"
-    warn "Docker is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
+    warn "Docker is installed but its daemon is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
   else
-    warn "No 'open-webui' docker volume found — skipping WebUI data."
+    warn "No 'open-webui' docker volume on this machine — skipping WebUI data."
   fi
 
   # 2. .env
@@ -207,6 +212,37 @@ do_backup() {
   fi
 
   info "Copy it off the machine (e.g. scp) — restore with: ${SCRIPT_DIR}/restore.sh ${tarball}"
+}
+
+# webui_data_state DOCKER_USABLE DOCKER_INSTALLED VOLUME_PRESENT — which of the
+# three retention states this machine is in, decided before anything is
+# archived. Its own function so all of it can be exercised without a docker
+# daemon, the same reason verify_backup below is one.
+#
+#   present   the volume is there and readable -> archive it, then prune
+#   unknown   docker is here but its daemon is not answering, so nothing has
+#             LOOKED -> keep older backups
+#   none      no docker at all, or docker answered and there is no volume ->
+#             nothing to lose, prune
+#
+# ENABLE_WEBUI is deliberately not a parameter, and used to be part of this
+# decision. The volume outlives the setting: switch the chat app off in .env
+# and every account and chat is still sitting in 'open-webui' — which is why
+# the caller archives it whether or not .env says the chat is enabled. But with
+# the daemon down AND ENABLE_WEBUI=false, the old condition fell through to "no
+# volume found", a claim nothing had checked, and pruned on the strength of it.
+# BACKUP_KEEP nights of that deletes every backup that still had the data —
+# the precise failure the three states were introduced to prevent, reachable
+# through the one input that has nothing to do with whether the data exists.
+webui_data_state() {
+  local usable="$1" installed="$2" volume="$3"
+  if [[ "${usable}" == "true" && "${volume}" == "true" ]]; then
+    printf 'present\n'
+  elif [[ "${usable}" != "true" && "${installed}" == "true" ]]; then
+    printf 'unknown\n'
+  else
+    printf 'none\n'
+  fi
 }
 
 # verify_backup TARBALL STAGING_DIR — true when the archive reads back cleanly
