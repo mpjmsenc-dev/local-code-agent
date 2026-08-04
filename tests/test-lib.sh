@@ -226,6 +226,54 @@ restore_validates_env_first() {
 check "restore.sh validates the backed-up .env before sourcing it" \
   restore_validates_env_first
 
+# ...and the whole thing driven once, end to end, on a hostile archive. The
+# checks above prove the validator and the call order separately; this proves
+# what a user actually gets — because the property that matters is not "the
+# function returned 1", it is "the payload did not run and the recovery
+# continued anyway".
+#
+# apply.sh and install_webui.sh are stubbed: the real apply would reach
+# 'netmode.sh harden' and load a firewall on the machine running the tests.
+# Ollama and Docker are shimmed away so this costs no waiting.
+RST_SB="${SANDBOX}/hostile"
+mkdir -p "${RST_SB}/scripts" "${RST_SB}/backups" "${RST_SB}/stage"
+cp "${REPO}/restore.sh" "${RST_SB}/restore.sh"
+cp "${REPO}/.env.example" "${RST_SB}/.env.example"
+cp "${REPO}/.env.example" "${RST_SB}/.env"
+cp "${REPO}/scripts/lib.sh" "${RST_SB}/scripts/lib.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${RST_SB}/scripts/apply.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${RST_SB}/scripts/install_webui.sh"
+chmod +x "${RST_SB}/restore.sh" "${RST_SB}"/scripts/*.sh
+cat >> "${RST_SB}/scripts/lib.sh" <<'SHIM'
+have() { [[ "$1" != docker && "$1" != ollama ]]; }
+ensure_ollama_up_announced() { return 1; }
+SHIM
+RST_PAYLOAD="${RST_SB}/PWNED"
+{
+  printf 'MODEL_NAME=qwen2.5-coder:7b\n'
+  printf 'WEBUI_PORT=3000\n'
+  printf 'PWNED=%s(touch %s)\n' '$' "${RST_PAYLOAD}"
+} > "${RST_SB}/stage/env"
+printf 'NAME\tID\tSIZE\n' > "${RST_SB}/stage/models.txt"
+tar czf "${RST_SB}/backups/local-code-agent-backup-20260101-000000.tar.gz" \
+  -C "${RST_SB}/stage" . 2>/dev/null
+hostile_rc=0
+hostile_out="$(cd "${RST_SB}" && ./restore.sh </dev/null 2>&1)" || hostile_rc=$?
+
+# The one that matters.
+check "a hostile .env in a backup never executes" test ! -e "${RST_PAYLOAD}"
+check "the live .env is left exactly as it was" \
+  cmp -s "${RST_SB}/.env" "${REPO}/.env.example"
+hostile_kept_a_copy() {
+  [[ -f "${RST_SB}/.env.rejected" ]] && grep -qF 'PWNED' "${RST_SB}/.env.rejected"
+}
+check "the refused file is kept for the user to read" hostile_kept_a_copy
+# Refusing is not failing: a recovery has to finish everything it still can.
+hostile_restore_continued() {
+  [[ "${hostile_rc}" == "0" ]] && grep -qF 'Restore complete' <<<"${hostile_out}"
+}
+check "the rest of the restore still ran" hostile_restore_continued
+
 echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
 # backup.sh only runs main() when executed, so sourcing it here just defines
 # its functions. Guards the "disk filled up mid-tar" case: the archive must read
