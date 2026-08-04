@@ -749,11 +749,30 @@ echo "# saving state may not kill the command that already did its work"
 #
 # Three-line window because these writes wrap, and 'if !' can be two lines
 # above its redirect. Comments stripped first, as everywhere else here.
+#
+# The variable names are DERIVED per file, not listed. The first version of
+# this carried a hand-typed set of four — and missed run-agent.sh, the headline
+# command, which writes aider's model metadata into the very same directory and
+# died there for the very same reason. A gate against hand-typed lists that
+# itself hand-typed a list.
 cache_writes_cannot_abort() {
-  local f hits bad=0
+  local f hits bad=0 roots n more names
   for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
-    hits="$(sed 's/#.*//' "${f}" | awk '{ a = b; b = c; c = $0 }
-      c ~ /(mkdir -p|>)[ ]*"\$\{(ASK_STATE_DIR|STATE_DIR|BASELINE|ASK_LAST)/ {
+    # Variables assigned a path under ~/.cache/local-code-agent...
+    roots="$(sed 's/#.*//' "${f}" \
+      | grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*\.cache/local-code-agent' \
+      | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' | sort -u || true)"
+    [[ -n "${roots}" ]] || continue
+    # ...and the ones built out of those (BASELINE from STATE_DIR, and so on).
+    for n in ${roots}; do
+      more="$(sed 's/#.*//' "${f}" \
+        | grep -E "^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\"?[$]\{${n}\}" \
+        | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' || true)"
+      roots="${roots}"$'\n'"${more}"
+    done
+    names="$(printf '%s\n' "${roots}" | sed '/^$/d' | sort -u | paste -sd'|' -)"
+    hits="$(sed 's/#.*//' "${f}" | awk -v names="${names}" '{ a = b; b = c; c = $0 }
+      c ~ ("(mkdir -p|>)[ ]*\"\\$\\{(" names ")") {
         w = a " " b " " c
         if (w !~ /\|\|/ && w !~ /if !/) printf "  %d: %s\n", NR, c }')"
     [[ -z "${hits}" ]] || {

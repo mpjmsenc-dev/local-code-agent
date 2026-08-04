@@ -58,9 +58,20 @@ main() {
   # fallback) can never make the metadata and the printed window disagree.
   window=$(( input_tokens + output_tokens ))
   meta_dir="${HOME}/.cache/local-code-agent"
-  mkdir -p "${meta_dir}"
   meta_file="${meta_dir}/aider.model.metadata.json"
-  cat > "${meta_file}" <<EOF
+  # Not bare under 'set -e'. This directory is shared with 'lca ask' and 'lca
+  # speed', and it ends up root-owned the moment any of the three is run once
+  # under sudo — after which THIS command, the headline one, died on a raw
+  # "Permission denied" before aider ever started.
+  #
+  # It still stops, unlike the other two: the metadata is not decoration.
+  # Without it aider trusts litellm's generic 32k figure while Ollama runs at
+  # OLLAMA_CONTEXT_LENGTH and truncates anything longer, silently. So this dies
+  # deliberately, saying what happened and what to look at.
+  local meta_ok=true
+  mkdir -p "${meta_dir}" 2>/dev/null || meta_ok=false
+  if [[ "${meta_ok}" == "true" ]]; then
+    ( cat > "${meta_file}" <<EOF
 {
   "ollama_chat/${MODEL_NAME}": {
     "max_input_tokens": ${input_tokens},
@@ -69,6 +80,9 @@ main() {
   }
 }
 EOF
+    ) 2>/dev/null || meta_ok=false
+  fi
+  [[ "${meta_ok}" == "true" ]] || die "Could not write ${meta_file}, and aider must not start without it: it would trust a generic 32k context while Ollama runs at ${window} and truncates anything longer, with no error. Usually this directory is root-owned from a run under sudo — check with: ls -ld ${meta_dir}"
 
   # Edit format and repo-map size make a large difference to output quality on
   # small local models — see aider_edit_format()/aider_map_tokens(). AUTO picks
