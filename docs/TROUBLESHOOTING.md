@@ -223,19 +223,32 @@ files with no malformed edits, in about a minute each — and **0/5** produced
 tests that passed first time. In every run the tests it wrote caught its own
 bug, which is the useful part.
 
-So iterate rather than re-prompt from scratch:
+Run the tests. On 3b they are the deliverable that shows you the one line to
+change:
 
 ```bash
 python3 -m unittest            # or however your project runs its tests
-lca                            # aider again, in the same directory
-# > test_budget.py fails with TypeError: 'int' object is not iterable
 ```
 
-Pasting the actual error back is usually enough, and costs a minute. Asking for
-one file at a time works better than one big request. If you want stronger
-first-draft code, that is what more RAM buys — 7b from ~12 GB, 14b from 16 GB —
-unlike the chat's handover behaviour, which a bigger model does **not** improve
-(see [PHONE.md](PHONE.md)).
+**Handing the error back does not work on 3b.** Given the exact traceback and
+both files, four runs out of four re-emitted `budget.py` byte-identical — no
+fix, no error, "Applied edit to budget.py", 14-37 seconds each. The same
+follow-up on **7b** fixed it in **3 of 4** (100-287 seconds). Correctness is
+the one thing a bigger rung genuinely buys here, which is worth saying plainly
+because it is the opposite of the chat's handover behaviour, where 3b and 7b
+measure identical ([PHONE.md](PHONE.md)).
+
+**`--auto-test` is not the shortcut it looks like.** aider can run your tests
+itself and feed failures back — `lca --auto-test --test-cmd 'python3 -m
+unittest discover -q'`. Measured on the same task, three runs on 3b: all three
+ended with failing tests, all three exhausted aider's three-reflection limit,
+and each took **~6.3 minutes** against **~1 minute** for the plain run. On a
+CPU box every reflection is another full generation, and a small model tends to
+circle the same wrong fix.
+
+So on the base droplet's rung: ask for one file at a time, keep the tests, and
+expect to fix small logic yourself. From ~12 GB of RAM auto-tune moves you to
+7b and the follow-up loop starts working — at roughly three minutes a round.
 
 ## I changed a setting in .env and nothing happened
 

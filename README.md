@@ -381,11 +381,19 @@ accumulated a running total per category while `total_by_category` called
 fix, and the test that finds it comes free in the same run.
 
 So: it reliably produces a working shape and rarely one-shots correct logic.
-Ask for one file at a time, keep the tests it writes, and run them — telling
-aider "test_budget.py fails with TypeError: 'int' object is not iterable" is a
-minute of its time and usually enough. If you expect to type one sentence and
-get a finished app, no local model on a 8 GB droplet will do that, and neither
-will anything else on this hardware.
+Keep the tests it writes and run them — on 3b they are the deliverable that
+shows you the one line to change.
+
+Asking 3b to fix it does not work: handed the exact traceback, four runs out
+of four re-emitted the same file unchanged. The same follow-up on **7b** fixed
+it in **3 of 4**. That is the concrete thing more RAM buys here — and it is the
+opposite of the chat's handover behaviour, where a bigger model measures
+[identical](docs/PHONE.md). Full numbers, including why `--auto-test` is not
+the shortcut it looks like, are in
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+If you expect to type one sentence and get a finished app, no local model on an
+8 GB droplet will do that.
 
 ## Docs
 

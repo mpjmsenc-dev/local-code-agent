@@ -212,6 +212,12 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
   over — so if the chat is misbehaving, more RAM is not the fix. Check
   `lca check` for `chat app config drift: SYSTEM_PROMPT` first.
 
+  That first sentence is not hand-waving: handed a failing test and the exact
+  traceback, 3b re-emitted the file unchanged 4 times out of 4, while 7b fixed
+  it in 3 of 4. So the two halves of this stack answer the RAM question
+  differently — the chat's obedience does not improve, the agent's code does.
+  Numbers in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
   The 3b column has since been re-measured through `/api/chat` — the request
   shape Open WebUI itself sends, with the prompt as a system *message* rather
   than a template field — and every figure came back the same. The chat app's
