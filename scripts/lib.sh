@@ -603,7 +603,15 @@ has_nvidia_gpu() {
 # be actively misleading.
 gpu_hardware_present() {
   have lspci || return 1
-  lspci 2>/dev/null | grep -qi 'nvidia'
+  # Captured, then matched against a here-string. 'lspci | grep -qi' is the
+  # shape that returns 141 under pipefail when grep exits on an early match
+  # while the producer is still writing — measured with a match at the head of
+  # a 200 KiB stream: the pipe form reported NOT FOUND, the capture form found
+  # it. A PCI listing is small enough that this has probably never fired, and
+  # that is exactly the argument that keeps a footgun loaded.
+  local devices
+  devices="$(lspci 2>/dev/null || true)"
+  [[ -n "${devices}" ]] && grep -qi 'nvidia' <<<"${devices}"
 }
 
 # vram_mib_from_smi — read `nvidia-smi --query-gpu=memory.total ...` output on

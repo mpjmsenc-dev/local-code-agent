@@ -4691,6 +4691,34 @@ no_variable_is_piped_into_an_early_exiting_reader() {
 }
 check "no script pipes a variable into a reader that exits early" \
   no_variable_is_piped_into_an_early_exiting_reader
+# Same trap, other end: a COMMAND whose output size the script does not
+# control, feeding a grep that leaves on the first match. install_webui.sh had
+# 'ss -ltn | grep -qE ":${WEBUI_PORT}"' as its port-clash check, and the
+# direction of that failure is what makes it matter — a missed match means the
+# port looks free, 'docker run --network=host' cannot bind, the container
+# crash-loops under --restart unless-stopped, and the squatter answers the
+# health probe. A false success, from the one block written to prevent exactly
+# that.
+#
+# Measured, with the match at the head of a 200 KiB stream: the pipe form
+# returned 141 and read as "not found"; the capture form found it.
+#
+# Scoped to producers that can outgrow the 64 KiB pipe buffer on a real
+# machine. 'docker inspect -f' prints one line and 'id -nG' one more, so they
+# are deliberately not here — this is not a ban on pipelines.
+no_unbounded_listing_is_piped_into_grep_q() {
+  local hits
+  hits="$(grep -rnE '\b(ss|ps|journalctl|lspci|docker (ps|images|logs)|docker [a-z]+ ls)\b[^|]*\|[[:space:]]*grep -q' \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these pipe an unbounded listing into a grep that exits early (141 reads as not-found):\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "no unbounded listing is piped into 'grep -q'" \
+  no_unbounded_listing_is_piped_into_grep_q
 
 echo "# a script that rewrites its own file must not let bash read on"
 # bash reads a script incrementally from an open fd. update.sh fast-forwards

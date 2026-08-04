@@ -45,8 +45,24 @@ main() {
      | grep -q true; then
     webui_running=true
   fi
-  if [[ "${webui_running}" != "true" ]] \
-     && have ss && ss -ltn 2>/dev/null | grep -qE ":${WEBUI_PORT}[[:space:]]"; then
+  # Captured, then matched against a here-string — never 'ss | grep -q'. Under
+  # 'set -o pipefail' a grep that exits on its first match SIGPIPEs the producer
+  # and the pipeline returns 141, which reads as "not found" precisely when it
+  # WAS found. motd.sh records the same trap beside current_run_log, and CI's
+  # own assertions are written this way for the same reason; the listening-socket
+  # table is the one producer here big enough to still be writing when grep
+  # leaves.
+  #
+  # The direction of that failure is what makes it worth the two lines: a
+  # missed match means the port looks free, docker run --network=host cannot
+  # bind, the container crash-loops under --restart unless-stopped, and the
+  # squatter answers the health probe — the false success this whole block
+  # exists to prevent.
+  local listeners=""
+  if [[ "${webui_running}" != "true" ]] && have ss; then
+    listeners="$(ss -ltn 2>/dev/null || true)"
+  fi
+  if [[ -n "${listeners}" ]] && grep -qE ":${WEBUI_PORT}[[:space:]]" <<<"${listeners}"; then
     die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
   fi
 
