@@ -2965,6 +2965,26 @@ apply_covers() { grep -qF "$1" "${APPLY}"; }
 check "apply covers the Ollama drop-in"  apply_covers 'apply_ollama'
 check "apply covers the chat app"        apply_covers 'apply_webui'
 check "apply covers the backup timer"    apply_covers 'apply_backup_timer'
+# No applier may invoke another script bare under 'set -e'. apply_webui has
+# said why since it was written — "a failed re-create aborted 'lca apply'
+# right here: the inbound guard was never reconciled, no summary was printed"
+# — and the other two did exactly that, including the last one, where
+# everything else has already succeeded by the time it runs.
+appliers_check_the_scripts_they_call() {
+  local hits
+  hits="$(grep -nE '^[[:space:]]*"\$\{(REPO_ROOT|SCRIPT_DIR)\}/[^"]*"' "${REPO}/scripts/apply.sh" || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'apply.sh runs these without checking their status:\n%s\n' "${hits}" >&2
+    return 1
+  }
+  # ...and the guarded form must still be there, or a rename could empty this.
+  grep -qE 'if ! "\$\{(REPO_ROOT|SCRIPT_DIR)\}/' "${REPO}/scripts/apply.sh" || {
+    echo "apply.sh no longer calls any sub-script — this gate stopped watching" >&2
+    return 1
+  }
+}
+check "no applier runs a sub-script without checking it worked" \
+  appliers_check_the_scripts_they_call
 # The dry run must be incapable of changing anything: every mutating call has
 # to sit behind the 'would' guard that returns early.
 dry_run_guards_every_change() {
@@ -4252,7 +4272,13 @@ check "'lca check' reports guard drift and 'lca apply' fixes it" \
 # whether a firewall gets loaded. apply.sh guards its own main() behind a
 # BASH_SOURCE test precisely so this is possible.
 cp "${REPO}/scripts/apply.sh" "${SANDBOX}/scripts/apply.sh"
-printf '#!/usr/bin/env bash\necho "HARDEN-CALLED"\n' > "${SANDBOX}/netmode.sh"
+# Exits HARDEN_RC so a kernel that refuses the ruleset can be simulated; the
+# checks that predate it set nothing and get the old always-succeeds stub.
+cat > "${SANDBOX}/netmode.sh" <<'HARDENSTUB'
+#!/usr/bin/env bash
+echo "HARDEN-CALLED"
+exit "${HARDEN_RC:-0}"
+HARDENSTUB
 chmod +x "${SANDBOX}/netmode.sh"
 cat > "${SANDBOX}/apply-probe.sh" <<'PROBE'
 #!/usr/bin/env bash
@@ -4309,6 +4335,23 @@ guard_without_nft_is_unchecked() {
   grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || { echo "${out}" >&2; return 1; }
   ! grep -q 'HARDEN-CALLED' <<<"${out}"
 }
+# A harden that FAILS must not take the command out. This one is the last
+# applier, so a bare call meant a kernel that will not load the ruleset — a
+# container, a VPS kernel without the nftables modules — ended 'lca apply'
+# with no summary line at all, immediately after everything else had applied
+# cleanly. The probe's final echo is the assertion: under 'set -e' it simply
+# never prints if apply_guard aborts.
+guard_failure_is_reported_not_fatal() {
+  local out; out="$(HARDEN_RC=1 apply_probe 0 0 "" false)"
+  grep -q 'HARDEN-CALLED' <<<"${out}" || { echo "${out}" >&2; return 1; }
+  grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || {
+    printf 'apply_guard did not survive a failing harden:\n%s\n' "${out}" >&2
+    return 1
+  }
+  grep -q 'may still be reachable from outside' <<<"${out}" || {
+    echo "the failure was counted but never explained" >&2; return 1
+  }
+}
 guard_without_root_is_unchecked() {
   local out; out="$(apply_probe 0 1 "" false)"
   grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || { echo "${out}" >&2; return 1; }
@@ -4351,6 +4394,7 @@ check "--dry-run only talks about a drifted port"           guard_dry_run_on_a_d
 check "--dry-run only talks about a missing guard"          guard_dry_run_when_not_loaded
 check "no nftables is 'not checked', never 'matches'"        guard_without_nft_is_unchecked
 check "no root is 'not checked', never 'matches'"            guard_without_root_is_unchecked
+check "a harden that fails is reported, not fatal"           guard_failure_is_reported_not_fatal
 
 echo "# what a boot unit will really run ('enabled' is a claim about a symlink)"
 # All three of our units bake the installing checkout's absolute path into

@@ -157,7 +157,15 @@ apply_backup_timer() {
   would "move the backup timer from '${live}' to '${BACKUP_SCHEDULE}'." && return 0
   needs_root "Re-installing the backup timer" || return 0
   info "Backups:  moving the timer from '${live}' to '${BACKUP_SCHEDULE}'..."
-  "${REPO_ROOT}/backup.sh" --install-timer
+  # Not bare under 'set -e', for the reason apply_webui states above: a
+  # failure here took 'lca apply' out on the spot, so the inbound guard was
+  # never reconciled and no summary was printed at all — on a command whose
+  # whole contract is a summary of what it did.
+  if ! "${REPO_ROOT}/backup.sh" --install-timer; then
+    warn "Backups:  the timer could not be re-installed, so it still fires on '${live}' rather than '${BACKUP_SCHEDULE}' — see the error above. Continuing with the rest."
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
   ok "Backups:  applied."
   CHANGED=$((CHANGED+1))
 }
@@ -201,7 +209,16 @@ apply_guard() {
     would "apply the inbound guard, which is not loaded, to ${want//$'\n'/ + }." && return 0
     info "Guard:    applying to ${want//$'\n'/ + } (it is not loaded)..."
   fi
-  "${REPO_ROOT}/netmode.sh" harden
+  # Same rule, and this one is the LAST applier — so a bare call meant a
+  # ruleset the kernel would not load (a container, a VPS kernel without the
+  # nftables modules) ended the command with no summary line at all, right
+  # after everything else had applied cleanly. install_webui.sh has treated
+  # the same failure as warn-only since it was written, for the same reason.
+  if ! "${REPO_ROOT}/netmode.sh" harden; then
+    warn "Guard:    could not be applied, so ${want//$'\n'/ + } may still be reachable from outside — see the error above. Retry with: sudo ${REPO_ROOT}/netmode.sh harden"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
   ok "Guard:    applied."
   CHANGED=$((CHANGED+1))
 }
@@ -244,7 +261,7 @@ main() {
   if (( CHANGED == 0 )); then
     if (( UNCHECKED > 0 )); then
       # Never "everything matches" when something could not be looked at.
-      warn "Nothing needed applying, but ${UNCHECKED} component(s) could not be checked — see above."
+      warn "Nothing needed applying, but ${UNCHECKED} component(s) could not be checked or applied — see above."
       return 0
     fi
     ok "Everything already matches .env — nothing to do."
@@ -264,7 +281,7 @@ main() {
     return 0
   fi
   if (( UNCHECKED > 0 )); then
-    warn "Applied ${CHANGED} change(s), but ${UNCHECKED} component(s) could not be checked — see above."
+    warn "Applied ${CHANGED} change(s), but ${UNCHECKED} component(s) could not be checked or applied — see above."
     return 0
   fi
   ok "Applied ${CHANGED} change(s). Verify with: lca check"
