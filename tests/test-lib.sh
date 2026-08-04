@@ -1462,8 +1462,55 @@ make_lint_matches_ci() {
     printf 'make lint covers:  %s\nCI lints:          %s\n' "${mk}" "${ci}" >&2
     return 1
   }
+  # THREE copies, not two. CI keeps its own glob for the 'bash -n' loop, and
+  # nothing compared it — so the syntax check and the lint check could cover
+  # different files, with the cheaper one silently narrower.
+  local syn
+  syn="$(grep -oE '^ *for f in .*; do$' "${REPO}/.github/workflows/ci.yml" | head -1)"
+  syn="${syn#*for f in }"
+  syn="${syn%; do}"
+  [[ -n "${syn}" ]] || { echo "cannot find the bash -n loop in ci.yml" >&2; return 1; }
+  [[ "${syn}" == "${ci}" ]] || {
+    printf "CI's bash -n covers: %s\nCI's shellcheck:     %s\n" "${syn}" "${ci}" >&2
+    return 1
+  }
 }
 check "'make lint' lints exactly the files CI lints" make_lint_matches_ci
+
+# ...and that shared list has to cover every bash script in the repository.
+# The three copies agreeing only means they are equally wrong. .githooks/pre-push
+# was the one file none of them saw — the gate that guards every push, ungated
+# — and it fails badly in both directions: a syntax error blocks every push, a
+# swallowed status lets red gates through, which is the single thing it exists
+# to prevent.
+#
+# Derived from shebangs, so a new directory of scripts cannot slip in the same
+# way. git ls-files, not a find: an untracked scratch file is nobody's problem.
+every_bash_script_is_linted() {
+  local f pats covered tracked uncovered=()
+  pats="$(grep -oE '^SCRIPTS := .*' "${REPO}/Makefile" | head -1)"
+  pats="${pats#*wildcard }"; pats="${pats%)}"
+  [[ -n "${pats}" ]] || { echo "cannot read SCRIPTS out of the Makefile" >&2; return 1; }
+  # ${pats} is a LIST of globs and must split and expand — that is the whole
+  # point of reading it from the Makefile rather than keeping a fourth copy of
+  # it here.
+  # shellcheck disable=SC2086
+  covered="$(cd "${REPO}" && for f in ${pats}; do printf '%s\n' ${f}; done | sort -u)"
+  tracked="$(git -C "${REPO}" ls-files 2>/dev/null || true)"
+  [[ -n "${tracked}" ]] || { echo "could not list tracked files (not a git checkout?)" >&2; return 1; }
+  while read -r f; do
+    [[ -n "${f}" ]] || continue
+    head -1 "${REPO}/${f}" 2>/dev/null | grep -q '^#!.*bash' || continue
+    grep -qxF "${f}" <<<"${covered}" || uncovered+=("${f}")
+  done <<<"${tracked}"
+  (( ${#uncovered[@]} == 0 )) || {
+    printf 'these are bash scripts that neither shellcheck nor bash -n ever sees:\n' >&2
+    printf '  %s\n' "${uncovered[@]}" >&2
+    return 1
+  }
+}
+check "every bash script in the repo is covered by the lint glob" \
+  every_bash_script_is_linted
 
 echo "# the Makefile's header comment and its real targets must agree"
 # The header lists targets by hand; 'make help' derives them from the '##'

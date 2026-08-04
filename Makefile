@@ -15,7 +15,12 @@
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
-SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*)
+# .githooks/* included. The pre-push hook is a bash script like any other, and
+# it was the ONLY one in the repo that neither ShellCheck nor 'bash -n' ever
+# saw — the gate that guards every push, ungated. It fails badly in both
+# directions: a syntax error blocks every push, and a swallowed status lets red
+# gates through, which is the one thing it exists to prevent.
+SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
 
 .PHONY: gates lint syntax test dry-run check smoke bench hooks help
 .DEFAULT_GOAL := help
