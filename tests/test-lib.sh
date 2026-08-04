@@ -2697,6 +2697,36 @@ guard_without_root_is_unchecked() {
   grep -q 'CHANGED=0 UNCHECKED=1' <<<"${out}" || { echo "${out}" >&2; return 1; }
   ! grep -q 'HARDEN-CALLED' <<<"${out}"
 }
+# The summary is a claim too. Three of its four branches already refused to
+# say "everything matches" when something could not be looked at; the dry-run
+# branch printed the count alone, so a reader whose docker daemon was down got
+# "1 change(s) would be applied" as if that were the whole plan. Found by
+# running 'lca apply --dry-run' on a box with no docker, which is exactly the
+# combination — a change found elsewhere, a component unreadable.
+cat > "${SANDBOX}/apply-summary-probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+apply_ollama()       { :; }
+apply_webui()        { UNCHECKED=$((UNCHECKED+1)); }
+apply_backup_timer() { :; }
+apply_guard()        { CHANGED=$((CHANGED+1)); }
+main "${@:2}"
+PROBE
+chmod +x "${SANDBOX}/apply-summary-probe.sh"
+summary_probe() { bash "${SANDBOX}/apply-summary-probe.sh" "${SANDBOX}/scripts/apply.sh" "$@" 2>&1; }
+dry_run_owns_up_to_what_it_could_not_read() {
+  local out; out="$(summary_probe --dry-run)"
+  grep -q 'could not be checked' <<<"${out}" || { echo "${out}" >&2; return 1; }
+}
+real_run_owns_up_too() {
+  local out; out="$(summary_probe)"
+  grep -q 'could not be checked' <<<"${out}" || { echo "${out}" >&2; return 1; }
+}
+check "a dry-run plan says when it could not read something" \
+  dry_run_owns_up_to_what_it_could_not_read
+check "and so does the real run"  real_run_owns_up_too
+
 check "apply leaves a guard that already covers .env alone" guard_noop_when_covered
 check "apply re-hardens when a port drifted"                guard_hardens_on_a_drifted_port
 check "apply hardens when no guard is loaded"               guard_hardens_when_not_loaded

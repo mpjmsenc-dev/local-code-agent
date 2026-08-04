@@ -244,6 +244,15 @@ main() {
     return 0
   fi
   if [[ "${DRY_RUN}" == "true" ]]; then
+    # A plan is a claim about what is left to do, so it carries the same rule
+    # as the other three summaries: never present it as complete when a
+    # component could not be looked at. The CHANGED==0 branch above already
+    # said so; this one printed the count alone, and a reader with a docker
+    # daemon down would take "1 change would be applied" as the whole list.
+    if (( UNCHECKED > 0 )); then
+      warn "${CHANGED} change(s) would be applied, but ${UNCHECKED} component(s) could not be checked at all — the real plan may be longer. See above, then re-run."
+      return 0
+    fi
     info "${CHANGED} change(s) would be applied. Run without --dry-run to do it."
     return 0
   fi
