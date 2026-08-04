@@ -3057,7 +3057,7 @@ advice_paths_are_absolute() {
   # already-absolute path cannot match, then anything relative still standing
   # is a defect.
   hits="$(grep -nE '\b(warn|info|die|err|ok|p_pass|p_warn|p_fail)[[:space:]]+"' \
-            "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh 2>/dev/null \
           | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' \
           | sed 's|[$]{SCRIPT_DIR}||g; s|[$]{REPO_ROOT}||g' \
           | grep -E '(\./|[[:space:]("'"'"']scripts/)[a-z_-]+\.sh' || true)"
