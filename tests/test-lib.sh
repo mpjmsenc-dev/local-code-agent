@@ -392,6 +392,45 @@ no_aider_collision() {
 }
 check "no .env key collides with an aider env var" no_aider_collision
 
+echo "# every setting is BOTH documented and defaulted — the two lists are one list"
+# Two failures, one in each direction, and neither shows up until a user hits
+# it:
+#
+#   documented but not defaulted — .env.example is the file people edit, and
+#     deleting a line from it is an ordinary thing to do. Every script here
+#     runs under 'set -u', so a key load_env does not default is an unbound
+#     variable the moment someone removes it: the command dies with a bash
+#     error naming a variable, not a setting.
+#
+#   defaulted but not documented — the setting works and nothing tells anyone
+#     it exists. .env.example IS the reference; there is no other.
+env_keys_and_defaults_agree() {
+  local documented defaulted missing
+  documented="$(grep -oE '^[A-Z_]+=' "${REPO}/.env.example" | tr -d '=' | sort -u)"
+  defaulted="$(sed -n '/^load_env()/,/^}/p' "${REPO}/scripts/lib.sh" \
+    | grep -oE '^  [A-Z_]+=' | tr -d ' =' | sort -u)"
+  # Either list coming back empty means the extraction stopped working, and a
+  # comparison of two empty lists passes for ever.
+  [[ -n "${documented}" && -n "${defaulted}" ]] || {
+    echo "could not read the settings out of .env.example or load_env" >&2
+    return 1
+  }
+  missing="$(comm -23 <(printf '%s\n' "${documented}") <(printf '%s\n' "${defaulted}"))"
+  [[ -z "${missing}" ]] || {
+    printf 'documented in .env.example but not defaulted in load_env: %s\n' \
+      "${missing//$'\n'/, }" >&2
+    return 1
+  }
+  missing="$(comm -13 <(printf '%s\n' "${documented}") <(printf '%s\n' "${defaulted}"))"
+  [[ -z "${missing}" ]] || {
+    printf 'defaulted in load_env but undocumented in .env.example: %s\n' \
+      "${missing//$'\n'/, }" >&2
+    return 1
+  }
+}
+check "every .env.example key has a default, and every default is documented" \
+  env_keys_and_defaults_agree
+
 echo "# processor_from_ps(): is the GPU actually being used? (parsed by pattern, not column)"
 PS_GPU="NAME                ID              SIZE      PROCESSOR    CONTEXT    UNTIL
 qwen2.5-coder:7b    dae161e27b0e    5.5 GB    100% GPU     4096       4 minutes from now"
