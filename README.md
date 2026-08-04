@@ -188,7 +188,7 @@ offline because the models are local.
   `WEBUI_ENABLE_SIGNUP=false` and run `sudo lca apply`.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
   internet, and keep `OLLAMA_HOST` on loopback.
-- Verify the posture any time with `./check-system.sh` and
+- Verify the posture any time with `lca check` and
   `sudo lca status`. On DigitalOcean, the **Recovery Console** is the
   unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
 
@@ -350,7 +350,7 @@ that fits its VRAM, and proving it is really being used.
 
 Note: CI exercises the CPU path on standard runners (there are no GPU runners),
 so the GPU path is documented and detected but not automatically E2E-tested —
-verify it on your GPU host with `./check-system.sh` after setup.
+verify it on your GPU host with `lca check` after setup.
 
 ## Honest expectations vs Claude
 

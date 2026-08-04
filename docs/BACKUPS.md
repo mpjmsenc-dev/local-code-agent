@@ -85,7 +85,7 @@ believes exists — the volume is there but the archive failed, or Docker is dow
 so its contents can't be verified. Without that guard, a week of unattended runs
 with Docker broken would quietly delete every backup that still held your
 accounts and chat history. When that happens the run warns and keeps the older
-backups; fix Docker and re-run `./backup.sh`. A machine with no WebUI data at all
+backups; fix Docker and re-run `lca backup`. A machine with no WebUI data at all
 (`ENABLE_WEBUI=false`, or Docker running with no `open-webui` volume) prunes
 normally — there is nothing to lose.
 
@@ -112,7 +112,7 @@ sudo lca backup --uninstall-timer   # disable
   malformed one. Re-run `install-timer` after changing it.
 - `Persistent=true`, so a run missed while the box was off happens at next boot.
 - Check it: `systemctl list-timers local-code-agent-backup.timer`, or
-  `./check-system.sh` (the Backups section shows the timer state and the age of
+  `lca check` (the Backups section shows the timer state and the age of
   the newest backup).
 
 Scheduled backups still write to the same local disk, so they protect against

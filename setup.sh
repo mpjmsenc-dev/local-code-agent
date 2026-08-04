@@ -80,9 +80,6 @@ main() {
   # honest outcome and the EXIT trap above still prints a verdict.
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
-  "${SCRIPT_DIR}/scripts/install_python.sh"
-  "${SCRIPT_DIR}/scripts/install_ollama.sh"
-
   # Docker is not one of those. Its only job here is to run the chat app, which
   # .env can switch off and which setup already treats as non-fatal — so a
   # Docker failure was aborting the install over precisely the component the
@@ -92,6 +89,8 @@ main() {
     warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
     setup_ok=false
   fi
+  "${SCRIPT_DIR}/scripts/install_python.sh"
+  "${SCRIPT_DIR}/scripts/install_ollama.sh"
 
   # Auto-tune BEFORE the model pull so we download the right model for this
   # machine's RAM straight away.

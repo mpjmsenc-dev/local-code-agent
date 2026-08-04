@@ -98,7 +98,7 @@ it is created, so editing the repo is not enough on its own — run `sudo lca
 apply` and it re-creates the container with the new prompt (your account and
 chats live in a docker volume and survive). If you forget, `lca check` now says
 so rather than staying silent: *"chat app config drift: SYSTEM_PROMPT — edited
-in .env or the repo but NOT in effect"*. (`./webui.sh status` spells out each
+in .env or the repo but NOT in effect"*. (`lca webui status` spells out each
 one at length; `lca check` is the one to reach for.)
 
 The one exception is a setting you have already changed **inside the WebUI**:
@@ -223,6 +223,6 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
 
 ## If the page won't load
 
-In order: is the phone's Tailscale toggle on? → does `./check-system.sh` on the
-server pass the WebUI checks? → `./webui.sh status` → see
+In order: is the phone's Tailscale toggle on? → does `lca check` on the
+server pass the WebUI checks? → `lca webui status` → see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

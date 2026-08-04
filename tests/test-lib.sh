@@ -787,6 +787,30 @@ help_examples_are_dispatched() {
 check "'lca <aider-flag>' reaches aider, as 'lca help' promises" \
   help_examples_are_dispatched
 
+echo "# docs/INSTALL.md's numbered list is a claim about the ORDER"
+# "What setup.sh does, in order" is the only place a reader can find out what
+# the twenty minutes are spent on, and the order is the content. Guarding
+# install_docker.sh moved it two places without meaning to, and nothing
+# noticed — the list said Docker third while setup ran it fifth.
+#
+# Both sides derived. setup.sh names a guarded installer twice, once in the
+# 'if !' and once in the retry advice beside it, so adjacent repeats collapse.
+install_doc_order_matches_setup() {
+  local doc code
+  doc="$(sed -n '/^### What setup.sh does, in order/,/^Re-running/p' "${REPO}/docs/INSTALL.md" \
+    | grep -oE 'scripts/install_[a-z_]+\.sh' | paste -sd' ' -)"
+  code="$(sed 's/#.*//' "${REPO}/setup.sh" \
+    | grep -oE 'scripts/install_[a-z_]+\.sh' | uniq | paste -sd' ' -)"
+  [[ -n "${doc}" ]] || { echo 'could not find the ordered list in docs/INSTALL.md' >&2; return 1; }
+  [[ -n "${code}" ]] || { echo 'could not find the installer calls in setup.sh' >&2; return 1; }
+  [[ "${doc}" == "${code}" ]] || {
+    printf 'INSTALL.md documents: %s\nsetup.sh actually runs: %s\n' "${doc}" "${code}" >&2
+    return 1
+  }
+}
+check "docs/INSTALL.md lists the installers in the order setup.sh runs them" \
+  install_doc_order_matches_setup
+
 echo "# an optional component may not abort the whole install"
 # setup.sh already said this about the chat app: "A WebUI failure must NOT
 # abort the rest of setup — the terminal stack still works". Tailscale and
