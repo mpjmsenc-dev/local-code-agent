@@ -3357,6 +3357,54 @@ check "a checkout reached through a symlinked parent is still ok" \
 lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
+echo "# a big piped input must not kill the command that exists to read it"
+# 'lca logs | lca ask "why did this fail?"' is the first thing
+# docs/TROUBLESHOOTING.md tells you to run. It died outright — exit 141, no
+# answer, no warning, no error — whenever the piped input passed the 64 KiB
+# pipe buffer, which is to say whenever the log was big enough to be worth
+# asking about. ask.sh sliced it with 'printf "%s" "${piped}" | head -c 12000':
+# head leaves after 12000 bytes, printf still has the rest to write and takes
+# SIGPIPE, pipefail returns 141, and errexit exits the script mid-assignment.
+#
+# Demonstrated rather than asserted, so the gate below is visibly guarding
+# something real.
+pipeline_slice_really_does_die() {
+  local rc=0
+  ( set -euo pipefail
+    s="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+    printf '%s' "${s}" | head -c 12000 >/dev/null ) || rc=$?
+  (( rc != 0 ))
+}
+parameter_slice_survives() {
+  local s out
+  s="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+  out="${s:0:12000}"
+  (( ${#out} == 12000 ))
+}
+check "the old 'printf | head' form fails on a 200k input" \
+  pipeline_slice_really_does_die
+check "the parameter slice returns the same 12000 chars and lives" \
+  parameter_slice_survives
+ask_slices_without_a_pipe() {
+  grep -q 'piped:0:12000' "${REPO}/scripts/ask.sh"
+}
+check "ask.sh slices piped input with parameter expansion" ask_slices_without_a_pipe
+# ...and nowhere else may reintroduce it. A variable written into a reader that
+# leaves early is the same bug wherever it appears; CONTRIBUTING lists it as
+# shell trap #1 and it was in shipped code anyway.
+no_variable_is_piped_into_an_early_exiting_reader() {
+  local hits
+  hits="$(grep -rnE '(printf|echo)[^|]*[$][{][A-Za-z_]+[^|]*[|][[:space:]]*(head|grep -q|grep -m)' \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca" \
+            2>/dev/null || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these write a variable into a reader that exits early (SIGPIPE at >64KiB):\n%s\n' "${hits}" >&2
+    return 1
+  }
+}
+check "no script pipes a variable into a reader that exits early" \
+  no_variable_is_piped_into_an_early_exiting_reader
+
 echo "# a script that rewrites its own file must not let bash read on"
 # bash reads a script incrementally from an open fd. update.sh fast-forwards
 # the checkout it is running from, and install.sh hard-resets it; either can

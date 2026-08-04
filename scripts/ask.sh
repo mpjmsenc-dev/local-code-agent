@@ -104,7 +104,18 @@ main() {
     # Cap each file so one large file cannot blow the whole context window.
     context+="--- file: ${f} ---"$'\n'"$(head -c 12000 "${f}")"$'\n\n'
   done
-  [[ -z "${piped}" ]] || context+="--- piped input ---"$'\n'"$(printf '%s' "${piped}" | head -c 12000)"$'\n\n'
+  # Sliced with parameter expansion, NOT 'printf ... | head -c'. That pipeline
+  # killed this command outright on exactly the inputs it exists for: head
+  # exits after 12000 bytes, printf still has the rest to write, takes SIGPIPE,
+  # and under 'set -o pipefail' the substitution returns 141 — which errexit
+  # then turns into an immediate exit with no answer, no warning and no error.
+  #
+  # Size-dependent, so it looked like nothing was wrong: anything that fits the
+  # 64 KiB pipe buffer completes before head leaves. Measured — 60000 chars
+  # exit 0, 70000 exit 141. 'lca logs | lca ask "why did this fail?"' is the
+  # first thing docs/TROUBLESHOOTING.md tells you to run, and a log big enough
+  # to be worth asking about is a log big enough to trigger this.
+  [[ -z "${piped}" ]] || context+="--- piped input ---"$'\n'"${piped:0:12000}"$'\n\n'
 
   # Same system prompt as the phone chat — one assistant, two doors.
   local system prompt
