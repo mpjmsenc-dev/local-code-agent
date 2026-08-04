@@ -94,18 +94,50 @@ echo "# every hole the offline ruleset opens must be named in the README"
 # a new hole opened without documenting it, and a documented hole quietly
 # removed — the second is how someone gets stranded on a remote VM when
 # Tailscale cannot re-resolve after a reboot.
+#
+# Driven off every accept RULE, not off port numbers. The version this replaces
+# extracted '(udp|tcp) (dport|sport) N' and nothing else, so two of the holes
+# in the ruleset were invisible to it — including the ICMPv6 rule its own
+# comment cites as the original bug. Deleting "and ICMPv6 neighbour discovery"
+# from the README left it green, and so would a new 'icmpv6 type echo-request
+# accept' or a second fwmark exemption.
+#
+# The load-bearing part is the default: a rule whose shape is not in the case
+# below FAILS. Every hole therefore has to be classified by a person once —
+# either "the README must name this" or "this never leaves the box, and here is
+# why" — instead of being skipped for not looking like a port.
 README_MD="$(cd "$(dirname "$0")/.." && pwd)/README.md"
 limits="$(sed -n '/^\*\*Honest limitations\*\*/,/^\*\*Your responsibilities/p' "${README_MD}")"
 undocumented=""
-while read -r port; do
-  [[ -n "${port}" ]] || continue
-  grep -qF "${port}" <<<"${limits}" || undocumented="${undocumented} ${port}"
-done < <(grep -oE '(udp|tcp) (dport|sport) \{?[ 0-9,]+\}?' "${RULES}" \
-           | grep -oE '[0-9]+' | sort -un)
-if [[ -z "${undocumented}" ]]; then
-  t_ok "every port the offline ruleset accepts is listed in the README's limitations"
+unclassified=""
+while IFS= read -r rule; do
+  [[ -n "${rule}" ]] || continue
+  needs=()
+  case "${rule}" in
+    # Traffic that never reaches another machine, so there is no hole to
+    # disclose: loopback, and replies on connections something already allowed.
+    'oifname "lo" accept')             ;;
+    'ct state established,related accept') ;;
+    # The Tailscale path is the point of offline mode, named all over the
+    # README rather than buried in this one paragraph.
+    'oifname "tailscale0" accept')     ;;
+    # Everything below can carry packets to an arbitrary host.
+    'meta mark'*)                      needs=(fwmark) ;;
+    'icmpv6 type'*)                    needs=(ICMPv6) ;;
+    *' dport '*|*' sport '*)           mapfile -t needs < <(grep -oE '[0-9]+' <<<"${rule}") ;;
+    *) unclassified="${unclassified}
+    ${rule}"; continue ;;
+  esac
+  for need in ${needs[0]+"${needs[@]}"}; do
+    grep -qF "${need}" <<<"${limits}" || undocumented="${undocumented} ${need}"
+  done
+done < <(sed -n 's/^ *\(.*[^ ] accept\)$/\1/p' "${RULES}" | sort -u)
+if [[ -n "${unclassified}" ]]; then
+  t_fail "the offline ruleset accepts traffic this test does not know how to judge — classify it above, then say so in the README if it can leave the box:${unclassified}"
+elif [[ -n "${undocumented}" ]]; then
+  t_fail "offline mode opens hole(s) the README never mentions:${undocumented}"
 else
-  t_fail "offline mode opens port(s) the README never mentions:${undocumented}"
+  t_ok "every hole the offline ruleset opens is listed in the README's limitations"
 fi
 
 echo "# OFFLINE also covers forwarded (docker-bridge) traffic"
