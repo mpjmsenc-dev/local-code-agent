@@ -287,8 +287,8 @@ trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${WRF_SB}"' EXIT
 wrf_run() {   # ENV-PREP -> writes ${WRF_SB}/netmode.nft, prints nothing
   bash -c '
     set -euo pipefail
-    as_root() { "$@"; }
     source "$1"
+    as_root() { "$@"; }   # after the source: lib.sh defines as_root too
     NETMODE_DIR="$2"; NFT_RULES_FILE="$2/netmode.nft"
     '"$1"'
     write_rules_file
@@ -324,6 +324,97 @@ if compgen -G "${WRF_SB}/*.lca-new" >/dev/null; then
   t_fail "a temp file was left behind in ${WRF_SB}"
 else
   t_ok "...leaving no temp file behind"
+fi
+
+echo "# apply_inbound_guard — the writer AND the sentence it prints afterwards"
+# Same gap as write_rules_file, on the more important of the two files: this is
+# the ruleset that keeps the WebUI and Ollama ports off the public internet,
+# and nothing had ever executed the function that writes it. Its success line
+# was gated only by a grep for a comparison in the source.
+#
+# NOTHING here can reach real nftables. 'nft' is shadowed by a function that
+# fails loudly if anything calls it, and as_root refuses to run it at all, so
+# the two independent guards would both have to fail for a rule to be applied.
+# 'have nft' still answers yes, because command -v finds the function.
+GUARD_SB="$(mktemp -d)"
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${WRF_SB}" "${GUARD_SB}"' EXIT
+guard_run() {   # ENV_LINES [EXTRA_SETUP] -> the function's output
+  local envc="$1" setup="${2:-:}"
+  printf '%s\n' "${envc}" > "${GUARD_SB}/env"
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    # AFTER the source, not before: lib.sh defines as_root itself, so a stub
+    # set up first is simply overwritten. The nft shadow caught that when it
+    # happened, which is the whole reason for having two layers.
+    nft() { echo "REAL-NFT-WAS-CALLED" >&2; return 1; }
+    as_root() { case "${1:-}" in nft) return 0 ;; *) "$@" ;; esac; }
+    C_GREEN=""; C_YELLOW=""; C_RESET=""; C_RED=""
+    ENV_FILE="$2/env"
+    NETMODE_DIR="$2"; INBOUND_RULES_FILE="$2/inbound.nft"
+    '"${setup}"'
+    apply_inbound_guard
+  ' _ "${REPO}/netmode.sh" "${GUARD_SB}" 2>&1
+}
+GUARD_OUT="$(guard_run 'WEBUI_PORT=3000
+OLLAMA_HOST=127.0.0.1:11434' || true)"
+if grep -q 'REAL-NFT-WAS-CALLED' <<<"${GUARD_OUT}"; then
+  t_fail "the test reached real nft — refusing to trust any result below"
+elif [[ -s "${GUARD_SB}/inbound.nft" ]]; then
+  t_ok "apply_inbound_guard writes the guard ruleset"
+else
+  t_fail "apply_inbound_guard did not produce a guard ruleset"
+fi
+if diff -q "${INBOUND}" "${GUARD_SB}/inbound.nft" >/dev/null 2>&1; then
+  t_ok "...byte for byte what render-inbound prints"
+else
+  t_fail "the written guard differs from the rendered one"
+fi
+# The sentence this prints is the one that must never be wrong: it tells the
+# reader which ports are now private. Asserted by RUNNING it, where before only
+# a grep for the '!= "22"' comparison stood in for it.
+if grep -q 'Inbound guard active' <<<"${GUARD_OUT}" \
+   && grep -q '3000' <<<"${GUARD_OUT}" && grep -q '11434' <<<"${GUARD_OUT}"; then
+  t_ok "...and names both guarded ports"
+else
+  t_fail "the guard message did not name the ports it guarded: ${GUARD_OUT}"
+fi
+# render_inbound_rules REFUSES port 22 so SSH can never be locked out, which
+# makes "port 22 is reachable only via loopback and Tailscale" a lie about a
+# port left deliberately wide open.
+SSH_OUT="$(guard_run 'WEBUI_PORT=22
+OLLAMA_HOST=127.0.0.1:11434' || true)"
+if grep -qE 'WebUI[: ]*22' <<<"${SSH_OUT}"; then
+  t_fail "the guard claimed port 22 was guarded: ${SSH_OUT}"
+else
+  t_ok "a WebUI port of 22 is never claimed as guarded"
+fi
+if grep -q '11434' <<<"${SSH_OUT}"; then
+  t_ok "...while the port that IS guarded is still named"
+else
+  t_fail "the other guarded port stopped being named: ${SSH_OUT}"
+fi
+BOTH22_OUT="$(guard_run 'WEBUI_PORT=22
+OLLAMA_HOST=127.0.0.1:22' || true)"
+if grep -q 'drops nothing' <<<"${BOTH22_OUT}"; then
+  t_ok "a guard that drops nothing says so instead of claiming success"
+else
+  t_fail "a guard covering no ports still reported success: ${BOTH22_OUT}"
+fi
+# ...and a render that fails must leave the guard already on disk alone. nft
+# will not load a partial ruleset, and this file is what the boot service feeds
+# it — a fragment here means the ports come back public after a reboot.
+printf 'PREVIOUS GUARD\n' > "${GUARD_SB}/inbound.nft"
+FAILED_RENDER_OUT="$(guard_run 'WEBUI_PORT=3000' 'render_inbound_rules() { return 1; }' || true)"
+if [[ "$(cat "${GUARD_SB}/inbound.nft")" == "PREVIOUS GUARD" ]]; then
+  t_ok "a failed render leaves the guard already on disk untouched"
+else
+  t_fail "a failed render destroyed the guard ruleset on disk"
+fi
+if grep -q 'is unchanged' <<<"${FAILED_RENDER_OUT}"; then
+  t_ok "...and says so"
+else
+  t_fail "a failed render did not report the file was left alone: ${FAILED_RENDER_OUT}"
 fi
 
 echo
