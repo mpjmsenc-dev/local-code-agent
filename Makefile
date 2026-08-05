@@ -7,6 +7,7 @@
 #   make lint     ShellCheck (zero findings required), same flags as CI
 #   make syntax   bash -n on every script
 #   make test     both unit suites (lib + netmode ruleset)
+#   make coverage which lib.sh functions no test touches (a report, not a gate)
 #   make dry-run  scripts/tune.sh --dry-run (detection only, changes nothing)
 #   make check    ./check-system.sh (full health check; degrades gracefully)
 #   make smoke    scripts/selftest.sh (live end-to-end round-trip on this box)
@@ -22,7 +23,7 @@ SHELL := /usr/bin/env bash
 # gates through, which is the one thing it exists to prevent.
 SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
 
-.PHONY: gates lint syntax test dry-run check smoke bench hooks help
+.PHONY: gates lint syntax test coverage dry-run check smoke bench hooks help
 .DEFAULT_GOAL := help
 
 gates: syntax lint test ## Everything CI gates on, locally
@@ -40,6 +41,9 @@ syntax: ## bash -n on every script
 test: ## Unit suites (library helpers + netmode ruleset)
 	bash tests/test-lib.sh
 	bash tests/test-netmode.sh
+
+coverage: ## Report which lib.sh functions no test touches (a report, not a gate)
+	bash tests/coverage.sh
 
 dry-run: ## Preview the auto-tune decision without changing anything
 	bash scripts/tune.sh --dry-run

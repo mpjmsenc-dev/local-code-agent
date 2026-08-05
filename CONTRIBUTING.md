@@ -60,6 +60,7 @@ step non-optional rather than remembered.
 | `make lint` | `shellcheck -x -P SCRIPTDIR` on every script (zero findings required) |
 | `make syntax` | `bash -n` on every script |
 | `make test` | both unit suites (library helpers + netmode ruleset) |
+| `make coverage` | which `lib.sh` functions no test touches — a report, not a gate |
 | `make dry-run` | preview the auto-tune decision without changing anything |
 | `make check` | full `check-system.sh` health check (degrades gracefully) |
 
@@ -202,6 +203,15 @@ failing `exec` redirect returns non-zero and prints its own diagnostic rather
 than killing the shell, so `exec {FD}>lock || { warn …; return 0; }` is both
 safe and quiet enough. `exec somecmd 2>/dev/null` is fine — with a command,
 the redirection goes to the command.
+
+And one that is not a trap in the code but in the *coverage*: a function can be
+thoroughly gated and never once executed. Two of the functions that write this
+project's firewall ruleset were guarded only by greps for their source text —
+the only ways to run them are `netmode.sh offline` and `harden`, which a suite
+must not do, so nothing ever did. `make coverage` answers "what does no test
+touch?" in one command. Read its own caveats first: it measures functions run
+in the suite's shell, and the house style for a behavioural test is a child
+`bash -c`, which it cannot see.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.

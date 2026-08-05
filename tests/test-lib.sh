@@ -1070,6 +1070,67 @@ backup_serialises_itself() {
 }
 check "backup.sh runs one at a time" backup_serialises_itself
 
+echo "# installed_backup_schedule() — the timer's real OnCalendar, out of systemd"
+# Found by 'make coverage': neither suite ran this, and no test named it, while
+# 'lca check' and 'lca apply' both compare its answer against .env to decide
+# whether the backup schedule has drifted. A parser nothing feeds is a parser
+# nobody knows the shape of — and lib.sh's own comment cites it as the example
+# of the ' ; ' trap that another function had to learn.
+#
+# Driven with real 'systemctl show -p TimersCalendar --value' records, stubbing
+# systemctl so this needs neither systemd nor a timer.
+schedule_from() {   # SYSTEMCTL_OUTPUT -> what the parser makes of it
+  SHOWOUT="$1" bash -c '
+    set -uo pipefail
+    source "$1"
+    systemd_available() { return 0; }
+    systemctl() { printf "%s\n" "${SHOWOUT}"; }
+    installed_backup_schedule || printf "(none)"
+  ' _ "${REPO}/scripts/lib.sh" 2>/dev/null
+}
+check "the ordinary single-entry record yields just the calendar spec" \
+  test "$(schedule_from '{ OnCalendar=*-*-* 03:30:00 ; next_elapse=Wed 2026-08-06 03:30:00 UTC }')" \
+     = '*-*-* 03:30:00'
+# A timer with nothing left to fire still reports its calendar; the capture must
+# end at the ' ; ' rather than swallowing whatever follows.
+check "a timer that never elapses again still reports its schedule" \
+  test "$(schedule_from '{ OnCalendar=*-*-* 03:30:00 ; next_elapse=n/a }')" \
+     = '*-*-* 03:30:00'
+# Two OnCalendar entries arrive on ONE line, so both greedy '.*' matches race.
+# Measured rather than reasoned about — the prediction going in was that this
+# returns a mangled span from the first entry to the last separator; the leading
+# '.*' is greedy too and wins first, so it is the LAST entry that comes back.
+# Pinned because "incomplete" and "corrupt" are different answers, and only one
+# of them is safe to compare against .env.
+check "two calendars return one whole spec, not a mangled span" \
+  test "$(schedule_from '{ OnCalendar=Mon *-*-* 01:00:00 ; next_elapse=Mon 2026-08-10 01:00:00 UTC } { OnCalendar=*-*-* 03:30:00 ; next_elapse=Wed 2026-08-06 03:30:00 UTC }')" \
+     = '*-*-* 03:30:00'
+# No timer installed: systemd prints nothing, and "no schedule" must not come
+# back as an empty string a caller would compare against .env and call drift.
+check "no timer reports nothing, and says so by exit status" \
+  test "$(schedule_from '')" = '(none)'
+check "a record with no OnCalendar at all reports nothing" \
+  test "$(schedule_from '{ next_elapse=n/a }')" = '(none)'
+
+echo "# git_identity_user() — WHOSE git config the two reporters read"
+# Also untouched by any test. It decides which account 'lca check' and
+# install_git.sh ask about user.name/user.email, and under 'sudo lca check' the
+# answer must be the human rather than root — root's global config is not where
+# anyone put their identity, so getting this wrong reports a missing identity to
+# someone who has one.
+identity_user_with() {   # SUDO_USER value ("" = unset)
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    if [[ -n "$2" ]]; then export SUDO_USER="$2"; else unset SUDO_USER; fi
+    git_identity_user
+  ' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
+}
+check "under sudo it asks about the human, not root" \
+  test "$(identity_user_with _ someone)" = "someone"
+check "without sudo it asks about the current user" \
+  test "$(identity_user_with _ '')" = "$(id -un)"
+
 echo "# .env keys must not collide with aider's own env vars (load_env exports them)"
 # load_env sources .env under 'set -a', so every key becomes an environment
 # variable. A key named AIDER_* can therefore be consumed by aider itself: our
