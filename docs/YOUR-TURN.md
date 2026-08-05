@@ -38,9 +38,13 @@ in this order. Copy-paste blocks are exact; button names are exact.
    ```
     local-code-agent  ready   ·   model qwen2.5-coder:7b
       Chat on your phone   http://100.x.y.z:3000
+      Write code here      cd ~/my-project && lca   (edits real files)
       Ask right here       lca ask "why is this box slow?"
       All commands         lca help
    ```
+
+   That middle line is the product; the two around it cannot touch a file.
+   Step 6 below is where you use it.
 
    If it says **ready**, skip straight to Step 3. If it says **still
    installing**, log out and come back later, or watch it live as below. It

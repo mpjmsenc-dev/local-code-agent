@@ -280,6 +280,7 @@ banner_ready() {
     row "Chat on your phone" "${hint}"
   fi
   chat_stale_row
+  coding_row
   row "Ask right here" "lca ask \"why is this box slow?\""
   row "All commands" "lca help"
   offline_row
@@ -306,6 +307,35 @@ chat_stale_row() {
   [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
   if LCA_INSPECT_TIMEOUT=2 webui_prompt_drifted; then
     row "Chat is OUT OF DATE" "it answers with an older assistant — sudo lca apply"
+  fi
+}
+
+# coding_row — the one command on this box that writes files.
+#
+# Every other line of the ready banner points at something that cannot. The
+# chat URL is a text box with no filesystem. 'lca ask' is one-shot text. Both
+# are useful and neither is the product. So the banner named the chat, named
+# the one-shot, named 'lca help', and never once named the coding agent — while
+# "Ask right here" sat there looking exactly like the thing to try if what you
+# want is code.
+#
+# That is the same bug as chat_stale_row above, one layer earlier: this is the
+# screen the one real bug reporter was reading when they picked the wrong door.
+# A banner nobody asked for is the only documentation everyone reads, and it
+# has to name the thing the box is for.
+#
+# Placed directly above "Ask right here" so the two sit adjacent: one edits your
+# files, one answers a question. Read together the difference is obvious, which
+# it is not when only one of them is on screen.
+coding_row() {
+  # Not installed → say so rather than staying quiet, for the reason
+  # model_missing() gives at length: "ready" is the strongest claim this file
+  # makes, and a box that cannot run the coding agent has not earned it. The
+  # command matches run-agent.sh's own message, so the two cannot drift.
+  if [[ -x "$(aider_bin)" ]]; then
+    row "Write code here" "cd ~/my-project && lca   (edits real files)"
+  else
+    row "Coding agent MISSING" "${REPO_ROOT}/scripts/install_python.sh"
   fi
 }
 

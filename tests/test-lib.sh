@@ -5011,6 +5011,92 @@ ready_banner_asks_about_the_model() {
 check "the ready banner asks whether the model is there" \
   ready_banner_asks_about_the_model
 
+echo "# ...and the banner has to name the one command that writes files"
+# Before this, the ready banner named the chat URL, 'lca ask' and 'lca help' —
+# a text box with no filesystem, one-shot text, and a menu. Not one line named
+# the coding agent, while "Ask right here" sat directly where someone looking
+# for code would land. That is the same failure as the chat itself, one layer
+# earlier and on the screen you get without asking for it: it is what the one
+# real bug reporter was reading when they picked the wrong door.
+motd_coding_row() {  # AIDER_PATH -> the rendered row
+  # The path goes through a variable rather than the stub's own positional
+  # parameters: inside a function "$1" is the FUNCTION's argument, not the
+  # script's — a mistake this file has made three times.
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    FAKE="$2"
+    # AFTER the source: lib.sh defines aider_bin, and a stub set before it
+    # would be silently replaced.
+    aider_bin() { printf "%s\n" "${FAKE}"; }
+    coding_row' _ "${MOTD}" "$1" 2>/dev/null
+}
+coding_row_names_the_writer() {
+  local out
+  out="$(motd_coding_row /bin/sh)"   # /bin/sh: an executable that always exists
+  [[ -n "${out}" ]] || {
+    echo 'the ready banner says nothing about the coding agent' >&2; return 1; }
+  # Bare 'lca' — the word on its own. 'lca ask' would satisfy a naive grep for
+  # "lca" and is precisely the wrong door: one-shot text, no filesystem.
+  grep -qE '(^|[^[:alnum:]_-])lca([^[:alnum:]_-]|$)' <<<"${out}" || {
+    echo 'the coding row never names bare "lca"' >&2; return 1; }
+  if grep -qE 'lca +(ask|chat|check|help)' <<<"${out}"; then
+    echo 'the coding row points at a command that cannot write files' >&2
+    return 1
+  fi
+}
+check "the ready banner names the coding agent, not just the chat" \
+  coding_row_names_the_writer
+# ...and when aider is not installed it must SAY so rather than going quiet.
+# 'ready' is the strongest word this file prints; a box that cannot run the
+# coding agent has not earned it, which is the same argument model_missing
+# makes about an engine with no model.
+coding_row_reports_a_missing_agent() {
+  local out
+  out="$(motd_coding_row /nonexistent/aider)"
+  grep -qi 'missing' <<<"${out}" || {
+    echo 'a box with no coding agent still prints a banner that says "ready"' >&2
+    return 1; }
+  # ...naming the fix, and the same one run-agent.sh names, so they cannot drift.
+  grep -q 'install_python.sh' <<<"${out}" || {
+    echo 'the banner reports a missing coding agent without naming the fix' >&2
+    return 1; }
+}
+check "...and says so when the coding agent is not installed" \
+  coding_row_reports_a_missing_agent
+# The helper is worth nothing if the ready banner never calls it. Same
+# comment-stripped, function-scoped shape as the model probe above.
+ready_banner_offers_the_coding_agent() {
+  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
+    | awk '/^banner_ready\(\) \{/ { inb = 1 }
+           inb && /coding_row/     { found = 1 }
+           inb && /^\}/            { exit }
+           END { exit !found }'
+}
+check "...and the ready banner actually prints that row" \
+  ready_banner_offers_the_coding_agent
+# YOUR-TURN.md prints a sample of this banner, and someone deciding what this
+# box is for reads that sample long before they ever see the real one. It went
+# stale the instant motd.sh changed — a screenshot in a doc is drift waiting to
+# happen, and a documented banner that hides the product is the same bug as a
+# real one that does.
+documented_ready_banner_shows_the_agent() {
+  local doc="${REPO}/docs/YOUR-TURN.md" block rows
+  block="$(awk '/local-code-agent  ready/ { inb = 1 }
+                inb && /^ *```/           { exit }
+                inb' "${doc}")"
+  [[ -n "${block}" ]] || {
+    echo 'YOUR-TURN.md no longer shows the ready banner at all' >&2; return 1; }
+  # Drop the rows that cannot write files, then require what is left to still
+  # name 'lca' — otherwise "lca ask" alone would satisfy this.
+  rows="$(grep -vE 'lca +(ask|chat|check|help)' <<<"${block}" || true)"
+  grep -qE '(^|[^[:alnum:]_-])lca([^[:alnum:]_-]|$)' <<<"${rows}" || {
+    echo "the banner YOUR-TURN.md shows names only doors that cannot write files" >&2
+    return 1; }
+}
+check "...and the banner the walkthrough shows is not a lie about it" \
+  documented_ready_banner_shows_the_agent
+
 echo "# ...and whether the chat app is still answering with an older assistant"
 # The container is created with the assistant's instructions baked in, so a
 # 'git pull' that fixes the assistant does not reach a running one and nothing
