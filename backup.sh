@@ -17,6 +17,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. Without it the shared docker
+# probes take the strict default, and 'lca backup' run without sudo by an
+# ordinary sudoer skipped the chat history and called a healthy daemon "not
+# usable". A backup that quietly omits your accounts is found out at restore.
+LCA_MAY_PROMPT=true
 load_env
 
 BACKUP_DIR="${REPO_ROOT}/backups"

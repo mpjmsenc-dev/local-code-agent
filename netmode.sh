@@ -249,7 +249,17 @@ save_state() {
   printf '%s\n' "$1" | as_root tee "${NETMODE_STATE_FILE}" >/dev/null
 }
 
+# Tri-state, the same contract as inbound_loaded below: 0 loaded, 1 not
+# loaded, 2 nobody could look.
+#
+# This was a bare as_root, which is the worst of the three shapes: with sudo
+# but no passwordless access 'lca status' STOPPED on "[sudo] password for ..."
+# — measured, two lines in and waiting indefinitely — and with neither root
+# nor sudo as_root die()s, killing the status report outright. Both happen
+# before the "cannot inspect nftables" branch that exists to report exactly
+# this, five lines further down.
 table_loaded() {
+  can_root_now || return 2
   as_root nft list table inet "${NFT_TABLE}" >/dev/null 2>&1
 }
 
@@ -374,15 +384,21 @@ apply_saved() {
 
 show_status() {
   step "Netmode status"
-  local state inbound_rc
+  local state inbound_rc egress_rc
   state="$(netmode_state)"
   info "Persisted mode: ${state}"
   if have nft; then
-    if table_loaded; then
-      info "nftables: egress lockdown table 'inet ${NFT_TABLE}' is LOADED (egress restricted)."
-    else
-      info "nftables: no egress lockdown table loaded (egress unrestricted)."
-    fi
+    # '|| egress_rc=$?' for the same reason spelled out under inbound_rc below,
+    # and a third answer for the same reason again: "could not look" is not
+    # "not loaded". Reporting an unreadable ruleset as "egress unrestricted"
+    # is the reassuring direction to be wrong in, which is the worse one.
+    egress_rc=0
+    table_loaded || egress_rc=$?
+    case "${egress_rc}" in
+      0) info "nftables: egress lockdown table 'inet ${NFT_TABLE}' is LOADED (egress restricted)." ;;
+      2) warn "Cannot inspect nftables from this account — the egress lockdown state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      *) info "nftables: no egress lockdown table loaded (egress unrestricted)." ;;
+    esac
     # '|| inbound_rc=$?', not 'inbound_loaded; inbound_rc=$?'. The second form
     # leaves inbound_loaded as an untested command, so under 'set -e' a
     # non-zero return kills the script HERE — before the case below that exists
@@ -395,7 +411,7 @@ show_status() {
     inbound_loaded || inbound_rc=$?
     case "${inbound_rc}" in
       0) info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)." ;;
-      2) warn "Cannot inspect nftables without root or sudo — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      2) warn "Cannot inspect nftables from this account — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
       *) warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden" ;;
     esac
   else

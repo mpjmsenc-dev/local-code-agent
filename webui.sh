@@ -28,16 +28,41 @@ EOF
 # normally works: using as_root unconditionally would trigger a needless sudo
 # password prompt (breaking non-interactive use), and with neither root nor sudo
 # as_root would die() mid-command instead of giving a usable message.
+#
+# Three rungs, in this order, and the order is the whole point:
+#   1. plain docker            — no escalation at all
+#   2. sudo -n                 — escalation that CANNOT stop and ask
+#   3. interactive sudo, after saying so
+#
+# Rung 3 stays because this script mostly ACTS: 'webui.sh start' that refused
+# where it used to work would be the worse trade. What it may not do is ask
+# silently, and it did — measured, 'lca webui status' printed nothing
+# whatsoever and then sat on "[sudo] password for ...". That reads as a hung
+# command rather than a question, on a subcommand 'lca help' does not mark as
+# needing root. The elif keeps it to ONE escalation attempt, so the sentence
+# about a password is printed only where a password can really be asked for:
+# root reaching rung 2 and failing has a broken daemon, not a missing password.
 DOCKER=(docker)
 select_docker() {
   if docker info >/dev/null 2>&1; then
     DOCKER=(docker)
-  elif can_root && as_root docker info >/dev/null 2>&1; then
-    DOCKER=(as_root docker)
-  else
-    return 1
+    return 0
   fi
-  return 0
+  if can_root_now; then
+    if as_root docker info >/dev/null 2>&1; then
+      DOCKER=(as_root docker)
+      return 0
+    fi
+  elif can_root; then
+    # warn, not info: 'lca webui logs' can be piped, and an announcement that
+    # lands in the middle of a captured log stream is its own small bug.
+    warn "Docker is not reachable as '$(id -un)' — retrying with sudo, which may ask for your password."
+    if as_root docker info >/dev/null 2>&1; then
+      DOCKER=(as_root docker)
+      return 0
+    fi
+  fi
+  return 1
 }
 
 container_exists() {

@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh.
+LCA_MAY_PROMPT=true
 load_env
 
 

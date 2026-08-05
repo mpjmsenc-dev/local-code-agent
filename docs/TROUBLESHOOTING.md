@@ -109,6 +109,27 @@ Your user was added to the `docker` group during setup, but group membership onl
 applies to **new** logins. Log out and back in (or `newgrp docker`). Still broken:
 `sudo usermod -aG docker $USER`, then re-login.
 
+## A check says "could not look" instead of an answer
+
+You are running it from an account that is neither root nor a passwordless
+sudoer, so `lca check`, `lca status` and the login banner will not guess. They
+report the firewall, the Docker daemon and the chat container as **UNKNOWN**
+rather than claiming a state they could not read. Re-run as root for the full
+picture:
+
+```bash
+sudo lca check
+sudo lca status
+```
+
+This is deliberate. The earlier behaviour was worse in both directions: it
+either asserted "inbound guard NOT loaded" and "container does not exist" on a
+machine where both were fine, or it stopped dead on a `[sudo] password for …`
+prompt in the middle of a login banner nobody had asked to run.
+
+Commands that *change* something — `lca apply`, `lca webui start`, `lca logs` —
+still escalate normally, and will say so before sudo asks.
+
 ## WebUI unreachable from the phone
 
 Check in this order:

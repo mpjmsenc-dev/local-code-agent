@@ -143,12 +143,10 @@ probe_region() {  # FILE START_PREFIX END_PREFIX
 }
 probes_use_the_stricter_test() {
   local bad=0 spec file start end label body
-  # Every place that asks "can I look?" rather than "may I act?".
+  # Single-caller probes, which therefore know their own answer.
   local -a regions=(
-    "scripts/lib.sh|webui_container_env() {|}|the login banner's container read"
-    "scripts/lib.sh|docker_daemon_reachable() {|}|docker_daemon_reachable"
-    "scripts/lib.sh|webui_container_exists() {|}|webui_container_exists"
     "netmode.sh|inbound_loaded() {|}|netmode's inbound_loaded"
+    "netmode.sh|table_loaded() {|}|netmode's table_loaded"
     "check-system.sh|step \"Docker\"|step \"|'lca check' Docker step"
     "check-system.sh|step \"Open WebUI\"|step \"|'lca check' Open WebUI step"
     "check-system.sh|step \"Inbound guard\"|step \"|'lca check' inbound-guard step"
@@ -177,6 +175,120 @@ probes_use_the_stricter_test() {
 }
 check "no probe asks 'is sudo installed' — it would wait on the password" \
   probes_use_the_stricter_test
+
+# The shared docker helpers are the other case: the SAME function is a
+# reporter's question inside the login banner and an action's question inside
+# 'lca backup', so it must not decide for itself. Deciding inside the helper
+# has now shipped wrong in both directions — can_root everywhere hung the
+# banner, can_root_now everywhere made 'lca backup' skip the chat history and
+# call a healthy daemon "not usable". They delegate to root_for_probe; the
+# caller sets LCA_MAY_PROMPT, and silence means the strict answer.
+shared_probes_let_the_caller_decide() {
+  local bad=0 name body
+  for name in webui_container_env docker_daemon_reachable webui_container_exists; do
+    body="$(probe_region scripts/lib.sh "${name}() {" "}")"
+    grep -q 'root_for_probe' <<<"${body}" || {
+      printf '%s does not delegate to root_for_probe (region empty or renamed?)\n' \
+        "${name}" >&2
+      bad=1
+      continue
+    }
+    # Deciding for itself, in either direction, is the defect.
+    if grep -qE 'can_root' <<<"${body}"; then
+      printf '%s decides the caller question for itself: %s\n' "${name}" \
+        "$(grep -nE 'can_root' <<<"${body}" | head -1)" >&2
+      bad=1
+    fi
+  done
+  # ...and the switch itself must offer both answers and default to the strict
+  # one. A default of true would make every future reporter hang by omission.
+  body="$(probe_region scripts/lib.sh 'root_for_probe() {' '}')"
+  grep -qE 'can_root([^_]|$)' <<<"${body}" || {
+    echo "root_for_probe has no interactive answer, so no action can opt in" >&2
+    bad=1
+  }
+  grep -q 'can_root_now' <<<"${body}" || {
+    echo "root_for_probe has no strict answer, which is the one that matters" >&2
+    bad=1
+  }
+  grep -qE '^: *"\$\{LCA_MAY_PROMPT:=false\}"' "${REPO}/scripts/lib.sh" || {
+    echo "LCA_MAY_PROMPT does not default to false — silence must mean strict" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the shared docker probes let the caller say whether it may ask" \
+  shared_probes_let_the_caller_decide
+
+# And the opt-in has to be present where it was measured to matter. backup.sh
+# is the one that loses data without it: no LCA_MAY_PROMPT, and a backup taken
+# without sudo by an ordinary sudoer contains no accounts and no chat history.
+actions_opt_in_to_prompting() {
+  local bad=0 f
+  for f in backup.sh scripts/apply.sh scripts/install_webui.sh scripts/install_docker.sh; do
+    grep -qE '^LCA_MAY_PROMPT=true' "${REPO}/${f}" || {
+      printf '%s acts but never opts in — its docker probes will refuse instead of asking\n' \
+        "${f}" >&2
+      bad=1
+    }
+  done
+  # The reporters must NOT: this is the whole point of the default.
+  for f in scripts/motd.sh check-system.sh; do
+    if grep -qE '^LCA_MAY_PROMPT=true' "${REPO}/${f}"; then
+      printf '%s reports, but opted into a password prompt\n' "${f}" >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+check "scripts that act opt in; scripts that only report do not" \
+  actions_opt_in_to_prompting
+
+# The other side of the same rule. select_docker and run_reader serve typed
+# commands — 'webui.sh start', 'lca logs' — so they ARE allowed to ask for a
+# password; one that refused where it used to work would be the worse trade.
+# What they may not do is ask silently. Measured: 'lca webui status' printed
+# nothing whatsoever and then sat on "[sudo] password for ...", and 'lca logs'
+# did the same under a bare section header. Two properties, both leaving a
+# later author free to drop the interactive path entirely if they prefer:
+#   - the passwordless attempt comes FIRST, so the common case never prompts;
+#   - nothing escalates interactively before saying so.
+sudo_asks_out_loud() {
+  local bad=0 spec file start label body
+  local -a regions=(
+    "webui.sh|select_docker() {|select_docker"
+    "scripts/lib.sh|run_reader() {|run_reader"
+  )
+  for spec in "${regions[@]}"; do
+    IFS='|' read -r file start label <<<"${spec}"
+    body="$(probe_region "${file}" "${start}" "}")"
+    grep -q 'can_root_now' <<<"${body}" || {
+      printf '%s never tries the passwordless path (renamed?)\n' "${label}" >&2
+      bad=1
+      continue
+    }
+    # can_root_now CONTAINS can_root, hence the [^_] in every bare-call match.
+    # The announcement is necessarily INSIDE the 'if can_root' branch, so what
+    # has to be ordered is the escalation, not the test: once a bare can_root
+    # opens the interactive path, no as_root may run before something is said.
+    # The announcement must be matched as a CALL to lib.sh's helper, anchored
+    # at the start of the statement. A bare /info |warn / also matches
+    # "docker info >/dev/null", which is the first line of select_docker — so
+    # that version passed with the announcement deleted, for the wrong reason.
+    # Caught by mutating it; a gate that has not been made to fail is decoration.
+    awk '/can_root_now/            { now = 1; next }
+         /can_root([^_]|$)/        { if (!now) early = 1; pending = 1 }
+         /^[[:space:]]*(info|warn|ok|err) / { said = 1 }
+         /as_root/ && pending && !said { silent = 1 }
+         END { exit (early || silent) ? 1 : 0 }' <<<"${body}" || {
+      printf '%s escalates interactively before trying sudo -n, or without saying so\n' \
+        "${label}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "nothing asks for a password with nothing on screen" sudo_asks_out_loud
 
 echo "# a number that is not a number must be named, not absorbed"
 # Each of these fails quietly or confusingly, never as itself. Measured:
@@ -277,7 +389,7 @@ echo "# no probe may reach for sudo without checking it is there first"
 # first; check-system.sh has carried a comment saying exactly this for a while,
 # and it was the only one that did.
 sudo_probes_are_guarded() {
-  local hits bad=0 line
+  local hits bad=0 line file lno window
   # Comment lines dropped BEFORE the emptiness guard, not after. The
   # paragraphs above explaining this rule quote the idiom, so filtering them
   # out later left the guard counting them: the first version of this passed
@@ -292,14 +404,24 @@ sudo_probes_are_guarded() {
   }
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
-    grep -q 'can_root' <<<"${line}" || {
+    file="${line%%:*}"
+    lno="${line#*:}"; lno="${lno%%:*}"
+    # The guard used to have to be on the SAME line, which was true only while
+    # every call site was a one-liner. Two shapes have since broken that
+    # without weakening anything: root_for_probe (the caller decides, see
+    # lib.sh) and webui.sh's three-rung ladder, where the guard opens an
+    # if/elif and the call sits a line or two inside it. So look at the call
+    # line and the four above it — still far too tight for an unguarded
+    # as_root, which is the thing that die()s, to hide in.
+    window="$(sed -n "$(( lno > 4 ? lno - 4 : 1 )),${lno}p" "${file}" | sed 's/#.*//')"
+    grep -qE 'can_root|root_for_probe' <<<"${window}" || {
       printf 'unguarded sudo probe: %s\n' "${line}" >&2
       bad=1
     }
   done <<<"${hits}"
   return "${bad}"
 }
-check "every 'as_root docker info' probe checks can_root first" \
+check "every 'as_root docker info' probe is guarded against die()" \
   sudo_probes_are_guarded
 
 echo "# git_identity() — aider's product is commits, and a commit needs an author"

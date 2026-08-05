@@ -151,6 +151,37 @@ can_root_now() {
   sudo -n true >/dev/null 2>&1
 }
 
+# LCA_MAY_PROMPT / root_for_probe — who decides, for the SHARED helpers.
+#
+# The rule above is a property of the CALLER, not of the function. The three
+# docker helpers further down are asked the same question by both kinds of
+# caller: docker_daemon_reachable is a reporter's question inside the login
+# banner and an action's question inside 'lca backup'. Deciding it inside the
+# helper is wrong in one direction or the other every single time, and this
+# project has now shipped BOTH mistakes:
+#
+#   can_root everywhere      -> 'lca check' and the banner stopped dead on a
+#                               password prompt (measured: indefinitely).
+#   can_root_now everywhere  -> 'lca backup' run without sudo by an ordinary
+#                               sudoer skipped the chat history and called a
+#                               perfectly healthy daemon "not usable".
+#
+# The second is the worse one: a backup that quietly omits the accounts and
+# chat history is only discovered when it is restored.
+#
+# So the caller says, once, next to where it sources this file. The default is
+# the strict answer, because the default caller is a reporter and a reporter
+# that stops for a password is the bug all of this exists to prevent — a new
+# script gets the safe behaviour by saying nothing.
+: "${LCA_MAY_PROMPT:=false}"
+root_for_probe() {
+  if [[ "${LCA_MAY_PROMPT}" == "true" ]]; then
+    can_root
+  else
+    can_root_now
+  fi
+}
+
 # apt_get ARGS... — apt-get as root, non-interactive, and tolerant of the
 # dpkg lock that apt-daily / unattended-upgrades routinely hold during the
 # first minutes of a fresh boot (waits up to 10 min instead of failing hard).
@@ -1062,9 +1093,25 @@ run_reader() {
     "${real[@]}"
     return 0
   fi
-  if can_root && as_root "${probe[@]}" >/dev/null 2>&1; then
-    as_root "${real[@]}"
-    return 0
+  # Passwordless first, interactive second, and the second says so — the same
+  # order as webui.sh's select_docker, for the same measured reason: 'lca logs'
+  # printed its ollama section and then sat on a bare "[sudo] password for ..."
+  # under the next header. A typed command may ask; it may not ask silently.
+  # elif, not a second if: exactly one escalation attempt, and the sentence
+  # about a password is printed only where a password can actually be asked
+  # for. Root reaching this point has simply failed the probe.
+  if can_root_now; then
+    if as_root "${probe[@]}" >/dev/null 2>&1; then
+      as_root "${real[@]}"
+      return 0
+    fi
+  elif can_root; then
+    # stderr, so it cannot land inside a log stream someone is piping.
+    warn "Reading this needs root — sudo may ask for your password."
+    if as_root "${probe[@]}" >/dev/null 2>&1; then
+      as_root "${real[@]}"
+      return 0
+    fi
   fi
   return 1
 }
@@ -1144,15 +1191,16 @@ webui_container_env() {
   # .env key on purpose: it is a property of the caller, not of the install.
   if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
   fmt='{{range .Config.Env}}{{println .}}{{end}}'
-  # can_root_now, not can_root — and the timeout above is why it MATTERS here.
+  # root_for_probe, and the timeout above is why the default MATTERS here.
   # 'sudo timeout 15 docker inspect' bounds docker, not sudo: the password
   # prompt happens before timeout is ever exec'd, so it is outside the bound.
   # Measured on this box with an account that is not a sudoer: the login
   # banner printed its first two lines, then sat on "[sudo] password for ..."
   # for as long as it was left running. Every SSH login, on the one code path
-  # whose comment above says it must never hang.
+  # whose comment above says it must never hang. The banner sets nothing, so
+  # it gets the strict default; 'lca apply' opts in and may ask.
   env_lines="$("${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root_now && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || { root_for_probe && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
     || true)"
   [[ -n "${env_lines}" ]] || return 1
   out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
@@ -1166,12 +1214,13 @@ webui_container_env() {
 # every docker probe collapses into the same non-zero exit. Telling someone
 # their chat app was never created, when the truth is that dockerd is down,
 # sends them to an install command that cannot work either.
-# can_root_now, not can_root: this is a probe, and an interactive sudo turns
-# it from "cannot ask" into a password prompt in the middle of a health check.
+# root_for_probe, not can_root or can_root_now: every caller of this asks the
+# same question and means a different thing by it. 'lca backup' may ask for a
+# password; the login banner may not.
 docker_daemon_reachable() {
   have docker || return 1
   docker info >/dev/null 2>&1 && return 0
-  can_root_now && as_root docker info >/dev/null 2>&1
+  root_for_probe && as_root docker info >/dev/null 2>&1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -1182,7 +1231,7 @@ docker_daemon_reachable() {
 webui_container_exists() {
   have docker || return 1
   docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
-  can_root_now && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+  root_for_probe && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
 # webui_drift — echo the .env keys whose value has not reached the running

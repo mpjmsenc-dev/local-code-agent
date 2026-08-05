@@ -22,6 +22,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. It escalates for the changes
+# themselves, so the drift READS that decide whether to make them must be
+# allowed to ask too; otherwise 'lca apply' could reach the daemon and still
+# report "already matches .env" because it could not read the container.
+LCA_MAY_PROMPT=true
 load_env
 
 DRY_RUN=false

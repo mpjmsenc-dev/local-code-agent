@@ -496,6 +496,54 @@ and "cannot reach the daemon" are different facts, and every docker probe
 collapses them into the same non-zero exit. A confident wrong line is worse
 than an admitted unknown.
 
+## Run it as somebody else, on a real terminal
+
+The account is a state like any other, and it is the one nobody tests: this
+project is developed as root, so every path that needs root simply worked.
+Create a throwaway user, give it no sudo rights, and run the command under a
+**pty** — `sudo -n` behaves completely differently from an interactive sudo,
+and a pipe hides the difference:
+
+```bash
+sudo useradd -m lcaprobe          # no groups, no sudo, no password
+# python3 -c 'import pty; pty.spawn(...)' as that uid, with a time limit
+```
+
+The bound is the point. An interactive sudo on a real terminal does not fail,
+it **waits**, so the failure mode is a command that never returns — which no
+`|| true`, no `2>/dev/null` and no exit-status assertion will ever notice. One
+afternoon of this found five, all invisible as root:
+
+| Command | As root | As a user who is not a passwordless sudoer |
+|---|---|---|
+| the login banner (every SSH login) | 0.10s | two lines, then waits for ever |
+| `lca check` | full report | stalls twice; then "docker daemon not responding" and chat app "does not exist", both false |
+| `lca status` | full report | two lines, then waits for ever |
+| `lca webui status` | full report | *nothing at all*, then waits for ever |
+| `lca logs` | full output | ollama section, then waits for ever |
+
+The rule that came out of it, gated in `tests/test-lib.sh`:
+
+- **An action the user asked for** → `can_root`. A password prompt is fair;
+  they typed `lca apply`, `webui.sh start`. Refusing where it used to work
+  would be the worse trade.
+- **A probe that only reports** → `can_root_now` (root, or `sudo -n` works).
+  A prompt here is a stall in something nobody asked to run.
+- **Either way, never ask silently.** If a typed command is about to escalate,
+  print the reason first. A bare `[sudo] password for ...` under a command
+  that has produced no output reads as a hang, not as a question.
+
+Two traps in gating this:
+
+- `can_root_now` **contains** `can_root`, so "the fix is present" greps clean
+  while a leftover bare call sits three lines below it. That is exactly how
+  four of the five above survived a fix to the fifth. Match `can_root([^_]|$)`
+  and require *both* directions: the strict call present, no loose call left.
+- A `timeout` wrapper does not bound a password prompt. `sudo timeout 15 cmd`
+  bounds `cmd`; the prompt happens before `timeout` is ever exec'd. If the
+  point is "this must not hang", the order has to be `timeout sudo`, or the
+  escalation must not be interactive at all.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
