@@ -910,7 +910,28 @@ largest_model_for_vram() {
 # PROCESSOR field itself contains a space, so $4 would only ever capture "100%".
 processor_from_ps() {
   local model="$1" line
-  line="$(grep -F -- "${model}" || true)"
+  # The NAME column, matched EXACTLY — not a substring of the row.
+  #
+  # 'ollama ps' lists every model currently resident, and 'grep -F' on the
+  # whole line matched 'qwen2.5-coder:7b-instruct' when asked about
+  # 'qwen2.5-coder:7b'. Measured: asked about the 7b sitting at 100% GPU, it
+  # answered 100% CPU — the instruct model's row, which happened to come first.
+  # Two models are resident whenever 'lca ask -m OTHER' has run inside
+  # OLLAMA_KEEP_ALIVE, and :7b alongside :7b-instruct is an ordinary pair of
+  # tags rather than a contrived one.
+  #
+  # The wrong answer is not cosmetic: this is what 'lca check' reports about
+  # whether YOUR model is on the GPU, on the machine someone paid for a GPU.
+  #
+  # No 'exit' in the awk, deliberately. Stopping at the first match would close
+  # the pipe while 'ollama ps' is still writing, and 141 under pipefail reads
+  # as "model not loaded" — the trap this file gates against elsewhere. It
+  # reads to the end and keeps the first hit.
+  #
+  # ENVIRON rather than -v: -v processes backslash escapes in the value, and a
+  # model tag is user-supplied text.
+  line="$(m="${model}" awk '$1 == ENVIRON["m"] && !seen { line = $0; seen = 1 }
+                            END { if (seen) print line }' || true)"
   [[ -n "${line}" ]] || return 1
   local proc
   proc="$(grep -oE '[0-9]+%/[0-9]+% [A-Z]+/[A-Z]+|[0-9]+% (GPU|CPU)' <<<"${line}" | head -1)"

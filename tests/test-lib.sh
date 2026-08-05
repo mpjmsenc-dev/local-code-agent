@@ -1211,6 +1211,68 @@ not_loaded() { ! printf '%s\n' "${PS_EMPTY}" | processor_from_ps qwen2.5-coder:7
 check "unloaded model reports nothing" not_loaded
 wrong_model() { ! printf '%s\n' "${PS_GPU}" | processor_from_ps some-other-model 2>/dev/null; }
 check "a different model is not matched" wrong_model
+# ...and a model whose name CONTAINS the one asked about is not matched either.
+# Every fixture above has exactly one row, which is why a substring match
+# looked correct for as long as it did. 'ollama ps' lists everything resident,
+# and two models are resident whenever 'lca ask -m OTHER' has run inside
+# OLLAMA_KEEP_ALIVE. Measured before the fix: asked about the 7b sitting at
+# 100% GPU, this answered 100% CPU — the ':7b-instruct' row above it.
+PS_TWO="NAME                        ID              SIZE      PROCESSOR    CONTEXT   UNTIL
+qwen2.5-coder:7b-instruct   9ec8897f747e    8.0 GB    100% CPU     8192      4 minutes from now
+qwen2.5-coder:7b            dae161e27b0e    5.5 GB    100% GPU     4096      4 minutes from now"
+check "a longer name that contains ours does not steal the answer" \
+  test "$(pfp "${PS_TWO}" qwen2.5-coder:7b)" = "100% GPU"
+check "...and asking about the longer one still gets its own row" \
+  test "$(pfp "${PS_TWO}" qwen2.5-coder:7b-instruct)" = "100% CPU"
+# An unknown model must stay unknown rather than borrowing the first row —
+# gpu_state passes an empty string whenever MODEL_NAME is unset.
+no_model_name() { ! printf '%s\n' "${PS_TWO}" | processor_from_ps "" 2>/dev/null; }
+check "no model name reports nothing, not the first row" no_model_name
+# The header must never be mistaken for a model, whatever is asked.
+header_not_a_model() { ! printf '%s\n' "${PS_TWO}" | processor_from_ps NAME 2>/dev/null; }
+check "the header row is not a model" header_not_a_model
+
+echo "# ollama_processor() — the same parser, fed by the real 'ollama ps'"
+# 'make coverage' found this untested: the parser had fixtures, the function
+# that supplies it did not, and the wrapper is where the pipeline lives.
+op_with() {   # MODEL PS_OUTPUT
+  PSOUT="$2" bash -c '
+    set -uo pipefail
+    source "$1"
+    # $1 inside a function is the FUNCTION'"'"'s argument, not the script'"'"'s.
+    have() { [[ "$1" == "ollama" ]]; }
+    ollama() { printf "%s\n" "${PSOUT}"; }
+    ollama_processor "$2" || printf "(none)"
+  ' _ "${REPO}/scripts/lib.sh" "$1" 2>/dev/null
+}
+check "the wrapper reports the asked-for model's placement" \
+  test "$(op_with qwen2.5-coder:7b "${PS_TWO}")" = "100% GPU"
+check "a model that is not resident reports nothing" \
+  test "$(op_with qwen2.5-coder:3b "${PS_TWO}")" = "(none)"
+# Reading to the END of 'ollama ps' rather than stopping at the first match is
+# what keeps this from returning 141 under pipefail, where "model not loaded"
+# is the answer a closed pipe fakes. Asserted with a producer that keeps
+# writing long after the match, because a small fixture cannot tell the two
+# implementations apart — the first version of this gate could not, and an
+# 'exit' added to the parser sailed straight through it.
+op_slow_producer() {   # match first, then far more than a pipe buffer
+  PSOUT="$1" bash -c '
+    set -uo pipefail
+    source "$1"
+    have() { [[ "$1" == "ollama" ]]; }
+    ollama() { printf "%s\n" "${PSOUT}"; seq 1 400000; }
+    ollama_processor qwen2.5-coder:7b || printf "(none)"
+  ' _ "${REPO}/scripts/lib.sh" 2>/dev/null
+}
+check "a match early in a long listing is still reported (not 141)" \
+  test "$(op_slow_producer "${PS_TWO}")" = "100% GPU"
+no_ollama() { ! bash -c '
+    set -uo pipefail
+    source "$1"
+    have() { return 1; }
+    ollama_processor qwen2.5-coder:7b
+  ' _ "${REPO}/scripts/lib.sh" 2>/dev/null; }
+check "no ollama binary reports nothing rather than guessing" no_ollama
 
 echo "# aider output quality: edit format per model size, repo map scaled to the window"
 ef() { aider_edit_format "$1"; }
