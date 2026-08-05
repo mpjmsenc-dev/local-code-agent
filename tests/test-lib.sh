@@ -47,6 +47,52 @@ check "default AIDER_CONVENTIONS" test "${AIDER_CONVENTIONS}" = "true"
 check "default BACKUP_SCHEDULE" test "${BACKUP_SCHEDULE}" = "*-*-* 03:30:00"
 check "default SKIP_TAILSCALE" test "${SKIP_TAILSCALE}" = "false"
 
+echo "# a port that is not a port must say so, not become an uncloseable gap"
+# Measured with WEBUI_PORT=abc, a plain typo: netmode's own extractor refuses
+# it and guards 3000, while guarded_ports asked for "WebUI abc" — so
+# inbound_guard_uncovered reported the guard stale, 'lca check' said "run sudo
+# lca apply", apply re-applied the same guard and reported success, and the
+# next check said it again. A loop with no exit, in which the word "abc" never
+# appeared.
+port_is() { if valid_port "$2"; then [[ "$1" == valid ]]; else [[ "$1" == bad ]]; fi; }
+check "a normal port is valid"            port_is valid 3000
+check "1 is valid"                        port_is valid 1
+check "65535 is valid"                    port_is valid 65535
+check "0 is not a port"                   port_is bad   0
+check "65536 is not a port"               port_is bad   65536
+check "a word is not a port"              port_is bad   abc
+check "empty is not a port"               port_is bad   ""
+# ...and guarded_ports must leave out what it cannot guard, rather than asking
+# for a gap that can never be closed. The message about the real fault belongs
+# to check-system.sh, which names the setting.
+guarded_without() {   # WEBUI_PORT value -> the list guarded_ports produces
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env
+    ENABLE_WEBUI=true; WEBUI_PORT="$2"; OLLAMA_HOST=127.0.0.1:11434
+    webui_container_env() { return 1; }
+    guarded_ports || true' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
+}
+check "a real port is asked for" \
+  grep -qF "WebUI 3000" <<<"$(guarded_without _ 3000)"
+check "a port that is not a port is not asked for" \
+  test -z "$(guarded_without _ abc | grep WebUI)"
+check "...while the other service is still guarded" \
+  grep -qF "Ollama 11434" <<<"$(guarded_without _ abc)"
+# And the health check must name the setting, or the user is left with a
+# stack that fails in three places and never says why.
+check_names_a_bad_port() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -qE 'valid_port "[$][{]WEBUI_PORT[}]"' <<<"${body}" || {
+    echo "check-system.sh does not validate WEBUI_PORT" >&2; return 1; }
+  grep -qE 'valid_port "[$][{]OLLAMA_PORT_SEEN[}]"' <<<"${body}" || {
+    echo "check-system.sh does not validate the port OLLAMA_HOST resolves to" >&2; return 1; }
+  grep -q 'is not a port number' <<<"${body}" || {
+    echo "check-system.sh never says a port is not a port number" >&2; return 1; }
+}
+check "'lca check' names a port that is not a port" check_names_a_bad_port
+
 echo "# no probe may reach for sudo without checking it is there first"
 # as_root DIES when there is neither root nor sudo. That is right for a step
 # that cannot proceed without root, and wrong for a PROBE whose whole job is to

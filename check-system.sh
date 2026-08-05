@@ -37,6 +37,38 @@ p_pass() { ok "$*";   PASS=$((PASS+1)); }
 p_warn() { warn "$*"; WARN=$((WARN+1)); }
 p_fail() { err "$*";  FAIL=$((FAIL+1)); }
 
+# --- Settings that other checks assume are sane ------------------------------
+# Checked FIRST, because a bad value here surfaces further down as three
+# different confusing failures and never as itself. Measured with
+# WEBUI_PORT=abc: netmode guards 3000 (its extractor falls back), the chat app
+# container is created with PORT=abc and crash-loops, and the guard-coverage
+# check asks for a port that can never be covered — so 'lca check' said the
+# guard was stale, 'lca apply' re-applied it and reported success, and the next
+# check said it again. A loop with no exit, and the word "abc" appeared
+# nowhere.
+step "Settings"
+for setting in WEBUI_PORT OLLAMA_HOST; do
+  case "${setting}" in
+    WEBUI_PORT)
+      if [[ "${ENABLE_WEBUI}" != "true" ]]; then
+        info "WEBUI_PORT not checked — the chat app is disabled in .env."
+      elif valid_port "${WEBUI_PORT}"; then
+        p_pass "WEBUI_PORT=${WEBUI_PORT} is a usable port"
+      else
+        p_fail "WEBUI_PORT='${WEBUI_PORT}' is not a port number (1-65535). The chat app cannot bind it and the inbound guard cannot cover it, so nothing below can be right about that port. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply"
+      fi
+      ;;
+    OLLAMA_HOST)
+      OLLAMA_PORT_SEEN="$(ollama_url)"; OLLAMA_PORT_SEEN="${OLLAMA_PORT_SEEN##*:}"
+      if valid_port "${OLLAMA_PORT_SEEN}"; then
+        p_pass "OLLAMA_HOST resolves to a usable port (${OLLAMA_PORT_SEEN})"
+      else
+        p_fail "OLLAMA_HOST='${OLLAMA_HOST}' does not give a usable port number. Nothing can reach the model server, and the inbound guard cannot cover it. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply"
+      fi
+      ;;
+  esac
+done
+
 # --- Binaries ---------------------------------------------------------------
 step "Binaries"
 for bin in git curl jq python3 ollama nft; do

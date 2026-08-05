@@ -1241,6 +1241,16 @@ webui_prompt_comparable() {
 # fixes it, and two copies of a coverage rule is how one of them ends up
 # calling a port safe that the other knows is exposed.
 
+# valid_port PORT — a number a service can actually listen on.
+#
+# Not pedantry: netmode's own extractors already refuse a non-numeric
+# WEBUI_PORT and fall back to 3000, while guarded_ports took whatever .env
+# said. Those two disagreeing is what turns a typo into a loop — see below.
+valid_port() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] || return 1
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
 # guarded_ports — the service ports .env says must not be publicly reachable,
 # as "Label port" lines. Returns 1 when there is nothing to guard.
 guarded_ports() {
@@ -1250,10 +1260,20 @@ guarded_ports() {
   # the guard can never lock anyone out. A service parked there is therefore
   # not a gap either — reporting it would be an unfixable failure, which is
   # worse than saying nothing.
-  if [[ "${ENABLE_WEBUI}" == "true" && "${WEBUI_PORT}" != "22" ]]; then
+  # Only ports that could BE guarded. A value that is not a port number is not
+  # a gap in the guard, it is a broken setting — and treating it as a gap is
+  # worse than saying nothing, because it cannot be closed. Measured with
+  # WEBUI_PORT=abc: netmode's extractor falls back to 3000 and guards that,
+  # this list asked for "WebUI abc", and inbound_guard_uncovered therefore
+  # reported the guard stale for ever. 'lca check' said "run sudo lca apply",
+  # apply re-applied the same guard and reported success, and the next check
+  # said it again — a loop with no exit, and never once the word "abc".
+  # check-system.sh names the real fault; this function stays quiet about it.
+  if [[ "${ENABLE_WEBUI}" == "true" && "${WEBUI_PORT}" != "22" ]] \
+     && valid_port "${WEBUI_PORT}"; then
     out+=("WebUI ${WEBUI_PORT}")
   fi
-  if [[ "${oport}" =~ ^[0-9]+$ && "${oport}" != "22" ]]; then
+  if [[ "${oport}" != "22" ]] && valid_port "${oport}"; then
     out+=("Ollama ${oport}")
   fi
   # The port the container is REALLY on, when that is not the one .env names.
