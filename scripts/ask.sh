@@ -176,6 +176,26 @@ main() {
   answer_tmp="$(mktemp)"
   # shellcheck disable=SC2064
   trap "rm -f '${answer_tmp}'" EXIT
+
+  # Streaming solves the SECOND half of the wait — tokens appearing as they are
+  # generated, per the comment above. It cannot touch the first half: a model
+  # that is not resident has to be loaded before it produces a single token,
+  # and that is silent by nature. Measured on this 4-vCPU host with no GPU:
+  # 88s to load a 3B, 64s for a 0.5B, and warm_model records 228s for a 7B on a
+  # cold page cache. A minute of nothing after pressing Enter is exactly the
+  # "is it hung?" that the streaming was added to prevent, arriving before the
+  # stream can start.
+  #
+  # Only when it will actually be slow. If the model is already resident the
+  # first token is immediate and this would be noise on every question.
+  #
+  # stderr, not stdout: README documents 'lca logs | lca ask "why did this
+  # fail?"', and people redirect answers to files. The answer must stay the
+  # only thing on stdout.
+  if ! ollama_processor "${MODEL_NAME}" >/dev/null 2>&1; then
+    printf 'Loading %s into memory first — this pause happens once, then the answer streams.\n' \
+      "${MODEL_NAME}" >&2
+  fi
   # Status captured, not swallowed. Bare under 'set -o pipefail' this pipeline
   # was the last statement of main, so a curl that died mid-answer — the 600s
   # cap, or Ollama being OOM-killed by the very model it just loaded — exited

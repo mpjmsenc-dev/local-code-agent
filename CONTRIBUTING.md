@@ -94,9 +94,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Seven shell traps that turn a gate into decoration
+## Eight shell traps that turn a gate into decoration
 
-All seven were shipped here at least once. They matter more in an assertion
+All eight were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -212,6 +212,18 @@ must not do, so nothing ever did. `make coverage` answers "what does no test
 touch?" in one command. Read its own caveats first: it measures functions run
 in the suite's shell, and the house style for a behavioural test is a child
 `bash -c`, which it cannot see.
+
+**8. `awk '/x/ { exit 0 } END { exit 1 }'` — the rule-level `exit` runs `END`
+too.** `exit` in an awk rule sets the status and *then* executes the `END`
+block, so an `END { exit 1 }` underneath silently overwrites it and the check
+fails on code that is correct. Both times this was hit here, the gate reported
+a real ordering as wrong. Let `END` decide alone:
+
+```awk
+/opens/  { seen = 1 }
+/uses/   { if (!done) { done = 1; in_order = seen } }
+END      { exit (done && in_order) ? 0 : 1 }
+```
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.

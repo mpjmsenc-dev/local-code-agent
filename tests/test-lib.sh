@@ -2088,6 +2088,48 @@ ask_reports_a_cut_short_answer() {
   grep -qE '\(\( *stream_rc *!= *0 *\)\)' <<<"${body}"
 }
 check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_answer
+# ...and it must say something BEFORE the answer starts, when the model has to
+# be loaded first.
+#
+# Streaming solves the second half of the wait — tokens appearing as they are
+# generated, which ask.sh's own comment calls "the difference between working
+# and hung". It cannot touch the first half: an unloaded model produces no
+# token at all until it is in memory. Measured on a 4-vCPU host with no GPU,
+# 88s to load a 3B and 64s for a 0.5B, and warm_model records 228s for a 7B on
+# a cold page cache. That silence arrives before the stream can start, and it
+# is invisible on a GPU box where the first token lands in about a second.
+ask_announces_a_cold_load() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
+  # Asked, so the message appears only when it is true — on a resident model
+  # the first token is immediate and this would be noise on every question.
+  grep -q 'ollama_processor' <<<"${body}" || {
+    echo 'ask.sh never checks whether the model is already resident, so it cannot know if the wait is coming' >&2
+    return 1; }
+  # stderr, or it lands in the answer. README documents
+  # 'lca logs | lca ask "why did this fail?"', and answers get redirected.
+  #
+  # Continuations joined first: the redirect sits on the line AFTER the printf,
+  # so a line-scoped grep sees the two separately and matches with the '>&2'
+  # deleted — which is exactly the mutation that walked through the first
+  # version of this check.
+  local joined
+  joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' <<<"${body}")"
+  grep -qE "printf 'Loading %s.*>&2" <<<"${joined}" || {
+    echo 'the cold-load notice is not printed to stderr, so it would contaminate the answer' >&2
+    return 1; }
+  # And it must come before the request, not after it.
+  # END decides, and only END: a rule-level 'exit N' in awk still RUNS the END
+  # block, so an 'END { exit 1 }' underneath silently overwrites the status.
+  # Second time in this session — see CONTRIBUTING trap #8.
+  awk '/ollama_processor/       { seen = 1 }
+       /curl .*api\/generate/   { if (!done) { done = 1; in_order = seen } }
+       END { exit (done && in_order) ? 0 : 1 }' <<<"${body}" || {
+    echo 'the cold-load notice comes after the request it is meant to explain' >&2
+    return 1; }
+}
+check "'lca ask' explains the silence before a cold model answers" \
+  ask_announces_a_cold_load
 
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
