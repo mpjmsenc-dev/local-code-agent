@@ -2283,6 +2283,88 @@ walkthrough_reaches_the_coding_agent() {
 check "YOUR-TURN.md ends with a real edit, not a chat message" \
   walkthrough_reaches_the_coding_agent
 
+echo "# ...and the README must not bury the coding agent below the chat either"
+# Same failure, third door. The README had two 'Quick start' sections — server,
+# then phone — and the coding agent sat 150 lines further down, behind
+# auto-tune, the kill switch, updating and the security model. Someone who
+# reads the two quick starts has installed a box and opened a chat, and has
+# been given no reason to believe anything else exists.
+#
+# The ordering is not only a statement of priorities, it is the dependency
+# order: coding needs nothing beyond setup.sh, while the phone section needs
+# Tailscale installed on a second device first.
+readme_offers_coding_before_chat() {
+  local doc="${REPO}/README.md" code_line chat_line
+  # Bare 'lca' on its own line inside a fenced block, optionally with a trailing
+  # comment — the same shape YOUR-TURN.md is held to. 'lca ask' and 'lca chat'
+  # do not count: neither writes a file.
+  code_line="$(grep -nE '^lca( +#.*)?$' "${doc}" | head -1 | cut -d: -f1)"
+  [[ -n "${code_line}" ]] || {
+    echo 'the README never shows bare "lca", the command that writes files' >&2
+    return 1; }
+  chat_line="$(grep -n '^## Quick start (phone)' "${doc}" | head -1 | cut -d: -f1)"
+  [[ -n "${chat_line}" ]] || {
+    echo 'the README has no phone quick start to order against' >&2; return 1; }
+  (( code_line < chat_line )) || {
+    printf 'the README shows the chat (line %s) before the coding agent (line %s)\n' \
+      "${chat_line}" "${code_line}" >&2
+    return 1; }
+}
+check "the README reaches the coding agent before the chat" \
+  readme_offers_coding_before_chat
+
+echo "# every in-document link must point at a heading that exists"
+# The section above is reached by an anchor link, and an anchor is a string
+# nobody ever re-checks: rename the heading and the link still looks fine and
+# silently goes nowhere. Both directions are covered — '](#anchor)' within a
+# file and '](OTHER.md#anchor)' across two.
+#
+# Slug rules are GitHub's: lowercase, drop everything that is not a letter,
+# digit, space or hyphen (which is what happens to the em dashes this project
+# writes headings with), then spaces to hyphens.
+md_anchor_links_resolve() {
+  local bad=0 src target file anchor line
+  local -a docs=()
+  # git ls-files, for the reason every_bash_script_is_linted gives further
+  # down: it is this project's own documentation, not the thousand markdown
+  # files aider vendors into .venv, whose broken links are not our problem.
+  # An array rather than a word-split string — the paths are data, and this is
+  # the one shape of it that needs no shellcheck exemption.
+  mapfile -t docs < <(git -C "${REPO}" ls-files '*.md' 2>/dev/null || true)
+  (( ${#docs[@]} > 0 )) || {
+    echo "could not list tracked markdown (not a git checkout?)" >&2; return 1; }
+  # '[^):]*' below is what skips external URLs: their 'https:' carries the one
+  # character a local path never does. Nothing here reaches the network.
+  while IFS= read -r line; do
+    src="${line%%:*}"; target="${line#*:}"
+    file="${target%%#*}"; anchor="${target#*\#}"
+    if [[ -z "${file}" ]]; then
+      file="${REPO}/${src}"                       # same-document anchor
+    elif [[ "${src}" == */* ]]; then
+      file="${REPO}/${src%/*}/${file}"            # relative to the linking file
+    else
+      file="${REPO}/${file}"                      # link from a top-level doc
+    fi
+    [[ -r "${file}" ]] || {
+      printf '%s links to a file that does not exist: %s\n' "${src}" "${file}" >&2
+      bad=1; continue; }
+    # Build every heading's slug the way GitHub does and look for this anchor.
+    if ! grep -E '^#+ ' "${file}" \
+      | sed -e 's/^#* *//' \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -e 's/[^a-z0-9 -]//g' -e 's/ /-/g' \
+      | grep -qxF "${anchor}"; then
+      printf '%s links to #%s, which is no heading in %s\n' \
+        "${src}" "${anchor}" "${file#"${REPO}/"}" >&2
+      bad=1
+    fi
+  done < <(cd "${REPO}" && grep -nHoE '\]\([^):]*#[a-z0-9-]+\)' -- "${docs[@]}" \
+             | sed -e 's/:[0-9]*:\](/:/' -e 's/)$//')
+  return "${bad}"
+}
+check "every anchor link in the docs points at a real heading" \
+  md_anchor_links_resolve
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit

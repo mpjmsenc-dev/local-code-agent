@@ -48,6 +48,27 @@ Then verify with `lca check`. For a zero-terminal DigitalOcean install,
 paste `deploy/do-user-data.sh` when creating the droplet — see
 [docs/DO.md](docs/DO.md) and the step-by-step [docs/YOUR-TURN.md](docs/YOUR-TURN.md).
 
+## Quick start (code) — the part that writes files
+
+Nothing more to install; `setup.sh` already did it. In a terminal on the server:
+
+```bash
+cd ~/my-project     # any git repo
+lca                 # aider, on your local model, in THIS directory
+```
+
+Ask for a change in plain English; it edits the real files and commits each one.
+Then read what it actually did, because a small local model sometimes changes
+code you never mentioned:
+
+```bash
+git diff HEAD~1
+```
+
+This comes before the phone section for a reason — it needs no further setup,
+and it is the half of this stack the chat cannot do. Full section:
+[Daily usage: aider](#daily-usage-aider-the-coding-agent).
+
 ## Quick start (phone)
 
 1. `sudo tailscale up` on the server, log in via the printed URL.
