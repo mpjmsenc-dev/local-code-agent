@@ -93,6 +93,33 @@ elif (( BOOLS_BAD == 0 )); then
   p_pass "${BOOLS_OK} on/off setting(s) hold true or false"
 fi
 
+# Numbers, with the consequence of each spelled out. These fail quietly or
+# confusingly, never as themselves:
+#
+#   OLLAMA_CONTEXT_LENGTH=abc  measured: Ollama warns once in its log and runs
+#     with 0 (the model's own default) while run-agent tells aider 8192, so
+#     prompts are silently truncated — the exact failure the model-metadata
+#     file exists to prevent. The drop-in matches .env, so the drift check is
+#     happy and nothing else looks.
+#   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
+#     parse, which is the safe direction and means the disk fills quietly.
+#   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP; do
+  value="${!setting}"
+  case "${setting}" in
+    BACKUP_KEEP) [[ "${value}" =~ ^[0-9]+$ ]] && continue ;;
+    *)           [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} > 0 )) && continue ;;
+  esac
+  case "${setting}" in
+    OLLAMA_CONTEXT_LENGTH)
+      p_fail "OLLAMA_CONTEXT_LENGTH='${value}' is not a number. Ollama ignores it and runs at the model's own default while aider is told 8192, so long prompts are silently truncated. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply" ;;
+    BACKUP_KEEP)
+      p_warn "BACKUP_KEEP='${value}' is not a whole number, so retention never runs and backups accumulate until the disk is full. Set a number (or 0 to keep everything on purpose) in ${ENV_FILE}." ;;
+    LCA_ASK_TOKENS)
+      p_warn "LCA_ASK_TOKENS='${value}' is not a positive number — 'lca ask' silently uses 512. Fix it in ${ENV_FILE}." ;;
+  esac
+done
+
 # --- Binaries ---------------------------------------------------------------
 step "Binaries"
 for bin in git curl jq python3 ollama nft; do

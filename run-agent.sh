@@ -91,6 +91,14 @@ EOF
   edit_format="${LCA_EDIT_FORMAT:-auto}"
   if [[ "${edit_format}" == "auto" ]]; then
     edit_format="$(aider_edit_format "${MODEL_NAME}")"
+  # Warned about, not refused. aider accepts a dozen edit formats and someone
+  # may well want one this project does not document — but a typo here is
+  # answered by forty lines of aider's usage text ending in "invalid choice:
+  # 'whole-file'", with nothing pointing at .env. Measured, on the one command
+  # the whole stack is for.
+  elif [[ "${edit_format}" != "whole" && "${edit_format}" != "diff" \
+       && "${edit_format}" != "udiff" ]]; then
+    warn "LCA_EDIT_FORMAT='${edit_format}' in ${ENV_FILE} is not one of auto, whole, diff or udiff. Passing it to aider anyway — if it rejects the value, that is why."
   fi
   map_tokens="$(aider_map_tokens "${OLLAMA_CONTEXT_LENGTH:-8192}")"
 

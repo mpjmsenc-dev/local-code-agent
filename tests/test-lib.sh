@@ -93,6 +93,59 @@ check_names_a_bad_port() {
 }
 check "'lca check' names a port that is not a port" check_names_a_bad_port
 
+echo "# a number that is not a number must be named, not absorbed"
+# Each of these fails quietly or confusingly, never as itself. Measured:
+#   OLLAMA_CONTEXT_LENGTH=abc  Ollama warns once in its own log and runs at the
+#     model default (0) while run-agent tells aider 8192 — silent truncation,
+#     and the drop-in matches .env so the drift check is happy.
+#   BACKUP_KEEP=abc            backups_to_prune refuses to act, so retention
+#     never runs and the disk fills.
+#   LCA_EDIT_FORMAT=whole-file 'lca' dies in forty lines of aider usage text.
+numeric_settings_are_checked() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  # The LIST it iterates, not just a mention of the name: the first version of
+  # this grepped the whole file, and every one of these also appears in the
+  # message printed about it — so dropping a setting from the loop left the
+  # gate green.
+  local k loop
+  loop="$(grep -oE 'for setting in [A-Z_ ]+; do' <<<"${body}" \
+    | grep OLLAMA_CONTEXT_LENGTH | head -1)"
+  [[ -n "${loop}" ]] || {
+    echo "check-system.sh no longer loops over the numeric settings" >&2; return 1; }
+  for k in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP; do
+    grep -qF "${k}" <<<"${loop}" || {
+      printf 'check-system.sh does not check %s\n' "${k}" >&2; return 1; }
+  done
+  grep -q 'is not a number' <<<"${body}" || {
+    echo "check-system.sh never says a number is not a number" >&2; return 1; }
+  # The message has to say what actually happens, or it is a scolding rather
+  # than a diagnosis.
+  grep -q 'silently truncated' <<<"${body}" || {
+    echo "the context-length message does not say what goes wrong" >&2; return 1; }
+}
+check "'lca check' names a setting that should be a number and is not" \
+  numeric_settings_are_checked
+# ...and the headline command warns about an edit format aider will reject,
+# before aider answers with its usage text.
+run_agent_warns_on_an_odd_edit_format() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/run-agent.sh")"
+  grep -q 'LCA_EDIT_FORMAT' <<<"${body}" || {
+    echo "run-agent.sh no longer mentions LCA_EDIT_FORMAT" >&2; return 1; }
+  grep -qE 'warn "LCA_EDIT_FORMAT' <<<"${body}" || {
+    echo "run-agent.sh does not warn about an edit format it does not document" >&2
+    return 1
+  }
+  # Warned about, never refused: aider accepts formats this project does not
+  # document, and someone may want one.
+  grep -qE 'die "LCA_EDIT_FORMAT' <<<"${body}" && {
+    echo "run-agent.sh refuses an edit format instead of warning" >&2; return 1; }
+  return 0
+}
+check "'lca' explains an edit format aider will reject" \
+  run_agent_warns_on_an_odd_edit_format
+
 echo "# a switch takes two words, and anything else silently means off"
 # Everything in this project compares a switch against the literal string
 # "true", so AUTO_TUNE=yes does not mean on — it turns the headline feature off
