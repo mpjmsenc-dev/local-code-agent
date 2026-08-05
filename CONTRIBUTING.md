@@ -127,6 +127,27 @@ piped input: `printf '%s' "${var}" | head -c 12000` returns 141 as soon as
 prefix of a variable, slice it — `"${var:0:12000}"` — and never build a pipe
 you only intend to half-read.
 
+**`awk` with an `exit` is the same reader, and it is the one that keeps getting
+written anyway.** `sed file | awk '/start/ { inb = 1 } inb && /^}/ { exit }'` is
+the standard way this suite reads one function out of a script, and every one of
+them is the trap above wearing a different hat: awk stops reading at the closing
+brace, `sed` is still writing, SIGPIPE, 141. It turned CI red on
+`ollama_models_dir`, which sits halfway up `lib.sh` — the largest file here, so
+~600 lines were still queued. The identical checks against `motd.sh` have never
+failed because that file fits inside the buffer, which is luck, not design. If
+you need a function's body, read the whole file first:
+
+```bash
+body="$(sed -n '/^the_function() {/,/^}/p' "${REPO}/scripts/lib.sh")"
+awk '...' <<<"${body}"
+```
+
+A `sed` range reads to the end and exits early nowhere. Several call sites in
+`tests/test-lib.sh` still use the piped form and are safe only by file size;
+converting them is a mechanical change, and a first attempt at doing it in bulk
+broke two gates by mis-detecting where an awk program ended (`' || {`), so do it
+one at a time and re-run the suite after each.
+
 **2. `grep -q PATTERN && { echo FAIL; exit 1; }` under `set -e`.** Here a
 *non*-matching grep is the passing case, and the AND-list's non-zero status
 aborts the step anyway. Use `if`/`fi` for negative assertions.
