@@ -90,8 +90,11 @@ main() {
   # Give the chat a system prompt and suggestions that fit a private coding
   # assistant. Stock Open WebUI ships neither: no system prompt at all, and
   # starter prompts about vocabulary exams and the Roman Empire.
-  local params_env=() suggestions_env=()
+  local params_env=() suggestions_env=() banners_env=()
   if have jq; then
+    # The banner is the one statement that must not depend on the model
+    # choosing to make it. See lca_webui_banners.
+    banners_env=( -e "WEBUI_BANNERS=$(lca_webui_banners)" )
     # -c keeps it on one line: an env value with embedded newlines is legal but
     # awkward to inspect with 'docker inspect' and easy to mangle in a log.
     params_env=( -e "DEFAULT_MODEL_PARAMS=$(lca_system_prompt | jq -Rsc '{system: .}')" )
@@ -118,6 +121,7 @@ main() {
     -e WEBUI_NAME="${WEBUI_NAME}" \
     ${params_env[@]+"${params_env[@]}"} \
     ${suggestions_env[@]+"${suggestions_env[@]}"} \
+    ${banners_env[@]+"${banners_env[@]}"} \
     -e ENABLE_OPENAI_API=false \
     -e ENABLE_VERSION_UPDATE_CHECK=false \
     -e DO_NOT_TRACK=true \

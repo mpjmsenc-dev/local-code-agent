@@ -304,6 +304,7 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
+| `AIDER_NO_AUTO_COMMIT` | `false` | Stop aider committing each edit. You then review a dirty tree yourself — and lose the one-commit-per-change trail that makes `git revert <sha>` precise |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
@@ -408,6 +409,26 @@ the shortcut it looks like, are in
 
 If you expect to type one sentence and get a finished app, no local model on an
 8 GB droplet will do that.
+
+### Review every edit — local models can make unrequested changes
+
+A small model does not only get logic wrong; it sometimes edits code you never
+mentioned. Measured on `qwen2.5-coder:7b`: asked to make `divide()` raise on
+zero **and** add a `subtract()` function, it did both correctly and **deleted
+`add()`**, which was never part of the request.
+
+The net is already there — aider commits every edit — so use it:
+
+```bash
+git diff HEAD~1     # exactly what the last change touched
+git revert <sha>    # undo one change cleanly
+```
+
+**After any session, read `git diff HEAD~N` before trusting the result**,
+especially on a file with several functions. `AIDER_NO_AUTO_COMMIT=true` in
+`.env` stops the auto-commit if you would rather review a dirty tree first, at
+the cost of the per-change trail. Full example and reasoning in
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Docs
 

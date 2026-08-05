@@ -118,6 +118,21 @@ EOF
     info "Priming with coding conventions (config/CONVENTIONS.md; AIDER_CONVENTIONS=false to skip)"
   fi
 
+  # Auto-commit is ON by default and that is deliberate: it is the safety net
+  # for a small model's unrequested edits. Every change lands as its own commit,
+  # so 'git diff HEAD~1' shows exactly what was touched and 'git revert <sha>'
+  # undoes one cleanly. Measured on qwen2.5-coder:7b: asked for two specific
+  # changes, it made both correctly AND deleted an unrelated function it was
+  # never asked about — recoverable only because the commit existed.
+  #
+  # The opt-out is for people who would rather inspect a dirty tree before
+  # anything is recorded. It costs the per-change audit trail: several edits
+  # pile up unstaged together, and undoing one of them becomes a manual job.
+  if [[ "${AIDER_NO_AUTO_COMMIT:-false}" == "true" ]]; then
+    aider_args+=( --no-auto-commits )
+    warn "AIDER_NO_AUTO_COMMIT=true — edits will NOT be committed. Review with 'git diff' before you lose track of which change was which."
+  fi
+
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
   info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${window}-token window"
   info "Edit format: ${edit_format} · repo map: ${map_tokens} tokens (LCA_EDIT_FORMAT=auto picks per model)"

@@ -235,6 +235,64 @@ reach the model (1 and 2 above) or something else was in the request (3).
 `scripts/prompt-bench.sh` counts tool calls now, so a prompt change can be
 judged against this failure rather than only against the tutorial.
 
+## Review every edit — local models can make unrequested changes
+
+**This is the one habit worth building.** A small local model does not only get
+logic wrong; it sometimes edits code you never mentioned.
+
+Measured on `qwen2.5-coder:7b`, one run, against a two-function file. The
+request was *"make `divide()` raise `ValueError('division by zero')` when b is
+0, and add a `subtract(a, b)` function"*. Both requested changes were made
+correctly — and `add()`, which was never mentioned, was deleted:
+
+```diff
+-def add(a, b):
+-    return a + b
++def subtract(a, b):
++    "subtract two numbers"
+ 
++    return a - b
+ 
+ def divide(a, b):
+-    return a / b
++    "divide two numbers"
++
++    if b == 0:
++        raise ValueError('division by zero')
++    else:
++        return a / b
+```
+
+It replaced `add` with `subtract` instead of adding one beside the other. On a
+file with twenty functions you would not notice until something broke.
+
+This is the model's ceiling, not a fault in the harness — and there is a net
+under it. **aider commits every edit it makes**, so:
+
+```bash
+git diff HEAD~1          # exactly what the last change touched
+git revert <sha>         # undo one change cleanly, keeping the rest
+```
+
+The habit: **after any aider session, run `git diff HEAD~N`** — N being the
+number of commits it made — **and actually read it** before trusting the
+result. Especially on a file with several functions in it. Reading a short
+diff costs seconds; finding a silently deleted function a week later does not.
+
+If you would rather nothing be committed until you have looked, set this in
+`.env`:
+
+```bash
+AIDER_NO_AUTO_COMMIT=true
+```
+
+That passes `--no-auto-commits` to aider: edits land in the working tree and
+you commit them yourself. The tradeoff is real — you lose the
+one-commit-per-change audit trail, so several edits pile up together
+unstaged and `git revert` can no longer undo exactly one of them. Default is
+`false`, because on a small model the trail is usually worth more than the
+pause.
+
 ## aider wrote the files, but the code does not work
 
 That is the expected shape of this stack on a small model, not a fault to

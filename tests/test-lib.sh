@@ -2131,6 +2131,121 @@ ask_announces_a_cold_load() {
 check "'lca ask' explains the silence before a cold model answers" \
   ask_announces_a_cold_load
 
+echo "# the chat's filesystem limit must not depend on the model mentioning it"
+# The system prompt tells the model it has no filesystem and it usually says
+# so — usually. One time in ten on the build question it writes a confident
+# tutorial instead, and the user concludes the product cannot code. That is
+# what the first real user hit. A banner is served by Open WebUI itself and
+# rendered whatever the model does.
+banner_json="$(lca_webui_banners 2>/dev/null || true)"
+check "the banner is valid JSON Open WebUI can parse" \
+  test "$(jq -r 'type' <<<"${banner_json}" 2>/dev/null)" = "array"
+# Open WebUI's BannerModel requires every one of these; a missing field makes
+# it drop the banner and log an exception, which is silent from outside.
+banner_has_every_required_field() {
+  local f
+  for f in id type title content dismissible timestamp; do
+    [[ "$(jq -r --arg f "${f}" '.[0] | has($f)' <<<"${banner_json}" 2>/dev/null)" == "true" ]] || {
+      printf 'banner is missing the %s field BannerModel requires\n' "${f}" >&2
+      return 1
+    }
+  done
+}
+check "...with every field BannerModel requires" banner_has_every_required_field
+check "it states the limitation" \
+  grep -qi 'cannot read, create or edit files' <<<"${banner_json}"
+# A limit with no way out is a complaint. It has to name the thing that works.
+check "...and names the command that does write files" \
+  grep -q 'lca \[project-dir\]' <<<"${banner_json}"
+# Dismissible would let someone hide it on day one and meet the tutorial on
+# day thirty. The limitation never goes away, so neither does the banner.
+check "...and cannot be dismissed" \
+  test "$(jq -r '.[0].dismissible' <<<"${banner_json}" 2>/dev/null)" = "false"
+# ...and the installer must actually pass it, or all of the above is a string
+# nothing ever reads.
+installer_passes_the_banner() {
+  local body; body="$(sed 's/#.*//' "${REPO}/scripts/install_webui.sh")"
+  grep -q 'WEBUI_BANNERS' <<<"${body}" || {
+    echo 'install_webui.sh never passes WEBUI_BANNERS, so no banner is baked in' >&2
+    return 1; }
+  grep -q 'banners_env\[@\]' <<<"${body}" || {
+    echo 'the banner env array is built but never reaches docker run' >&2
+    return 1; }
+}
+check "install_webui.sh bakes the banner into the container" \
+  installer_passes_the_banner
+# Open WebUI never updates a setting in place, so an install predating the
+# banner keeps a container without one. Drift detection is what tells them.
+#
+# The assertion is on the REPORTING line, not on the name appearing somewhere
+# in the function: a first version grepped for 'WEBUI_BANNERS' and passed with
+# the comparison replaced by ':', because the two lines that read the wanted
+# and live values still mentioned it.
+check "a container with no banner is reported as drifted" \
+  grep -q 'drifted+=("WEBUI_BANNERS")' \
+    <<<"$(sed -n '/^webui_drift() {/,/^}/p' "${REPO}/scripts/lib.sh")"
+
+echo "# AIDER_NO_AUTO_COMMIT — the opt-out from the safety net, off by default"
+# aider's auto-commit is what makes an unrequested edit recoverable: one commit
+# per change, so 'git diff HEAD~1' shows it and 'git revert <sha>' undoes just
+# that one. Turning it off is a legitimate preference and a real tradeoff, so
+# it is a setting rather than a rewrite — and it defaults to keeping the net.
+aider_no_auto_commit_is_wired() {
+  local body; body="$(sed 's/#.*//' "${REPO}/run-agent.sh")"
+  grep -q 'AIDER_NO_AUTO_COMMIT' <<<"${body}" || {
+    echo 'run-agent.sh never reads AIDER_NO_AUTO_COMMIT, so the setting does nothing' >&2
+    return 1; }
+  # The flag itself has to be handed to aider, not merely mentioned.
+  grep -qE 'aider_args\+=\( --no-auto-commits \)' <<<"${body}" || {
+    echo 'AIDER_NO_AUTO_COMMIT is read but --no-auto-commits never reaches aider' >&2
+    return 1; }
+  # ...and only when asked for. Unconditional would silently remove the net.
+  awk '/AIDER_NO_AUTO_COMMIT/           { guard = 1 }
+       /aider_args\+=\( --no-auto-commits \)/ { if (!done) { done = 1; ok = guard } }
+       END { exit (done && ok) ? 0 : 1 }' <<<"${body}" || {
+    echo 'the --no-auto-commits flag is not guarded by the setting' >&2
+    return 1; }
+  # Default must keep committing: lib.sh applies it, .env.example ships it.
+  # '[$]{' rather than the literal, so this line is not itself an
+  # unexpanded-expression finding — the bracket idiom used elsewhere here.
+  grep -qE 'AIDER_NO_AUTO_COMMIT="[$][{]AIDER_NO_AUTO_COMMIT:-false[}]"' "${REPO}/scripts/lib.sh" || {
+    echo 'AIDER_NO_AUTO_COMMIT does not default to false' >&2
+    return 1; }
+  grep -qx 'AIDER_NO_AUTO_COMMIT=false' "${REPO}/.env.example" || {
+    echo '.env.example does not ship AIDER_NO_AUTO_COMMIT=false' >&2
+    return 1; }
+}
+check "AIDER_NO_AUTO_COMMIT maps to --no-auto-commits and defaults off" \
+  aider_no_auto_commit_is_wired
+# The risk it exists for has to be written down where someone will meet it,
+# with the recovery beside it. A toggle nobody understands is not a mitigation.
+unrequested_edits_are_documented() {
+  local f section
+  for f in README.md docs/TROUBLESHOOTING.md; do
+    # Scoped to the section, not the whole file. A whole-file grep for
+    # 'git revert' passed with the recovery block deleted, satisfied by the
+    # sentence further down explaining what the opt-out costs you — the
+    # recovery has to be beside the risk, where someone meeting it will look.
+    section="$(awk '/^#+ Review every edit/ { inb = 1; next }
+                    inb && /^#+ / { exit }
+                    inb' "${REPO}/${f}")"
+    [[ -n "${section}" ]] || {
+      printf '%s has no "Review every edit" section warning about unrequested changes\n' "${f}" >&2
+      return 1; }
+    grep -qi 'unrequested changes' "${REPO}/${f}" || {
+      printf '%s does not warn that a local model can edit code you did not ask about\n' "${f}" >&2
+      return 1; }
+    grep -q 'git diff HEAD~' <<<"${section}" || {
+      printf '%s names the risk but not how to see it\n' "${f}" >&2
+      return 1; }
+    grep -q 'git revert' <<<"${section}" || {
+      printf '%s names the risk but not how to undo it\n' "${f}" >&2
+      return 1; }
+  done
+}
+check "the unrequested-edit risk is documented with its recovery" \
+  unrequested_edits_are_documented
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit

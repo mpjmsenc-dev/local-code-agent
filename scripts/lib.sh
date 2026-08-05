@@ -250,6 +250,7 @@ load_env() {
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  AIDER_NO_AUTO_COMMIT="${AIDER_NO_AUTO_COMMIT:-false}"
   LCA_EDIT_FORMAT="${LCA_EDIT_FORMAT:-auto}"
   LCA_ASK_TOKENS="${LCA_ASK_TOKENS:-512}"
   SKIP_DOCKER="${SKIP_DOCKER:-false}"
@@ -1264,6 +1265,34 @@ Only mention these when they are actually relevant to the question.
 EOF
 }
 
+# lca_webui_banners — the always-visible notice at the top of every chat, as the
+# JSON list Open WebUI's WEBUI_BANNERS expects.
+#
+# The system prompt above already tells the model it has no filesystem, and it
+# is good at saying so — but it is an INSTRUCTION to a 3b, obeyed most of the
+# time rather than always. The one time it is not obeyed, the user is handed a
+# confident multi-file tutorial, concludes the product cannot code, and stops.
+# That is not a hypothetical: it is the first thing a real user reported.
+#
+# A banner is not an instruction. It is served by Open WebUI itself, from
+# /api/v1/configs/banners, and rendered above the conversation whatever the
+# model does or does not say. Verified against the real image
+# by starting a container from WEBUI_IMAGE with it set and reading it back from
+# note it does NOT appear under 'ui.banners' in /api/config, which is where you
+# would look first and find null.
+#
+# dismissible:false on purpose. The limitation does not go away, and a
+# dismissed banner is exactly what someone would not see on the day they ask it
+# to build something.
+lca_webui_banners() {
+  local content
+  content="This chat cannot read, create or edit files — it is a chat box with no filesystem. For real coding, SSH into the server and run:  lca [project-dir]   (that is aider, on this same private model, and it does write files.)"
+  jq -nc --arg c "${content}" \
+    '[{id: "lca-no-filesystem", type: "warning",
+       title: "This chat cannot touch your files",
+       content: $c, dismissible: false, timestamp: 1}]'
+}
+
 # run_reader PROBE_CMD... -- REAL_CMD... — decide once, with a cheap probe,
 # whether a log reader needs root, then run the real command directly.
 #
@@ -1475,6 +1504,12 @@ webui_drift() {
     live="$(webui_container_env DEFAULT_PROMPT_SUGGESTIONS || true)"
     [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
       || drifted+=("PROMPT_SUGGESTIONS")
+    # The banner is baked in at creation like everything else here, so an
+    # install that predates it keeps a container with no banner at all and
+    # nothing would say so. That is the state the first real user was in.
+    want="$(lca_webui_banners 2>/dev/null || true)"
+    live="$(webui_container_env WEBUI_BANNERS || true)"
+    [[ -z "${want}" || "${live}" == "${want}" ]] || drifted+=("WEBUI_BANNERS")
   fi
   (( ${#drifted[@]} )) || return 1
   printf '%s\n' "${drifted[@]}"

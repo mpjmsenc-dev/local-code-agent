@@ -72,4 +72,30 @@ if grep -qi 'roman empire' <<<"${titles}"; then
   exit 1
 fi
 
+# ...and the banner, which is the one statement here that does not depend on a
+# 3b choosing to make it. A user who reaches the chat and asks it to build
+# something gets a tutorial roughly one time in ten however good the system
+# prompt is; the banner is served by Open WebUI itself and rendered whatever
+# the model says.
+#
+# Read from /api/v1/configs/banners, NOT from /api/config. Verified against
+# ghcr.io/open-webui/open-webui:main: 'ui.banners' in /api/config is null even
+# for a signed-in user, which is exactly where you would look first and
+# conclude, wrongly, that WEBUI_BANNERS does not work.
+banners="$(curl -sS --max-time 20 -H "Authorization: Bearer ${token}" \
+  "${BASE}/api/v1/configs/banners" 2>/dev/null || true)"
+banner_text="$(printf '%s' "${banners}" | jq -r '[.[]?.content] | join(" ")' 2>/dev/null || true)"
+if [[ -z "${banner_text}" ]]; then
+  echo "FAIL: no banner is served, so nothing tells a chat user it cannot write files." >&2
+  echo "--- /api/v1/configs/banners ---" >&2
+  printf '%s' "${banners}" | head -c 300 >&2 || true
+  exit 1
+fi
+grep -qi 'cannot read, create or edit files' <<<"${banner_text}" \
+  || { echo "FAIL: the banner does not state the filesystem limitation: ${banner_text}" >&2; exit 1; }
+# It must also name the way out, or it is a complaint rather than an answer.
+grep -q 'lca ' <<<"${banner_text}" \
+  || { echo "FAIL: the banner states the limit but names no alternative: ${banner_text}" >&2; exit 1; }
+
 echo "OK: Open WebUI serves our starter questions, not the stock ones"
+echo "OK: and a banner telling chat users it cannot write files, naming 'lca'"

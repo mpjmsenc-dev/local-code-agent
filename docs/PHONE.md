@@ -129,6 +129,34 @@ The chat is a **text box with no filesystem**. It cannot create files, run
 commands, or see your project — so "build me a whole app" is the one request it
 genuinely cannot fulfil, no matter which model you run.
 
+A **banner says so at the top of every chat**, and it does not depend on the
+model remembering to mention it:
+
+> **This chat cannot touch your files**
+> This chat cannot read, create or edit files — it is a chat box with no
+> filesystem. For real coding, SSH into the server and run: `lca [project-dir]`
+
+That exists because the handover below, good as it measures, is still an
+*instruction to a small model* — obeyed most of the time, not every time. The
+one time it is not, someone is handed a confident tutorial and concludes the
+product cannot code. A banner is served by Open WebUI itself and rendered
+whatever the model says.
+
+**How it is set.** `scripts/install_webui.sh` passes `WEBUI_BANNERS` to
+`docker run`, built by `lca_webui_banners()` in `scripts/lib.sh`. Open WebUI
+reads that env var as a JSON list and serves it from
+`/api/v1/configs/banners` — note *not* `ui.banners` in `/api/config`, which
+stays `null` even for a signed-in user and will mislead you if you check there.
+`tests/webui-config-gate.sh` asserts the running server really serves it.
+
+**How it reaches an existing install.** Open WebUI bakes every setting in at
+container creation and never updates one in place, so this only arrives when
+the container is recreated. `install_webui.sh` is idempotent by
+`docker rm -f` + `docker run` — re-running it recreates from current settings —
+and that is what `sudo lca apply` triggers once it sees the drift. `lca check`
+reports `WEBUI_BANNERS` as drifted on any container built before this existed,
+so an older install is told rather than left quietly without it.
+
 Ask it anyway and it hands the job over instead of bluffing. It opens with the
 command that *can* do it — bare **`lca`** (aider), in a terminal, inside your
 project directory:
