@@ -491,4 +491,13 @@ main() {
   esac
 }
 
-main "$@"
+# Sourceable, the same as restore.sh, apply.sh and uninstall.sh, so the two
+# functions that WRITE this file's security-critical files can be executed by a
+# test. tests/test-netmode.sh runs 'netmode.sh render-rules' as a subprocess,
+# which exercises the renderers and nothing else — write_rules_file and
+# apply_inbound_guard had no test that ran them at all, only greps. The one
+# reliable way to reach them before was 'netmode.sh offline' or 'harden', which
+# a test suite must never do.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

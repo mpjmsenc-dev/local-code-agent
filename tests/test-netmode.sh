@@ -272,6 +272,60 @@ else
   fi
 fi
 
+echo "# write_rules_file — the step that puts the ruleset on disk"
+# Everything above renders. Nothing ran the function that WRITES, because the
+# only ways to reach it are 'netmode.sh offline' and 'harden', which a test
+# suite must never do — so the file this project reloads at every boot was
+# produced by code no test had executed. netmode.sh is sourceable now (the
+# same guard restore.sh and apply.sh use), so it can be called directly with
+# NETMODE_DIR pointed at a sandbox.
+#
+# Nothing here touches nft: write_rules_file only writes a file. as_root is
+# stubbed to run the command unchanged, since a sandbox path needs no root.
+WRF_SB="$(mktemp -d)"
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${WRF_SB}"' EXIT
+wrf_run() {   # ENV-PREP -> writes ${WRF_SB}/netmode.nft, prints nothing
+  bash -c '
+    set -euo pipefail
+    as_root() { "$@"; }
+    source "$1"
+    NETMODE_DIR="$2"; NFT_RULES_FILE="$2/netmode.nft"
+    '"$1"'
+    write_rules_file
+  ' _ "${REPO}/netmode.sh" "${WRF_SB}" >/dev/null 2>&1
+}
+if wrf_run ':' && [[ -s "${WRF_SB}/netmode.nft" ]]; then
+  t_ok "write_rules_file writes the ruleset"
+else
+  t_fail "write_rules_file did not produce a ruleset"
+fi
+# What it wrote must be exactly what render-rules prints — a writer that
+# silently drops or reorders lines is the failure this cannot otherwise see.
+if diff -q "${RULES}" "${WRF_SB}/netmode.nft" >/dev/null 2>&1; then
+  t_ok "...byte for byte what render-rules prints"
+else
+  t_fail "the written ruleset differs from the rendered one"
+fi
+# ...and a render that fails must leave the previous ruleset alone, rather than
+# replacing it with however much arrived before the error. nft will not load a
+# partial ruleset, and this file is what the boot service feeds it.
+printf 'PREVIOUS RULESET\n' > "${WRF_SB}/netmode.nft"
+if wrf_run 'render_rules() { return 1; }'; then
+  t_fail "a failed render was reported as a successful write"
+else
+  t_ok "a failed render does not report success"
+fi
+if [[ "$(cat "${WRF_SB}/netmode.nft")" == "PREVIOUS RULESET" ]]; then
+  t_ok "...and leaves the previous ruleset untouched"
+else
+  t_fail "a failed render destroyed the ruleset already on disk"
+fi
+if compgen -G "${WRF_SB}/*.lca-new" >/dev/null; then
+  t_fail "a temp file was left behind in ${WRF_SB}"
+else
+  t_ok "...leaving no temp file behind"
+fi
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
