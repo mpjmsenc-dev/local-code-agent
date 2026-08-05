@@ -1620,6 +1620,86 @@ no_tps() { ! tokens_per_second "$1" "$2" >/dev/null 2>&1; }
 check "zero duration -> nonzero exit" no_tps 10 0
 check "non-numeric duration -> nonzero exit" no_tps 10 abc
 
+echo "# ...and the READING rate has to be measured on a prompt Ollama has not seen"
+# 'lca speed' reported reading input at 160-213 tokens/second on a machine that
+# reads at 20. Two faults, both in the prompt it measured with:
+#
+#   - it was a fixed 43-token string, so Ollama served the KV prefix out of
+#     cache from the second run onward. The same 2,050-token prompt twice in a
+#     row here: 104 seconds, then 0.
+#   - 43 tokens is small enough that per-request overhead is most of it.
+#
+# An order of magnitude wrong, on the single number that explains why a code
+# edit takes minutes. So the probe must differ every call and be big.
+read_probe_is_uncacheable_and_big() {
+  local a b
+  a="$(read_probe_prompt)"; b="$(read_probe_prompt)"
+  [[ "${a}" != "${b}" ]] || {
+    echo 'read_probe_prompt is identical between calls — Ollama would serve it from cache' >&2
+    return 1; }
+  # The differing part must be at the HEAD: a nonce at the end leaves every
+  # token before it cacheable, which is most of them.
+  [[ "$(head -1 <<<"${a}")" != "$(head -1 <<<"${b}")" ]] || {
+    echo 'the probe differs only after its first line, so the prefix is still cacheable' >&2
+    return 1; }
+  # ~600 tokens measured; bytes are the cheap proxy the test can check.
+  (( "$(printf '%s' "${a}" | wc -c)" > 1500 )) || {
+    echo 'the read probe is too small to measure anything but per-request overhead' >&2
+    return 1; }
+}
+check "the read probe is uncacheable and big enough to mean something" \
+  read_probe_is_uncacheable_and_big
+
+echo "# ...and both rates turn into the one number the user came for"
+check "2800 in at 20/s + 113 out at 4.8/s -> 163s" \
+  test "$(aider_edit_seconds 20 4.8)" = "163"
+check "a faster machine gets a smaller number" \
+  test "$(aider_edit_seconds 40 12)" = "79"
+no_estimate() { ! aider_edit_seconds "$1" "$2" >/dev/null 2>&1; }
+# Same reason as the zero-duration case above: awk would print 'inf' and the
+# line would read "one code edit ~inf".
+check "a zero reading rate is refused, not divided by" no_estimate 0 4.8
+check "a zero generation rate is refused too" no_estimate 20 0
+check "seconds stay seconds below 90" test "$(human_duration 45)" = "45s"
+check "...and become minutes above it" test "$(human_duration 163)" = "3 min"
+check "...rounded, not truncated" test "$(human_duration 100)" = "2 min"
+check "...and hours when it comes to that" test "$(human_duration 4000)" = "1 h 7 min"
+check "a non-number is refused" test ! "$(human_duration abc 2>/dev/null)"
+# ...and speed.sh has to actually use the new probe rather than re-reading the
+# generation request's cached prefix, which is the bug this replaces.
+speed_measures_reading_separately() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/speed.sh")"
+  grep -q 'read_probe_prompt' <<<"${body}" || {
+    echo 'speed.sh does not use the uncacheable probe, so its reading rate is a cache hit' >&2
+    return 1; }
+  # The printed rate must come from the PROBE's counters. Matched as the exact
+  # call, with no alternation: the first version of this check allowed
+  # 'read_count.*read_ns' too, and an unrelated 'if' line mentioning both
+  # satisfied it — so swapping the counters back to the cached ones passed the
+  # gate. Caught by mutation, not by reading it.
+  # SC2016 is the intent, not a slip: the literal characters ${read_count} are
+  # what has to appear in speed.sh's source. Expanding them here would search
+  # for this test's own empty variables and match nothing, forever.
+  # shellcheck disable=SC2016
+  grep -qF 'tokens_per_second "${read_count}" "${read_ns}"' <<<"${body}" || {
+    echo 'speed.sh computes its reading rate from something other than the probe' >&2
+    return 1; }
+  # ...and the cached counters must not be mined off the GENERATION response at
+  # all, so there is nothing lying around to be picked up again by accident.
+  # Anchored on '<<<"${response}"' specifically: the probe reads
+  # prompt_eval_count too, legitimately, from its own reply.
+  # shellcheck disable=SC2016  # ...and the same here, for ${response}.
+  ! grep -q 'prompt_eval_[a-z]*.*<<<"${response}"' <<<"${body}" || {
+    echo "speed.sh still reads the generation request's cached prompt counters" >&2
+    return 1; }
+  grep -q 'aider_edit_seconds' <<<"${body}" || {
+    echo 'speed.sh measures both rates and still never says what an edit costs' >&2
+    return 1; }
+}
+check "lca speed measures reading with the probe, and reports what an edit costs" \
+  speed_measures_reading_separately
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has

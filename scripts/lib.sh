@@ -1073,6 +1073,66 @@ tokens_per_second() {
   awk -v c="${count}" -v n="${ns}" 'BEGIN { printf "%.1f\n", c / (n / 1000000000) }'
 }
 
+# read_probe_prompt — a prompt for measuring how fast this machine READS input,
+# which has to be two things the old benchmark was not: big, and different
+# every time.
+#
+# Different every time, because Ollama caches the KV prefix of a prompt it has
+# already seen. The benchmark prompt is a fixed 43-token string, so the second
+# and every later 'lca speed' re-read it out of that cache. Measured on this
+# box, the same 2,050-token prompt twice in a row:
+#
+#   {"prompt_eval_count":2050, "seconds":104, "read_tps":19}
+#   {"prompt_eval_count":2050, "seconds":0,   "read_tps":6899}
+#
+# Big, because at 43 tokens the per-request overhead dominates whatever is
+# left. Between them the two faults reported 160-213 tokens/second on a machine
+# that really reads at 20 — an order of magnitude, on the one number that
+# explains why a code edit takes minutes.
+#
+# The nonce goes FIRST so the differing bytes are at the head of the prefix;
+# a nonce at the end would leave everything before it cacheable.
+read_probe_prompt() {
+  local i filler="the quick brown fox jumps over the lazy dog while counting widgets "
+  printf 'Session %s-%s-%s. Ignore the notes below and reply with one word: ok.\n' \
+    "$(date +%s%N 2>/dev/null || printf 0)" "$$" "${RANDOM}"
+  for (( i = 0; i < 45; i++ )); do printf '%s' "${filler}"; done
+  printf '\n'
+}
+
+# What one small aider edit costs, in tokens. Measured on this project's own
+# defaults: adding a two-line function to a two-line file sent 2,800 tokens and
+# got 113 back. The prompt is not the file — it is aider's system prompt, the
+# repo map (768 tokens by default), the read-only conventions file (253,
+# measured) and the chat history. A tiny file still carries all of it.
+LCA_EDIT_PROMPT_TOKENS=2800
+LCA_EDIT_REPLY_TOKENS=113
+
+# aider_edit_seconds READ_TPS GEN_TPS — how long that edit takes at two
+# measured rates. Echoes whole seconds; non-zero if either rate is unusable.
+#
+# 'Generation N tokens/second' is the number this project quoted everywhere and
+# the one every local-LLM discussion quotes, and for the coding agent it is the
+# smaller half. At the rates measured here — 20 reading, 4.8 generating — that
+# edit is 140 seconds of reading against 23 of writing. Someone asking why it
+# is slow was being answered about the 14%.
+aider_edit_seconds() {
+  awk -v r="${1:-0}" -v g="${2:-0}" -v ti="${LCA_EDIT_PROMPT_TOKENS}" -v to="${LCA_EDIT_REPLY_TOKENS}" \
+    'BEGIN { if (r <= 0 || g <= 0) exit 1; printf "%d\n", (ti / r) + (to / g) }'
+}
+
+# human_duration SECONDS — "45s" / "3 min" / "1 h 5 min". Minutes past 90
+# seconds, because "187 seconds" is a number you have to convert before you can
+# feel it, and feeling it is the whole purpose of printing it.
+human_duration() {
+  local s="${1:-0}"
+  [[ "${s}" =~ ^[0-9]+$ ]] || return 1
+  if (( s < 90 )); then printf '%ss\n' "${s}"
+  elif (( s < 3600 )); then printf '%s min\n' "$(( (s + 30) / 60 ))"
+  else printf '%s h %s min\n' "$(( s / 3600 ))" "$(( (s % 3600 + 30) / 60 ))"
+  fi
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.

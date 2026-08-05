@@ -104,11 +104,32 @@ main() {
   response="$(measure "${tokens}")" \
     || die "The request to Ollama failed. Is the service healthy? Try: lca check"
 
-  local eval_count eval_ns prompt_count prompt_ns
+  # Reading speed gets its OWN request, with a big prompt that differs every
+  # run — see read_probe_prompt(). Taking it from the generation request above
+  # measured a cached 43-token prefix and reported 160-213 tokens/second on a
+  # machine that reads at 20.
+  #
+  # It costs about half a minute and it is the half of the answer that actually
+  # explains a slow code edit, so it is not optional. Announced, because a
+  # silent extra wait in a benchmark reads as a hang.
+  info "Reading a realistic prompt — this is what a code edit really waits on..."
+  local read_response read_count read_ns read_tps=""
+  read_response="$(read_probe_prompt | jq -Rs --arg m "${MODEL_NAME}" \
+      '{model:$m, prompt:., stream:false, options:{num_predict:1}}' \
+    | curl -sS --max-time 900 -X POST "$(ollama_url)/api/generate" \
+        -H 'Content-Type: application/json' -d @- || true)"
+  read_count="$(jq -r '.prompt_eval_count // 0' <<<"${read_response}" 2>/dev/null || echo 0)"
+  read_ns="$(jq -r '.prompt_eval_duration // 0' <<<"${read_response}" 2>/dev/null || echo 0)"
+
+  # Deliberately NOT reading prompt_eval_* off this response. That is where the
+  # 160-213 tokens/second came from: this request re-sends the same 43-token
+  # benchmark prompt every run, so Ollama answers its prefix from cache and the
+  # counters describe the cache, not the machine. The probe above is the only
+  # honest source, and leaving these here to be picked up again by accident is
+  # how the bug would come back.
+  local eval_count eval_ns
   eval_count="$(jq -r '.eval_count // empty' <<<"${response}")"
   eval_ns="$(jq -r '.eval_duration // empty' <<<"${response}")"
-  prompt_count="$(jq -r '.prompt_eval_count // 0' <<<"${response}")"
-  prompt_ns="$(jq -r '.prompt_eval_duration // 0' <<<"${response}")"
   [[ -n "${eval_count}" && -n "${eval_ns}" ]] \
     || die "Ollama did not return timing counters. Response: $(head -c 200 <<<"${response}")"
 
@@ -134,8 +155,25 @@ main() {
 
   step "Results"
   printf '  generation      %s tokens/second\n' "${tps}"
-  if [[ "${prompt_count}" =~ ^[0-9]+$ ]] && (( prompt_count > 0 )) && (( prompt_ns > 0 )); then
-    printf '  reading input   %s tokens/second\n' "$(tokens_per_second "${prompt_count}" "${prompt_ns}")"
+  if [[ "${read_count}" =~ ^[0-9]+$ ]] && (( read_count > 200 )) && (( read_ns > 0 )); then
+    read_tps="$(tokens_per_second "${read_count}" "${read_ns}")"
+    printf '  reading input   %s tokens/second (over %s tokens)\n' "${read_tps}" "${read_count}"
+  fi
+  # The two rates are inputs, not an answer. Somebody runs this because a code
+  # edit felt slow, and neither number tells them how slow an edit is — they
+  # would have to already know aider sends ~2.8k tokens, and the reason they
+  # are here is that they do not.
+  #
+  # Computed from the rates just measured, so it is this machine's number: the
+  # 3b rung on a base droplet is faster on both counts and says so.
+  local edit_s
+  if [[ -n "${read_tps}" ]] && edit_s="$(aider_edit_seconds "${read_tps}" "${tps}")"; then
+    printf '  one code edit   ~%s  (aider sends ~%s tokens and gets ~%s back: %ss reading, %ss writing)\n' \
+      "$(human_duration "${edit_s}")" \
+      "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" 'BEGIN { printf "%.1fk", t / 1000 }')" \
+      "${LCA_EDIT_REPLY_TOKENS}" \
+      "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" -v r="${read_tps}" 'BEGIN { printf "%d", t / r }')" \
+      "$(awk -v t="${LCA_EDIT_REPLY_TOKENS}" -v g="${tps}" 'BEGIN { printf "%d", t / g }')"
   fi
   local load_s=""
   if [[ "${load_ns}" =~ ^[0-9]+$ ]] && (( load_ns > 1000000000 )); then
@@ -250,6 +288,19 @@ main() {
     if [[ -n "${params}" ]] && (( params > 3 )); then
       info "Want it faster today? A smaller model is the only big CPU-side lever:"
       info "  lca model --list-recommended"
+    fi
+    # Said here because the line above is the right answer for a CHAT reply and
+    # the wrong emphasis for a code edit. Most of an edit is Ollama reading
+    # aider's prompt, and that prompt is mostly aider's own scaffolding — so
+    # trimming what gets sent is a lever, and one nothing here ever mentioned.
+    #
+    # Deliberately not oversold: CONVENTIONS.md is 253 tokens of ~2,800
+    # (measured), so it is a tenth. Saying "a tenth" is worth more than
+    # implying a switch makes this fast.
+    if [[ -n "${read_tps}" ]]; then
+      info "Most of a code edit is Ollama READING aider's prompt, not writing the reply."
+      info "  Send less: a smaller repo map, or AIDER_CONVENTIONS=false in .env"
+      info "  (worth about a tenth of the prompt — a trim, not a fix)."
     fi
     case "$(gpu_state "${MODEL_NAME}")" in
       no-driver)
