@@ -17,6 +17,25 @@ main() {
   [[ -x "${aider}" ]] || die "aider is not installed at ${aider}. Run: ${REPO_ROOT}/scripts/install_python.sh"
   require_cmd curl jq
 
+  # Checked BEFORE the model is loaded, which costs 20 seconds on this box even
+  # warm: somebody who is in the wrong directory should be told while they are
+  # still looking at the screen, not after the wait.
+  #
+  # Auto-commit is the whole safety net for a small model's unrequested edits —
+  # see the note above AIDER_NO_AUTO_COMMIT below — and it needs a git repo.
+  # commit_safety_state() explains where aider does and does not make one.
+  case "$(commit_safety_state)" in
+    home)
+      warn "This is your home directory, and aider does not create a git repo here — so nothing will be committed, 'git diff HEAD~1' will have nothing to show you, and an edit you never asked for cannot be reverted."
+      info "Better: mkdir -p ~/my-project && cd ~/my-project && lca"
+      confirm "Start aider here anyway, with no undo?" \
+        || die "Nothing started. cd into a project directory and run 'lca' again."
+      ;;
+    norepo)
+      info "No git repo here yet — aider will offer to make one. Say yes: that is what turns each edit into a commit you can read with 'git diff HEAD~1' and undo with 'git revert'."
+      ;;
+  esac
+
   # Ollama must be up before aider starts. ensure_ollama_up_announced both
   # STARTS it — the systemd service where there is one and root to do it, a
   # background server otherwise — and says so while it happens.

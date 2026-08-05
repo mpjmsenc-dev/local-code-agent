@@ -403,6 +403,42 @@ git_identity() {
   printf '%s <%s>\n' "${name}" "${email}"
 }
 
+# commit_safety_state — whether an aider run started in THIS directory will
+# leave anything you can inspect or undo. Echoes one word:
+#
+#   repo    inside a git work tree — every edit becomes its own commit, so
+#           'git diff HEAD~1' shows it and 'git revert <sha>' takes it back
+#   home    $HOME, and not a repo — aider does NOT offer to create one here
+#   norepo  anywhere else without a repo — aider offers to create one, yes
+#
+# The 'home' case is the point of this function, and it is measured from
+# aider's own source rather than assumed: in main.py, a cwd equal to the home
+# directory prints "You should probably run aider in your project's directory,
+# not your home dir." and RETURNS — no prompt, no repo. Everywhere else it
+# asks "No git repo found, create one to track aider's changes (recommended)?"
+#
+# That exception lands on the likeliest directory there is. SSH puts you in
+# $HOME, 'lca help' describes the bare command as "start the coding agent
+# here", and the login banner now tells people to write code. So typing the
+# headline command the first time, in the directory you were already standing
+# in, is the one path where auto-commit — this project's entire answer to a
+# small model deleting a function nobody mentioned — silently does not exist.
+# aider says so in one line among ten lines of startup output.
+#
+# -ef, not string equality: it compares device and inode, so a symlinked or
+# non-canonical $HOME still matches instead of quietly missing the case.
+commit_safety_state() {
+  # The VALUE, not just the exit status: inside a bare .git directory
+  # 'rev-parse --is-inside-work-tree' prints false and still exits 0.
+  if have git && [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null || true)" == "true" ]]; then
+    printf 'repo\n'; return 0
+  fi
+  if [[ -n "${HOME:-}" && "${PWD}" -ef "${HOME}" ]]; then
+    printf 'home\n'; return 0
+  fi
+  printf 'norepo\n'
+}
+
 # set_env_var KEY VALUE — update KEY in .env in place, or append it, so that a
 # following load_env reads the value back unchanged.
 #

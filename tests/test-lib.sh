@@ -2217,6 +2217,80 @@ aider_no_auto_commit_is_wired() {
 }
 check "AIDER_NO_AUTO_COMMIT maps to --no-auto-commits and defaults off" \
   aider_no_auto_commit_is_wired
+
+echo "# ...and the safety net needs a git repo, which \$HOME will never get"
+# Measured in aider's own source (main.py): with no repo it asks "No git repo
+# found, create one to track aider's changes (recommended)?" — except when the
+# cwd IS the home directory, where it prints one line of advice and returns
+# without a repo and without asking.
+#
+# That exception lands on the likeliest directory there is. SSH puts you in
+# $HOME, 'lca help' calls the bare command "start the coding agent here", and
+# the login banner now tells people to write code. Typing 'lca' straight after
+# logging in is the one path where auto-commit — the whole answer to a small
+# model deleting a function nobody mentioned — silently is not there.
+csa_in() {  # DIR HOME -> repo | home | norepo
+  bash -c 'source "$1" >/dev/null 2>&1; cd "$2" || exit 9; HOME="$3"
+           commit_safety_state' _ "${REPO}/scripts/lib.sh" "$1" "$2"
+}
+commit_safety_state_reads_the_directory() {
+  local d="${SANDBOX}/csa" bad=0 got
+  rm -rf "${d}"; mkdir -p "${d}/home" "${d}/plain" "${d}/repo"
+  ( cd "${d}/repo" && git init -q ) || { echo 'could not make a test repo' >&2; return 1; }
+  ln -sfn "${d}/home" "${d}/link"
+  # want<TAB>dir<TAB>home
+  while IFS=$'\t' read -r want dir home; do
+    [[ -n "${want}" ]] || continue
+    got="$(csa_in "${dir}" "${home}")"
+    [[ "${got}" == "${want}" ]] || {
+      printf 'in %s (HOME=%s): wanted %s, got %s\n' \
+        "${dir#"${d}/"}" "${home#"${d}/"}" "${want}" "${got}" >&2
+      bad=1; }
+  done <<EOF
+repo	${d}/repo	${d}/home
+home	${d}/home	${d}/home
+norepo	${d}/plain	${d}/home
+home	${d}/home	${d}/link
+norepo	${d}/repo/.git	${d}/home
+EOF
+  return "${bad}"
+}
+check "commit_safety_state tells a repo, a home dir and a plain dir apart" \
+  commit_safety_state_reads_the_directory
+# The last two rows above are the ones that were written wrong first and are
+# easy to write wrong again:
+#   - a symlinked HOME is still HOME. String equality misses it; '-ef' compares
+#     device and inode, so it does not.
+#   - inside a bare .git, 'rev-parse --is-inside-work-tree' prints false and
+#     exits 0, so testing the exit status alone calls it a repo.
+#
+# ...and run-agent.sh has to act on it, before the model load rather than after
+# the twenty seconds that costs even warm.
+run_agent_checks_where_it_is_running() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/run-agent.sh")"
+  grep -q 'commit_safety_state' <<<"${body}" || {
+    echo 'run-agent.sh starts aider without ever asking whether edits can be undone' >&2
+    return 1; }
+  # In $HOME it must STOP and ask, not merely mention it in passing: confirm()
+  # auto-yes'es a non-tty, so this costs scripts and CI nothing.
+  awk '/home\)/       { inb = 1 }
+       inb && /confirm/ { found = 1 }
+       inb && /;;/     { exit }
+       END { exit !found }' <<<"${body}" || {
+    echo 'the home-directory case warns but never gives the user a way out' >&2
+    return 1; }
+  # Before the model is loaded, not after.
+  local check_at load_at
+  check_at="$(grep -n 'commit_safety_state' <<<"${body}" | head -1 | cut -d: -f1)"
+  load_at="$(grep -n 'ensure_ollama_up_announced' <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${load_at}" ]] || { echo 'run-agent.sh no longer starts Ollama' >&2; return 1; }
+  (( check_at < load_at )) || {
+    echo 'the directory check happens after the model load, so the wait is paid first' >&2
+    return 1; }
+}
+check "...and run-agent.sh acts on it before making anyone wait" \
+  run_agent_checks_where_it_is_running
 # The risk it exists for has to be written down where someone will meet it,
 # with the recovery beside it. A toggle nobody understands is not a mitigation.
 unrequested_edits_are_documented() {
