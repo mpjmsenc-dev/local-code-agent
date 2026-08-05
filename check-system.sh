@@ -139,11 +139,17 @@ else
     p_pass "docker client installed"
     # Never call as_root directly here: without root or sudo it die()s, and
     # that exit would kill the whole health check mid-run even under set +e.
-    # can_root() returns false instead, so we degrade to a warning.
-    if docker info >/dev/null 2>&1 || { can_root && as_root docker info >/dev/null 2>&1; }; then
+    # can_root_now() returns false instead, so we degrade to a warning.
+    #
+    # _now, not can_root: "sudo is installed" is not "I can look". For anyone
+    # who is not a passwordless sudoer this branch ran 'sudo docker info',
+    # which STOPS on a password prompt nothing warned about — measured, it
+    # waits indefinitely — and then reports a healthy daemon as "not
+    # responding", advising a sudo command that same account cannot run.
+    if docker info >/dev/null 2>&1 || { can_root_now && as_root docker info >/dev/null 2>&1; }; then
       p_pass "docker daemon responding"
-    elif ! can_root; then
-      p_warn "cannot query the docker daemon as a non-root user without sudo — re-run as root to check it"
+    elif ! can_root_now; then
+      p_warn "cannot query the docker daemon from this account — it was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
     else
       p_fail "docker daemon not responding (sudo systemctl start docker)"
     fi
@@ -367,11 +373,15 @@ elif [[ "${SKIP_DOCKER}" == "true" ]]; then
   info "SKIP_DOCKER=true — WebUI checks skipped."
 elif ! have docker; then
   p_fail "WebUI enabled but docker is missing"
-elif ! can_root && ! docker info >/dev/null 2>&1; then
-  p_warn "cannot inspect the WebUI container as a non-root user without sudo — re-run as root to check it"
+elif ! can_root_now && ! docker info >/dev/null 2>&1; then
+  p_warn "cannot inspect the WebUI container from this account — it was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
 else
+  # _now, not can_root — same defect as the Docker step above, with a worse
+  # sentence at the end of it: a non-sudoer fell past this guard, hit the
+  # password prompt, and was told the chat app "does not exist" on a machine
+  # where it is running. An empty answer here means "could not look".
   webui_status="$(docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root && as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
+    || { can_root_now && as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
   case "${webui_status}" in
     running)    p_pass "container '${WEBUI_CONTAINER}' is running" ;;
     restarting) p_fail "container '${WEBUI_CONTAINER}' is CRASH-LOOPING (restarting) — often port ${WEBUI_PORT} taken or a bad .env; see: ${SCRIPT_DIR}/webui.sh logs" ;;

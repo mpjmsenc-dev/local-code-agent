@@ -114,6 +114,15 @@ as_root() {
 # Unlike as_root this never exits, so callers that must keep running even
 # without a way to escalate (check-system.sh) can degrade gracefully instead
 # of dying silently inside a redirected probe.
+#
+# THE RULE, and there is a gate on it (tests/test-lib.sh):
+#   an ACTION the user asked for   -> can_root.     A password prompt is fair:
+#                                     they typed 'lca apply', 'webui.sh start'.
+#   a PROBE that only reports      -> can_root_now. A prompt here is a stall in
+#                                     something nobody asked to run.
+# Getting this backwards is not a style question. It cost a login banner that
+# hung for ever and two health-check lines that were confidently wrong; see
+# can_root_now directly below.
 can_root() {
   [[ "${EUID}" -eq 0 ]] || have sudo
 }
@@ -130,7 +139,12 @@ can_root() {
 # cannot run either. Measured on this box with a freshly created account.
 #
 # 'sudo -n' also means a probe can never sit waiting for a password inside a
-# health check that setup.sh runs unattended.
+# health check that setup.sh runs unattended. That is not a theoretical
+# nicety: an interactive sudo on a real terminal does not fail, it WAITS.
+# Measured from an account that is not a sudoer, the login banner printed two
+# lines and then sat on "[sudo] password for ..." for as long as it was left —
+# every SSH login, and the bounding 'timeout' was inside the sudo, so it never
+# got to start. With this function: 0.10s.
 can_root_now() {
   [[ "${EUID}" -eq 0 ]] && return 0
   have sudo || return 1
@@ -1130,8 +1144,15 @@ webui_container_env() {
   # .env key on purpose: it is a property of the caller, not of the install.
   if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
   fmt='{{range .Config.Env}}{{println .}}{{end}}'
+  # can_root_now, not can_root — and the timeout above is why it MATTERS here.
+  # 'sudo timeout 15 docker inspect' bounds docker, not sudo: the password
+  # prompt happens before timeout is ever exec'd, so it is outside the bound.
+  # Measured on this box with an account that is not a sudoer: the login
+  # banner printed its first two lines, then sat on "[sudo] password for ..."
+  # for as long as it was left running. Every SSH login, on the one code path
+  # whose comment above says it must never hang.
   env_lines="$("${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || { can_root_now && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
     || true)"
   [[ -n "${env_lines}" ]] || return 1
   out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
@@ -1145,10 +1166,12 @@ webui_container_env() {
 # every docker probe collapses into the same non-zero exit. Telling someone
 # their chat app was never created, when the truth is that dockerd is down,
 # sends them to an install command that cannot work either.
+# can_root_now, not can_root: this is a probe, and an interactive sudo turns
+# it from "cannot ask" into a password prompt in the middle of a health check.
 docker_daemon_reachable() {
   have docker || return 1
   docker info >/dev/null 2>&1 && return 0
-  can_root && as_root docker info >/dev/null 2>&1
+  can_root_now && as_root docker info >/dev/null 2>&1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -1159,7 +1182,7 @@ docker_daemon_reachable() {
 webui_container_exists() {
   have docker || return 1
   docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
-  can_root && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+  can_root_now && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
 # webui_drift — echo the .env keys whose value has not reached the running

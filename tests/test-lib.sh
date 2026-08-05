@@ -122,25 +122,60 @@ can_root_now_is_stricter() {
 }
 check "can_root_now asks whether root is reachable, not whether sudo exists" \
   can_root_now_is_stricter
-# ...and the two probes that produced the wrong answer must use it.
-probes_use_the_stricter_test() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
-  awk '/step "Inbound guard"/ { inb = 1 }
-       inb && /can_root_now/  { found = 1 }
-       inb && /step "Netmode/ { exit }
-       END { exit !found }' <<<"${body}" || {
-    echo "the inbound-guard check still decides on 'sudo is installed'" >&2
-    return 1
-  }
-  sed 's/#.*//' "${REPO}/netmode.sh" \
-    | awk '/^inbound_loaded\(\) \{/ { inb = 1 } inb && /can_root_now/ { found = 1 }
-           inb && /^\}/ { exit } END { exit !found }' || {
-    echo "netmode's inbound_loaded still decides on 'sudo is installed'" >&2
-    return 1
-  }
+# ...and EVERY probe must use it, not just the one that was reported.
+#
+# The inbound guard was fixed alone, and the same defect was sitting in four
+# more places, one of them worse than the original. Under a real terminal an
+# interactive sudo does not fail — it WAITS. Measured with an account that is
+# not a sudoer: the login banner printed two lines and then sat on "[sudo]
+# password for ..." indefinitely, on every SSH login, because the bounding
+# 'timeout' runs UNDER sudo and so never gets to start. 'lca check' did the
+# same thing twice and then reported a healthy daemon as "not responding" and
+# a running chat app as one that "does not exist". Fixed: banner 0.10s.
+#
+# Extraction is prefix-matching, not regex, so a '{' or '(' in a name cannot
+# quietly turn into an interval or a group and match nothing.
+probe_region() {  # FILE START_PREFIX END_PREFIX
+  sed 's/#.*//' "${REPO}/$1" | awk -v s="$2" -v e="$3" '
+    !inb && substr($0, 1, length(s)) == s { inb = 1; print; next }
+    inb  && substr($0, 1, length(e)) == e { exit }
+    inb'
 }
-check "the guard probes say 'could not look' instead of 'not loaded'" \
+probes_use_the_stricter_test() {
+  local bad=0 spec file start end label body
+  # Every place that asks "can I look?" rather than "may I act?".
+  local -a regions=(
+    "scripts/lib.sh|webui_container_env() {|}|the login banner's container read"
+    "scripts/lib.sh|docker_daemon_reachable() {|}|docker_daemon_reachable"
+    "scripts/lib.sh|webui_container_exists() {|}|webui_container_exists"
+    "netmode.sh|inbound_loaded() {|}|netmode's inbound_loaded"
+    "check-system.sh|step \"Docker\"|step \"|'lca check' Docker step"
+    "check-system.sh|step \"Open WebUI\"|step \"|'lca check' Open WebUI step"
+    "check-system.sh|step \"Inbound guard\"|step \"|'lca check' inbound-guard step"
+  )
+  for spec in "${regions[@]}"; do
+    IFS='|' read -r file start end label <<<"${spec}"
+    body="$(probe_region "${file}" "${start}" "${end}")"
+    # Anti-vacuity: a renamed or deleted region extracts nothing, and an empty
+    # body would sail through the "no bare can_root" test below.
+    grep -q 'can_root_now' <<<"${body}" || {
+      printf '%s does not escalate with can_root_now (region empty or renamed?)\n' \
+        "${label}" >&2
+      bad=1
+      continue
+    }
+    # can_root_now CONTAINS can_root, so presence is not enough — a leftover
+    # bare call beside a fixed one is exactly how this defect survived the
+    # first fix. Match can_root not followed by '_'.
+    if grep -qE 'can_root([^_]|$)' <<<"${body}"; then
+      printf '%s still has a bare can_root: %s\n' "${label}" \
+        "$(grep -nE 'can_root([^_]|$)' <<<"${body}" | head -1)" >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+check "no probe asks 'is sudo installed' — it would wait on the password" \
   probes_use_the_stricter_test
 
 echo "# a number that is not a number must be named, not absorbed"
