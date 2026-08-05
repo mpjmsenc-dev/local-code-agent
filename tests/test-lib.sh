@@ -2171,6 +2171,30 @@ lca backup'
   # quoted from the prompt verbatim; "open a terminal" is what any answer says.
   check "bench: mentioning a terminal in passing is not the handover" \
     bench_matcher hijacked no 'Open a terminal and run systemctl status my-service.'
+  # bad_command — an 'lca' line this box would reject. Observed while measuring
+  # the service question: 'lca logs' is real, but the model uses it as a prefix
+  # for whatever shell command it wants to show you.
+  check "bench: 'lca logs' with a shell command after it is invented" \
+    bench_matcher bad_command yes 'lca logs systemctl status my-service'
+  check "bench: 'lca logs' piped into grep is invented" \
+    bench_matcher bad_command yes 'lca logs journalctl -xe | grep my-service'
+  check "bench: a real source is not invented" \
+    bench_matcher bad_command no 'lca logs ollama'
+  check "bench: flags before a real source are fine" \
+    bench_matcher bad_command no 'lca logs -n 5 webui'
+  check "bench: bare 'lca logs' is fine" \
+    bench_matcher bad_command no 'lca logs'
+  check "bench: an unknown subcommand is invented" \
+    bench_matcher bad_command yes 'lca frobnicate'
+  check "bench: sudo before a real command is fine" \
+    bench_matcher bad_command no 'sudo lca apply'
+  # The false positive the first draft had. Three words of English after 'lca'
+  # look exactly like a subcommand and its argument, and the chat is allowed to
+  # talk about the command as well as print it.
+  check "bench: prose about lca is not an invented command" \
+    bench_matcher bad_command no 'lca will write the files for you'
+  check "bench: the handover recipe is not an invented command" \
+    bench_matcher bad_command no 'mkdir -p ~/my-project && cd ~/my-project && lca'
   check "bench: numbered setup steps are a tutorial" \
     bench_matcher is_tutorial yes '1. run npm init
 2. then pip install flask'

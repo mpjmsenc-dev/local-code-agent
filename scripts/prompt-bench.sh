@@ -13,6 +13,11 @@
 #   tutorial     the FAILURE: a doomed multi-file setup walkthrough
 #   hijack       the OTHER failure: the handover fired on a question that
 #                should simply have been answered
+#   bad-command  the FOURTH: an 'lca' command line this box would reject —
+#                an invented subcommand, or 'lca logs' used as a prefix for an
+#                arbitrary shell command, which is what the model does when it
+#                wants to show you a log. The prompt forbids inventing flags;
+#                this is whether it listens.
 #   tool-call    the THIRD failure, reported from a real phone: instead of
 #                answering, the model emits a function-call envelope —
 #                {"name": ..., "arguments": {...}} — which Open WebUI renders
@@ -118,6 +123,23 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 #   terminal  hands over   20/20    12/20   16/20
 #   service   handover      0/20    13/20    6/20
 #
+# bad-command, measured once on the shipped prompt at the same seeds:
+#   service 2/20   terminal 1/20   backup 0/20
+#
+# That is a FLOOR, deliberately. The matcher catches 'lca logs <shell command>'
+# and an unknown subcommand on a short line; it does not yet catch the same
+# mistake made with a subcommand that takes no argument at all, e.g.
+#
+#     lca apply systemctl restart my-service
+#
+# which appears in the same answers. Widening it there needs a way to tell that
+# line from prose like "lca apply changes settings", and a matcher that fires
+# on prose is worse than one that misses — the header-only hijack matcher
+# proved that two commits ago. The obvious next experiment is the prompt's own
+# command table, which says "lca logs   recent logs from Ollama, the chat app
+# and the installer" without ever saying that it takes one of four fixed
+# sources; the numbers above are the baseline to judge that against.
+#
 # 'terminal' is the one figure here not taken on the shipped bytes: it was
 # measured on the same words wrapped one line differently. That distinction is
 # not pedantry — re-wrapping a single sentence, changing nothing but where the
@@ -213,6 +235,63 @@ tool_called() {
   grep -q '"tool_calls"' <<<"$1" && return 0
   grep -q '"name"' <<<"$1" && grep -q '"arguments"' <<<"$1"
 }
+# lca_subcommands — every word bin/lca actually dispatches, read out of its own
+# case statement so aliases ('selftest', 'online') count and a rename cannot
+# leave this list quietly stale.
+lca_subcommands() {
+  grep -oE '^  [a-z|"]+\)' "${REPO_ROOT}/bin/lca" \
+    | tr -d ' )"' | tr '|' '\n' | grep -v '^$' | sort -u
+}
+
+# bad_command — the answer offers an 'lca' command line this box would reject.
+#
+# The prompt tells the model "never invent command-line flags, file paths or
+# API names — a confidently wrong flag costs the user more than I do not know",
+# and nothing here could see whether it listens. Observed while measuring the
+# 'service' question:
+#
+#     lca logs systemctl status my-service
+#     lca logs journalctl -xe | grep my-service
+#
+# 'lca logs' is real; those arguments are not — it takes ollama, webui, setup
+# or all. Two shapes are checked, and the second is deliberately narrow:
+#
+#   a known subcommand given an argument it rejects (only 'lca logs' today,
+#   which is the one a small model reliably treats as a prefix for any shell
+#   command it fancies)
+#
+#   an unknown subcommand, but ONLY on a line short enough to be a command.
+#   "lca will write the files for you" is prose, and the first draft of this
+#   flagged it: three words of English after 'lca' look exactly like a
+#   subcommand and an argument. Three tokens is the whole of 'sudo lca apply'.
+bad_command() {
+  local line word arg cmds
+  cmds="$(lca_subcommands)"
+  [[ -n "${cmds}" ]] || return 1        # cannot tell: never claim a failure
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"          # strip leading blanks
+    line="${line#$ }"; line="${line#sudo }"
+    word="$(awk '{print $2}' <<<"${line}")"
+    [[ -n "${word}" ]] || continue
+    if ! grep -qx -- "${word}" <<<"${cmds}"; then
+      (( $(wc -w <<<"${line}") <= 3 )) && return 0
+      continue
+    fi
+    [[ "${word}" == "logs" ]] || continue
+    # 'lca logs [-n N] [-f] [SOURCE]' — find the first token that is not a flag
+    # or its number, and check it against the sources logs.sh accepts.
+    arg="$(awk '{for (i = 3; i <= NF; i++) {
+                  if ($i ~ /^-/) { i++; continue }
+                  print $i; exit } }' <<<"${line}")"
+    [[ -n "${arg}" ]] || continue
+    case "${arg}" in
+      ollama|webui|setup|all) ;;
+      *) return 0 ;;
+    esac
+  done < <(grep -oE '^[[:space:]]*([$][[:space:]])?(sudo[[:space:]]+)?lca[[:space:]]+[a-z][a-z-]*.*' <<<"$1")
+  return 1
+}
+
 says_where()  { grep -qiE 'terminal|ssh|on (your|the|this) server' <<<"$1"; }
 # The handover has two shapes and this saw only one. The prompt tells the model
 # to open with a comment line and then the recipe, and a small model routinely
@@ -265,7 +344,7 @@ is_tutorial() {
 # that is the number lying about exactly what it is for.
 bench() {
   local label="$1" question="$2" i out
-  local over=0 where=0 tut=0 hij=0 tool=0 got=0
+  local over=0 where=0 tut=0 hij=0 tool=0 bad=0 got=0
   for (( i = 0; i < SAMPLES; i++ )); do
     out="$(ask "${question}" "$(( 1000 + i ))" || true)"
     if [[ -z "${out}" ]]; then
@@ -278,14 +357,15 @@ bench() {
     is_tutorial "${out}" && tut=$(( tut + 1 ))
     hijacked    "${out}" && hij=$(( hij + 1 ))
     tool_called "${out}" && tool=$(( tool + 1 ))
+    bad_command "${out}" && bad=$(( bad + 1 ))
   done
   if (( got == 0 )); then
     warn "  ${label}: NO sample answered — nothing was measured. Is '${MODEL}' pulled and Ollama up?"
     return 0
   fi
-  printf '  %-8s hands over %s/%s   says where %s/%s   tutorial %s/%s   handover-fired %s/%s   tool-call %s/%s\n' \
+  printf '  %-8s hands over %s/%s   says where %s/%s   tutorial %s/%s   handover-fired %s/%s   tool-call %s/%s   bad-command %s/%s\n' \
     "${label}" "${over}" "${got}" "${where}" "${got}" \
-    "${tut}" "${got}" "${hij}" "${got}" "${tool}" "${got}"
+    "${tut}" "${got}" "${hij}" "${got}" "${tool}" "${got}" "${bad}" "${got}"
   # Said out loud, because a denominator quietly smaller than the -n you asked
   # for is the difference between two runs you can compare and two you cannot.
   (( got == SAMPLES )) \
