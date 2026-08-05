@@ -2263,6 +2263,57 @@ check "a failure before the volume is touched says the data is intact" \
 # function that gives up immediately.
 check "the working path still restores the data" \
   restore_survives "all good" '' 'WebUI data restored'
+# Offline is not an error here. It is a state this project has a headline
+# feature for telling people to be in, and restore.sh met it with net_guard,
+# which die()s: the kill switch doing its job ended the recovery before the
+# model re-pull, the 'lca apply' reconciliation and the machine advice. Without
+# the image there is nothing to untar with, so the WebUI step is over either
+# way — but only that step.
+check "the kill switch being on does not end the restore" \
+  restore_survives "offline" \
+  'net_blocked() { return 0; }
+   as_root() { case "$*" in *"image inspect"*) return 1 ;; esac; return 0; }' \
+  'netmode is OFFLINE'
+# ...and it must say the existing data survived, because at that point it has.
+check "an offline restore says nothing was touched" \
+  restore_survives "offline" \
+  'net_blocked() { return 0; }
+   as_root() { case "$*" in *"image inspect"*) return 1 ;; esac; return 0; }' \
+  'any existing data is intact'
+# The two RECOVERY scripts must never reach for net_guard again. Every other
+# caller is an installer, where dying is right — one that cannot download
+# cannot install, and there is nothing else for it to do. These two have plenty
+# else to do, and backup.sh's abort was the worse of the pair: it threw away
+# the whole tarball, losing .env and the model list over a docker image, and
+# skipped the bookkeeping that keeps older backups from being pruned.
+recovery_scripts_survive_offline() {
+  local bad=0 f
+  for f in restore.sh backup.sh; do
+    if sed 's/#.*//' "${REPO}/${f}" | grep -qE '(^|[^_[:alnum:]])net_guard'; then
+      printf '%s calls net_guard, which die()s — offline would end the run\n' "${f}" >&2
+      bad=1
+    fi
+    # Anti-vacuity: they must still ASK, or "no net_guard" is satisfied by not
+    # checking the kill switch at all and letting a download hang instead.
+    grep -q 'net_blocked' "${REPO}/${f}" || {
+      printf '%s no longer checks the kill switch at all\n' "${f}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "the backup and restore commands survive the kill switch being on" \
+  recovery_scripts_survive_offline
+# ...and net_guard must still be the dying one, for the installers that want it.
+net_guard_still_dies() {
+  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
+    | awk '/^net_guard\(\) \{/ { inb = 1 } inb && /die / { found = 1 }
+           inb && /^\}/ { exit } END { exit !found }' || {
+    echo "net_guard no longer dies, so every installer now continues without a network" >&2
+    return 1
+  }
+}
+check "net_guard still dies, which is what the installers need" net_guard_still_dies
 # ...and main() must still call it, or every test here is about dead code.
 restore_main_calls_the_volume_restore() {
   awk '/^main\(\) \{/       { inmain = 1; next }

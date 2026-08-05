@@ -84,7 +84,15 @@ restore_webui_volume() {
   # isn't cached, so guard the implicit pull the way every other download path
   # does instead of dropping a raw registry error.
   if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
-    net_guard "Pulling the Open WebUI image (needed to restore the volume)"
+    # net_blocked, not net_guard: the guard die()s, and dying here skipped the
+    # model re-pull, the reconciliation and the machine advice. Offline is a
+    # state this project TELLS people to be in, so a restore meeting it is
+    # ordinary rather than exceptional — and without the image there is nothing
+    # to untar with, so this step is over either way. Say so and get on.
+    if net_blocked; then
+      warn "The ${WEBUI_IMAGE} image is not on this machine and netmode is OFFLINE, so the WebUI volume was NOT restored — nothing was touched and any existing data is intact. Run 'sudo ${SCRIPT_DIR}/netmode.sh online', then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
+      return 0
+    fi
     as_root docker pull "${WEBUI_IMAGE}" \
       || warn "Could not pull the Open WebUI image — the volume restore below may fail; re-run after 'sudo ${SCRIPT_DIR}/netmode.sh online' or once online."
   fi
@@ -247,8 +255,13 @@ main() {
         [[ -n "${model}" ]] || continue
         if model_present "${model}"; then
           ok "Model '${model}' already present."
+        elif net_blocked; then
+          # Per model, not once before the loop: which models arrived and which
+          # did not is the whole answer here, and the offline branch used to
+          # die() on the FIRST missing one — so a restore whose models were all
+          # present bar one lost the reconciliation and the machine advice too.
+          warn "Model '${model}' is missing and netmode is OFFLINE, so it was not re-pulled. Run 'sudo ${SCRIPT_DIR}/netmode.sh online', then: ollama pull ${model}"
         else
-          net_guard "Re-pulling ${model}"
           pull_model "${model}" || warn "Could not pull '${model}' — pull it later with: ollama pull ${model}"
         fi
       done < <(tail -n +2 "${workdir}/models.txt" | awk '{print $1}')

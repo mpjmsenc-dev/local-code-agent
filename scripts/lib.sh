@@ -1596,11 +1596,24 @@ netmode_state() {
   fi
 }
 
+# net_blocked — true when the kill switch is engaged, so no download can work.
+#
+# The predicate half of net_guard, for callers that must not die. net_guard
+# die()s, which is exactly right for an installer: one that cannot download
+# cannot install, and there is nothing else for it to do. It is wrong for a
+# RECOVERY, where the download is one step among several and the others are
+# still worth having — restore.sh died inside the WebUI volume step and took
+# the model re-pull, the 'lca apply' reconciliation and the machine advice down
+# with it, on a machine whose kill switch was doing exactly what it is for.
+net_blocked() {
+  [[ "$(netmode_state)" == "offline" ]]
+}
+
 # net_guard WHAT — die early with a helpful message when the netmode kill
 # switch is engaged, instead of letting downloads time out confusingly.
 net_guard() {
   local what="${1:-This step}"
-  if [[ "$(netmode_state)" == "offline" ]]; then
+  if net_blocked; then
     die "${what} needs internet access, but netmode is OFFLINE. Run: sudo ${REPO_ROOT}/netmode.sh online — then retry."
   fi
 }

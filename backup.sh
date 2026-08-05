@@ -88,11 +88,22 @@ do_backup() {
     # bites exactly where it hurts: after an image prune, or on a machine
     # rebuilt from a backup. restore.sh has guarded the identical call since it
     # was written; this one did not.
+    #
+    # net_blocked, not net_guard, for the same reason restore.sh uses it: the
+    # guard die()s, and dying HERE threw the whole backup away — no tarball at
+    # all, so .env and the model list were lost along with the volume that
+    # could not be fetched, and the "missed" bookkeeping below that exists to
+    # protect older backups never ran either. Offline is a state this project
+    # tells people to be in; meeting it should cost the WebUI data, not the
+    # backup.
     if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
-      warn "The ${WEBUI_IMAGE} image is not cached, and the volume is archived with the tar inside it — pulling it now (this is a download, not a hang)."
-      net_guard "Pulling the Open WebUI image (needed to archive the volume)"
-      as_root docker pull "${WEBUI_IMAGE}" \
-        || warn "Could not pull it — the archive step below will fail and this backup will keep older ones rather than prune them."
+      if net_blocked; then
+        warn "The ${WEBUI_IMAGE} image is not on this machine and netmode is OFFLINE — the volume is archived using the tar inside that image, so the WebUI data cannot be captured this time. .env and the model list are still being saved, and older backups will be KEPT rather than pruned. For a complete one: sudo ${SCRIPT_DIR}/netmode.sh online, then re-run."
+      else
+        warn "The ${WEBUI_IMAGE} image is not cached, and the volume is archived with the tar inside it — pulling it now (this is a download, not a hang)."
+        as_root docker pull "${WEBUI_IMAGE}" \
+          || warn "Could not pull it — the archive step below will fail and this backup will keep older ones rather than prune them."
+      fi
     fi
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
     # while the container is writing yields a torn, possibly-corrupt snapshot
