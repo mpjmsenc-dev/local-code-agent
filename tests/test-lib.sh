@@ -225,7 +225,7 @@ check "the shared docker probes let the caller say whether it may ask" \
 # without sudo by an ordinary sudoer contains no accounts and no chat history.
 actions_opt_in_to_prompting() {
   local bad=0 f
-  for f in backup.sh scripts/apply.sh scripts/install_webui.sh scripts/install_docker.sh; do
+  for f in backup.sh restore.sh scripts/apply.sh scripts/install_webui.sh scripts/install_docker.sh; do
     grep -qE '^LCA_MAY_PROMPT=true' "${REPO}/${f}" || {
       printf '%s acts but never opts in — its docker probes will refuse instead of asking\n' \
         "${f}" >&2
@@ -2192,6 +2192,90 @@ check "restoring onto different RAM names both sizes and says to re-tune" \
   different_machine_is_told
 check "a backup with no machine details gets conditional advice, not silence" \
   old_backup_gets_conditional_advice
+
+echo "# a restore must survive every way docker can fail — the rest depends on it"
+# The model re-pull, the 'lca apply' reconciliation and the machine advice all
+# come AFTER the volume restore and are worth having even when the chat data is
+# not. Under 'set -e' a single bare docker command takes all three down, and
+# 'docker volume create' was bare: with docker installed but its daemon
+# stopped, restore.sh died there with a raw docker error. That is the fresh
+# machine docs/MIGRATE.md is written for, where a daemon not yet up is normal.
+#
+# Driven, not grepped. The volume restore moved into its own function for this
+# reason — the branches worth testing are the failing ones, and no test can
+# perform a real restore to reach them. A grep for '||' cannot tell the outer
+# handler from the '|| exit 3' inside the helper's -c script; running it can.
+RESTORE_SB="${SANDBOX}/restore-vol"
+rm -rf "${RESTORE_SB}"; mkdir -p "${RESTORE_SB}"
+: > "${RESTORE_SB}/open-webui-volume.tar.gz"
+restore_volume_with() {   # STUB-BODY -> the report, with RC=<status> appended
+  bash -c '
+    set -uo pipefail
+    source "$1"; source "$2"      # lib.sh, restore.sh (its guard stops main)
+    C_YELLOW=""; C_GREEN=""; C_RED=""; C_BLUE=""; C_RESET=""; C_BOLD=""
+    WEBUI_CONTAINER=open-webui; WEBUI_IMAGE=img; ENABLE_WEBUI=false
+    have() { return 0; }
+    docker_daemon_reachable() { return 0; }
+    net_guard() { :; }
+    as_root() { return 0; }
+    eval "$4"                     # the failure under test
+    restore_webui_volume "$3" 2>&1
+    printf "RC=%s\n" "$?"
+  ' _ "${REPO}/scripts/lib.sh" "${REPO}/restore.sh" "${RESTORE_SB}" "$1" 2>&1
+}
+restore_survives() {   # LABEL  STUBS  EXPECTED-SUBSTRING
+  local out
+  out="$(restore_volume_with "$2")"
+  # No RC line at all means the shell exited inside the function: errexit fired
+  # on a bare command and took the whole recovery with it. That is the bug.
+  grep -q 'RC=0' <<<"${out}" || {
+    printf '%s: the recovery stopped here instead of carrying on\n%s\n' "$1" "${out}" >&2
+    return 1
+  }
+  grep -qF "$3" <<<"${out}" || {
+    printf '%s: report did not mention "%s"\n%s\n' "$1" "$3" "${out}" >&2
+    return 1
+  }
+}
+# Each of these used to be, or still could become, an abort.
+check "a stopped docker daemon does not end the restore" \
+  restore_survives "daemon down" 'docker_daemon_reachable() { return 1; }' \
+  'Docker daemon is not responding'
+check "docker not installed does not end the restore" \
+  restore_survives "no docker" 'have() { return 1; }' \
+  'Docker not installed'
+check "'docker volume create' failing does not end the restore" \
+  restore_survives "volume create" \
+  'as_root() { case "$*" in *"volume create"*|*"container inspect"*) return 1 ;; esac; return 0; }' \
+  'volume could not be created'
+check "removing the old container failing does not end the restore" \
+  restore_survives "rm -f" \
+  'as_root() { case "$*" in *"rm -f"*) return 1 ;; esac; return 0; }' \
+  'could not be removed'
+# ...and the messages must answer the only question that matters at this point.
+# 6 and 7 both run BEFORE the volume is touched, so "intact" is a fact here,
+# not a hope — unlike code 5, which is the one path where it would be a lie.
+check "a failure before the volume is touched says the data is intact" \
+  restore_survives "volume create" \
+  'as_root() { case "$*" in *"volume create"*|*"container inspect"*) return 1 ;; esac; return 0; }' \
+  'your existing WebUI data is intact'
+# The success path still has to work, or the four above are satisfied by a
+# function that gives up immediately.
+check "the working path still restores the data" \
+  restore_survives "all good" '' 'WebUI data restored'
+# ...and main() must still call it, or every test here is about dead code.
+restore_main_calls_the_volume_restore() {
+  awk '/^main\(\) \{/       { inmain = 1; next }
+       inmain && /^\}/      { inmain = 0 }
+       inmain && /^[[:space:]]*#/ { next }
+       inmain && /restore_webui_volume/ { found = 1 }
+       END { exit !found }' "${REPO}/restore.sh" || {
+    echo "restore.sh no longer restores the WebUI volume at all" >&2
+    return 1
+  }
+}
+check "restore.sh still restores the WebUI volume" \
+  restore_main_calls_the_volume_restore
 # backup.sh must actually record what restore.sh reads, or the comparison above
 # silently degrades to the "old backup" branch for every new backup.
 backup_records_the_machine() {
