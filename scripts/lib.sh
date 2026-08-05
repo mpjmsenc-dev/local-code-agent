@@ -733,8 +733,53 @@ model_present() {
 # Retrying is cheap and safe because 'ollama pull' resumes: completed blobs are
 # already in the local store, so a second attempt re-fetches only what is
 # missing rather than starting over.
+# ollama_models_dir — where Ollama keeps its blobs, for a free-space question.
+# OLLAMA_MODELS wins if set; otherwise the systemd service account's store,
+# then the invoking user's. The last branch is a best guess rather than a
+# failure, because the answer only feeds a warning.
+ollama_models_dir() {
+  local d
+  if [[ -n "${OLLAMA_MODELS:-}" ]]; then printf '%s' "${OLLAMA_MODELS}"; return 0; fi
+  for d in /usr/share/ollama/.ollama/models "${HOME}/.ollama/models"; do
+    [[ -d "${d}" ]] && { printf '%s' "${d}"; return 0; }
+  done
+  printf '%s' "${HOME}/.ollama/models"
+}
+
+# free_gb PATH — whole GB free on PATH's filesystem, walking up to the nearest
+# directory that exists (the models dir is created by the first pull).
+free_gb() {
+  local p="${1:-/}"
+  while [[ ! -d "${p}" && "${p}" != "/" ]]; do p="$(dirname "${p}")"; done
+  df -Pk "${p}" 2>/dev/null | awk 'NR == 2 { printf "%d\n", $4 / 1048576 }'
+}
+
+# model_disk_gb TAG — roughly what TAG will occupy, in whole GB.
+#
+# The same ~0.6 GB per billion parameters at q4 that model_fits_ram and
+# largest_model_for_vram already use, so a fourth estimate cannot drift from
+# the other three, plus 1 GB for the manifest and rounding. Nothing (exit 1)
+# for a tag with no parseable parameter count — an unknown size must not be
+# turned into a confident refusal.
+model_disk_gb() {
+  local params
+  params="$(model_params_b "$1" 2>/dev/null)" || return 1
+  awk -v p="${params}" 'BEGIN { printf "%d\n", p * 0.6 + 1 }'
+}
+
 pull_model() {
-  local model="$1" attempt
+  local model="$1" attempt need="" free_now="" store
+  store="$(ollama_models_dir)"
+  # Asked BEFORE the download, not after it. Every other disk message in this
+  # project is a post-mortem — "disk full? check df -h" — which on a pull means
+  # finding out after several gigabytes have already crossed the wire, on a VPS
+  # whose disk is fixed. Skipped silently when either number is unknown: a
+  # guess must not become a refusal.
+  if need="$(model_disk_gb "${model}")" && free_now="$(free_gb "${store}")" \
+     && [[ -n "${free_now}" ]] && (( free_now < need )); then
+    err "'${model}' needs about ${need} GB and only ${free_now} GB is free on ${store}. Nothing has been downloaded. Free some space — 'ollama list' shows what is already there, 'ollama rm <model>' removes one — then retry."
+    return 1
+  fi
   info "Pulling model '${model}' (this can take several minutes on first download)..."
   for attempt in 1 2 3; do
     if ollama pull "${model}"; then
@@ -742,6 +787,16 @@ pull_model() {
       return 0
     fi
     if (( attempt < 3 )); then
+      # A pull that ran the disk out will not succeed on a retry, and retrying
+      # re-downloads gigabytes — twice, at five and ten seconds' notice. Asked
+      # by re-measuring rather than by reading ollama's output, because
+      # capturing that would hide the progress a multi-GB download needs to
+      # show. The retry is for a transient registry error; a full disk is not
+      # one of those.
+      if [[ -n "${need}" ]] && (( $(free_gb "${store}") < need )); then
+        err "'${model}' ran ${store} out of space part way through — not retrying, because the next attempt would download it all again. Free some space ('ollama rm <model>') and re-run."
+        return 1
+      fi
       warn "Pull attempt ${attempt}/3 for '${model}' failed (transient registry error?) — retrying in $((attempt * 5))s; finished parts are kept."
       sleep "$((attempt * 5))"
     fi

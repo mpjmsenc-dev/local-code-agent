@@ -3820,6 +3820,82 @@ pull_gives_up_after_three() {
   }
 }
 check "a pull that never succeeds fails after exactly 3 attempts" pull_gives_up_after_three
+
+echo "# a pull must not spend gigabytes finding out there was no room for them"
+# Every other disk message in this project is a post-mortem — "disk full? check
+# df -h" — which on a model pull means learning it after several GB have
+# crossed the wire. On a VPS whose disk is fixed and whose model is the biggest
+# thing on it, that is the difference between a refusal and a broken box: the
+# .env writes, the drop-in, the backups and the WebUI volume all share that
+# filesystem, and this is what fills it.
+check "0.5b rounds up to 1 GB"  test "$(model_disk_gb qwen2.5-coder:0.5b)" = "1"
+check "3b needs about 2 GB"     test "$(model_disk_gb qwen2.5-coder:3b)"   = "2"
+check "7b needs about 5 GB"     test "$(model_disk_gb qwen2.5-coder:7b)"   = "5"
+check "14b needs about 9 GB"    test "$(model_disk_gb qwen2.5-coder:14b)"  = "9"
+# An unknown size must stay unknown. Turning "I cannot tell" into a number is
+# how a guess becomes a refusal of a model that would have fitted.
+unsized_tag_is_unknown() { ! model_disk_gb weird-model 2>/dev/null; }
+check "a tag with no parameter count has no estimate" unsized_tag_is_unknown
+# free_gb answers about a real filesystem, and about the nearest existing
+# parent when the models directory has not been created yet.
+free_gb_is_a_number()      { [[ "$(free_gb /)" =~ ^[0-9]+$ ]]; }
+free_gb_walks_up()         { [[ "$(free_gb /nonexistent-xyz/models)" =~ ^[0-9]+$ ]]; }
+check "free_gb reports whole GB for a path"        free_gb_is_a_number
+check "...and for one that does not exist yet"     free_gb_walks_up
+pull_with_space() {   # FREE_GB -> "rc=N attempts=N" plus the message
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    # Captured OUT of the positional parameters first: inside a function, $2 is
+    # that FUNCTION second argument, and free_gb is called with one. The stub
+    # read empty and the assertions failed for a reason unrelated to the code.
+    FREE="$2"
+    free_gb() { printf "%s\n" "${FREE}"; }
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 0; }
+    sleep() { :; }
+    pull_model qwen2.5-coder:14b 2>&1
+    printf "rc=%s attempts=%s\n" "$?" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh" "$1" 2>&1
+}
+NO_ROOM="$(pull_with_space 3)"
+check "a pull with no room downloads nothing at all" \
+  grep -q 'attempts=0' <<<"${NO_ROOM}"
+check "...and names what it needs and what there is" \
+  grep -qE 'about 9 GB and only 3 GB is free' <<<"${NO_ROOM}"
+check "...and says how to make room" \
+  grep -q 'ollama rm' <<<"${NO_ROOM}"
+check "room enough still pulls" \
+  grep -q 'attempts=1' <<<"$(pull_with_space 40)"
+# A tag whose size cannot be estimated must still be pullable.
+check "an unsized tag is pulled, not refused" \
+  grep -q 'attempts=1' <<<"$(bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    free_gb() { printf "1\n"; }
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 0; }
+    pull_model weird-model >/dev/null 2>&1
+    printf "attempts=%s\n" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh")"
+# Running out DURING the download must not be retried: the next attempt
+# re-downloads everything, twice, on a disk that just proved too small.
+pull_that_fills_the_disk() {
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    ATTEMPTS=0
+    # Room to start, none once the first attempt has run.
+    free_gb() { if (( ATTEMPTS == 0 )); then printf "40\n"; else printf "2\n"; fi; }
+    ollama() { ATTEMPTS=$((ATTEMPTS+1)); return 1; }
+    sleep() { :; }
+    pull_model qwen2.5-coder:14b 2>&1
+    printf "attempts=%s\n" "${ATTEMPTS}"
+  ' _ "${REPO}/scripts/lib.sh" 2>&1
+}
+FILLED="$(pull_that_fills_the_disk)"
+check "a pull that fills the disk is not retried" grep -q 'attempts=1' <<<"${FILLED}"
+check "...and says why it stopped" grep -q 'ran .* out of space' <<<"${FILLED}"
 pull_succeeds_first_time_without_retrying() {
   local out
   out="$(bash -c '
