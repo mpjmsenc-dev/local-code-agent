@@ -108,8 +108,12 @@ rules about bash, not as rules about tests.
 **1. `cmd | grep -q PATTERN` under `set -o pipefail`.** `grep -q` exits the
 instant it matches, closing the pipe; the writer is killed by SIGPIPE and the
 pipeline reports 141. So the check fails *because* the pattern was found —
-but only once the output is big enough to still be writing, which makes it
-look intermittent. Capture first, then match a herestring:
+whenever the writer still has a write in flight, which makes it look
+intermittent. Do not reason about whether the output "fits": this suite lost a
+run to `sed uninstall.sh | grep -q` on a **9.5 KiB** file, comfortably inside
+the 64 KiB pipe buffer, then passed five times on byte-identical code. `sed`
+writes in blocks, so the race needs an unlucky schedule, not a big file. Size
+only changes the odds. Capture first, then match a herestring:
 
 ```bash
 out="$(some_command 2>&1)"

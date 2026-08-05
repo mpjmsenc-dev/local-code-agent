@@ -59,11 +59,15 @@ if [[ -z "${titles}" ]]; then
   exit 1
 fi
 
-printf '%s' "${titles}" | grep -q 'Explain this command' \
+# Here-strings, not pipes: 'producer | grep -q' returns 141 under pipefail when
+# grep matches and exits while the producer is still writing, and 141 reads as
+# "not found" — a gate that fails on the code it is meant to pass. Observed
+# once in this suite before it was swept out.
+grep -q 'Explain this command' <<<"${titles}" \
   || { echo "FAIL: our starter questions are not the ones being served: ${titles}" >&2; exit 1; }
 # if/fi rather than 'grep && exit 1': under set -e the AND-list's first command
 # failing is the PASSING case here, and a gate should not hinge on that.
-if printf '%s' "${titles}" | grep -qi 'roman empire'; then
+if grep -qi 'roman empire' <<<"${titles}"; then
   echo "FAIL: Open WebUI is still serving its stock starter questions" >&2
   exit 1
 fi

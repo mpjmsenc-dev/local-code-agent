@@ -369,7 +369,8 @@ check "a port setting is NOT treated as a switch" \
 switches_are_reported() {
   grep -q 'valid_bool' "${REPO}/check-system.sh" || {
     echo "check-system.sh does not validate the on/off settings" >&2; return 1; }
-  sed 's/#.*//' "${REPO}/scripts/tune.sh" | grep -qF 'AUTO_TUNE=false — a real run' && {
+  local tune; tune="$(sed 's/#.*//' "${REPO}/scripts/tune.sh")"
+  grep -qF 'AUTO_TUNE=false — a real run' <<<"${tune}" && {
     echo "tune.sh still reports AUTO_TUNE=false regardless of what .env says" >&2; return 1; }
   return 0
 }
@@ -1738,12 +1739,13 @@ check "nothing installed means nothing removed" \
 # in THEIR home. Nothing removed that, so on the hosts this project supports
 # specially the prompt promised "incl. ALL models" and left the gigabytes.
 uninstall_clears_user_model_dirs() {
-  sed 's/#.*//' "${REPO}/uninstall.sh" | grep -qE 'rm -rf +"\$\{d\}/\.ollama"' || {
+  local body; body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
+  grep -qE 'rm -rf +"\$\{d\}/\.ollama"' <<<"${body}" || {
     echo 'uninstall.sh leaves per-user model blobs (~/.ollama) on disk' >&2
     return 1
   }
   # Both homes, not just the one sudo happens to expose.
-  sed 's/#.*//' "${REPO}/uninstall.sh" | grep -q 'SUDO_USER' || {
+  grep -q 'SUDO_USER' <<<"${body}" || {
     echo 'uninstall.sh only cleans the invoking home, not the human who sudo-ed' >&2
     return 1
   }
@@ -1955,7 +1957,8 @@ ci_compares_the_whole_prompt() {
   # the broken one to explain why it was replaced, and a whole-file grep read
   # that as the bug still being present — tests/long-wait.awk had to learn the
   # same lesson about reading its own explanation as evidence.
-  if grep -vE '^[[:space:]]*#' "${ci}" | grep -qF 'test("local-code-agent")'; then
+  local ci_code; ci_code="$(grep -vE '^[[:space:]]*#' "${ci}")"
+  if grep -qF 'test("local-code-agent")' <<<"${ci_code}"; then
     echo "ci.yml is back to asserting the prompt by substring — any stale prompt passes that" >&2
     return 1
   fi
@@ -2289,7 +2292,8 @@ check "an offline restore says nothing was touched" \
 recovery_scripts_survive_offline() {
   local bad=0 f
   for f in restore.sh backup.sh; do
-    if sed 's/#.*//' "${REPO}/${f}" | grep -qE '(^|[^_[:alnum:]])net_guard'; then
+    local src; src="$(sed 's/#.*//' "${REPO}/${f}")"
+    if grep -qE '(^|[^_[:alnum:]])net_guard' <<<"${src}"; then
       printf '%s calls net_guard, which die()s — offline would end the run\n' "${f}" >&2
       bad=1
     fi
@@ -2486,7 +2490,7 @@ every_bash_script_is_linted() {
   [[ -n "${tracked}" ]] || { echo "could not list tracked files (not a git checkout?)" >&2; return 1; }
   while read -r f; do
     [[ -n "${f}" ]] || continue
-    head -1 "${REPO}/${f}" 2>/dev/null | grep -q '^#!.*bash' || continue
+    grep -q '^#!.*bash' <<<"$(head -1 "${REPO}/${f}" 2>/dev/null)" || continue
     grep -qxF "${f}" <<<"${covered}" || uncovered+=("${f}")
   done <<<"${tracked}"
   (( ${#uncovered[@]} == 0 )) || {
@@ -6716,6 +6720,39 @@ no_unbounded_listing_is_piped_into_grep_q() {
 }
 check "no unbounded listing is piped into 'grep -q'" \
   no_unbounded_listing_is_piped_into_grep_q
+# ...and the same trap in the SUITE, which the gate above never looked at.
+#
+# This is not hypothetical here. 'uninstall clears models pulled without
+# systemd' failed once during a run and then passed five times in a row on
+# byte-identical code: 'sed file | grep -q' where grep matched and left while
+# sed still had writes in flight. The file is 9.5 KiB, well under the pipe
+# buffer, which is the point — sed writes in blocks, so the race does not need
+# a big file, only an unlucky schedule. Every gate in here runs under
+# 'set -euo pipefail', where 141 reads as "pattern absent": a red build on
+# correct code, whose obvious remedy is to re-run it, which is how a suite
+# stops being believed.
+#
+# A here-string costs nothing and cannot race, so in the suite the rule is
+# absolute rather than scoped by producer size — the reason the gate above
+# stops at unbounded listings does not apply to a test that is only ever
+# reading a repo file it has already located.
+#
+# The pattern lives in a variable so this gate does not find ITSELF, the
+# vacuity trap two gates in this file have already fallen into. Anti-vacuity
+# is by mutation, not by a non-empty hit list: a prohibition is proved by
+# planting a violation, not by finding one.
+no_pipe_into_grep_q_in_the_suite() {
+  local hits pat='\$\{[A-Za-z_]+\}[^|]*\|[[:space:]]*grep -q'
+  hits="$(grep -nE "${pat}" "${REPO}"/tests/*.sh 2>/dev/null \
+            | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'the suite pipes a file read into a grep that exits early (141 reads as not-found; capture it and use a here-string instead):\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "the test suite never pipes a file read into 'grep -q'" \
+  no_pipe_into_grep_q_in_the_suite
 
 echo "# a script that rewrites its own file must not let bash read on"
 # bash reads a script incrementally from an open fd. update.sh fast-forwards
