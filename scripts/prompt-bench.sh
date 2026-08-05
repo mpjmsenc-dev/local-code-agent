@@ -112,11 +112,18 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # same run either side of the change that added "a service that will not start"
 # to the prompt's list of server questions:
 #
-#                        wanted    before   after
+#                        wanted    before   after (as shipped)
 #   build     hands over   20/20    19/20   18/20
-#   build     tutorial      0/20     3/20    4/20
+#   build     tutorial      0/20     3/20    2/20
 #   terminal  hands over   20/20    12/20   16/20
-#   service   handover      0/20    13/20    9/20
+#   service   handover      0/20    13/20    6/20
+#
+# 'terminal' is the one figure here not taken on the shipped bytes: it was
+# measured on the same words wrapped one line differently. That distinction is
+# not pedantry — re-wrapping a single sentence, changing nothing but where the
+# line breaks fall, moved 'service' from 9/20 to 6/20. Three in twenty is about
+# one standard error at this sample size, which is the honest scale of the
+# wobble in every number on this page.
 #
 # The other three, at n=6 and stable across every run so far: backup and
 # explain fire no handover and no tool call; wishlist hands over 6/6.

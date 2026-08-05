@@ -952,10 +952,15 @@ restart_ollama() {
 # diagnosing it, starting with the exact commands" — has the SHAPE of a build
 # request while being a question about this box, and the handover fired on it
 # 13 times in 20. Naming the case in the list of things that are NOT a build
-# request took it to 9 in 20, and did not cost the handover elsewhere: at the
-# same seeds, build held at 18/20 against 19/20 and the terminal starter
-# improved from 12/20 to 16/20. Adding to the list of RIGHT answers is safe in
-# a way that naming a wrong one is not.
+# request took it to 6 in 20, and did not cost the handover elsewhere: at the
+# same seeds, build held at 18/20 against 19/20 with tutorials 2/20 against
+# 3/20, and the terminal starter improved from 12/20 to 16/20. Adding to the
+# list of RIGHT answers is safe in a way that naming a wrong one is not.
+#
+# One more thing that measurement showed, and it is worth knowing before
+# editing anything here: re-wrapping that same sentence — identical words, one
+# line break moved — took service from 9/20 to 6/20. About one standard error
+# at n=20, which is the scale of wobble to expect from any edit at all.
 lca_system_prompt() {
   cat <<'EOF'
 You are the assistant for local-code-agent, a private AI stack running entirely
@@ -985,8 +990,8 @@ Add one line: aider writes those files for you, on this same model. Then offer
 to write any single file's contents here.
 
 Questions about this server itself — backups, logs, speed, disk, a service
-that will not start, an error message — are NOT that. Answer those directly with the 'lca' command that does
-the job, and never send them to aider.
+that will not start, an error message — are NOT that. Answer those directly
+with the 'lca' command that does the job, and never send them to aider.
 
 The server manages itself through one command, 'lca':
   lca            start the coding agent (aider) — the ONLY one that writes files
