@@ -28,6 +28,28 @@ BACKUP_DIR="${REPO_ROOT}/backups"
 BACKUP_SERVICE=/etc/systemd/system/local-code-agent-backup.service
 BACKUP_TIMER=/etc/systemd/system/local-code-agent-backup.timer
 
+# acquire_backup_lock — hold an exclusive lock for the rest of this process.
+#
+# flock releases on exit, including a kill -9, so a crashed run cannot wedge
+# the nightly timer the way a stale lockfile would. Where flock is missing we
+# warn and continue: a backup that refuses to run is worse than one that might
+# overlap, and unique_backup_path still keeps the two from sharing a name.
+acquire_backup_lock() {
+  have flock || {
+    warn "flock is not installed, so two backups running at once cannot be prevented — install util-linux for a safer nightly backup."
+    return 0
+  }
+  local wait_s="${BACKUP_LOCK_WAIT:-900}"
+  exec {BACKUP_LOCK_FD}>"${BACKUP_DIR}/.backup.lock" 2>/dev/null || {
+    warn "Could not open the backup lock in ${BACKUP_DIR} — continuing without it."
+    return 0
+  }
+  flock -n "${BACKUP_LOCK_FD}" && return 0
+  info "Another backup is already running — waiting up to ${wait_s}s for it to finish."
+  flock -w "${wait_s}" "${BACKUP_LOCK_FD}" \
+    || die "Another backup has held the lock for over ${wait_s}s. It may be stuck: check with 'ps aux | grep backup.sh', then retry."
+}
+
 do_backup() {
   step "Creating backup"
   local stamp tarball
@@ -52,7 +74,22 @@ do_backup() {
   # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
   # and set -e would abort with no explanation — say what's wrong instead.
   [[ -w "${BACKUP_DIR}" ]] || die "Cannot write to ${BACKUP_DIR} (owned by $(stat -c %U "${BACKUP_DIR}" 2>/dev/null || echo 'another user')). Re-run with sudo, or: sudo chown -R $(id -un) ${BACKUP_DIR}"
-  tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
+  # One backup at a time. Nothing here was serialised, and there are three ways
+  # to have two at once: the nightly timer, a manual 'lca backup', and the one
+  # 'lca update' takes before it changes anything. Run together they interleave
+  # on the ONE thing the pause below exists to make consistent — the first run
+  # pauses the container, the second sees it already paused, adopts it, and
+  # unpauses while the first is still reading the volume. A torn snapshot of a
+  # WAL-mode SQLite database, reported as a success.
+  #
+  # Bounded wait rather than refusal, because update.sh relies on the backup
+  # actually being taken; and announced, because a silent 15-minute wait is
+  # indistinguishable from a hang.
+  acquire_backup_lock
+  # Even serialised, two runs can finish in the same second — see
+  # unique_backup_path. This is the second half of that fix; the lock alone
+  # would still have let them share a name.
+  tarball="$(unique_backup_path "${BACKUP_DIR}" "${stamp}")"
 
   # Retention below must never evict an older COMPLETE backup because this run
   # captured less than it should have. Three distinct states — conflating the

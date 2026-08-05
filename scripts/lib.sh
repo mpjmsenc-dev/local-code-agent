@@ -565,6 +565,31 @@ aider_map_tokens() {
 # empty, zero, or non-numeric prints nothing — retention disabled means keep
 # everything, so a bad value can never delete a backup. Pure (stdin->stdout),
 # so backup.sh's retention is unit-tested without ever touching the disk.
+# unique_backup_path DIR STAMP — a tarball path under DIR for STAMP that does
+# not already exist.
+#
+# The stamp is second-granular, and a backup finishes inside one second
+# whenever there is no WebUI volume to archive — a documented configuration
+# (ENABLE_WEBUI=false), not a corner. Two runs then landed on the SAME path,
+# and both said "Backup written and verified" while only one file survived.
+# Measured, with two concurrent runs: two success lines, one tarball.
+#
+# The suffix is '_N', not '-N', and that is not cosmetic. backups_to_prune
+# sorts these names lexically and treats the tail as newest, which works only
+# because the embedded YYYYmmdd-HHMMSS makes lexical order chronological. '-'
+# is 0x2D and '.' is 0x2E, so 'stamp-2.tar.gz' would sort BEFORE 'stamp.tar.gz'
+# and retention would delete the newer file first. '_' is 0x5F, after '.', so
+# the order holds.
+unique_backup_path() {
+  local dir="$1" stamp="$2" path n=2
+  path="${dir}/local-code-agent-backup-${stamp}.tar.gz"
+  while [[ -e "${path}" ]]; do
+    path="${dir}/local-code-agent-backup-${stamp}_${n}.tar.gz"
+    n=$(( n + 1 ))
+  done
+  printf '%s' "${path}"
+}
+
 backups_to_prune() {
   local keep="${1:-}"
   [[ "${keep}" =~ ^[0-9]+$ ]] || return 0

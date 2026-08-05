@@ -898,6 +898,92 @@ check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
 
+echo "# two backups at once shared a filename and both called it a success"
+# Nothing serialised backup.sh, and there are three ways to have two running:
+# the nightly timer, a manual 'lca backup', and the one 'lca update' takes.
+# Measured with two concurrent runs before the fix: two "Backup written and
+# verified" lines naming the SAME path, and one file on disk. The stamp is
+# second-granular and a backup finishes inside a second whenever there is no
+# WebUI volume to archive — ENABLE_WEBUI=false is documented, not a corner.
+UBP="${SANDBOX}/ubp"
+rm -rf "${UBP}"; mkdir -p "${UBP}"
+check "a free stamp keeps the plain name" \
+  test "$(unique_backup_path "${UBP}" 20250101-000000)" \
+     = "${UBP}/local-code-agent-backup-20250101-000000.tar.gz"
+: > "${UBP}/local-code-agent-backup-20250101-000000.tar.gz"
+check "a taken stamp does not overwrite it" \
+  test "$(unique_backup_path "${UBP}" 20250101-000000)" \
+     = "${UBP}/local-code-agent-backup-20250101-000000_2.tar.gz"
+: > "${UBP}/local-code-agent-backup-20250101-000000_2.tar.gz"
+check "...and keeps counting past the second" \
+  test "$(unique_backup_path "${UBP}" 20250101-000000)" \
+     = "${UBP}/local-code-agent-backup-20250101-000000_3.tar.gz"
+# The suffix character is load-bearing. backups_to_prune sorts lexically and
+# calls the tail newest, which holds only because YYYYmmdd-HHMMSS makes lexical
+# order chronological. '-' is 0x2D and '.' is 0x2E, so a '-2' suffix sorts
+# BEFORE the plain name and retention would delete the NEWER file first. '_' is
+# 0x5F, after '.', so the order survives. Pinned, because nothing else would
+# notice this being "tidied" back to a dash.
+#
+# Both names come FROM unique_backup_path rather than being written out here,
+# so the two cannot drift: change the suffix and this asserts the ordering for
+# whatever it becomes, instead of going on testing a name nothing produces.
+# (Hand-written literals passed the '-N' mutation this is here to catch.)
+SAME_DIR="${SANDBOX}/ubp-order"
+rm -rf "${SAME_DIR}"; mkdir -p "${SAME_DIR}"
+SAME_1="$(unique_backup_path "${SAME_DIR}" 20250101-000000)"; : > "${SAME_1}"
+SAME_2="$(unique_backup_path "${SAME_DIR}" 20250101-000000)"
+check "the collision suffix counts as NEWER, so retention drops the plain one" \
+  test "$(prune_sel 1 "${SAME_2}" "${SAME_1}")" = "${SAME_1}"
+# ...and the lock itself, which is what stops the two runs interleaving on the
+# container pause — the one thing that pause exists to make consistent.
+backup_serialises_itself() {
+  local body; body="$(sed 's/#.*//' "${REPO}/backup.sh")"
+  grep -q 'acquire_backup_lock' <<<"${body}" || {
+    echo "backup.sh no longer takes a lock — the timer and a manual run can interleave" >&2
+    return 1
+  }
+  # Scoped to the function, and to the two calls that DO the work rather than
+  # to the word "flock" anywhere in the file. The loose version passed a
+  # mutation that replaced the acquiring call with 'true' — every mention of
+  # flock survived in the comments and the degrade check, so the gate saw a
+  # lock that was no longer taken.
+  local lockfn; lockfn="$(probe_region backup.sh 'acquire_backup_lock() {' '}')"
+  [[ -n "${lockfn}" ]] || {
+    echo "acquire_backup_lock is gone (renamed?)" >&2
+    return 1
+  }
+  # flock, not a lockfile someone has to clean up: it releases even on kill -9,
+  # so a crashed run cannot wedge every future nightly backup.
+  grep -q 'flock -n' <<<"${lockfn}" || {
+    echo "backup.sh never actually takes the lock (no 'flock -n')" >&2
+    return 1
+  }
+  # ...and waits rather than giving up, because update.sh depends on the backup
+  # really being taken.
+  grep -q 'flock -w' <<<"${lockfn}" || {
+    echo "backup.sh does not wait for a running backup — update.sh would proceed unbacked" >&2
+    return 1
+  }
+  # A missing flock must not stop the backup happening at all.
+  grep -q 'have flock' <<<"${lockfn}" || {
+    echo "backup.sh requires flock outright instead of degrading" >&2
+    return 1
+  }
+  # The lock has to be held BEFORE the tarball path is chosen, or two runs can
+  # still pick the same one.
+  # END decides, and only END. A rule-level 'exit N' in awk still RUNS the END
+  # block, so an 'END { exit 1 }' underneath silently overwrites the status —
+  # this check reported the ordering as wrong while the code had it right.
+  awk '/acquire_backup_lock$/ { locked = 1 }
+       /unique_backup_path "/ { if (!seen) { seen = 1; in_order = locked } }
+       END { exit (seen && in_order) ? 0 : 1 }' <<<"${body}" || {
+    echo "backup.sh picks its tarball name before taking the lock" >&2
+    return 1
+  }
+}
+check "backup.sh runs one at a time" backup_serialises_itself
+
 echo "# .env keys must not collide with aider's own env vars (load_env exports them)"
 # load_env sources .env under 'set -a', so every key becomes an environment
 # variable. A key named AIDER_* can therefore be consumed by aider itself: our
