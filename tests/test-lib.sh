@@ -5439,6 +5439,43 @@ every_banner_state_gets_the_warning() {
 }
 check "...and every banner state inherits it, not just the ready one" \
   every_banner_state_gets_the_warning
+# ...except the two banners that are already about setup not having finished,
+# where "run sudo setup.sh" is wrong (it is running) or duplicated (stalled
+# already prints that line).
+#
+# Keyed on WHICH BANNER renders, not on install_state, and that distinction is
+# the whole reason this check exists. Written the state way first and it was
+# wrong on the machine it was written on: a verdict-less log from an
+# interrupted first boot makes install_state say 'stalled' while main(), which
+# trusts the live system over the log, prints banner_ready. The row vanished
+# from exactly the box that needed it — caught by running it, not by reading it.
+banner_render() {  # BANNER -> its output, with lca absent
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    SETUP_LOG=/nonexistent
+    have() { [[ "$1" != "lca" ]]; }
+    model_missing() { return 1; }
+    chat_address() { return 1; }
+    "$2" 2>&1' _ "${MOTD}" "$1" 2>/dev/null
+}
+setup_banners_stay_quiet_about_lca() {
+  local b out
+  for b in banner_installing banner_stalled; do
+    out="$(banner_render "${b}")"
+    ! grep -q 'NOT on PATH' <<<"${out}" || {
+      printf '%s tells the user to run setup.sh while setup is the thing that is wrong\n' "${b}" >&2
+      return 1; }
+  done
+  # ...and the ready banner must STILL say it. This is the assertion the first
+  # implementation failed.
+  out="$(banner_render banner_ready)"
+  grep -q 'NOT on PATH' <<<"${out}" || {
+    echo 'the ready banner went quiet about a missing lca — the one place it matters' >&2
+    return 1; }
+}
+check "...but the two setup banners stay quiet, and the ready one does not" \
+  setup_banners_stay_quiet_about_lca
 
 echo "# ...and whether the chat app is still answering with an older assistant"
 # The container is created with the assistant's instructions baked in, so a

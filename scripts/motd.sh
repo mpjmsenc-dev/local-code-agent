@@ -207,13 +207,31 @@ headline() {
 # Called from headline() rather than from each banner, so a sixth banner state
 # added later cannot forget it — the note has to sit above the rows it is about,
 # and every banner starts with exactly one headline.
+# Silent in the two banners that are already about setup not having finished.
+# There the missing symlink is a symptom rather than a fault — setup.sh
+# installs it near the end — and the advice would be actively wrong: "run sudo
+# setup.sh" printed underneath "still installing — nothing works yet" invites a
+# SECOND concurrent install, and banner_stalled prints that same line already,
+# for the real reason.
+#
+# Keyed on WHICH BANNER is rendering, not on install_state. Written the other
+# way first, and it was wrong on the machine it was written on: this box's log
+# is verdict-less from an interrupted first boot, so install_state says
+# 'stalled' while main() — which trusts the live system over the log — prints
+# banner_ready. The row vanished from precisely the box that needed it.
+#
+# Default is to SHOW, so a future banner that forgets to opt out prints one
+# redundant row rather than hiding a needed one.
+BANNER_SUPPRESS_LCA_ROW=false
 missing_lca_row() {
+  [[ "${BANNER_SUPPRESS_LCA_ROW}" == "true" ]] && return 0
   have lca && return 0
   row "'lca' NOT on PATH" "run them as ${REPO_ROOT}/bin/lca"
   row "Install the name" "sudo ${REPO_ROOT}/setup.sh"
 }
 
 banner_installing() {
+  BANNER_SUPPRESS_LCA_ROW=true   # setup is running; it installs the symlink itself
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
@@ -248,6 +266,7 @@ banner_attention() {
 # install really did give up partway. Re-running setup is safe (it is
 # idempotent) and is the actual fix, which "run lca check" would not have said.
 banner_stalled() {
+  BANNER_SUPPRESS_LCA_ROW=true   # this banner already says "sudo setup.sh"
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
