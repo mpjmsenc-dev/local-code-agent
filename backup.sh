@@ -40,7 +40,15 @@ acquire_backup_lock() {
     return 0
   }
   local wait_s="${BACKUP_LOCK_WAIT:-900}"
-  exec {BACKUP_LOCK_FD}>"${BACKUP_DIR}/.backup.lock" 2>/dev/null || {
+  # No '2>/dev/null' on this line, ever. 'exec' with redirections and NO command
+  # applies them to the SHELL, so that silences stderr for the whole rest of the
+  # backup — which is exactly what it did: on a full disk, the tar failure's
+  # die() message ("disk full? check: df -h") and every warning after it went to
+  # /dev/null, and the run ended at exit 1 with a completely blank stderr. A
+  # nightly timer failing with nothing to read is the worst version of this.
+  # A failing exec redirect returns non-zero and prints its own diagnostic
+  # rather than killing the shell, so the handler below is all that is needed.
+  exec {BACKUP_LOCK_FD}>"${BACKUP_DIR}/.backup.lock" || {
     warn "Could not open the backup lock in ${BACKUP_DIR} — continuing without it."
     return 0
   }

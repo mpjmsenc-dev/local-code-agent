@@ -6806,6 +6806,45 @@ no_unbounded_listing_is_piped_into_grep_q() {
 }
 check "no unbounded listing is piped into 'grep -q'" \
   no_unbounded_listing_is_piped_into_grep_q
+# Same family, and the least visible member: 'exec' with redirections and NO
+# command applies them to the SHELL, not to anything being run.
+#
+# backup.sh opened its lock with 'exec {FD}>lock 2>/dev/null'. That 2>/dev/null
+# looks like it belongs to the lock. It does not — it silenced stderr for the
+# entire rest of the backup. Measured on a filesystem with no space left: the
+# tar failure's own die(), "Could not write ... (disk full? check: df -h)",
+# went to /dev/null and the run ended at exit 1 with a completely blank stderr.
+# A nightly timer failing with nothing to read is the worst version of this,
+# and the message it was throwing away is the one that names the cause. With
+# the redirection removed, the same run prints gzip's "No space left on
+# device", tar's error, and the die() — and older backups are still kept.
+#
+# The '{VAR}>' form is the legitimate one: it opens a numbered-by-bash fd and
+# touches nothing else. A failing exec redirect returns non-zero and prints its
+# own diagnostic rather than killing the shell, so it needs no muffling.
+no_commandless_exec_redirects_the_shell() {
+  local hits bad=0 line rest
+  hits="$(grep -rnE '^[[:space:]]*exec[[:space:]]+([0-9]*[<>]|\{[A-Za-z_]+\}[<>]|&>)' \
+            "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh \
+            "${REPO}"/tests/*.sh "${REPO}/bin/lca" 2>/dev/null \
+          | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+  # An empty hit list is a legitimate pass: this is a prohibition, and there
+  # may simply be no command-less exec in the repo. Proved by mutation.
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    # Strip the legitimate '{VAR}>target' opening, then see what redirection
+    # syntax is left — anything at all is aimed at the shell.
+    rest="$(sed -E 's/\{[A-Za-z_]+\}[<>]+[^[:space:]]*//g' <<<"${line#*:*:}")"
+    grep -qE '[0-9&]?[<>]' <<<"${rest}" && {
+      printf 'this exec redirects the SHELL, silencing everything after it:\n%s\n' \
+        "${line}" >&2
+      bad=1
+    }
+  done <<<"${hits}"
+  return "${bad}"
+}
+check "no command-less 'exec' redirects the shell's own streams" \
+  no_commandless_exec_redirects_the_shell
 # ...and the same trap in the SUITE, which the gate above never looked at.
 #
 # This is not hypothetical here. 'uninstall clears models pulled without

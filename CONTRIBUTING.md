@@ -93,9 +93,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Six shell traps that turn a gate into decoration
+## Seven shell traps that turn a gate into decoration
 
-All six were shipped here at least once. They matter more in an assertion
+All seven were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -190,6 +190,18 @@ where `LC_CTYPE=POSIX`. Use a range wide enough for the encoding — `.{1,3}` �
 or match on the digits alone and never on what sits between them. A bracket
 expression containing a multi-byte character is worse still: `[–-]` is three
 bytes inside `[]`, not one character.
+
+**7. `exec {FD}>file 2>/dev/null` — the `2>/dev/null` is not part of the
+open.** `exec` with redirections and *no command* applies every one of them to
+the running shell. That trailing muffle silenced stderr for the whole rest of
+`backup.sh`: on a filesystem with no space left, the tar failure's own
+`die()` — "Could not write … (disk full? check: `df -h`)" — went to
+`/dev/null`, and a nightly backup failed with exit 1 and a completely blank
+stderr. Measured, before and after. Nothing needs muffling here anyway: a
+failing `exec` redirect returns non-zero and prints its own diagnostic rather
+than killing the shell, so `exec {FD}>lock || { warn …; return 0; }` is both
+safe and quiet enough. `exec somecmd 2>/dev/null` is fine — with a command,
+the redirection goes to the command.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
