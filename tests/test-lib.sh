@@ -1699,6 +1699,31 @@ speed_measures_reading_separately() {
 }
 check "lca speed measures reading with the probe, and reports what an edit costs" \
   speed_measures_reading_separately
+# ...and the trap has to be written down where someone hand-rolling this with
+# curl will meet it. PERFORMANCE.md's own closing line is "a change you cannot
+# measure is not an improvement", and it already warns about the cold-model
+# direction — a rate 10x too LOW. The cache is the same error in the other
+# direction and produced a number 10x too HIGH, which is the more dangerous
+# one: it looks like good news.
+performance_doc_warns_about_the_prompt_cache() {
+  local doc="${REPO}/docs/PERFORMANCE.md" body
+  body="$(cat "${doc}")"
+  grep -qi 'cache' <<<"${body}" || {
+    echo 'PERFORMANCE.md never mentions the prompt cache that made this 10x wrong' >&2
+    return 1; }
+  # Naming the cache is not enough: the reader has to be told what to DO, which
+  # is to send something Ollama has not processed before.
+  #
+  # The term list is deliberately tight. It first included 'nonce', and a
+  # mutation that removed the whole instruction still passed — because the word
+  # survived in an explanatory aside about where to PUT one. A gate satisfied
+  # by a sentence explaining the fix, rather than by the fix, is not a gate.
+  grep -qiE 'not seen before|never seen|fresh prompt|a new prompt|uncacheable' <<<"${body}" || {
+    echo 'PERFORMANCE.md names the cache but never says to measure with a prompt it has not seen' >&2
+    return 1; }
+}
+check "PERFORMANCE.md warns that a repeated prompt measures the cache" \
+  performance_doc_warns_about_the_prompt_cache
 
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"

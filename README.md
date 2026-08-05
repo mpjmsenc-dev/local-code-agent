@@ -247,7 +247,7 @@ lca                 # starts aider on the local model, right here
 | `lca check` / `lca test` | health check / live end-to-end self-test (`lca check --quick` skips the ~1-minute model probe) |
 | `lca apply` | make the running system match your `.env` edits (`--dry-run` previews) |
 | `lca logs` | recent logs from Ollama, the chat app and the installer |
-| `lca speed` | measure tokens/second and explain what limits it |
+| `lca speed` | measure generation *and* reading speed, say what one code edit costs, and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
 | `lca harden` | re-close ports 3000/11434 — now, and again on every boot (needs sudo) |

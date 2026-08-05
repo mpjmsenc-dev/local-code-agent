@@ -10,11 +10,20 @@ where it pays.
 lca speed
 ```
 
-That is the whole first step. It generates a fixed number of tokens, reads the
-timings out of Ollama's own counters, and tells you four things: your
-tokens/second, whether the model is on the CPU or the GPU, how much of a delay
-the first message after an idle period costs, and what is actually limiting you.
-It remembers the last run, so after any change you can see whether it helped.
+That is the whole first step. It makes two real requests — one that generates,
+one that only reads — takes a minute or two, and reads the timings out of
+Ollama's own counters. It tells you: how fast the model **generates**, how fast
+it **reads** input, **what one code edit therefore costs**, whether you are on
+the CPU or the GPU, how much the first message after an idle period costs, and
+what is actually limiting you. It remembers the last run, so after any change
+you can see whether it helped.
+
+The `one code edit` line is the one to read first if you came here because
+aider felt slow. Generation speed is the number everybody quotes and it is the
+smaller half: aider sends about 2,800 tokens and gets about 113 back, so most
+of the wait is Ollama *reading* — its system prompt, the repo map, the
+conventions file, the history. None of that is your file, and all of it is
+re-read on every request.
 
 On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures **6.1
 tokens/second** (the measured table further down has the rest). That is the
@@ -148,8 +157,27 @@ last run, and ignores swings under 10% because back-to-back runs on the same
 machine vary by a few percent anyway. A change you cannot measure is not an
 improvement.
 
-One caveat worth knowing: measure a **warm** model. The first request after an
-idle period pays the load cost (20 seconds is normal on a droplet, and it is
-reported separately), and its prompt-reading rate is dominated by warm-up —
-around 10× slower than the real figure. `lca speed` loads the model first for
-exactly this reason.
+Two caveats worth knowing, and they pull in opposite directions.
+
+Measure a **warm** model. The first request after an idle period pays the load
+cost (20 seconds is normal on a droplet, and it is reported separately), and its
+prompt-reading rate is dominated by warm-up — around 10× slower than the real
+figure. `lca speed` loads the model first for exactly this reason.
+
+Measure reading with a prompt Ollama has **not seen before**, and a big one.
+Ollama caches the KV prefix of a prompt it has already processed, so re-sending
+the same text measures the cache rather than the machine. Measured here, the
+same 2,050-token prompt twice in a row:
+
+```
+{"prompt_eval_count":2050, "seconds":104, "read_tps":19}
+{"prompt_eval_count":2050, "seconds":0,   "read_tps":6899}
+```
+
+`lca speed` used to read with a fixed 43-token benchmark string and reported
+160–213 tokens/second on a machine that reads at 20 — too small to out-weigh
+per-request overhead, and identical every run so the prefix came straight from
+cache. It now sends a fresh, larger prompt with a nonce at the **front** (a
+nonce at the end leaves everything before it cacheable, which is most of it).
+If you ever hand-roll this measurement with `curl`, do the same, or you will
+measure a cache and conclude your box is ten times faster than it is.
