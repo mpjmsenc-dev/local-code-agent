@@ -135,10 +135,26 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # which appears in the same answers. Widening it there needs a way to tell that
 # line from prose like "lca apply changes settings", and a matcher that fires
 # on prose is worse than one that misses — the header-only hijack matcher
-# proved that two commits ago. The obvious next experiment is the prompt's own
-# command table, which says "lca logs   recent logs from Ollama, the chat app
-# and the installer" without ever saying that it takes one of four fixed
-# sources; the numbers above are the baseline to judge that against.
+# proved that two commits ago.
+#
+# The obvious fix was tried and REJECTED, which is why the table line still
+# reads the way it does. The prompt's command table says "lca logs   recent
+# logs from Ollama, the chat app and the installer" and never says it takes one
+# of four fixed sources, so naming them looked like plain accuracy. Measured,
+# n=20, same seeds:
+#
+#                       before   after naming the sources
+#   service bad-command   2/20    9/20
+#   terminal bad-command  1/20    1/20
+#   backup bad-command    0/20    0/20
+#   (handover metrics unmoved on all three)
+#
+# Describing the argument slot taught the model to USE it, and a 3b model
+# fills it wrong more often than right: 'lca logs systemd' is a typical
+# failure, guessing a source that does not exist. Same shape as the earlier
+# result where naming 'lca apply' as a counter-example taught the model to
+# answer 'lca apply'. Adding detail about how a command can be used is not the
+# safe direction; adding an example of the RIGHT answer is.
 #
 # 'terminal' is the one figure here not taken on the shipped bytes: it was
 # measured on the same words wrapped one line differently. That distinction is

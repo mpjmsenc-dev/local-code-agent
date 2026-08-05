@@ -387,7 +387,23 @@ for the terminal case":
 The last row is the lesson: mentioning `lca apply` as a counter-example taught
 the model to answer `lca apply`. State what the command **is**; do not
 enumerate what it is not. The winning change was one clause, and the other
-four bench questions were re-run at n=6 to prove it cost nothing elsewhere.
+bench questions were re-run to prove it cost nothing elsewhere.
+
+**Describing an argument slot invites the model to fill it.** The same lesson
+from the other side, measured at `-n 20` on the same seeds. The prompt's
+command table says `lca logs   recent logs from Ollama, the chat app and the
+installer` and never mentions that it takes one of four fixed sources, so
+naming them looked like plain accuracy:
+
+| | invented an `lca` command |
+|---|---|
+| shipped wording | 2/20 |
+| naming the log sources | **9/20** |
+
+It started passing a source and guessing it wrong — `lca logs systemd`. The
+handover metrics did not move either way. Two experiments now point the same
+direction: more detail about how a command *can* be used costs more than it
+buys, while an example of the right answer is safe.
 
 **A command you put in the prompt is a command you are shipping — run it.**
 Once the handover fired reliably, it was reliably handing out
