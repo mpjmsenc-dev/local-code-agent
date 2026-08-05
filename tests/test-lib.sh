@@ -93,6 +93,38 @@ check_names_a_bad_port() {
 }
 check "'lca check' names a port that is not a port" check_names_a_bad_port
 
+echo "# a switch takes two words, and anything else silently means off"
+# Everything in this project compares a switch against the literal string
+# "true", so AUTO_TUNE=yes does not mean on — it turns the headline feature off
+# and says nothing. Measured before this: 'lca tune --dry-run' on a box whose
+# .env said AUTO_TUNE=yes printed "AUTO_TUNE=false — a real run would keep the
+# manual pin", asserting a value the file does not contain.
+bool_is() { if valid_bool "$2"; then [[ "$1" == valid ]]; else [[ "$1" == bad ]]; fi; }
+check "true is a switch value"    bool_is valid true
+check "false is a switch value"   bool_is valid false
+check "yes is not"                bool_is bad   yes
+check "1 is not"                  bool_is bad   1
+check "TRUE is not"               bool_is bad   TRUE
+check "empty is not"              bool_is bad   ""
+# The list of switches comes from .env.example, so a new one is covered the day
+# it ships rather than the day someone remembers to add it here.
+check "the switch list is read from .env.example" \
+  test "$(boolean_settings | wc -l)" -ge 5
+check "AUTO_TUNE is one of them" \
+  grep -qx AUTO_TUNE <<<"$(boolean_settings)"
+check "a port setting is NOT treated as a switch" \
+  test -z "$(boolean_settings | grep -x WEBUI_PORT)"
+# ...and both reporters must use it. tune.sh must quote what .env actually
+# holds rather than asserting 'false' about a file that says something else.
+switches_are_reported() {
+  grep -q 'valid_bool' "${REPO}/check-system.sh" || {
+    echo "check-system.sh does not validate the on/off settings" >&2; return 1; }
+  sed 's/#.*//' "${REPO}/scripts/tune.sh" | grep -qF 'AUTO_TUNE=false — a real run' && {
+    echo "tune.sh still reports AUTO_TUNE=false regardless of what .env says" >&2; return 1; }
+  return 0
+}
+check "a mistyped switch is named by the tools that read it" switches_are_reported
+
 echo "# no probe may reach for sudo without checking it is there first"
 # as_root DIES when there is neither root nor sudo. That is right for a step
 # that cannot proceed without root, and wrong for a PROBE whose whole job is to

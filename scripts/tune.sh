@@ -180,7 +180,7 @@ main() {
 
   if [[ "${dry_run}" == "true" ]]; then
     if [[ "${AUTO_TUNE}" != "true" ]]; then
-      info "AUTO_TUNE=false — a real run would keep the manual pin and change nothing."
+      info "AUTO_TUNE is '${AUTO_TUNE}', not 'true' — a real run would keep the manual pin and change nothing."
     elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
       info "Already tuned — a real run would change nothing."
     else

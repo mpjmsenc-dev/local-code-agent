@@ -69,6 +69,30 @@ for setting in WEBUI_PORT OLLAMA_HOST; do
   esac
 done
 
+# Switches take exactly two words, and everything here compares against the
+# literal "true" — so AUTO_TUNE=yes does not mean "on", it means the headline
+# feature is off and nothing says so. The list comes from .env.example, so a
+# new switch is covered the day it ships.
+BOOLS_OK=0
+BOOLS_BAD=0
+while read -r setting; do
+  [[ -n "${setting}" ]] || continue
+  if valid_bool "${!setting}"; then
+    BOOLS_OK=$((BOOLS_OK+1))
+    continue
+  fi
+  BOOLS_BAD=$((BOOLS_BAD+1))
+  p_warn "${setting}='${!setting}' is not true or false. Every switch here is compared against the word 'true', so this reads as OFF — which is probably not what you meant. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply"
+done < <(boolean_settings 2>/dev/null || true)
+# The pass line counts only what passed. Printed unconditionally it said "6
+# settings hold true or false" directly under a warning that one of them does
+# not — the same summarising-over-a-failure this file takes out everywhere else.
+if (( BOOLS_OK + BOOLS_BAD == 0 )); then
+  p_warn "could not read the list of on/off settings from .env.example — they were not checked"
+elif (( BOOLS_BAD == 0 )); then
+  p_pass "${BOOLS_OK} on/off setting(s) hold true or false"
+fi
+
 # --- Binaries ---------------------------------------------------------------
 step "Binaries"
 for bin in git curl jq python3 ollama nft; do

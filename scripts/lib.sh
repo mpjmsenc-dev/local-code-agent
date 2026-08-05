@@ -1241,6 +1241,19 @@ webui_prompt_comparable() {
 # fixes it, and two copies of a coverage rule is how one of them ends up
 # calling a port safe that the other knows is exposed.
 
+# valid_bool VALUE — exactly the two words every switch in .env is documented
+# to take. Everything here compares against the literal string "true", so any
+# other spelling silently means false: AUTO_TUNE=yes turns the headline feature
+# off and nothing says so.
+valid_bool() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
+
+# boolean_settings — the .env keys that ARE switches, read out of .env.example
+# rather than listed here, so a new one is covered the day it ships.
+boolean_settings() {
+  [[ -r "${ENV_EXAMPLE}" ]] || return 1
+  grep -oE '^[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" | cut -d= -f1 | sort -u
+}
+
 # valid_port PORT — a number a service can actually listen on.
 #
 # Not pedantry: netmode's own extractors already refuse a non-numeric
