@@ -4372,13 +4372,33 @@ check "ollama_models_dir prefers OLLAMA_MODELS, then the real store" \
 # The ORDER of the two candidates matters and cannot be asserted on a box that
 # has only one of them: Ollama runs as its own service account, so on a machine
 # with both stores the service one is the filesystem that fills up.
+#
+# No pipe anywhere in here, deliberately. Written first as
+# 'sed lib.sh | awk ... exit', which passed on this machine and FAILED in CI:
+# awk stops reading at the line it wants, sed keeps writing into a closed pipe,
+# takes SIGPIPE, and under 'set -o pipefail' the pipeline reports failure. It
+# is a race against the 64 KiB pipe buffer, so it depends on how much of the
+# file is left — lib.sh is the biggest file here and the match is halfway up,
+# which is why this one lost and the identical checks against motd.sh do not.
+# The same trap lib.sh's own current_run_log() carries a comment about.
 service_store_is_checked_first() {
-  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
-    | awk '/^ollama_models_dir\(\) \{/ { inb = 1 }
-           inb && /for d in/ {
-             print; exit (index($0, "/usr/share/ollama") > 0 &&
-                          index($0, "/usr/share/ollama") < index($0, "HOME")) ? 0 : 1 }
-           inb && /^\}/ { exit 1 }' >/dev/null
+  local body l line="" svc_at home_at
+  # A range match reads the whole file; nothing exits early.
+  body="$(sed -n '/^ollama_models_dir() {/,/^}/p' "${REPO}/scripts/lib.sh")"
+  while IFS= read -r l; do
+    [[ "${l}" == *"for d in"* ]] && { line="${l}"; break; }
+  done <<<"${body}"
+  [[ -n "${line}" ]] || {
+    echo 'ollama_models_dir no longer loops over candidate stores' >&2; return 1; }
+  [[ "${line}" == */usr/share/ollama* && "${line}" == *HOME* ]] || {
+    echo 'the candidate list no longer names both the service store and the user one' >&2
+    return 1; }
+  # Prefix lengths, so the comparison is positional without invoking anything.
+  svc_at="${line%%/usr/share/ollama*}"
+  home_at="${line%%HOME*}"
+  (( ${#svc_at} < ${#home_at} )) || {
+    echo "the user's store is checked before the service account's" >&2
+    return 1; }
 }
 check "...and looks at the service account's store before the user's" \
   service_store_is_checked_first
