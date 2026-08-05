@@ -495,6 +495,92 @@ set_env_var MODEL_NAME "qwen2.5-coder:7b"
 load_env
 check "second update round-trips too" test "${MODEL_NAME}" = "qwen2.5-coder:7b"
 
+echo "# a .env write that FAILS must say why — sed's own error names nothing"
+# Every caller outside load_env's back-fill was a bare 'set_env_var', so under
+# 'set -e' a failed write ended the script with only
+# "sed: couldn't flush <unknown>: No space left on device" to explain it.
+# Measured on a full filesystem; the likeliest moment for it, too, since the
+# disk fills with gigabyte models and 'lca model' is what you run to fix that.
+#
+# Driven against a REAL failing write, not a stub. The .env path is given a
+# parent that is a regular file, so every write into it fails with ENOTDIR —
+# the same shape as ENOSPC and, unlike an unwritable directory, it stops root
+# too. A test that quietly skips on the runner it actually runs on is not a
+# test, and the first version of this one did exactly that.
+WRITE_SB="${SANDBOX}/envwrite"
+rm -rf "${WRITE_SB}"; mkdir -p "${WRITE_SB}"
+: > "${WRITE_SB}/notadir"
+# '|| true' on the assignment, because the whole point is that the inner shell
+# exits non-zero — and under errexit a command substitution's status becomes
+# the assignment's, which aborted this suite at exactly this line.
+WRITE_OUT="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    C_RED=""; C_RESET=""; C_YELLOW=""
+    ENV_FILE="$2/notadir/.env"
+    write_env_or_die MODEL_NAME new "Extra context."
+    echo "REACHED-THE-LINE-AFTER"
+  ' _ "${REPO}/scripts/lib.sh" "${WRITE_SB}" 2>&1)" || true
+check "a failed .env write names the likely cause" \
+  grep -q "full disk" <<<"${WRITE_OUT}"
+check "...and promises the file is untouched" \
+  grep -q "left exactly as it was" <<<"${WRITE_OUT}"
+check "...and passes the caller's extra context through" \
+  grep -q "Extra context." <<<"${WRITE_OUT}"
+reached_after() { grep -q 'REACHED-THE-LINE-AFTER' <<<"${WRITE_OUT}"; }
+not_reached_after() { ! reached_after; }
+check "...and stops rather than carrying on" not_reached_after
+# The file really is intact after a refusal — which is what the message
+# promises, and the only reason it is safe to say "re-run once there is room".
+printf 'MODEL_NAME=old\n' > "${WRITE_SB}/.env"
+refuse_into() {
+  bash -c '
+    set -uo pipefail
+    source "$1"; C_RED=""; C_RESET=""
+    ENV_FILE="$2/.env"
+    set_env_var MODEL_NAME "a\$(rm -rf /)b"
+  ' _ "${REPO}/scripts/lib.sh" "${WRITE_SB}" >/dev/null 2>&1 || true
+}
+refuse_into
+check "a refused write leaves .env byte for byte" \
+  test "$(cat "${WRITE_SB}/.env")" = "MODEL_NAME=old"
+# A value set_env_var refuses is already explained by set_env_var itself, so
+# write_env_or_die must stop without inventing a second, different reason.
+refused_value_is_not_re_explained() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"; C_RED=""; C_RESET=""
+    ENV_FILE="$2/.env"
+    write_env_or_die MODEL_NAME "a\$(rm -rf /)b"
+    echo "REACHED-THE-LINE-AFTER"
+  ' _ "${REPO}/scripts/lib.sh" "${WRITE_SB}" 2>&1)"
+  grep -q 'Refusing to write' <<<"${out}" || {
+    printf 'the refusal was not reported: %s\n' "${out}" >&2; return 1; }
+  grep -q 'full disk' <<<"${out}" && {
+    echo "a refused value was blamed on the disk" >&2; return 1; }
+  grep -q 'REACHED-THE-LINE-AFTER' <<<"${out}" && {
+    echo "a refused value did not stop the caller" >&2; return 1; }
+  return 0
+}
+check "a refused value is reported once, not twice, and still stops" \
+  refused_value_is_not_re_explained
+# ...and nothing may go back to calling set_env_var bare. lib.sh's own
+# back-fill is the exception: it tests the result to build its 'added' list.
+no_bare_set_env_var() {
+  local hits
+  hits="$(grep -rn 'set_env_var' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+            "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
+          | grep -vE ':[0-9]+:[[:space:]]*#' \
+          | grep -v 'scripts/lib.sh' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these write .env without explaining a failure (use write_env_or_die):\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "no script writes .env through a bare set_env_var" no_bare_set_env_var
+
 echo "# confirm() auto-confirms when stdin is not a tty (unattended installs)"
 check "confirm auto-yes on non-tty" confirm "test prompt?" </dev/null
 

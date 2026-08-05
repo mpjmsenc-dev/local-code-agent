@@ -415,6 +415,37 @@ git_identity() {
 # Quoting is applied only when the value actually contains whitespace, so every
 # write made today is byte-for-byte what it was before and the boot path cannot
 # change behaviour.
+# write_env_or_die KEY VALUE [EXTRA] — set_env_var, but a failure explains
+# itself instead of leaving sed to do it.
+#
+# Every caller outside load_env's back-fill was a bare 'set_env_var', so under
+# 'set -e' a failed write ended the script with nothing to read but sed's own
+#
+#   sed: couldn't flush <unknown>: No space left on device
+#
+# Measured on a full filesystem, and that is the likeliest moment for it: the
+# disk fills with models at gigabytes each, and 'lca model' — which writes
+# MODEL_NAME — is exactly what someone runs to fix that.
+#
+# The promise in the message is real: sed -i writes a temp file and renames, so
+# a failed write leaves .env byte for byte as it was. Verified on the same full
+# filesystem, 59 bytes before and after.
+write_env_or_die() {
+  local rc=0
+  set_env_var "$1" "$2" || rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if (( rc == 2 )); then
+    # A refused value: set_env_var has already said exactly what was wrong
+    # with it, and repeating that in different words helps nobody. Only 2 —
+    # 1 is what a failed append returns, which is a write failure and needs
+    # the message below.
+    exit 1
+  fi
+  die "Could not write ${1} to ${ENV_FILE} (sed exited ${rc}) — a full disk is the usual cause, so check 'df -h'. ${ENV_FILE} was left exactly as it was; re-run once there is room.${3:+ $3}"
+}
+
 set_env_var() {
   local key="$1" value="$2" written="$2" bt bs
   # Built with printf rather than written inline: a literal backtick or
@@ -433,7 +464,11 @@ set_env_var() {
   if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *"${bt}"* \
      || "${value}" == *"${bs}"* || "${value}" == *$'\n'* ]]; then
     err "Refusing to write ${key} to .env: the value contains a quote, backtick, backslash, '\$' or newline."
-    return 1
+    # 2, not 1, and the distinction is load-bearing: the append below returns 1
+    # when it cannot write, so a shared code would let write_env_or_die read a
+    # genuinely failed write as "already explained" and exit saying nothing.
+    # A refusal is about the VALUE; anything else is about the FILE.
+    return 2
   fi
   # Quoted unless EVERY character is one 'source' reads back literally.
   #

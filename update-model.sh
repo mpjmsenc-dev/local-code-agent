@@ -130,11 +130,16 @@ main() {
   fi
   ok "'${new_model}' validated."
 
-  set_env_var MODEL_NAME "${new_model}"
+  write_env_or_die MODEL_NAME "${new_model}" \
+    "'${new_model}' is downloaded and working — only the .env line naming it as the default did not change, so the old ${old_model} is still what starts."
   ok "Default model is now '${new_model}'."
 
   if [[ "${AUTO_TUNE}" == "true" ]]; then
-    set_env_var AUTO_TUNE false
+    # The one write here whose failure is worse than not having tried:
+    # MODEL_NAME has just landed, and without AUTO_TUNE=false beside it the
+    # next boot re-picks a model from RAM and silently undoes the pin.
+    write_env_or_die AUTO_TUNE false \
+      "MODEL_NAME was written but AUTO_TUNE was not, so auto-tune will override your choice on the next boot — set AUTO_TUNE=false in .env by hand once there is room."
     warn "AUTO_TUNE has been set to false — a manual pin would otherwise be overridden by auto-tune on the next boot."
     info "Re-enable spec-based auto selection anytime with: AUTO_TUNE=true in .env, then ${SCRIPT_DIR}/scripts/tune.sh"
   fi

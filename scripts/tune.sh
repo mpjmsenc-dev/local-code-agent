@@ -230,8 +230,9 @@ main() {
   if ! have ollama; then
     # Called before Ollama exists (or on a stripped-down box): record the
     # decision so setup.sh's model-pull step uses it, and stop there.
-    set_env_var MODEL_NAME "${TUNE_MODEL}"
-    set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+    write_env_or_die MODEL_NAME "${TUNE_MODEL}"
+    write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+      "MODEL_NAME was written but the context length was not, so .env is half-tuned; set OLLAMA_CONTEXT_LENGTH=${TUNE_CTX} by hand or re-run 'lca tune' once there is room."
     warn "Ollama is not installed yet — wrote the tuned values to .env; setup.sh will pull ${TUNE_MODEL}."
     exit 0
   fi
@@ -246,8 +247,9 @@ main() {
       # No service manager and we couldn't bring the API up — record the
       # decision so it applies once Ollama is running, and degrade gracefully
       # instead of dying with a systemctl hint that cannot work here.
-      set_env_var MODEL_NAME "${TUNE_MODEL}"
-      set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+      write_env_or_die MODEL_NAME "${TUNE_MODEL}"
+      write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+        "MODEL_NAME was written but the context length was not, so .env is half-tuned; set OLLAMA_CONTEXT_LENGTH=${TUNE_CTX} by hand or re-run 'lca tune' once there is room."
       warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run 'lca tune' to apply."
       exit 0
     fi
@@ -309,8 +311,12 @@ main() {
   MODEL_NAME="${chosen_model}"
   OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
   if [[ "${chosen_model}" != "${old_model}" || "${old_ctx}" != "${TUNE_CTX}" ]] || ! ollama_dropin_matches; then
-    set_env_var MODEL_NAME "${chosen_model}"
-    set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+    # Before render_ollama_dropin on purpose: if .env cannot be written, the
+    # drop-in must not be either, or Ollama would run settings .env does not
+    # name and every drift check would disagree with itself from then on.
+    write_env_or_die MODEL_NAME "${chosen_model}"
+    write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+      "MODEL_NAME was written but the context length was not; Ollama has NOT been restarted, so nothing is running settings .env does not name. Re-run 'lca tune' once there is room."
     render_ollama_dropin
     restart_ollama
     if [[ "${old_model}" != "${chosen_model}" ]]; then
