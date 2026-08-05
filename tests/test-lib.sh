@@ -2246,6 +2246,43 @@ unrequested_edits_are_documented() {
 check "the unrequested-edit risk is documented with its recovery" \
   unrequested_edits_are_documented
 
+echo "# the first-run walkthrough must not finish at a chat window"
+# docs/YOUR-TURN.md is the step-by-step a first-time user follows to the end.
+# Every step led to the CHAT — account, phone, signups, kill switch — and the
+# finish checklist was satisfied by sending it a message. It never once had
+# them run the thing that writes files. A user who follows it to completion
+# reasonably concludes the chat IS the product, asks it to build something,
+# gets a tutorial, and decides the stack cannot code. That is not hypothetical:
+# it is the first real report this project received.
+walkthrough_reaches_the_coding_agent() {
+  local doc="${REPO}/docs/YOUR-TURN.md" body
+  body="$(cat "${doc}")"
+  # Bare 'lca' in a project directory — not lca ask/chat/check, which the
+  # walkthrough already had and which do not write files.
+  grep -qE '^lca( +#.*)?$' <<<"${body}" || {
+    echo 'YOUR-TURN.md never has the user run bare "lca" (the coding agent)' >&2
+    return 1; }
+  # ...and it must send them to look at what happened, since the model edits
+  # things it was not asked about.
+  grep -q 'git diff HEAD~' <<<"${body}" || {
+    echo 'YOUR-TURN.md runs the coding agent but never has the user read the diff' >&2
+    return 1; }
+  # The finish checklist is the part people actually tick off, so the coding
+  # step has to appear THERE, not only in prose above it.
+  local checklist
+  checklist="$(awk '/^## .*You are finished when/ { inb = 1; next }
+                    inb && /^## / { exit }
+                    inb' "${doc}")"
+  [[ -n "${checklist}" ]] || {
+    echo 'YOUR-TURN.md has no "You are finished when" checklist' >&2
+    return 1; }
+  grep -q 'git diff HEAD~' <<<"${checklist}" || {
+    echo 'the finish checklist can be ticked off without ever editing a file' >&2
+    return 1; }
+}
+check "YOUR-TURN.md ends with a real edit, not a chat message" \
+  walkthrough_reaches_the_coding_agent
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit
@@ -5441,14 +5478,45 @@ GUARD_DUMP='table inet lca_inbound {
     tcp dport { 3000, 11434 } ct state new counter packets 0 bytes 0 drop
   }
 }'
+# Both helpers run in a SUBSHELL with the live-container probe stubbed out.
+#
+# guarded_ports also reports the port a RUNNING chat app is really on when it
+# differs from .env — a real and valuable case, covered on its own below. But
+# these assertions are about what .env asks for, and without the stub they pick
+# up whatever container happens to exist on the machine: with one running on
+# 3000, three of the checks below failed while every one of them was correct.
+#
+# That is worse than an inconvenience. It means 'make gates' failed on a box
+# with the chat app actually running — which is a real install, the one place a
+# user would run it. Found only because a container got started here.
+#
+# The subshell matters: a function defined inside a function is global from
+# then on in bash, so a bare stub would silently follow every later test.
 ports_for() {  # ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
-  local ENABLE_WEBUI="$1" WEBUI_PORT="$2" OLLAMA_HOST="$3"
-  guarded_ports | paste -sd'|' -
+  ( ENABLE_WEBUI="$1"; WEBUI_PORT="$2"; OLLAMA_HOST="$3"
+    webui_container_env() { return 1; }
+    guarded_ports | paste -sd'|' - )
 }
 uncovered_for() {  # DUMP ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
-  local dump="$1" ENABLE_WEBUI="$2" WEBUI_PORT="$3" OLLAMA_HOST="$4"
-  inbound_guard_uncovered "${dump}" | paste -sd'|' -
+  ( local dump="$1"; ENABLE_WEBUI="$2"; WEBUI_PORT="$3"; OLLAMA_HOST="$4"
+    webui_container_env() { return 1; }
+    inbound_guard_uncovered "${dump}" | paste -sd'|' - )
 }
+# ...and the live-container case itself, which nothing covered deterministically
+# because it depended on whether a container happened to be running. A chat app
+# left on the OLD port after a .env edit is unauthenticated on every interface,
+# so this is the one the guard most needs to hear about.
+live_ports_for() {  # WEBUI_PORT LIVE_PORT
+  ( ENABLE_WEBUI=true; WEBUI_PORT="$1"; OLLAMA_HOST=127.0.0.1:11434
+    LIVE="$2"; webui_container_env() { printf '%s' "${LIVE}"; }
+    guarded_ports | paste -sd'|' - )
+}
+check "a chat app still on the old port is named alongside the new one" \
+  test "$(live_ports_for 8080 3000)" = "WebUI 8080|Ollama 11434|live WebUI 3000"
+check "...and is not repeated when it already agrees with .env" \
+  test "$(live_ports_for 3000 3000)" = "WebUI 3000|Ollama 11434"
+check "...and a live chat app on 22 is not called a gap either" \
+  test "$(live_ports_for 8080 22)" = "WebUI 8080|Ollama 11434"
 check "both service ports are guarded by default" \
   test "$(ports_for true 3000 127.0.0.1:11434)" = "WebUI 3000|Ollama 11434"
 check "with the chat app off, only Ollama's port is" \
@@ -7095,6 +7163,12 @@ guard_round_trip() {  # $1 = .env content, $2 = label
       source "$1" >/dev/null 2>&1
       source <(printf "%s\n" "$2") >/dev/null 2>&1
       ENABLE_WEBUI="${ENABLE_WEBUI:-true}"
+      # AFTER the source, because lib.sh defines it. This round trip is about
+      # the renderer and the reader agreeing on what .env asks for; a chat app
+      # actually running on this machine adds its live port to the reader and
+      # nothing to the renderer, so without the stub the check failed on any
+      # box with the container up — which is a real install.
+      webui_container_env() { return 1; }
       inbound_guard_uncovered "$3" || true
     ' _ "${REPO}/scripts/lib.sh" "$1" "${dump}")" || rc=$?
   (( rc == 0 )) || { printf '%s: reader errored\n' "$2" >&2; return 1; }
