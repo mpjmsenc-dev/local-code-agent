@@ -201,9 +201,21 @@ main() {
     # who pinned a model is in.
     if resync_dropin_if_drifted; then
       ok "Applied your pinned settings: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE})."
-      exit 0
+    else
+      ok "AUTO_TUNE=false — keeping your manual pin: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
     fi
-    ok "AUTO_TUNE=false — keeping your manual pin: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
+    # Warmed on the way out of THIS branch too, not only on the auto-tune path
+    # at the end of main. Both exits here used to return first, so the boot
+    # oneshot loaded nothing and the first message after every reboot paid the
+    # full cold load — measured at 60-90s for a 3B on a 4-vCPU box with no GPU,
+    # and warm_model's own comment records 228s for a 7B on a cold page cache.
+    #
+    # This is not the unusual branch. 'lca model' sets AUTO_TUNE=false for you,
+    # so it is where everyone who picked their own model ends up, and a
+    # CPU-only host is where that wait is the difference between "thinking" and
+    # "broken". After resync_dropin_if_drifted, because that restarts Ollama
+    # when it re-syncs and a restart drops whatever was loaded.
+    warm_model "${MODEL_NAME}"
     exit 0
   fi
 

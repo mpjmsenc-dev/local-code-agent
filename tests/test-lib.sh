@@ -1337,6 +1337,49 @@ check "23 GiB -> 14b/8192"  ladder_is 23 qwen2.5-coder:14b 8192
 check "24 GiB -> 14b/16384" ladder_is 24 qwen2.5-coder:14b 16384
 check "64 GiB -> 14b/16384" ladder_is 64 qwen2.5-coder:14b 16384
 
+echo "# the boot run must warm the model on the PINNED path too, not just when tuning"
+# Nothing else loads a model at boot: OLLAMA_KEEP_ALIVE stops a resident model
+# being evicted, it never preloads one. warm_model at the end of main covers
+# the auto-tune path — and both exits in the AUTO_TUNE=false branch returned
+# before ever reaching it.
+#
+# That branch is not the unusual one. 'lca model' sets AUTO_TUNE=false for you,
+# so it is where everyone who picked their own model ends up, and on a CPU-only
+# host the cost is the whole first message: measured 60-90s for a 3B on 4 vCPU
+# here, and warm_model's own comment records 228s for a 7B on a cold cache.
+tune_pinned_run() {   # RESYNC_RC -> the run's output
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    load_env() { :; }
+    detect_ram_gib() { echo 16; }
+    have() { return 0; }
+    systemd_available() { return 1; }
+    resync_dropin_if_drifted() { return '"$1"'; }
+    warm_model() { printf "WARMED:%s\n" "$1"; }
+    AUTO_TUNE=false
+    MODEL_NAME=qwen2.5-coder:7b; OLLAMA_CONTEXT_LENGTH=8192; OLLAMA_KEEP_ALIVE=30m
+    main
+  ' _ "${REPO}/scripts/tune.sh" 2>&1 || true
+}
+# Both exits: nothing drifted, and the drop-in was re-synced (which restarts
+# Ollama, dropping whatever was loaded — so warming after it is the point).
+check "a pinned model with nothing to do is still warmed" \
+  grep -q 'WARMED:qwen2.5-coder:7b' <<<"$(tune_pinned_run 1)"
+check "...and so is one whose drop-in had to be re-synced" \
+  grep -q 'WARMED:qwen2.5-coder:7b' <<<"$(tune_pinned_run 0)"
+# The warm has to come AFTER the re-sync's restart, or it loads a model the
+# restart then drops.
+warm_follows_resync() {
+  local out; out="$(tune_pinned_run 0)"
+  local warm_line resync_line
+  warm_line="$(grep -n 'WARMED:' <<<"${out}" | head -1 | cut -d: -f1)"
+  resync_line="$(grep -n 'pinned settings' <<<"${out}" | head -1 | cut -d: -f1)"
+  [[ -n "${warm_line}" && -n "${resync_line}" ]] || return 1
+  (( warm_line > resync_line ))
+}
+check "the warm comes after the re-sync that restarts Ollama" warm_follows_resync
+
 echo "# largest_present_within() — offline-downgrade fallback picks the largest model <= target"
 # Stub model_present against a PRESENT list so we can unit-test the selection
 # without a real ollama. (This override is intentional and only affects the
