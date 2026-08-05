@@ -5538,6 +5538,47 @@ every_boot_unit_is_verified() {
 }
 check "check-system.sh verifies the program behind every boot unit" \
   every_boot_unit_is_verified
+# ...and the tune unit must be checked whatever AUTO_TUNE says.
+#
+# It has two jobs. Re-picking the model from RAM is the AUTO_TUNE=true one; the
+# other is warming the model at boot, and nothing else does that —
+# OLLAMA_KEEP_ALIVE stops a resident model being evicted, it never preloads
+# one. On a CPU-only host the cost of losing it is the whole first message
+# after a reboot: measured 60-90s for a 3B on 4 vCPU, 228s for a 7B cold.
+#
+# The check used to sit inside 'if [[ "${AUTO_TUNE}" == "true" ]]', so the
+# account most likely to depend on the warm was the one it said nothing to:
+# 'lca model' sets AUTO_TUNE=false for you.
+tune_unit_checked_regardless_of_auto_tune() {
+  local body region
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  # The block that decides on the tune unit, from the guard that opens it to
+  # the closing of its branch.
+  region="$(awk '/systemd_available; then/ { open = 1 }
+                 open { print }
+                 open && /local-code-agent-tune.service is not enabled/ { exit }' <<<"${body}")"
+  grep -q 'local-code-agent-tune.service' <<<"${region}" || {
+    echo "check-system.sh no longer decides anything about the tune boot unit" >&2
+    return 1
+  }
+  grep -qE 'AUTO_TUNE\}" == "true" \]\] && systemd_available' <<<"${region}" && {
+    echo "the tune boot unit is checked only when AUTO_TUNE=true — a pinned model gets no warning that nothing will preload it" >&2
+    return 1
+  }
+  # ...and the consequence has to be stated for BOTH configurations, or the
+  # branch is checked and then described with the wrong stake.
+  grep -q 'preloaded' <<<"${body}" || {
+    echo "nothing tells a pinned user what an unenabled tune unit costs them" >&2
+    return 1
+  }
+  grep -q 'resizing this VM' <<<"${body}" || {
+    echo "the auto-tune consequence stopped being named" >&2
+    return 1
+  }
+  return 0
+}
+check "the boot unit is checked whether or not AUTO_TUNE is on" \
+  tune_unit_checked_regardless_of_auto_tune
 
 echo "# the documented way to put the inbound guard back must actually stick"
 # 'netmode.sh harden' is the ONE command this repo names when the guard is

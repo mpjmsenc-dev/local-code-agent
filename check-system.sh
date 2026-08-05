@@ -318,15 +318,34 @@ fi
 # Without this, "resize the droplet and the model follows" is a promise with
 # nothing behind it, and the failure is silent — everything keeps working, at
 # the old model, forever.
-if [[ "${AUTO_TUNE}" == "true" ]] && systemd_available; then
+#
+# Checked whatever AUTO_TUNE says, because the unit has TWO jobs and this used
+# to skip the whole block on AUTO_TUNE=false. The second job is warming the
+# model at boot, and nothing else does it: OLLAMA_KEEP_ALIVE stops a resident
+# model being evicted, it never preloads one. On a CPU-only host that is the
+# entire first message after a reboot — measured 60-90s for a 3B on 4 vCPU,
+# and 228s for a 7B on a cold page cache.
+#
+# AUTO_TUNE=false is not the unusual case either: 'lca model' sets it for you,
+# so the account most likely to depend on the warm was the one this check said
+# nothing to.
+if systemd_available; then
+  # What is actually lost if the unit does not run, in this configuration.
+  if [[ "${AUTO_TUNE}" == "true" ]]; then
+    TUNE_STAKE="resizing this VM will NOT change the model on reboot, and the first message after one will pay the full model load"
+    TUNE_DOES="re-tune and preload the model"
+  else
+    TUNE_STAKE="the model will NOT be preloaded after a reboot, so the first message pays the full load (a minute or more on a CPU-only host)"
+    TUNE_DOES="preload your pinned model"
+  fi
   if systemctl is-enabled --quiet local-code-agent-tune.service 2>/dev/null; then
     if TUNE_GONE="$(stale_boot_program local-code-agent-tune.service)"; then
-      p_warn "auto-tune's boot service is enabled but runs ${TUNE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — resizing this VM will NOT change the model. Fix: sudo ${SCRIPT_DIR}/setup.sh"
+      p_warn "the boot service is enabled but runs ${TUNE_GONE}, which it can no longer execute (was this checkout moved or renamed?) — ${TUNE_STAKE}. Fix: sudo ${SCRIPT_DIR}/setup.sh"
     else
-      p_pass "auto-tune will re-run on boot (local-code-agent-tune.service enabled)"
+      p_pass "on boot it will ${TUNE_DOES} (local-code-agent-tune.service enabled)"
     fi
   else
-    p_warn "AUTO_TUNE=true but local-code-agent-tune.service is not enabled — resizing this VM will NOT change the model on reboot. Fix: $(reenable_hint local-code-agent-tune.service "sudo ${SCRIPT_DIR}/setup.sh")"
+    p_warn "local-code-agent-tune.service is not enabled — ${TUNE_STAKE}. Fix: $(reenable_hint local-code-agent-tune.service "sudo ${SCRIPT_DIR}/setup.sh")"
   fi
 fi
 # These two are what setup.sh installs OUTSIDE the checkout, and both are
