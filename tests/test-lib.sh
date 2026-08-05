@@ -2365,6 +2365,36 @@ md_anchor_links_resolve() {
 check "every anchor link in the docs points at a real heading" \
   md_anchor_links_resolve
 
+echo "# ...and so must the list setup.sh prints the moment it finishes"
+# Fifth door, and the one printed at the exact moment someone is deciding what
+# this box is for. Coding was there — at number 4, underneath two chat steps
+# and 'lca ask', which cannot write a file and looks more like the thing that
+# can than anything else on the list. Somebody who reads three lines and stops
+# was pointed away from the product three times out of three.
+setup_next_steps_lead_with_code() {
+  local block code_at chat_at
+  block="$(awk '/^  step "Next steps"/ { inb = 1; next }
+                inb && /VERDICT_PRINTED/ { exit }
+                inb' "${REPO}/setup.sh")"
+  [[ -n "${block}" ]] || {
+    echo 'setup.sh no longer prints a "Next steps" list' >&2; return 1; }
+  # The coding entry: bare 'lca' at the end of a command, not 'lca ask'/'chat'.
+  code_at="$(grep -nE '&& lca( |"|$)' <<<"${block}" | head -1 | cut -d: -f1)"
+  [[ -n "${code_at}" ]] || {
+    echo 'setup.sh finishes without ever naming the command that writes files' >&2
+    return 1; }
+  chat_at="$(grep -n 'lca chat' <<<"${block}" | head -1 | cut -d: -f1)"
+  [[ -n "${chat_at}" ]] || {
+    echo 'setup.sh no longer offers the chat, so there is nothing to order against' >&2
+    return 1; }
+  (( code_at < chat_at )) || {
+    printf 'setup.sh offers the chat (line %s of the list) before coding (line %s)\n' \
+      "${chat_at}" "${code_at}" >&2
+    return 1; }
+}
+check "setup.sh's last words offer the coding agent before the chat" \
+  setup_next_steps_lead_with_code
+
 echo "# every systemd unit this project installs must also be uninstalled"
 # Four units are installed today — tune, netmode, backup service and timer —
 # and uninstall.sh removes all four. Nothing holds that together. A fifth unit

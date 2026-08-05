@@ -238,11 +238,18 @@ main() {
   # Teach the short command, not the long paths — 'lca' is the intended
   # interface now, and a next-steps list that contradicts it is how a tool ends
   # up with two half-remembered ways to do everything.
-  info "1. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
-  info "2. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
+  # Coding first, and not only as a statement of priorities — it is the
+  # dependency order. 'lca' needs nothing beyond what just finished
+  # installing, while phone access needs 'tailscale up' and an app installed
+  # on a second device. The shorter path was printed fourth, underneath two
+  # chat steps and 'lca ask', which is the door that cannot write files and
+  # looks the most like the one that can. Someone who reads three lines and
+  # stops has been pointed away from the product every time.
+  info "1. Code in the terminal: cd <your-project> && lca   (edits real files, commits each change)"
+  info "2. Ask one question:     lca ask \"how do I find the biggest files here?\"   (answers only — no files)"
+  info "3. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
+  info "4. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
   info "   Install the Tailscale app on the phone first — docs/PHONE.md"
-  info "3. Ask one question:     lca ask \"how do I find the biggest files here?\""
-  info "4. Code in the terminal: cd <your-project> && lca"
   info "5. Prove it end-to-end:  lca test        · health check: lca check"
   info "6. When something looks wrong: lca logs   · when it feels slow: lca speed"
   info "7. Internet kill switch: sudo lca offline | sudo lca online | sudo lca status"
