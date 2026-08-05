@@ -185,7 +185,33 @@ chat_address() {
 # scannable in the second someone actually gives it.
 row() { printf '   %-20s %s\n' "$1" "$2"; }
 
-headline() { printf '\n %b%s%b  %s\n' "${C_BOLD}" "local-code-agent" "${C_RESET}" "$1"; }
+headline() {
+  printf '\n %b%s%b  %s\n' "${C_BOLD}" "local-code-agent" "${C_RESET}" "$1"
+  missing_lca_row
+}
+
+# missing_lca_row — every banner below speaks in 'lca'. Say so when it is not
+# there.
+#
+# setup.sh installs /usr/local/bin/lca as a symlink and deliberately does NOT
+# die if it cannot: no root, or a read-only /usr/local, and it warns and
+# carries on. That is the right call — the stack works, only the short name is
+# missing — but it leaves a box where every line of this banner names a command
+# that does not exist. Measured on exactly such a box: 'ready', a chat URL, and
+# four commands, all of which answer 'lca: command not found'.
+#
+# chat_address() already refuses to print 'sudo tailscale up' on a machine
+# without tailscale, for this reason and in as many words. This is the same
+# rule applied to the command this file mentions four times instead of once.
+#
+# Called from headline() rather than from each banner, so a sixth banner state
+# added later cannot forget it — the note has to sit above the rows it is about,
+# and every banner starts with exactly one headline.
+missing_lca_row() {
+  have lca && return 0
+  row "'lca' NOT on PATH" "run them as ${REPO_ROOT}/bin/lca"
+  row "Install the name" "sudo ${REPO_ROOT}/setup.sh"
+}
 
 banner_installing() {
   local age step

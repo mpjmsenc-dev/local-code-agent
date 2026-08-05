@@ -5388,6 +5388,58 @@ documented_ready_banner_shows_the_agent() {
 check "...and the banner the walkthrough shows is not a lie about it" \
   documented_ready_banner_shows_the_agent
 
+echo "# ...and it must not speak in 'lca' on a box that has no 'lca'"
+# setup.sh symlinks /usr/local/bin/lca and deliberately does NOT die when it
+# cannot — no root, or a read-only /usr/local — it warns and carries on. Right
+# call: the stack works, only the short name is missing. But every line of this
+# banner is written in 'lca', so such a box gets "ready", a chat URL and four
+# commands that all answer 'command not found'. Measured on exactly that box.
+#
+# chat_address() already refuses to print 'sudo tailscale up' where tailscale
+# is absent, and says so in as many words. Same rule, applied to the command
+# this file names four times instead of once.
+motd_lca_row() {  # present | absent -> the rendered rows
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    STATE="$2"
+    # After the source: lib.sh defines have(), and a stub set before it would
+    # be silently replaced.
+    have() { [[ "$1" == "lca" && "${STATE}" == "present" ]]; }
+    missing_lca_row' _ "${MOTD}" "$1" 2>/dev/null
+}
+banner_names_a_command_that_exists() {
+  local absent present
+  absent="$(motd_lca_row absent)"
+  present="$(motd_lca_row present)"
+  [[ -n "${absent}" ]] || {
+    echo 'with no lca on PATH the banner still hands out four commands that do not exist' >&2
+    return 1; }
+  grep -q 'bin/lca' <<<"${absent}" || {
+    echo 'the banner reports lca missing without naming the path that does work' >&2
+    return 1; }
+  grep -q 'setup.sh' <<<"${absent}" || {
+    echo 'the banner names the fallback but never how to get the short name back' >&2
+    return 1; }
+  [[ -z "${present}" ]] || {
+    echo 'the banner nags about lca on a box where lca is installed' >&2
+    return 1; }
+}
+check "the banner says so when 'lca' is not on PATH, and stays quiet when it is" \
+  banner_names_a_command_that_exists
+# ...from headline(), so a sixth banner state added later cannot forget it.
+# Every banner calls exactly one headline, and the note has to sit above the
+# rows it is about.
+every_banner_state_gets_the_warning() {
+  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
+    | awk '/^headline\(\) \{/     { inb = 1 }
+           inb && /missing_lca_row/ { found = 1 }
+           inb && /^\}/           { exit }
+           END { exit !found }'
+}
+check "...and every banner state inherits it, not just the ready one" \
+  every_banner_state_gets_the_warning
+
 echo "# ...and whether the chat app is still answering with an older assistant"
 # The container is created with the assistant's instructions baked in, so a
 # 'git pull' that fixes the assistant does not reach a running one and nothing
