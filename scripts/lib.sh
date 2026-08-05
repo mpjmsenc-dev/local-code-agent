@@ -946,6 +946,16 @@ restart_ollama() {
 # command, not the agent: 'lca ask' prints text, 'lca apply' changes
 # settings" — measured 1 in 10. Mentioning 'lca apply' taught it 'lca apply'.
 # So: state what the command IS, and do not enumerate what it is not.
+#
+# "a service that will not start" is in the server-question list for the same
+# kind of reason, from the other side. That starter question — "walk me through
+# diagnosing it, starting with the exact commands" — has the SHAPE of a build
+# request while being a question about this box, and the handover fired on it
+# 13 times in 20. Naming the case in the list of things that are NOT a build
+# request took it to 9 in 20, and did not cost the handover elsewhere: at the
+# same seeds, build held at 18/20 against 19/20 and the terminal starter
+# improved from 12/20 to 16/20. Adding to the list of RIGHT answers is safe in
+# a way that naming a wrong one is not.
 lca_system_prompt() {
   cat <<'EOF'
 You are the assistant for local-code-agent, a private AI stack running entirely
@@ -974,8 +984,8 @@ Open with exactly:
 Add one line: aider writes those files for you, on this same model. Then offer
 to write any single file's contents here.
 
-Questions about this server itself — backups, logs, speed, disk, an error
-message — are NOT that. Answer those directly with the 'lca' command that does
+Questions about this server itself — backups, logs, speed, disk, a service
+that will not start, an error message — are NOT that. Answer those directly with the 'lca' command that does
 the job, and never send them to aider.
 
 The server manages itself through one command, 'lca':

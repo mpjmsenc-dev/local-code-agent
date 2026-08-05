@@ -21,9 +21,11 @@
 #                whether the model listens. Nothing here could see it before,
 #                so a prompt change could not be judged against it.
 #
-# Sampling matters. Generation is stochastic, so one run proves nothing and
-# small differences at N=3 are noise — a 2-in-3 "regression" here measured
-# 1-in-6 when re-run. Use -n 6 or more before believing a difference.
+# Sampling matters more than it looks. Generation is stochastic, and six
+# samples do not merely give a wide interval — they have pointed the WRONG WAY:
+# a change that measured 5/6 -> 2/6 here (a regression) measured 12/20 -> 16/20
+# at matched seeds (an improvement). Use -n 20 for anything you intend to act
+# on, run the same seeds either side, and change one thing at a time.
 #
 # Deliberately NOT part of 'make test' or CI: it needs a running model and
 # minutes of CPU, and CI has neither.
@@ -51,7 +53,7 @@ Usage: scripts/prompt-bench.sh [-n SAMPLES] [-m MODEL] [-f PROMPT_FILE]
 Measures the shared system prompt against the real model and prints a count
 per behaviour. Compare two candidates by benching each with the SAME -n.
 
-  -n N   samples per question (default ${SAMPLES}; use 6+ before believing a diff)
+  -n N   samples per question (default ${SAMPLES}; use 20 to judge a change)
   -m M   model to ask (default ${MODEL_NAME}, from .env)
   -f F   bench the prompt in file F instead of the built-in one
 EOF
@@ -103,30 +105,33 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # own header warns about, caught by re-running rather than by shipping the
 # first number.
 #
-# Baseline, 3b rung, current prompt, n=6, through /api/chat (see ask() below),
-# with the two-part hijack matcher below:
-#   build     hands over 6/6  says where 6/6  tutorial 0/6  handover 6/6  tool 0/6
-#   wishlist  hands over 6/6  says where 6/6  tutorial 2/6  handover 6/6  tool 0/6
-#   terminal  hands over 5/6  says where 6/6  tutorial 0/6  handover 1/6  tool 0/6
-#   backup    hands over 0/6  says where 6/6  tutorial 0/6  handover 0/6  tool 0/6
-#   explain   hands over 0/6  says where 0/6  tutorial 0/6  handover 0/6  tool 0/6
-#   service   hands over 2/6  says where 6/6  tutorial 0/6  handover 2/6  tool 0/6
+# Baseline, 3b rung, current prompt, through /api/chat (see ask() below), with
+# the two-part hijack matcher.
 #
-# Read those last two columns with the WANTED lines in main(): for build,
+# The three questions that have been measured properly — n=20, matched seeds,
+# same run either side of the change that added "a service that will not start"
+# to the prompt's list of server questions:
+#
+#                        wanted    before   after
+#   build     hands over   20/20    19/20   18/20
+#   build     tutorial      0/20     3/20    4/20
+#   terminal  hands over   20/20    12/20   16/20
+#   service   handover      0/20    13/20    9/20
+#
+# The other three, at n=6 and stable across every run so far: backup and
+# explain fire no handover and no tool call; wishlist hands over 6/6.
+#
+# Read the last two columns with the WANTED lines in main(): for build,
 # wishlist and terminal a fired handover is the POINT; for backup, explain and
 # service it is the failure.
 #
-# Two rows are worth naming rather than leaving in the table:
-#
-#   service 2/6 is a real, open failure — a question about THIS server that
-#   the prompt says to answer directly, and one of the five starter questions
-#   the empty screen offers. It was invisible until the matcher below learned
-#   the truncated shape of the handover.
-#
-#   wishlist tutorial 2/6 is noise, not a regression. The same question has
-#   measured 3/4, then 0/6, now 2/6 on an unchanged prompt. Six samples is
-#   enough to see a five-point move and not enough to call a two-point one;
-#   that is what the header says about -n and it applies to this table too.
+# On sampling, harder than the header above puts it. Six samples cannot judge
+# these questions, and not merely because the interval is wide — it pointed the
+# WRONG WAY. The n=6 bench read terminal 5/6 before and 2/6 after, which says
+# the change hurt it; n=20 at matched seeds says 12/20 to 16/20, which is the
+# opposite. Service read 2/6 before and 3/6 after at one seed range while the
+# same prompt pair read 8/10 and 2/10 at another. Use -n 20 for anything in
+# this table, and change one thing at a time.
 BENCH_WISHLIST="build me an income and expense tracker app with categories, a monthly summary, search and filter, CSV export, local storage, a responsive UI, unit tests and a README. After finishing, review the code and suggest improvements."
 # The fifth is not hypothetical either: it is verbatim the last entry in
 # config/prompt-suggestions.json, i.e. one of five things a phone user can tap

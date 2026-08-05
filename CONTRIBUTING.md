@@ -364,7 +364,11 @@ because a wrong matcher makes every future measurement wrong in a way nobody
 would notice; two already did.
 
 So: run each candidate several times (they are sampled, so one generation
-proves nothing), count outcomes, and put the counts in the commit message. Also check the change does
+proves nothing), count outcomes, and put the counts in the commit message.
+**Use `-n 20`, and the same seeds either side.** Six is not enough — not just
+wide, but wrong: one change read 5/6 then 2/6 at `-n 6` (a regression) and
+12/20 then 16/20 at matched seeds (an improvement). The same prompt pair read
+2/6 and 3/6 at one seed range and 8/10 and 2/10 at another. Also check the change does
 not fire on questions it should not — a handover rule strong enough to beat
 the tutorial reflex can easily hijack "what does this error mean?", and a chat
 that answers everything with `cd ~/my-project && lca` has been made useless in
