@@ -53,9 +53,12 @@ paste `deploy/do-user-data.sh` when creating the droplet — see
 Nothing more to install; `setup.sh` already did it. In a terminal on the server:
 
 ```bash
-cd ~/my-project     # any git repo
-lca                 # aider, on your local model, in THIS directory
+mkdir -p ~/my-project && cd ~/my-project && git init   # or cd into a repo you have
+lca                                                    # aider, on your model, here
 ```
+
+The `git init` is not ceremony: aider commits every edit, which is what makes
+the next command work and what makes a bad edit one `git revert` away.
 
 Ask for a change in plain English; it edits the real files and commits each one.
 Then read what it actually did, because a small local model sometimes changes
