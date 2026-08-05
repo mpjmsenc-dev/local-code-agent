@@ -449,8 +449,8 @@ if [[ "${ENABLE_WEBUI}" != "true" ]] && ! ollama_bind_is_public; then
   info "WebUI disabled and Ollama on loopback — no public service ports to guard."
 elif ! have nft; then
   p_warn "nft not installed — the inbound guard is not enforced (WebUI/Ollama ports may be publicly reachable)"
-elif ! can_root; then
-  p_warn "cannot inspect nftables without root/sudo — re-run as root to verify the inbound guard"
+elif ! can_root_now; then
+  p_warn "cannot inspect nftables from this account — the guard was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
 elif ! as_root nft list table inet lca_inbound >/dev/null 2>&1; then
   p_fail "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable (sudo ${SCRIPT_DIR}/netmode.sh harden)"
 else

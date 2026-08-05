@@ -93,6 +93,56 @@ check_names_a_bad_port() {
 }
 check "'lca check' names a port that is not a port" check_names_a_bad_port
 
+echo "# 'sudo exists' is not 'I can become root', and one of those is a probe"
+# can_root answers "is the sudo binary installed", which is right for a step
+# allowed to ask for a password and wrong for a probe. The difference produced
+# a false SECURITY alarm: 'lca check' run by a user who is not a sudoer took
+# the can_root branch, ran 'sudo nft list table', got nothing, and reported
+# "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable" on
+# a machine whose guard may be perfectly loaded — then advised a sudo command
+# that user cannot run either. Measured with a freshly created account.
+can_root_now_is_stricter() {
+  # Both are true for root, which is the only account this suite can speak for.
+  can_root     || { echo "can_root is false as $(id -un)" >&2; return 1; }
+  can_root_now || { echo "can_root_now is false as $(id -un)" >&2; return 1; }
+  # The distinction has to be in the code, not just in the comment: can_root
+  # must not consult sudo -n, and can_root_now must.
+  local lib="${REPO}/scripts/lib.sh" body
+  body="$(sed 's/#.*//' "${lib}")"
+  awk '/^can_root\(\) \{/ { inb = 1 } inb && /sudo -n/ { bad = 1 } inb && /^\}/ { exit }
+       END { exit bad }' <<<"${body}" || {
+    echo "can_root now depends on sudo -n, which makes it useless for actions" >&2
+    return 1
+  }
+  awk '/^can_root_now\(\) \{/ { inb = 1 } inb && /sudo -n/ { found = 1 } inb && /^\}/ { exit }
+       END { exit !found }' <<<"${body}" || {
+    echo "can_root_now does not actually test whether sudo works" >&2
+    return 1
+  }
+}
+check "can_root_now asks whether root is reachable, not whether sudo exists" \
+  can_root_now_is_stricter
+# ...and the two probes that produced the wrong answer must use it.
+probes_use_the_stricter_test() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  awk '/step "Inbound guard"/ { inb = 1 }
+       inb && /can_root_now/  { found = 1 }
+       inb && /step "Netmode/ { exit }
+       END { exit !found }' <<<"${body}" || {
+    echo "the inbound-guard check still decides on 'sudo is installed'" >&2
+    return 1
+  }
+  sed 's/#.*//' "${REPO}/netmode.sh" \
+    | awk '/^inbound_loaded\(\) \{/ { inb = 1 } inb && /can_root_now/ { found = 1 }
+           inb && /^\}/ { exit } END { exit !found }' || {
+    echo "netmode's inbound_loaded still decides on 'sudo is installed'" >&2
+    return 1
+  }
+}
+check "the guard probes say 'could not look' instead of 'not loaded'" \
+  probes_use_the_stricter_test
+
 echo "# a number that is not a number must be named, not absorbed"
 # Each of these fails quietly or confusingly, never as itself. Measured:
 #   OLLAMA_CONTEXT_LENGTH=abc  Ollama warns once in its own log and runs at the

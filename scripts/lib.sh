@@ -118,6 +118,25 @@ can_root() {
   [[ "${EUID}" -eq 0 ]] || have sudo
 }
 
+# can_root_now — can this process become root WITHOUT prompting?
+#
+# can_root above answers "is the sudo binary installed", which is the right
+# question for a step that is allowed to ask for a password. It is the wrong
+# question for a PROBE, and the difference produced a false security alarm:
+# 'lca check' as a user who is not a sudoer took the can_root branch, ran
+# 'sudo nft list table', got nothing, and reported "inbound guard NOT loaded —
+# WebUI/Ollama ports may be publicly reachable" on a machine whose guard may be
+# perfectly loaded. It then advised 'sudo netmode.sh harden', which that user
+# cannot run either. Measured on this box with a freshly created account.
+#
+# 'sudo -n' also means a probe can never sit waiting for a password inside a
+# health check that setup.sh runs unattended.
+can_root_now() {
+  [[ "${EUID}" -eq 0 ]] && return 0
+  have sudo || return 1
+  sudo -n true >/dev/null 2>&1
+}
+
 # apt_get ARGS... — apt-get as root, non-interactive, and tolerant of the
 # dpkg lock that apt-daily / unattended-upgrades routinely hold during the
 # first minutes of a fresh boot (waits up to 10 min instead of failing hard).

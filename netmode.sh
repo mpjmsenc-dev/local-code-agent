@@ -236,7 +236,11 @@ apply_inbound_guard() {
 # die() and abort `status` mid-run, leaving the operator with no answer at all
 # about whether their ports are guarded — worse than an explicit "unknown".
 inbound_loaded() {
-  can_root || return 2
+  # can_root_now, not can_root: the latter is true whenever the sudo binary
+  # exists, so a user who cannot actually escalate fell through to the nft
+  # call, got nothing, and was told the guard is NOT loaded rather than that
+  # nobody could look.
+  can_root_now || return 2
   as_root nft list table inet "${INBOUND_TABLE}" >/dev/null 2>&1
 }
 
