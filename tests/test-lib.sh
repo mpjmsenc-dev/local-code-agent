@@ -4327,6 +4327,61 @@ free_gb_is_a_number()      { [[ "$(free_gb /)" =~ ^[0-9]+$ ]]; }
 free_gb_walks_up()         { [[ "$(free_gb /nonexistent-xyz/models)" =~ ^[0-9]+$ ]]; }
 check "free_gb reports whole GB for a path"        free_gb_is_a_number
 check "...and for one that does not exist yet"     free_gb_walks_up
+# ...and free_gb has to be pointed at the RIGHT filesystem, which is
+# ollama_models_dir's whole job. `make coverage` found this one: three branches
+# and no test touched any of them.
+#
+# It is not cosmetic. Someone who moved their models onto a second, bigger disk
+# with OLLAMA_MODELS has a pre-flight check that would measure / instead, find
+# it full, and refuse a pull that had room — the exact opposite of the failure
+# the check was added to prevent.
+models_dir_for() {  # OLLAMA_MODELS HOME -> the answer
+  bash -c 'source "$1" >/dev/null 2>&1
+           if [[ -n "$2" ]]; then export OLLAMA_MODELS="$2"; else unset OLLAMA_MODELS; fi
+           HOME="$3"; ollama_models_dir' _ "${REPO}/scripts/lib.sh" "$1" "$2"
+}
+ollama_models_dir_answers_correctly() {
+  local home="${SANDBOX}/mdir" service=/usr/share/ollama/.ollama/models got want
+  rm -rf "${home}"; mkdir -p "${home}/.ollama/models"
+  # 1. An explicit OLLAMA_MODELS wins over any directory that happens to exist.
+  got="$(models_dir_for /mnt/big-disk/models "${home}")"
+  [[ "${got}" == "/mnt/big-disk/models" ]] || {
+    printf 'OLLAMA_MODELS ignored: wanted /mnt/big-disk/models, got %s\n' "${got}" >&2
+    return 1; }
+  # 2. Unset: the service account's store if it exists, else this user's. The
+  #    expectation is computed from the same fact the code tests, so this is
+  #    deterministic on a box with or without the service directory — the
+  #    environment-dependence trap that bit the guarded_ports tests.
+  want="${home}/.ollama/models"
+  [[ -d "${service}" ]] && want="${service}"
+  got="$(models_dir_for "" "${home}")"
+  [[ "${got}" == "${want}" ]] || {
+    printf 'unset OLLAMA_MODELS: wanted %s, got %s\n' "${want}" "${got}" >&2
+    return 1; }
+  # 3. Nothing exists anywhere: still an answer, not an empty string. It only
+  #    feeds a warning, and free_gb walks up to the nearest real parent.
+  want="${SANDBOX}/nowhere/.ollama/models"
+  [[ -d "${service}" ]] && want="${service}"
+  got="$(models_dir_for "" "${SANDBOX}/nowhere")"
+  [[ "${got}" == "${want}" ]] || {
+    printf 'with no store anywhere: wanted %s, got %s\n' "${want}" "${got}" >&2
+    return 1; }
+}
+check "ollama_models_dir prefers OLLAMA_MODELS, then the real store" \
+  ollama_models_dir_answers_correctly
+# The ORDER of the two candidates matters and cannot be asserted on a box that
+# has only one of them: Ollama runs as its own service account, so on a machine
+# with both stores the service one is the filesystem that fills up.
+service_store_is_checked_first() {
+  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
+    | awk '/^ollama_models_dir\(\) \{/ { inb = 1 }
+           inb && /for d in/ {
+             print; exit (index($0, "/usr/share/ollama") > 0 &&
+                          index($0, "/usr/share/ollama") < index($0, "HOME")) ? 0 : 1 }
+           inb && /^\}/ { exit 1 }' >/dev/null
+}
+check "...and looks at the service account's store before the user's" \
+  service_store_is_checked_first
 pull_with_space() {   # FREE_GB -> "rc=N attempts=N" plus the message
   bash -c '
     set -uo pipefail
