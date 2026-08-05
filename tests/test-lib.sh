@@ -1245,6 +1245,83 @@ OLLAMA_CONTEXT_LENGTH="8192"
 rm -f "${DROP}"
 check "missing drop-in counts as a mismatch" dropin_drifted
 
+echo "# a config file must never be half-replaced by a write that failed"
+# 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
+# has written a byte. Demonstrated by accident, on the real function: an unbound
+# variable inside render_ollama_dropin_content left the drop-in holding its
+# header and '[Service]' and nothing else — OLLAMA_HOST and the context length
+# simply gone from a file that had been correct a second earlier.
+#
+# Nine files were written that way, and the systemd units are the ones that
+# make it serious: systemd will not load a unit it cannot parse, and one of
+# them re-applies the inbound guard at boot. A truncated copy of THAT means the
+# WebUI and Ollama ports come back public at the next reboot.
+WRF="${SANDBOX}/wrf"
+rm -rf "${WRF}"; mkdir -p "${WRF}"
+printf 'OLD CONTENT\n' > "${WRF}/f"
+# The temp path is occupied by a directory, so tee cannot write it — a failure
+# that lands for root as well, unlike an unwritable parent.
+mkdir -p "${WRF}/f.lca-new"
+wrf_write() { printf 'NEW CONTENT\n' | write_root_file "${WRF}/f"; }
+# Its own wrapper rather than the suite's not_ok, which is not defined until
+# further down this file.
+wrf_write_fails() { ! wrf_write >/dev/null 2>&1; }
+check "a write that cannot happen reports failure" wrf_write_fails
+check "...and the old file is untouched" \
+  test "$(cat "${WRF}/f")" = "OLD CONTENT"
+rmdir "${WRF}/f.lca-new"
+check "a good write replaces the content" wrf_write
+check "...with what was actually sent" test "$(cat "${WRF}/f")" = "NEW CONTENT"
+check "...at mode 0644 by default" test "$(stat -c %a "${WRF}/f")" = "644"
+check "...honouring an explicit mode" \
+  test "$(printf 'x\n' | write_root_file "${WRF}/g" 0600 && stat -c %a "${WRF}/g")" = "600"
+wrf_no_leftovers() { ! compgen -G "${WRF}/*.lca-new" >/dev/null; }
+check "...and leaving no temp file behind" wrf_no_leftovers
+# ...and the renderer's own failure must be caught BEFORE the destination is
+# touched, which is the half a pipeline cannot do for itself: nothing
+# downstream can tell a producer that died early from one with little to say.
+dropin_survives_a_failed_render() {
+  local sb="${SANDBOX}/dropinfail" out
+  rm -rf "${sb}"; mkdir -p "${sb}"
+  printf 'GOOD DROPIN\n' > "${sb}/override.conf"
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"; C_RED=""; C_RESET=""; C_GREEN=""
+    OLLAMA_DROPIN_DIR="$2"; OLLAMA_DROPIN="$2/override.conf"
+    render_ollama_dropin_content() { return 1; }   # the renderer fails
+    render_ollama_dropin
+  ' _ "${REPO}/scripts/lib.sh" "${sb}" 2>&1)" || true
+  grep -q 'is unchanged' <<<"${out}" || {
+    printf 'a failed render was not reported as leaving the file alone: %s\n' "${out}" >&2
+    return 1
+  }
+  [[ "$(cat "${sb}/override.conf")" == "GOOD DROPIN" ]] || {
+    echo "a failed render destroyed the existing drop-in" >&2
+    return 1
+  }
+}
+check "a failed render leaves the previous Ollama settings in place" \
+  dropin_survives_a_failed_render
+# ...and nothing may go back to piping straight at a root-owned file.
+no_tee_into_a_root_file() {
+  local hits
+  hits="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+            "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
+          | grep -vE ':[0-9]+:[[:space:]]*#' \
+          | grep -v 'write_root_file() {' || true)"
+  # lib.sh's own implementation is the one legitimate use: it tees into the
+  # TEMP, which is the whole point.
+  # '[$]{tmp}' rather than the literal, so this line is not itself an
+  # unexpanded-expression finding — the same bracket idiom used elsewhere here.
+  hits="$(grep -v 'as_root tee "[$]{tmp}"' <<<"${hits}" || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'these truncate a root-owned file before knowing what to put in it:\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "no script tees straight into a root-owned file" no_tee_into_a_root_file
+
 echo "# lib.sh defines HOME when unset (cloud-init / systemd oneshots — else ollama panics)"
 home_set_when_unset() {
   (

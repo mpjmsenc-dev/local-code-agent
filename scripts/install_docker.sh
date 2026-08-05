@@ -28,11 +28,11 @@ install_docker_repo_and_engine() {
   esac
 
   curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" \
-    | as_root tee /etc/apt/keyrings/docker.asc >/dev/null
+    | write_root_file /etc/apt/keyrings/docker.asc 0644
   as_root chmod a+r /etc/apt/keyrings/docker.asc
 
   echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro_id} ${codename} stable" \
-    | as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
+    | write_root_file /etc/apt/sources.list.d/docker.list 0644
 
   apt_get update -y
   apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin

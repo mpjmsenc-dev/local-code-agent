@@ -968,9 +968,52 @@ render_ollama_dropin_content() {
 # render_ollama_dropin — (re)write the ollama systemd drop-in from the
 # current .env values plus any extra KEY=VALUE lines in config/ollama.env.
 # Used by install_ollama.sh at install time and tune.sh on every re-tune.
+# write_root_file DEST [MODE] — install stdin at DEST without ever leaving a
+# half-written file there.
+#
+# Replaces 'producer | as_root tee DEST'. tee opens DEST and TRUNCATES it
+# before the producer has written a byte, so anything that goes wrong part way
+# through replaces a working file with a fragment. Demonstrated: an unbound
+# variable inside render_ollama_dropin_content left the drop-in holding its
+# header and '[Service]' and nothing else — the OLLAMA_HOST and context-length
+# lines simply gone, on a file that had been correct a moment earlier.
+#
+# For the systemd units that matters more than it sounds. systemd will not load
+# a unit it cannot parse, and one of them is the service that re-applies the
+# inbound guard at boot: a truncated copy means the WebUI and Ollama ports come
+# back PUBLIC at the next reboot — the exact failure the rest of this project
+# spends paragraphs preventing.
+#
+# The temp sits beside DEST so the last step is a rename within one filesystem:
+# atomic, and impossible to half-do. DEST is not opened at all until the whole
+# content is on disk, so a full disk costs the temp and nothing else.
+#
+# Callers must still check the PIPELINE status, or better, materialise the
+# content first — nothing downstream can tell a producer that died early from
+# one that simply had little to say.
+write_root_file() {
+  local dest="$1" mode="${2:-0644}" tmp="$1.lca-new"
+  if ! as_root tee "${tmp}" >/dev/null; then
+    as_root rm -f "${tmp}" 2>/dev/null || true
+    return 1
+  fi
+  if as_root chmod "${mode}" "${tmp}" && as_root mv -f "${tmp}" "${dest}"; then
+    return 0
+  fi
+  as_root rm -f "${tmp}" 2>/dev/null || true
+  return 1
+}
+
 render_ollama_dropin() {
+  # Rendered into a variable FIRST, so a failure inside the renderer is caught
+  # while the existing drop-in is still untouched. Piping the renderer straight
+  # at the destination is what let a mid-render error truncate it.
+  local content
+  content="$(render_ollama_dropin_content)" \
+    || die "Could not render the Ollama settings — ${OLLAMA_DROPIN} is unchanged."
   as_root mkdir -p "${OLLAMA_DROPIN_DIR}"
-  render_ollama_dropin_content | as_root tee "${OLLAMA_DROPIN}" >/dev/null
+  printf '%s\n' "${content}" | write_root_file "${OLLAMA_DROPIN}" \
+    || die "Could not write ${OLLAMA_DROPIN} — a full disk is the usual cause, so check 'df -h'. The previous settings are still in place."
   ok "Wrote ${OLLAMA_DROPIN}"
 }
 

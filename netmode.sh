@@ -109,7 +109,12 @@ render_rules() {
 
 write_rules_file() {
   as_root mkdir -p "${NETMODE_DIR}"
-  render_rules | as_root tee "${NFT_RULES_FILE}" >/dev/null
+  # Rendered first, so a failure inside render_rules cannot leave a fragment
+  # where the ruleset used to be — nft would refuse to load it at boot.
+  local rules
+  rules="$(render_rules)" || die "Could not render the offline ruleset — ${NFT_RULES_FILE} is unchanged."
+  printf '%s\n' "${rules}" | write_root_file "${NFT_RULES_FILE}" \
+    || die "Could not write ${NFT_RULES_FILE} (disk full? check 'df -h') — the previous ruleset is unchanged."
 }
 
 # --- Always-on inbound guard -----------------------------------------------
@@ -213,7 +218,12 @@ apply_inbound_guard() {
     return 0
   fi
   as_root mkdir -p "${NETMODE_DIR}"
-  render_inbound_rules | as_root tee "${INBOUND_RULES_FILE}" >/dev/null
+  # This is the file the boot service feeds to nft. A truncated one does not
+  # load, and not loading means the WebUI and Ollama ports are public.
+  local inbound
+  inbound="$(render_inbound_rules)" || die "Could not render the inbound guard — ${INBOUND_RULES_FILE} is unchanged."
+  printf '%s\n' "${inbound}" | write_root_file "${INBOUND_RULES_FILE}" \
+    || die "Could not write ${INBOUND_RULES_FILE} (disk full? check 'df -h') — the previous guard ruleset is unchanged."
   as_root nft -f "${INBOUND_RULES_FILE}"
   # Name only what was actually put in the drop set. render_inbound_rules
   # REFUSES port 22 — so a WEBUI_PORT of 22 produced "WebUI (port 22) ...
@@ -246,7 +256,8 @@ inbound_loaded() {
 
 save_state() {
   as_root mkdir -p "${NETMODE_DIR}"
-  printf '%s\n' "$1" | as_root tee "${NETMODE_STATE_FILE}" >/dev/null
+  printf '%s\n' "$1" | write_root_file "${NETMODE_STATE_FILE}" \
+    || die "Could not record the netmode state in ${NETMODE_STATE_FILE} (disk full? check 'df -h'). The mode on disk is unchanged, so a reboot would restore the old one."
 }
 
 # Tri-state, the same contract as inbound_loaded below: 0 loaded, 1 not
@@ -293,7 +304,7 @@ install_service() {
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
-  } | as_root tee "${NETMODE_SERVICE}" >/dev/null || return 1
+  } | write_root_file "${NETMODE_SERVICE}" || return 1
   as_root systemctl daemon-reload || return 1
   as_root systemctl enable local-code-agent-netmode.service >/dev/null 2>&1 || return 1
   ok "Netmode now persists across reboots."

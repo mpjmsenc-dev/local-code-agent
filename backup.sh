@@ -423,7 +423,8 @@ install_timer() {
     echo "[Service]"
     echo "Type=oneshot"
     echo "ExecStart=\"${SCRIPT_DIR}/backup.sh\""
-  } | as_root tee "${BACKUP_SERVICE}" >/dev/null
+  } | write_root_file "${BACKUP_SERVICE}" \
+    || die "Could not write ${BACKUP_SERVICE} (disk full? check 'df -h'). The existing backup service is unchanged."
   {
     echo "[Unit]"
     echo "Description=Run the local-code-agent backup on a schedule"
@@ -434,7 +435,8 @@ install_timer() {
     echo ""
     echo "[Install]"
     echo "WantedBy=timers.target"
-  } | as_root tee "${BACKUP_TIMER}" >/dev/null
+  } | write_root_file "${BACKUP_TIMER}" \
+    || die "Could not write ${BACKUP_TIMER} (disk full? check 'df -h'). The existing backup timer is unchanged."
   as_root systemctl daemon-reload
   as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"

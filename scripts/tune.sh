@@ -141,7 +141,8 @@ install_service() {
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
-  } | as_root tee "${TUNE_SERVICE}" >/dev/null
+  } | write_root_file "${TUNE_SERVICE}" \
+    || die "Could not write ${TUNE_SERVICE} (disk full? check 'df -h'). Auto-tune's boot service is unchanged."
   as_root systemctl daemon-reload
   as_root systemctl enable local-code-agent-tune.service >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-tune.service — check: systemctl status local-code-agent-tune"
