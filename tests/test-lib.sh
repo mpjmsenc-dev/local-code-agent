@@ -2145,6 +2145,32 @@ if have jq && have curl; then
   # 'lca backup' is the RIGHT answer to a backup question, not a hijack.
   check "bench: 'lca backup' is not the handover firing" \
     bench_matcher hijacked no 'you can use lca backup for that'
+  # The OTHER shape of the same handover, and the one that was invisible. The
+  # prompt tells the model to open with a comment line and then the recipe; a
+  # small model routinely emits the comment and a bare 'lca' with the mkdir/cd
+  # dropped. Measured on the starter question about a systemd service that will
+  # not start: three of six answers opened that way and the matcher counted
+  # one, so the bench's headline failure figure was a third of the truth.
+  check "bench: the header plus a bare 'lca' is the handover firing" \
+    bench_matcher hijacked yes '# in a terminal on the server (SSH in from your phone)
+lca
+
+To diagnose why a systemd service is not starting, check systemctl status.'
+  # ...and the same header above a REAL command is the correct answer, not a
+  # hijack. This is the case that caught the first version of the fix: matching
+  # the header alone took the backup question from 0/6 to 6/6 while its answers
+  # had not changed at all, because
+  #     # in a terminal on the server (SSH in from your phone)
+  #     lca backup
+  # is exactly what the prompt asks for. Being sent to the coding AGENT is the
+  # failure; the location hint is not.
+  check "bench: the header above 'lca backup' is a correct answer" \
+    bench_matcher hijacked no '# in a terminal on the server (SSH in from your phone)
+lca backup'
+  # ...and prose that merely mentions a terminal is not it either. The header is
+  # quoted from the prompt verbatim; "open a terminal" is what any answer says.
+  check "bench: mentioning a terminal in passing is not the handover" \
+    bench_matcher hijacked no 'Open a terminal and run systemctl status my-service.'
   check "bench: numbered setup steps are a tutorial" \
     bench_matcher is_tutorial yes '1. run npm init
 2. then pip install flask'

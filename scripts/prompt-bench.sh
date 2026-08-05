@@ -90,6 +90,7 @@ parse_args() {
 #   terminal must hand over — a starter question the empty screen offers
 #   backup   must NOT hand over — it has a one-word answer, 'lca backup'
 #   explain  must NOT hand over — a language question is what the chat is FOR
+#   service  must NOT hand over — a question about THIS server, also a starter
 BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # The second real one, photographed from a phone on 2026-08-04: the same
 # request carrying a feature list AND a trailing follow-up instruction ("After
@@ -102,18 +103,30 @@ BENCH_BUILD="build me a whole functioning income and expense tracker app"
 # own header warns about, caught by re-running rather than by shipping the
 # first number.
 #
-# Baseline, 3b rung, current prompt, n=6, through /api/chat (see ask() below):
-#   build     hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
-#   wishlist  hands over 6/6  says where 6/6  tutorial 0/6  tool-call 0/6
-#   terminal  hands over 9/10 says where 10/10               tool-call 0/10
-#   backup    handover-fired 0/6                            tool-call 0/6
-#   explain   handover-fired 0/6                            tool-call 0/6
+# Baseline, 3b rung, current prompt, n=6, through /api/chat (see ask() below),
+# with the two-part hijack matcher below:
+#   build     hands over 6/6  says where 6/6  tutorial 0/6  handover 6/6  tool 0/6
+#   wishlist  hands over 6/6  says where 6/6  tutorial 2/6  handover 6/6  tool 0/6
+#   terminal  hands over 5/6  says where 6/6  tutorial 0/6  handover 1/6  tool 0/6
+#   backup    hands over 0/6  says where 6/6  tutorial 0/6  handover 0/6  tool 0/6
+#   explain   hands over 0/6  says where 0/6  tutorial 0/6  handover 0/6  tool 0/6
+#   service   hands over 2/6  says where 6/6  tutorial 0/6  handover 2/6  tool 0/6
 #
-# The four unchanged rows are the same figures the /api/generate era produced,
-# which is what made the endpoint switch safe without resetting the baseline.
-# 'terminal' is quoted at n=10 because it is the one that moved: 6/10 on the
-# wording shipped before this, 9/10 after a single clause was added. See
-# lca_system_prompt for the variant that made it 1/10.
+# Read those last two columns with the WANTED lines in main(): for build,
+# wishlist and terminal a fired handover is the POINT; for backup, explain and
+# service it is the failure.
+#
+# Two rows are worth naming rather than leaving in the table:
+#
+#   service 2/6 is a real, open failure — a question about THIS server that
+#   the prompt says to answer directly, and one of the five starter questions
+#   the empty screen offers. It was invisible until the matcher below learned
+#   the truncated shape of the handover.
+#
+#   wishlist tutorial 2/6 is noise, not a regression. The same question has
+#   measured 3/4, then 0/6, now 2/6 on an unchanged prompt. Six samples is
+#   enough to see a five-point move and not enough to call a two-point one;
+#   that is what the header says about -n and it applies to this table too.
 BENCH_WISHLIST="build me an income and expense tracker app with categories, a monthly summary, search and filter, CSV export, local storage, a responsive UI, unit tests and a README. After finishing, review the code and suggest improvements."
 # The fifth is not hypothetical either: it is verbatim the last entry in
 # config/prompt-suggestions.json, i.e. one of five things a phone user can tap
@@ -124,6 +137,12 @@ BENCH_WISHLIST="build me an income and expense tracker app with categories, a mo
 BENCH_TERMINAL="What kinds of task can you help with in this chat, and which ones need the terminal agent instead? Answer briefly and give me the exact command for the terminal case."
 BENCH_BACKUP="how do I take a backup right now?"
 BENCH_EXPLAIN="explain the difference between a list and a tuple in python"
+# Also verbatim from config/prompt-suggestions.json, and the one that measured
+# badly: "walk me through diagnosing it, starting with the exact commands" has
+# the shape of a build request while being a question about THIS server, which
+# the prompt says to answer directly and never send to aider. Three of six
+# answers on the 3b rung opened with the handover anyway.
+BENCH_SERVICE="A systemd service won't start. Walk me through diagnosing it, starting with the exact commands to run and what to look for in the output."
 
 SYSTEM=""
 
@@ -183,7 +202,36 @@ tool_called() {
   grep -q '"name"' <<<"$1" && grep -q '"arguments"' <<<"$1"
 }
 says_where()  { grep -qiE 'terminal|ssh|on (your|the|this) server' <<<"$1"; }
-hijacked()    { grep -qE 'mkdir -p [^&]*&&|cd [^&]*&& *lca' <<<"$1"; }
+# The handover has two shapes and this saw only one. The prompt tells the model
+# to open with a comment line and then the recipe, and a small model routinely
+# emits the comment plus a bare 'lca' with the mkdir/cd dropped:
+#
+#     # in a terminal on the server (SSH in from your phone)
+#     lca
+#
+# Measured on the starter question "a systemd service won't start — walk me
+# through diagnosing it": three of six answers opened that way, and this
+# matcher counted one. So the number this bench prints for its own headline
+# failure was a third of the truth, on exactly the questions it exists to
+# protect. The comment line is quoted verbatim from the prompt, which makes it
+# the more reliable half of the signature, not the weaker one.
+hijacked() {
+  grep -qE 'mkdir -p [^&]*&&|cd [^&]*&& *lca' <<<"$1" && return 0
+  # The header line AND a line that is just 'lca'. Both halves are needed.
+  #
+  # The header alone was the first attempt, and it fired on the best possible
+  # answer: asked "how do I take a backup right now?" the model replies
+  #
+  #     # in a terminal on the server (SSH in from your phone)
+  #     lca backup
+  #
+  # which is exactly right — the prompt teaches both the location hint and the
+  # command. Counting that as the handover firing took this metric from 0/6 to
+  # 6/6 on a question whose answers had not changed at all. Being sent to the
+  # coding AGENT is the failure, and that is the bare word on its own.
+  grep -qiF 'in a terminal on the server' <<<"$1" \
+    && grep -qE '^[[:space:]]*lca[[:space:]]*$' <<<"$1"
+}
 is_tutorial() {
   # Our own recipe contains 'mkdir', so strip it before looking for setup
   # steps — otherwise the fix reads as the failure it was written to prevent.
@@ -243,7 +291,7 @@ main() {
 
   local chars; chars="$(wc -c <<<"${SYSTEM}")"
   info "Prompt is ${chars} chars, roughly $(( chars / 4 )) tokens of the ${OLLAMA_CONTEXT_LENGTH} context — spent on every message."
-  info "This asks the model $(( SAMPLES * 5 )) times; on a CPU box that is minutes, not seconds."
+  info "This asks the model $(( SAMPLES * 6 )) times; on a CPU box that is minutes, not seconds."
   echo
 
   ok "WANTED: these hand over and say where; tutorial and tool-call stay 0"
@@ -254,6 +302,7 @@ main() {
   ok "WANTED: these answer the question — 'handover-fired' and 'tool-call' must stay 0"
   bench backup  "${BENCH_BACKUP}"
   bench explain "${BENCH_EXPLAIN}"
+  bench service "${BENCH_SERVICE}"
   echo
   info "Compare candidates with the same -n. Differences at n<6 are usually noise."
 }
