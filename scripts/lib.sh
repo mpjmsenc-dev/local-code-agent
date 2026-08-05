@@ -818,6 +818,18 @@ vram_mib_from_smi() {
   while read -r line; do
     line="${line//[^0-9]/}"
     [[ -n "${line}" ]] || continue
+    # Normalised to base 10 ONCE, here, rather than at each comparison. Bash
+    # reads a leading zero as OCTAL, so a zero-padded reading does not compare
+    # wrong — it ERRORS: measured with '08192', bash printed
+    #   ((: 08192: value too great for base (error token is "08192")
+    # from inside a function whose whole job is to answer a question quietly,
+    # then dropped the reading and reported no VRAM at all.
+    #
+    # Fixing only the comparison below is not enough, which is why this
+    # normalises instead: '(( best > 0 ))' at the end hits the same trap, and
+    # the padded string would be printed back to the caller to trip over next.
+    # nvidia-smi does not pad today; not depending on that costs one line.
+    line=$(( 10#${line} ))
     (( line > best )) && best="${line}"
   done
   (( best > 0 )) || return 1
