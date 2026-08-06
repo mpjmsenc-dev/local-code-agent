@@ -251,10 +251,29 @@ load_env() {
       # Deliberately create nothing: see load_env_readonly below.
       :
     elif [[ -f "${ENV_EXAMPLE}" ]]; then
-      cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-      # Notice goes to stderr: load_env may run inside commands whose stdout
-      # is data (a message on stdout would corrupt it).
-      info "Created ${ENV_FILE} from .env.example (edit it to customize)." >&2
+      # The copy can fail, and unguarded it failed the way every raw tool
+      # failure does. setup.sh installs to /opt/local-code-agent as root, and
+      # 'lca' is meant to be run as an ordinary user, so a missing .env there
+      # gives:
+      #
+      #   cp: cannot create regular file '/opt/local-code-agent/.env':
+      #   Permission denied
+      #
+      # ...and then the command aborts under errexit, mid-load_env, having said
+      # nothing about what .env is for or what to do. Measured as the 'ubuntu'
+      # user against a root-owned checkout.
+      #
+      # Not fatal: the branch below already treats a missing config as
+      # "continue with built-in defaults", and every default is right there in
+      # this function. So warn, name the cause and the fix, and carry on — the
+      # only thing actually lost is that settings will not persist.
+      if cp "${ENV_EXAMPLE}" "${ENV_FILE}" 2>/dev/null; then
+        # Notice goes to stderr: load_env may run inside commands whose stdout
+        # is data (a message on stdout would corrupt it).
+        info "Created ${ENV_FILE} from .env.example (edit it to customize)." >&2
+      else
+        warn "Could not create ${ENV_FILE} — $(id -un) cannot write to ${REPO_ROOT}. Continuing with built-in defaults, but settings will not persist. To fix: sudo cp ${ENV_EXAMPLE} ${ENV_FILE} && sudo chown $(id -un) ${ENV_FILE}"
+      fi
     else
       warn "Neither .env nor .env.example found in ${REPO_ROOT}; using built-in defaults."
     fi

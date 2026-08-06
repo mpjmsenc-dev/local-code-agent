@@ -1807,6 +1807,47 @@ the_two_env_rules_disagree_on_purpose() {
 check "the hand-edit rule and the tarball rule are not the same rule" \
   the_two_env_rules_disagree_on_purpose
 
+echo "# ...and a .env it cannot create is a warning, not a raw 'cp:' abort"
+# setup.sh installs to /opt/local-code-agent as root and 'lca' is meant to run
+# as an ordinary user, so a missing .env there hit an unguarded cp:
+#
+#   cp: cannot create regular file '/opt/local-code-agent/.env': Permission denied
+#
+# ...and the command then aborted under errexit, mid-load_env, having said
+# nothing about what .env is or what to do. Measured as the 'ubuntu' user
+# against a root-owned checkout.
+#
+# Continuing is the right answer, not dying: the branch beside it already
+# treats a missing config as "use the built-in defaults", and every default is
+# set a few lines further down the same function.
+load_env_survives_an_uncreatable_env() {
+  local body
+  body="$(awk '/^load_env\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  # No 'grep ... | head -1' here: head leaves after its line and the grep takes
+  # SIGPIPE, which is the same 141-under-pipefail trap this suite bans
+  # elsewhere. grep -q answers the question without a pipe at all.
+  # shellcheck disable=SC2016  # the literal ${ENV_EXAMPLE} is what we search for
+  grep -q 'cp "${ENV_EXAMPLE}"' <<<"${body}" || {
+    echo 'load_env no longer creates .env from the example — this gate stopped watching' >&2
+    return 1; }
+  # The copy must be a tested condition, not a bare statement that errexit
+  # turns into an abort.
+  grep -qE '(if|elif|\|\||&&|!) *cp "\$\{ENV_EXAMPLE\}"' <<<"${body}" || {
+    echo "load_env runs the copy unguarded, so a read-only checkout aborts on a raw 'cp:' line" >&2
+    return 1; }
+  # ...and the failure arm must say what to do rather than only that it failed.
+  grep -q 'chown' <<<"${body}" || {
+    echo 'load_env reports it could not write .env without naming the fix' >&2
+    return 1; }
+  # ...and must not be fatal.
+  ! grep -qE 'die .*ENV_FILE.*cannot write|die .*Could not create' <<<"${body}" || {
+    echo 'a .env that cannot be created should fall back to defaults, not stop the command' >&2
+    return 1; }
+}
+check "load_env warns and keeps going when it cannot write .env" \
+  load_env_survives_an_uncreatable_env
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has
