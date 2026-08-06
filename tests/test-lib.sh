@@ -7063,6 +7063,67 @@ verdict_line_is_consistent() {
 check "the SETUP COMPLETE line matches across lib.sh and the docs" \
   verdict_line_is_consistent
 
+# ...and the first-boot script has to REACH one of those lines, including when
+# the clone worked but brought back the wrong tree.
+#
+# install.sh checks this — "observed here by accident, cloning a stale local
+# 'main' that held only a README" — and do-user-data.sh, whose header opens
+# with an "EDIT ME if you forked the repository" block, did not. Measured
+# against a repository holding one README, apt stubbed:
+#
+#   .../target/scripts/motd.sh: No such file or directory
+#   (could not install the login banner — continuing)
+#   .../target/setup.sh: No such file or directory
+#   === setup reported problems — its verdict line is above ===
+#
+# It points at a verdict line that does not exist, because setup.sh never ran,
+# and NOT ONE of the three lines its own header promises appears in the log.
+# docs/YOUR-TURN.md step 2 tells people to watch that log for a definitive
+# answer; a wrong fork is exactly when they need one.
+#
+# Driven for real against a local git repo. apt-get is stubbed because this
+# script installs packages unconditionally; everything else — the clone, the
+# check, the verdict — is the real thing.
+DUD_SB="${SANDBOX}/dud"
+dud_run() {  # REPO_DIR -> the log contents, then "rc=N"
+  local rc=0 out
+  rm -rf "${DUD_SB}/target" "${DUD_SB}/log"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${DUD_SB}/stub:${PATH}" LCA_REPO_URL="$1" LCA_DIR="${DUD_SB}/target" \
+         LCA_LOG="${DUD_SB}/log" LCA_RUN_SETUP=false \
+         timeout 120 bash "${REPO}/deploy/do-user-data.sh" 2>&1)" || rc=$?
+  printf '%s\nrc=%s\n' "${out}" "${rc}"
+}
+first_boot_refuses_a_tree_with_no_setup() {
+  local out
+  mkdir -p "${DUD_SB}/stub" "${DUD_SB}/notours"
+  printf '#!/bin/sh\nexit 0\n' > "${DUD_SB}/stub/apt-get"
+  chmod +x "${DUD_SB}/stub/apt-get"
+  if [[ ! -d "${DUD_SB}/notours/.git" ]]; then
+    ( cd "${DUD_SB}/notours" && git init -q . \
+      && echo '# some other project' > README.md \
+      && git -c user.email=t@t -c user.name=t add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  fi
+  out="$(dud_run "${DUD_SB}/notours")"
+  grep -q 'FIRST-BOOT INSTALL FAILED' <<<"${out}" || {
+    printf 'a clone with no setup.sh gives no verdict at all — the log just stops, which reads as "still working":\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'no setup.sh' <<<"${out}" || {
+    printf 'the verdict does not say what was actually wrong:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'rc=0' <<<"${out}" && {
+    printf 'it exited 0 having installed nothing:\n%s\n' "${out}" >&2
+    return 1; }
+  # ...and it must stop BEFORE the banner install, or a first boot pointed at
+  # the wrong repository leaves an /etc/update-motd.d symlink into it.
+  ! grep -q 'Installing the login banner' <<<"${out}" || {
+    printf 'it went on to install a login banner out of a tree that is not this project:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "the first-boot script refuses a clone that is not this project" \
+  first_boot_refuses_a_tree_with_no_setup
+
 echo "# the install's verdict must carry an exit status, not just a line"
 # setup.sh printed "SETUP FINISHED WITH ERRORS" and then exited 0. That made
 # deploy/do-user-data.sh's failure branch — and its comment claiming setup

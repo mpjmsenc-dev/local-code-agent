@@ -334,6 +334,46 @@ jobs:
           grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
             || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
 
+          # A clone that SUCCEEDS and brings back the wrong tree is a third
+          # outcome, and it used to produce none of the three verdict lines:
+          # setup.sh simply was not there, so the log ended with "setup
+          # reported problems — its verdict line is above" pointing at a line
+          # that did not exist. install.sh has checked for this since it was
+          # caught cloning a stale 'main' holding only a README; the file whose
+          # header says "EDIT ME if you forked the repository" did not.
+          rm -rf /tmp/lca-notours /tmp/lca-notours.git /tmp/lca-dud-notours
+          mkdir -p /tmp/lca-notours
+          git -C /tmp/lca-notours init -q .
+          echo '# some other project' > /tmp/lca-notours/README.md
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            add -A
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            commit --quiet -m 'not local-code-agent'
+          git -C /tmp/lca-notours branch -f ci-notours HEAD
+          git clone --quiet --bare /tmp/lca-notours /tmp/lca-notours.git
+          git -C /tmp/lca-notours.git symbolic-ref HEAD refs/heads/ci-notours
+          set +e
+          LCA_REPO_URL=/tmp/lca-notours.git LCA_DIR=/tmp/lca-dud-notours \
+            LCA_LOG=/tmp/dud-notours.log LCA_RUN_SETUP=false \
+            bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a clone with no setup.sh reported success"; cat /tmp/dud-notours.log; exit 1; }
+          grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-notours.log \
+            || { echo "FAIL: no verdict for a clone that is not this project"; cat /tmp/dud-notours.log; exit 1; }
+          # ...and it must have stopped before installing a login banner out of
+          # a tree that is not this project. Asserted on the LOG, not on
+          # /etc/update-motd.d: the successful runs earlier in this same step
+          # install a banner of their own, so the file's existence proves
+          # nothing about this run.
+          if grep -q 'Installing the login banner' /tmp/dud-notours.log; then
+            echo "FAIL: a banner was installed from a foreign checkout"
+            cat /tmp/dud-notours.log
+            exit 1
+          fi
+          echo "do-user-data.sh: success, re-run, failed clone, wrong tree and failing setup all behave"
+
           # And the path that was dead code until now: setup itself failing.
           # Every run above uses LCA_RUN_SETUP=false, which is exactly why
           # nobody noticed that setup.sh printed "SETUP FINISHED WITH ERRORS"

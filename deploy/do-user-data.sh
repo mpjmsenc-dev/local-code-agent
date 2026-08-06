@@ -70,6 +70,31 @@ main() {
     fi
   fi
 
+  # A clone can succeed and still leave you without the project. install.sh
+  # learned this the hard way — "observed here by accident, cloning a stale
+  # local 'main' that held only a README" — and this file, whose header opens
+  # with an "EDIT ME if you forked the repository" block, never did.
+  #
+  # Measured against a repository holding one README, everything else stubbed:
+  #
+  #   .../target/scripts/motd.sh: No such file or directory
+  #   (could not install the login banner — continuing)
+  #   .../target/setup.sh: No such file or directory
+  #   === setup reported problems — its verdict line is above ===
+  #
+  # ...and NOT ONE of the three lines this file's header promises the log
+  # always ends with. It points at a verdict line that does not exist, because
+  # setup.sh never ran. docs/YOUR-TURN.md step 2 tells people to watch this log
+  # for a definitive answer; a wrong fork or a stale branch is exactly when
+  # they need one, and it is exactly when there was none.
+  #
+  # Checked before the chmod and the banner install below, so their "No such
+  # file" noise never happens either.
+  if [[ ! -f "${INSTALL_DIR}/setup.sh" ]]; then
+    first_boot_failed "cloned ${REPO_URL} but it contains no setup.sh — that is not a local-code-agent checkout. Check the repository URL and the branch it points at."
+    return 1
+  fi
+
   # Git already records these as executable; re-applying is free and covers a
   # clone made under a umask or filesystem that dropped the bit. bin/ matters
   # now too — that is where the 'lca' command lives.
