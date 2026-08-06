@@ -1728,6 +1728,29 @@ webui_container_exists() {
   root_for_probe && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
+# webui_volume_has_data — true when the chat app's volume exists AND has
+# something in it, i.e. there is something in there to lose.
+#
+# A third answer, for the same reason webui_container_exists is distinct from
+# webui_drift: "no volume", "an empty volume" and "a volume holding every
+# account and chat" are three different states, and restore.sh is about to
+# 'rm -rf' whichever one it finds.
+#
+# A volume can only be read from inside a container, so this needs the image.
+# Every way of failing — no docker, no daemon, image missing, run refused —
+# answers "no data", on purpose: the only caller uses this to decide whether to
+# ASK, and a question nobody can answer is worse than no question. Nothing is
+# decided by it that could lose data on its own; the destructive step validates
+# the archive before it clears anything either way.
+webui_volume_has_data() {
+  have docker || return 1
+  as_root docker volume inspect open-webui >/dev/null 2>&1 || return 1
+  local listing
+  listing="$(as_root docker run --rm --entrypoint sh -v open-webui:/v:ro \
+               "${WEBUI_IMAGE}" -c 'ls -A /v' 2>/dev/null || true)"
+  [[ -n "${listing}" ]]
+}
+
 # webui_drift — echo the .env keys whose value has not reached the running
 # container, one per line; return non-zero when nothing has drifted.
 #

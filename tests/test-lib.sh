@@ -3781,6 +3781,91 @@ check "an offline restore says nothing was touched" \
   'net_blocked() { return 0; }
    as_root() { case "$*" in *"image inspect"*) return 1 ;; esac; return 0; }' \
   'any existing data is intact'
+
+# ...and the SUCCESSFUL path has to say what it costs, which it never did.
+# 'rm -rf /to/*' replaces everything in the live volume with the backup's, and
+# there is no undo: .env gets a .env.pre-restore copy a few lines up, the
+# gigabytes of accounts and chats get nothing. This file already knows the
+# price — the code-5 message says "the old accounts and chat history are gone"
+# — but only when the unpack FAILS. When it worked, the same data went and the
+# only line printed was "Restoring the 'open-webui' docker volume...".
+#
+# Measured on this box, which is exactly the case: webui.db, uploads, vector_db
+# and cache all sitting in the volume.
+webui_volume_data_probe() {  # STUBS -> 'yes' | 'no'
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    WEBUI_IMAGE=img
+    eval "$2"
+    if webui_volume_has_data; then echo yes; else echo no; fi
+  ' _ "${SANDBOX}/scripts/lib.sh" "$1" 2>/dev/null
+}
+volume_data_probe_answers() {
+  local bad=0 out
+  # Something in the volume — the only answer that should provoke a question.
+  out="$(webui_volume_data_probe 'have() { return 0; }
+    as_root() { case "$*" in *"docker run"*) echo webui.db ;; esac; return 0; }')"
+  [[ "${out}" == "yes" ]] || {
+    printf 'a volume holding webui.db reads as empty: %s\n' "${out}" >&2; bad=1; }
+  # An empty volume: nothing to lose, so no question on the fresh-machine path
+  # docs/MIGRATE.md is written for.
+  out="$(webui_volume_data_probe 'have() { return 0; }
+    as_root() { return 0; }')"
+  [[ "${out}" == "no" ]] || {
+    printf 'an empty volume reads as holding data, which would prompt on every fresh restore: %s\n' "${out}" >&2; bad=1; }
+  # No volume at all, and no docker at all. Both are "cannot tell", and both
+  # must answer no: a question nobody can answer is worse than no question.
+  out="$(webui_volume_data_probe 'have() { return 0; }
+    as_root() { case "$*" in *"volume inspect"*) return 1 ;; esac; return 0; }')"
+  [[ "${out}" == "no" ]] || {
+    printf 'a missing volume reads as holding data: %s\n' "${out}" >&2; bad=1; }
+  out="$(webui_volume_data_probe 'have() { return 1; }')"
+  [[ "${out}" == "no" ]] || {
+    printf 'a machine with no docker reads as holding data: %s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "'is there anything in the chat volume' has three answers, not two" \
+  volume_data_probe_answers
+restore_warns_before_replacing_live_data() {
+  local out
+  out="$(restore_volume_with 'webui_volume_has_data() { return 0; }
+                              confirm() { return 1; }')"
+  grep -q 'RC=0' <<<"${out}" || {
+    printf 'declining the replacement ended the whole restore:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -qi 'will be gone' <<<"${out}" || {
+    printf 'the live chat data is replaced without saying what that costs:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'nothing was touched' <<<"${out}" || {
+    printf 'declining does not say the existing data survived:\n%s\n' "${out}" >&2
+    return 1; }
+  # ...and it really must not have gone on to replace it.
+  ! grep -q 'WebUI data restored' <<<"${out}" || {
+    printf 'the restore ran anyway after being told not to:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "a restore that would replace live chat data says so first" \
+  restore_warns_before_replacing_live_data
+restore_stays_quiet_with_nothing_to_lose() {
+  local out
+  # The documented happy path: a fresh machine, empty or absent volume.
+  out="$(restore_volume_with 'webui_volume_has_data() { return 1; }')"
+  grep -q 'WebUI data restored' <<<"${out}" || {
+    printf 'a restore onto an empty volume no longer restores:\n%s\n' "${out}" >&2
+    return 1; }
+  ! grep -qi 'will be gone' <<<"${out}" || {
+    printf 'a fresh machine is warned about data it does not have:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "...and stays quiet when there is nothing to lose" \
+  restore_stays_quiet_with_nothing_to_lose
+# ...and saying yes must still restore, or the two above are satisfied by a
+# function that never does anything.
+check "...while agreeing to it restores as before" \
+  restore_survives "confirmed" \
+  'webui_volume_has_data() { return 0; }; confirm() { return 0; }' \
+  'WebUI data restored'
 # The two RECOVERY scripts must never reach for net_guard again. Every other
 # caller is an installer, where dying is right — one that cannot download
 # cannot install, and there is nothing else for it to do. These two have plenty

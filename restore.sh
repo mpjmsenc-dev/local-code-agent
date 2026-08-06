@@ -96,6 +96,37 @@ restore_webui_volume() {
     as_root docker pull "${WEBUI_IMAGE}" \
       || warn "Could not pull the Open WebUI image — the volume restore below may fail; re-run after 'sudo ${SCRIPT_DIR}/netmode.sh online' or once online."
   fi
+  # What is about to be lost, said BEFORE it is lost.
+  #
+  # The 'rm -rf /to/*' below replaces everything in the live volume with the
+  # backup's. This file already spells out what that costs — the code-5 message
+  # further down says "the old accounts and chat history are gone" — but only
+  # when the unpack FAILS. On the path that works, the same data went, and the
+  # only thing printed was "Restoring the 'open-webui' docker volume...".
+  #
+  # There is no undo. .env gets a .env.pre-restore copy a few lines up; the
+  # gigabytes of chat history get nothing, which is the asymmetry that makes
+  # this an oversight rather than a decision.
+  #
+  # Asked only when there IS something to lose. On the fresh machine
+  # docs/MIGRATE.md is written for, the volume is absent or empty and a prompt
+  # there would be noise on the documented happy path.
+  #
+  # confirm(), which auto-answers yes off a terminal, rather than uninstall.sh's
+  # "demand --yes non-interactively". A restore is a recovery people script —
+  # CI runs this very path unattended — and the person who needs the warning is
+  # the one typing 'lca restore' at a prompt, who gets it.
+  #
+  # Declining is not a failure: it skips the volume and lets the model re-pull,
+  # the reconciliation and the machine advice happen, like every other branch
+  # in this function.
+  if webui_volume_has_data; then
+    warn "The chat app's volume already holds data. Restoring REPLACES it — every account and chat created since this backup was taken will be gone, and nothing keeps a copy of them."
+    if ! confirm "Replace the live chat data with this backup's?"; then
+      info "Left the existing chat data alone — nothing was touched. Continuing with the model restore."
+      return 0
+    fi
+  fi
   # These two were bare, and either one failing took the whole restore with it.
   # They join the vol_rc scheme instead, because the reader's real question is
   # the one all these codes exist to answer: is my existing data still there?
