@@ -200,6 +200,29 @@ main() {
     || die "'${tarball}' is not a readable gzip archive — it is corrupt or truncated. Nothing was changed. Try an older backup in ${BACKUP_DIR}, or a copy you moved off-box."
   tar xzf "${tarball}" -C "${workdir}"
 
+  # ...and a readable gzip is still not necessarily OUR gzip. Each component
+  # below is optional on purpose, so an older or partial backup restores what
+  # it does have and skips the rest. But when NONE of them is present the file
+  # is not a backup at all, and the old code walked the whole optional path and
+  # finished with "[ ok ] Restore complete." Measured, on a tarball containing
+  # one text file:
+  #
+  #   [warn] Backup contains no .env — skipping.
+  #   [warn] Backup contains no WebUI volume archive — skipping.
+  #   [warn] Backup contains no model list — skipping.
+  #   [ ok ] Restored settings are in effect.
+  #   [ ok ] Restore complete.
+  #
+  # Three warnings nobody reads as fatal, two claims that are simply false —
+  # the "restored" settings were the current ones — and exit 0. Someone who
+  # points this at the wrong file is told their data came back, and may then
+  # delete the source it was still sitting in.
+  local components=0 component
+  for component in env open-webui-volume.tar.gz models.txt meta; do
+    [[ -e "${workdir}/${component}" ]] && components=$(( components + 1 ))
+  done
+  (( components > 0 )) || die "'${tarball}' is a valid archive but contains none of a local-code-agent backup's parts (no env, no WebUI volume, no model list, no machine details) — it is some other tarball. Nothing was changed. Backups made by this project live in ${BACKUP_DIR} and are named local-code-agent-backup-*.tar.gz."
+
   # 1. .env
   #
   # Read before it is installed, because installing it is what runs it. The

@@ -794,6 +794,86 @@ hostile_restore_continued() {
 }
 check "the rest of the restore still ran" hostile_restore_continued
 
+echo "# ...and a tarball with none of our parts is not a backup at all"
+# Every component of a backup is optional on purpose, so an older or partial
+# one restores what it has and skips the rest. With NONE of them present the
+# script walked that whole optional path and finished with "Restore complete".
+# Measured on a tarball containing one text file:
+#
+#   [warn] Backup contains no .env — skipping.
+#   [warn] Backup contains no WebUI volume archive — skipping.
+#   [warn] Backup contains no model list — skipping.
+#   [ ok ] Restored settings are in effect.
+#   [ ok ] Restore complete.
+#   exit 0
+#
+# Three warnings nobody reads as fatal, two claims that were simply false — the
+# "restored" settings were the current ones — and a success exit. Someone who
+# points this at the wrong file is told their data came back, and may then
+# delete the source it is still sitting in.
+NOTB_SB="${SANDBOX}/notabackup"
+mkdir -p "${NOTB_SB}/scripts" "${NOTB_SB}/stage"
+cp "${REPO}/restore.sh" "${NOTB_SB}/restore.sh"
+cp "${REPO}/.env.example" "${NOTB_SB}/.env.example"
+cp "${REPO}/.env.example" "${NOTB_SB}/.env"
+cp "${REPO}/scripts/lib.sh" "${NOTB_SB}/scripts/lib.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${NOTB_SB}/scripts/apply.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${NOTB_SB}/scripts/install_webui.sh"
+chmod +x "${NOTB_SB}/restore.sh" "${NOTB_SB}"/scripts/*.sh
+cat >> "${NOTB_SB}/scripts/lib.sh" <<'SHIM'
+have() { [[ "$1" != docker && "$1" != ollama ]]; }
+ensure_ollama_up_announced() { return 1; }
+SHIM
+echo 'hello' > "${NOTB_SB}/stage/hello.txt"
+tar czf "${NOTB_SB}/other.tar.gz" -C "${NOTB_SB}/stage" . 2>/dev/null
+notb_rc=0
+notb_out="$(cd "${NOTB_SB}" && ./restore.sh ./other.tar.gz </dev/null 2>&1)" || notb_rc=$?
+check "a tarball that is not ours is refused, not 'restored'" \
+  test "${notb_rc}" != "0"
+notb_said_why() { grep -qiE 'contains none of|is some other tarball' <<<"${notb_out}"; }
+check "...and says what it looked for and where real backups live" notb_said_why
+notb_claimed_success() { ! grep -qF 'Restore complete' <<<"${notb_out}"; }
+check "...and never claims the restore completed" notb_claimed_success
+check "...and leaves the live .env untouched" \
+  cmp -s "${NOTB_SB}/.env" "${REPO}/.env.example"
+# The half a careless fix breaks: a GENUINE backup missing some parts — an old
+# one from before model lists existed — must still restore what it does carry.
+PART_SB="${SANDBOX}/partialbackup"
+mkdir -p "${PART_SB}/scripts" "${PART_SB}/stage"
+cp "${REPO}/restore.sh" "${PART_SB}/restore.sh"
+cp "${REPO}/.env.example" "${PART_SB}/.env.example"
+cp "${REPO}/.env.example" "${PART_SB}/.env"
+cp "${REPO}/scripts/lib.sh" "${PART_SB}/scripts/lib.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${PART_SB}/scripts/apply.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${PART_SB}/scripts/install_webui.sh"
+chmod +x "${PART_SB}/restore.sh" "${PART_SB}"/scripts/*.sh
+cat >> "${PART_SB}/scripts/lib.sh" <<'SHIM'
+have() { [[ "$1" != docker && "$1" != ollama ]]; }
+ensure_ollama_up_announced() { return 1; }
+SHIM
+printf 'MODEL_NAME=qwen2.5-coder:7b\nWEBUI_PORT=3000\n' > "${PART_SB}/stage/env"
+tar czf "${PART_SB}/envonly.tar.gz" -C "${PART_SB}/stage" . 2>/dev/null
+part_rc=0
+part_out="$(cd "${PART_SB}" && ./restore.sh ./envonly.tar.gz </dev/null 2>&1)" || part_rc=$?
+part_restored() {
+  [[ "${part_rc}" == "0" ]] && grep -qF 'Restore complete' <<<"${part_out}"
+}
+check "a genuine backup missing some parts still restores the parts it has" \
+  part_restored
+# ...and a SECOND shape of partial backup, carrying a different single part.
+# With only the env-only case above, narrowing the accepted list to 'env' alone
+# passed the gate — a backup holding just a model list or just the volume would
+# have been refused as "not ours" with nothing to notice. Caught by mutation.
+printf 'NAME\tID\tSIZE\n' > "${PART_SB}/stage2-models.txt"
+mkdir -p "${PART_SB}/stage2" && mv "${PART_SB}/stage2-models.txt" "${PART_SB}/stage2/models.txt"
+tar czf "${PART_SB}/modelsonly.tar.gz" -C "${PART_SB}/stage2" . 2>/dev/null
+part2_rc=0
+part2_out="$(cd "${PART_SB}" && ./restore.sh ./modelsonly.tar.gz </dev/null 2>&1)" || part2_rc=$?
+part2_restored() {
+  [[ "${part2_rc}" == "0" ]] && grep -qF 'Restore complete' <<<"${part2_out}"
+}
+check "...and one carrying only a model list is ours too" part2_restored
+
 echo "# verify_backup() rejects corrupt/incomplete archives (a bad backup must never be trusted)"
 # backup.sh only runs main() when executed, so sourcing it here just defines
 # its functions. Guards the "disk filled up mid-tar" case: the archive must read
