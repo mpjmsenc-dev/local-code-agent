@@ -83,7 +83,7 @@ model_ready=false
 if [[ "${ollama_reachable}" != "true" ]]; then
   p_fail "skipped generation — Ollama is not up"
 elif ! model_present "${MODEL_NAME}"; then
-  p_fail "model '${MODEL_NAME}' is not downloaded — pull it with: ollama pull ${MODEL_NAME} (or re-run ${REPO_ROOT}/setup.sh)"
+  p_fail "model '${MODEL_NAME}' is not downloaded (or re-run ${REPO_ROOT}/setup.sh). $(pull_advice "${MODEL_NAME}")"
 else
   info "Asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
   if model_responds "${MODEL_NAME}" 300; then

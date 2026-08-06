@@ -6564,6 +6564,59 @@ ollama_advice_is_conditional() {
 check "the engine's failure messages name a log and a restart this host has" \
   ollama_advice_is_conditional
 
+echo "# ...and 'pull the model' must know whether the kill switch will allow it"
+# Seven messages tell someone their model is missing. THREE asked first —
+# check-system.sh, restore.sh and run-agent.sh each wrote the same two-arm
+# branch by hand — and four did not: 'lca ask', 'lca speed', 'lca test' and
+# prompt-bench.sh all said "pull it with: ollama pull X" flat out. With netmode
+# OFFLINE that command cannot reach the registry, and the one thing standing
+# between the reader and their model goes unmentioned. Being correct in three
+# places is how the fourth is not, which is the argument docker_daemon_reachable
+# already makes in its own header.
+#
+# All seven route through pull_advice now, including the three that were right,
+# which is what lets this gate be BLANKET instead of an allow-list — the shape
+# the two gates above had to settle for. lib.sh is the single exception: it
+# holds the helper, and pull_model actually runs the command.
+pull_advice_for() {  # online|offline -> the sentence
+  bash -c 'source "$1" >/dev/null 2>&1
+    load_env_readonly
+    if [[ "$2" == "offline" ]]; then net_blocked() { return 0; }
+    else net_blocked() { return 1; }; fi
+    pull_advice "a-model:7b"' _ "${SANDBOX}/scripts/lib.sh" "$1" 2>/dev/null
+}
+pull_advice_checks_the_kill_switch() {
+  local out bad=0 f rel body
+  out="$(pull_advice_for online)"
+  if ! grep -q 'ollama pull a-model:7b' <<<"${out}" || grep -qi 'kill switch' <<<"${out}"; then
+    printf 'an online machine no longer just gets the pull command: %s\n' "${out}" >&2
+    bad=1
+  fi
+  out="$(pull_advice_for offline)"
+  if ! grep -qi 'kill switch' <<<"${out}" || ! grep -q 'netmode.sh online' <<<"${out}"; then
+    printf 'an offline machine is told to pull with no mention of the kill switch: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # The pull command still has to be there — the reader needs it for after they
+  # turn the switch off, and dropping it would pass a "mentions the switch" test.
+  grep -q 'ollama pull a-model:7b' <<<"${out}" || {
+    printf 'the offline sentence never names the command to run afterwards: %s\n' "${out}" >&2
+    bad=1; }
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}"/bin/lca; do
+    rel="${f#"${REPO}"/}"
+    [[ "${rel}" == "scripts/lib.sh" ]] && continue
+    body="$(sed 's/#.*//' "${f}")"
+    grep -q 'ollama pull' <<<"${body}" || continue
+    # shellcheck disable=SC2016  # naming the call site to write, not running it
+    printf '%s names "ollama pull" itself — use $(pull_advice MODEL), which says when the kill switch is in the way\n' \
+      "${rel}" >&2
+    bad=1
+  done
+  return "${bad}"
+}
+check "...and every 'your model is missing' message routes through pull_advice" \
+  pull_advice_checks_the_kill_switch
+
 echo "# a dead engine on a working box is not 'the install stopped before it finished'"
 # install_state cannot tell those apart: both are a verdict-less log. Its own
 # header comment describes the second case — an interrupted first boot on a

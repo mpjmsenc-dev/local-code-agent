@@ -72,7 +72,7 @@ main() {
   wait_for_ollama 5 >/dev/null 2>&1 \
     || die "Ollama is not answering at $(ollama_url). Try: lca check"
   model_present "${MODEL_NAME}" \
-    || die "Model '${MODEL_NAME}' is not downloaded. Pull it with: ollama pull ${MODEL_NAME}"
+    || die "Model '${MODEL_NAME}' is not downloaded. $(pull_advice "${MODEL_NAME}")"
 
   step "Measuring generation speed"
   info "Model:  ${MODEL_NAME}"

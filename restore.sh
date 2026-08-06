@@ -283,9 +283,9 @@ main() {
           # did not is the whole answer here, and the offline branch used to
           # die() on the FIRST missing one — so a restore whose models were all
           # present bar one lost the reconciliation and the machine advice too.
-          warn "Model '${model}' is missing and netmode is OFFLINE, so it was not re-pulled. Run 'sudo ${SCRIPT_DIR}/netmode.sh online', then: ollama pull ${model}"
+          warn "Model '${model}' is missing and was not re-pulled. $(pull_advice "${model}")"
         else
-          pull_model "${model}" || warn "Could not pull '${model}' — pull it later with: ollama pull ${model}"
+          pull_model "${model}" || warn "Could not pull '${model}'. $(pull_advice "${model}")"
         fi
       done < <(tail -n +2 "${workdir}/models.txt" | awk '{print $1}')
     else

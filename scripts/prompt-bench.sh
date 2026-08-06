@@ -395,7 +395,7 @@ main() {
   step "Benching the system prompt against ${MODEL} (${SAMPLES} samples each)"
   ensure_ollama_up_announced 60 \
     || die "Ollama is not answering at $(ollama_url) — start it, then re-run."
-  model_present "${MODEL}" || die "Model '${MODEL}' is not downloaded (ollama pull ${MODEL})"
+  model_present "${MODEL}" || die "Model '${MODEL}' is not downloaded. $(pull_advice "${MODEL}")"
 
   local chars; chars="$(wc -c <<<"${SYSTEM}")"
   info "Prompt is ${chars} chars, roughly $(( chars / 4 )) tokens of the ${OLLAMA_CONTEXT_LENGTH} context — spent on every message."

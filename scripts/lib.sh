@@ -261,6 +261,34 @@ ollama_log_hint() {
   fi
 }
 
+# pull_advice MODEL — how to get MODEL onto this machine FROM HERE.
+#
+# Seven messages tell someone their model is missing. Three of them asked
+# whether the kill switch was on first — check-system.sh, restore.sh and
+# run-agent.sh each wrote the same two-arm branch by hand — and four did not:
+# 'lca ask', 'lca speed', 'lca test' and prompt-bench.sh all said "pull it
+# with: ollama pull X" flat out. With netmode OFFLINE that command cannot
+# reach the registry, and the one thing standing between the reader and their
+# model goes unmentioned.
+#
+# Being correct in three places is how the fourth is not, which is the same
+# argument docker_daemon_reachable's header makes. All seven route through
+# here now, so the gate on it can be blanket rather than an allow-list: lib.sh
+# is the only file that may name the raw command, and the other occurrence
+# here is pull_model actually running it.
+# A whole sentence, not a fragment, so every caller can simply append it after
+# a full stop. Returning just the command read fine online and badly offline —
+# "Get it with: netmode is OFFLINE — run ..." — and a message that parses wrong
+# is a message people skim past.
+pull_advice() {
+  if net_blocked; then
+    printf "The netmode kill switch is ON, so nothing can download — run 'sudo %s/netmode.sh online', then: ollama pull %s" \
+      "${REPO_ROOT}" "$1"
+  else
+    printf 'Pull it with: ollama pull %s' "$1"
+  fi
+}
+
 # ollama_restart_hint — how to get the model engine running again ON THIS HOST.
 #
 # run-agent.sh and tune.sh both branch on systemd here already, and neither is

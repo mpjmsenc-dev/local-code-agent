@@ -259,10 +259,8 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
         p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and $(ollama_log_hint))"
       fi
     fi
-  elif [[ "$(netmode_state)" == "offline" ]]; then
-    p_fail "model '${MODEL_NAME}' not downloaded, and netmode is OFFLINE — run 'sudo ${SCRIPT_DIR}/netmode.sh online' then 'ollama pull ${MODEL_NAME}'"
   else
-    p_fail "model '${MODEL_NAME}' not downloaded (ollama pull ${MODEL_NAME})"
+    p_fail "model '${MODEL_NAME}' not downloaded. $(pull_advice "${MODEL_NAME}")"
   fi
 else
   p_fail "cannot check the model — ollama binary or API unavailable"

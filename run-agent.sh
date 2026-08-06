@@ -58,10 +58,8 @@ main() {
     if confirm "Pull '${MODEL_NAME}' now?"; then
       net_guard "Downloading ${MODEL_NAME}"
       pull_model "${MODEL_NAME}" || die "Could not pull '${MODEL_NAME}'."
-    elif [[ "$(netmode_state)" == "offline" ]]; then
-      die "Cannot start aider without the model, and netmode is OFFLINE. Run: sudo ${REPO_ROOT}/netmode.sh online — then: ollama pull ${MODEL_NAME}"
     else
-      die "Cannot start aider without the model. Pull it with: ollama pull ${MODEL_NAME}"
+      die "Cannot start aider without the model. $(pull_advice "${MODEL_NAME}")"
     fi
   fi
 
