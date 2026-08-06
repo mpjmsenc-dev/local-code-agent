@@ -8947,11 +8947,19 @@ check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_
 #
 # Driven, not grepped, and the assertion is literally "the caller is still
 # alive afterwards" — the only thing that distinguishes the two forms.
-apply_ollama_run() {  # CASE -> its output, then counters, then a liveness line
+apply_ollama_run() {  # CASE [BG_CTX] [BG_KEEP] -> output, counters, liveness
   bash -c '
     source "$1" >/dev/null 2>&1
-    CASE="$2"
+    CASE="$2"; BG_CTX="$3"; BG_KEEP="$4"
     have() { return 0; }
+    # The /proc read is stubbed, not performed: whether an ollama server is
+    # running on the machine executing the tests must not decide the answer.
+    ollama_bg_env() {
+      case "$1" in
+        OLLAMA_CONTEXT_LENGTH) [[ -n "${BG_CTX}" ]] && printf "%s" "${BG_CTX}" ;;
+        OLLAMA_KEEP_ALIVE)     [[ -n "${BG_KEEP}" ]] && printf "%s" "${BG_KEEP}" ;;
+      esac
+    }
     if [[ "${CASE}" == "nosystemd" ]]; then
       systemd_available() { return 1; }
     else
@@ -8969,7 +8977,7 @@ apply_ollama_run() {  # CASE -> its output, then counters, then a liveness line
     fi
     apply_ollama
     printf "unchecked=%s changed=%s\n" "${UNCHECKED}" "${CHANGED}"
-    echo "CALLER STILL ALIVE"' _ "${REPO}/scripts/apply.sh" "$1" 2>&1
+    echo "CALLER STILL ALIVE"' _ "${REPO}/scripts/apply.sh" "$1" "${2:-}" "${3:-}" 2>&1
 }
 apply_ollama_survives_a_dying_step() {
   local out bad=0 case
@@ -9007,6 +9015,7 @@ check "...and a dying Ollama step does not take the whole apply with it" \
 # where nothing had looked at the running server at all.
 apply_ollama_admits_it_cannot_look() {
   local out
+  # No launch environment readable at all — the shrug is still right here.
   out="$(apply_ollama_run nosystemd)"
   grep -q 'unchecked=1' <<<"${out}" || {
     printf 'a host without systemd is counted as checked, so the summary claims a match nothing verified: %s\n' "${out}" >&2
@@ -9021,6 +9030,67 @@ apply_ollama_admits_it_cannot_look() {
 }
 check "...and 'no systemd' is reported as unchecked, not as a match" \
   apply_ollama_admits_it_cannot_look
+# ...but "could not look" was the answer on EVERY run of EVERY systemd-less
+# host, which is a whole class of machine this project supports on purpose —
+# honest and permanently unhelpful. The launch environment turns out to be
+# readable: start_ollama_bg passes the values, and /proc/PID/environ keeps
+# them. Measured on this box:
+#
+#   OLLAMA_CONTEXT_LENGTH=8192
+#   OLLAMA_KEEP_ALIVE=30m
+#
+# NOT 'ollama ps'. Its CONTEXT column looks like the answer and is not — two
+# calls a minute apart on an idle box read 11677 then 11873, because newer
+# Ollama sizes the working context dynamically. A drift warning built on that
+# would have come and gone on its own.
+apply_ollama_reads_the_running_server() {
+  local out bad=0
+  # Agrees with .env: a real pass, not a shrug, and nothing counted.
+  out="$(apply_ollama_run nosystemd 8192 30m)"
+  if ! grep -q 'already matches .env' <<<"${out}" \
+     || ! grep -q 'read from the running server' <<<"${out}" \
+     || ! grep -q 'unchecked=0' <<<"${out}"; then
+    printf 'a server started with .env values is not reported as matching: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # Drifted: named on both sides, counted, and NOT silently "fixed" — there is
+  # no service manager here, and killing the model server out from under
+  # whatever is using it is not this command's call to make.
+  out="$(apply_ollama_run nosystemd 4096 30m)"
+  if ! grep -q 'was started with context 4096' <<<"${out}" \
+     || ! grep -q 'unchecked=1' <<<"${out}"; then
+    printf 'a server started with a different context is not reported as drifted: %s\n' "${out}" >&2
+    bad=1
+  fi
+  grep -q 'already matches' <<<"${out}" && {
+    printf 'a drifted server is also called a match: %s\n' "${out}" >&2; bad=1; }
+  # Keep-alive alone drifting counts too — checking only the context would
+  # have passed the two tests above.
+  out="$(apply_ollama_run nosystemd 8192 5m)"
+  grep -q 'unchecked=1' <<<"${out}" || {
+    printf 'a keep-alive that drifted alone is reported as a match: %s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and reads the running server rather than shrugging, where it can" \
+  apply_ollama_reads_the_running_server
+# ...and never from 'ollama ps', whose CONTEXT figure moves on its own.
+apply_does_not_read_ollama_ps() {
+  local body
+  body="$(sed -n '/^apply_ollama() {/,/^}/p' "${REPO}/scripts/apply.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || { echo 'could not find apply_ollama' >&2; return 1; }
+  ! grep -q 'ollama ps' <<<"${body}" || {
+    echo "apply.sh reads 'ollama ps' for a config value — its CONTEXT column is a live allocation that changes on an idle box, not the configured setting" >&2
+    return 1; }
+  body="$(sed -n '/^ollama_bg_env() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || { echo 'could not find ollama_bg_env' >&2; return 1; }
+  grep -q 'environ' <<<"${body}" || {
+    echo 'ollama_bg_env no longer reads the launch environment' >&2; return 1; }
+  ! grep -q 'ollama ps' <<<"${body}" || {
+    echo "ollama_bg_env reads 'ollama ps' instead of the launch environment" >&2; return 1; }
+}
+check "...from the launch environment, never from 'ollama ps'" \
+  apply_does_not_read_ollama_ps
 check "an unattended update refuses to continue past a failed backup" \
   update_refuses_unattended_after_a_failed_backup
 check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list

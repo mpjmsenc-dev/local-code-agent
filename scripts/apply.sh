@@ -75,22 +75,36 @@ apply_ollama() {
     return 0
   fi
   if ! systemd_available; then
-    # "applied by whatever starts ollama here" reads as "nothing to do", and
-    # with nothing else drifted the summary then said "Everything already
-    # matches .env — nothing to do." It does not match, and nothing looked.
+    # This branch said "applied by whatever starts ollama here" and counted
+    # nothing, so with nothing else drifted the summary read "Everything
+    # already matches .env — nothing to do." It does not match, and nothing
+    # had looked: start_ollama_bg passes OLLAMA_CONTEXT_LENGTH and
+    # OLLAMA_KEEP_ALIVE to the server AT LAUNCH, so a value edited afterwards
+    # is not in effect until it restarts.
     #
-    # start_ollama_bg passes OLLAMA_CONTEXT_LENGTH and OLLAMA_KEEP_ALIVE to the
-    # server AT LAUNCH, so a value edited in .env afterwards is not in effect
-    # until that server is restarted — and this has not read what the running
-    # one was started with. "Could not be looked at" is what UNCHECKED already
-    # means in this file, so it is counted as one and the summary stops
-    # claiming a match it has no evidence for.
-    #
-    # A real answer is possible here — the launch environment of the background
-    # server is readable from /proc — and would turn this into "matches" or
-    # "drifted" like the other three. Not claiming it is the fix; measuring it
-    # would be a feature.
-    warn "Ollama:   no systemd here, so the running server keeps whatever it was started with — .env's context (${OLLAMA_CONTEXT_LENGTH}) and keep-alive (${OLLAMA_KEEP_ALIVE}) reach it only when it next starts, and this cannot read what it has now. To be sure: stop it (pkill -f 'ollama serve') and re-run any lca command, which starts it again."
+    # It became an honest UNCHECKED first, and then a real answer, because the
+    # launch environment turns out to be readable — ollama_bg_env pulls it out
+    # of /proc. So this gives the same three answers the other appliers do
+    # instead of shrugging on every run of every systemd-less host, which is a
+    # whole class of machine this project supports on purpose. When it cannot
+    # read it, the honest shrug is still what happens.
+    local live_ctx live_keep
+    live_ctx="$(ollama_bg_env OLLAMA_CONTEXT_LENGTH || true)"
+    live_keep="$(ollama_bg_env OLLAMA_KEEP_ALIVE || true)"
+    if [[ -z "${live_ctx}" && -z "${live_keep}" ]]; then
+      warn "Ollama:   no systemd here, so the running server keeps whatever it was started with — .env's context (${OLLAMA_CONTEXT_LENGTH}) and keep-alive (${OLLAMA_KEEP_ALIVE}) reach it only when it next starts, and its launch settings could not be read. To be sure: stop it (pkill -f 'ollama serve') and re-run any lca command, which starts it again."
+      UNCHECKED=$((UNCHECKED+1))
+      return 0
+    fi
+    if [[ "${live_ctx}" == "${OLLAMA_CONTEXT_LENGTH}" && "${live_keep}" == "${OLLAMA_KEEP_ALIVE}" ]]; then
+      ok "Ollama:   already matches .env (context ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE}) — read from the running server."
+      return 0
+    fi
+    # Known drift that this command deliberately will not fix: killing the
+    # model server out from under whatever is using it is a bigger step than
+    # reconciling settings, and there is no service manager here to do it
+    # gracefully. Counted, so the summary cannot call the run complete.
+    warn "Ollama:   the running server was started with context ${live_ctx:-unknown} and keep-alive ${live_keep:-unknown}, not .env's ${OLLAMA_CONTEXT_LENGTH} / ${OLLAMA_KEEP_ALIVE} — and there is no systemd here to restart it. Apply them by stopping it (pkill -f 'ollama serve') and re-running any lca command, which starts it again."
     UNCHECKED=$((UNCHECKED+1))
     return 0
   fi

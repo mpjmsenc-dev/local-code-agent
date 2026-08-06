@@ -1426,6 +1426,43 @@ ensure_ollama_up() {
   fi
 }
 
+# ollama_bg_env KEY — the value KEY had when the background 'ollama serve' was
+# started. Nothing (exit 1) when it cannot be read.
+#
+# On a host with no systemd this project starts the server itself, passing
+# OLLAMA_CONTEXT_LENGTH and OLLAMA_KEEP_ALIVE from .env AT LAUNCH. Editing .env
+# afterwards changes nothing until it restarts, and until now nothing could say
+# whether that had happened: 'lca apply' reported "could not be looked at" on
+# every run of every such host, which is honest and permanently unhelpful.
+#
+# /proc/PID/environ is the launch environment, which is exactly the question.
+# Measured here, server started by start_ollama_bg:
+#
+#   OLLAMA_HOST=127.0.0.1:11434
+#   OLLAMA_CONTEXT_LENGTH=8192
+#   OLLAMA_KEEP_ALIVE=30m
+#
+# NOT 'ollama ps'. Its CONTEXT column looks like the answer and is not — two
+# calls a minute apart on an idle box read 11677 and then 11873, because newer
+# Ollama sizes the working context dynamically. Reporting drift from that would
+# have produced a config warning that came and went on its own.
+#
+# No pipes: this suite bans 'producer | reader-that-exits-early' outright, and
+# an environ block is small enough that it would have worked by luck.
+ollama_bg_env() {
+  local key="$1" pids pid environ val
+  have pgrep || return 1
+  pids="$(pgrep -f 'ollama serve' 2>/dev/null || true)"
+  [[ -n "${pids}" ]] || return 1
+  read -r pid <<<"${pids}"
+  [[ -n "${pid}" && -r "/proc/${pid}/environ" ]] || return 1
+  environ="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null || true)"
+  val="$(sed -n "s/^${key}=//p" <<<"${environ}")"
+  read -r val <<<"${val}"
+  [[ -n "${val}" ]] || return 1
+  printf '%s' "${val}"
+}
+
 # restart_ollama — reload systemd and restart the ollama service, then wait
 # for the API to come back. Warns (does not crash) where systemd is absent.
 restart_ollama() {
