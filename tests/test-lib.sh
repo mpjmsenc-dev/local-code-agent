@@ -36,6 +36,34 @@ cp "${REPO}/.env.example" "${SANDBOX}/"
 # shellcheck source=../scripts/lib.sh
 source "${SANDBOX}/scripts/lib.sh"
 
+# Nothing in this suite may ask the REAL docker daemon anything.
+#
+# Three times on this branch a test has passed on a machine with the chat app
+# running and failed in CI, which has no container — or the reverse. Every time
+# the cause was the same: a helper stubbed one docker-shaped probe and left
+# another reachable, so its answer came from the environment rather than the
+# fixture, and 'make gates' green here meant nothing about CI. The most recent
+# was a commit whose own message warned about this class.
+#
+# So the two probes guarded_ports consults are overridden here, immediately
+# after lib.sh is sourced, with versions that answer "no" and RECORD the call.
+# Every test that needs a real answer stubs them locally, as they already do;
+# anything that reaches these is by definition asking the environment, and the
+# final gate below fails on it by name. Deterministic first, and loud about the
+# thing that used to be silent.
+#
+# In-process only. Tests that run a script as a subprocess get lib.sh's real
+# functions, which is right — those exercise the script, and they carry their
+# own stubs.
+LCA_UNSTUBBED_LOG="${SANDBOX}/unstubbed-docker-calls"
+: > "${LCA_UNSTUBBED_LOG}"
+webui_container_running() {
+  printf 'webui_container_running\n' >> "${LCA_UNSTUBBED_LOG}"; return 1
+}
+webui_container_env() {
+  printf 'webui_container_env %s\n' "${1:-}" >> "${LCA_UNSTUBBED_LOG}"; return 1
+}
+
 echo "# load_env creates .env from .env.example and applies defaults"
 load_env
 check ".env auto-created" test -f "${SANDBOX}/.env"
@@ -9958,6 +9986,20 @@ self_rewriting_scripts_exit_explicitly() {
 }
 check "the self-rewriting scripts stop bash reading a file they replaced" \
   self_rewriting_scripts_exit_explicitly
+
+echo "# ...and no test may have asked the real docker daemon anything"
+# The counterpart to the overrides at the top of this file. If this fails, a
+# test reached a docker probe it did not stub, which means its result came from
+# whatever happened to be running on this machine — green here, red in CI, or
+# the other way round, with nothing to show which.
+no_test_asked_the_real_docker() {
+  [[ -s "${LCA_UNSTUBBED_LOG}" ]] || return 0
+  printf 'a test reached an unstubbed docker probe, so its answer came from this machine rather than its fixture:\n' >&2
+  sort -u "${LCA_UNSTUBBED_LOG}" | sed 's/^/  /' >&2
+  return 1
+}
+check "no test read the real docker daemon instead of its fixture" \
+  no_test_asked_the_real_docker
 
 echo
 if (( FAILED > 0 )); then
