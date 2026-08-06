@@ -3359,6 +3359,81 @@ update_reruns_setup_unconditionally() {
 check "'lca update' re-runs setup unconditionally, then self-tests" \
   update_reruns_setup_unconditionally
 
+echo "# ...and a fetch that failed must name the reason it actually had"
+# One line covered every cause: "Could not reach the remote. Check
+# connectivity, and whether the kill switch is on". A branch that is simply not
+# on the remote fails the same fetch. Measured on a checkout whose branch had
+# no upstream:
+#
+#   $ git fetch --quiet origin no-such-branch-xyz
+#   fatal: couldn't find remote ref no-such-branch-xyz
+#   exit=128
+#
+# ...and the reader is sent to test their connection and toggle a kill switch,
+# neither of which is involved. net_guard three lines above has ALREADY died if
+# netmode is offline, so the kill switch is the one cause that message can be
+# certain it is NOT.
+#
+# Driven end to end through a stubbed git rather than grepped, because the
+# whole fault was that one message served three states. Nothing in update.sh
+# mutates anything before the fetch — args, 'have git', the .git check, the
+# branch name, net_guard — and --check is passed as well, so a future reorder
+# that reaches it cannot start a backup out of a unit test.
+update_fetch_says() {  # LS_REMOTE_RC -> what 'lca update' prints and dies with
+  local stub="${SANDBOX}/gitstub"
+  mkdir -p "${stub}" "${SANDBOX}/.git"
+  cp "${REPO}/update.sh" "${SANDBOX}/update.sh"
+  # The stub answers only what update.sh asks before it dies. 'ls-remote
+  # --exit-code' is the classifier under test: git returns 2 for "connected,
+  # no matching ref" and 128 for "could not connect" — documented exit codes,
+  # so this does not depend on git's messages being in English.
+  cat > "${stub}/git" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"rev-parse --abbrev-ref HEAD"*) echo "a-local-branch"; exit 0 ;;
+  *ls-remote*)                     exit "${LS_RC}" ;;
+  *fetch*)                         exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "${stub}/git"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  LS_RC="$1" PATH="${stub}:${PATH}" bash "${SANDBOX}/update.sh" --check 2>&1 || true
+}
+update_fetch_failure_is_diagnosed() {
+  local out bad=0
+  # 2 — the remote answered, the branch is not there. THE regression.
+  out="$(update_fetch_says 2)"
+  if ! grep -q "does not exist on the remote" <<<"${out}" \
+     || grep -q 'kill switch' <<<"${out}"; then
+    printf 'a branch missing from the remote is still blamed on the network: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # ...and it must name the branch, so the reader knows which one to push.
+  grep -q 'a-local-branch' <<<"${out}" || {
+    printf 'the message does not say which branch is missing: %s\n' "${out}" >&2
+    bad=1; }
+  # 128 — could not connect. The original message, still correct here and the
+  # only state it was ever right for.
+  out="$(update_fetch_says 128)"
+  grep -q 'kill switch' <<<"${out}" || {
+    printf 'an unreachable remote no longer gets the connectivity advice: %s\n' "${out}" >&2
+    bad=1; }
+  # 0 — remote up, branch present, fetch failed anyway. Neither of the other
+  # two answers is true, and saying either would send the reader nowhere.
+  out="$(update_fetch_says 0)"
+  if grep -q 'kill switch' <<<"${out}" || grep -q 'does not exist on the remote' <<<"${out}"; then
+    printf 'a fetch that failed for a third reason is given one of the other two answers: %s\n' "${out}" >&2
+    bad=1
+  fi
+  grep -q 'reachable' <<<"${out}" || {
+    printf 'the third case says nothing useful: %s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and 'branch not on the remote' is not reported as a network fault" \
+  update_fetch_failure_is_diagnosed
+
 echo "# CI's e2e must compare the WHOLE prompt, not a substring of it"
 # The only end-to-end proof that the assistant's instructions reach a real
 # container is a step in ci.yml. It asserted `.system | test("local-code-agent")`

@@ -21,6 +21,52 @@ load_env
 
 usage() { sed -n '/^# Usage:/,/^set /{ /^set /!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
+# fetch_failed BRANCH — never returns; dies naming the reason the fetch had.
+#
+# The one line this replaces blamed the network for everything:
+#
+#   die "Could not reach the remote. Check connectivity, and whether the kill
+#        switch is on: netmode.sh status"
+#
+# A branch that is not on the remote fails the same fetch. Measured, on a
+# checkout whose branch had no upstream:
+#
+#   $ git fetch --quiet origin no-such-branch-xyz
+#   fatal: couldn't find remote ref no-such-branch-xyz
+#   exit=128
+#
+# ...and the reader is then sent to check their connection and toggle a kill
+# switch, neither of which has anything to do with it. Worse, net_guard three
+# lines above has ALREADY died if netmode is offline, so the kill switch is the
+# one cause this message can be sure it is not.
+#
+# The classification is git's own exit status, not its English: 'ls-remote
+# --exit-code' returns 2 for "connected, no matching ref" and 128 for "could
+# not connect", both documented and both locale-independent. Measured here: 0
+# for a branch that exists, 2 for one that does not, 128 against an unreachable
+# host. Grepping "couldn't find remote ref" would work until someone's box is
+# not in English.
+#
+# Only ever runs on the failure path, so the extra round trip costs nothing in
+# the normal case.
+fetch_failed() {
+  local branch="$1" rc=0
+  git -C "${SCRIPT_DIR}" ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1 || rc=$?
+  case "${rc}" in
+    2)
+      die "The branch this checkout is on ('${branch}') does not exist on the remote, so there is nothing to update from. The remote itself answered fine. Switch to the branch you track — git -C ${SCRIPT_DIR} checkout main — and re-run, or push '${branch}' first if it is yours."
+      ;;
+    0)
+      # The remote answered AND has the branch, so neither the network nor the
+      # branch is the problem. Usually a full disk or an unwritable .git.
+      die "The remote is reachable and '${branch}' is on it, but the fetch still failed — git's own message is above. Check free space (df -h ${SCRIPT_DIR}) and that .git is writable."
+      ;;
+    *)
+      die "Could not reach the remote. Check connectivity, and whether the kill switch is on: ${SCRIPT_DIR}/netmode.sh status"
+      ;;
+  esac
+}
+
 main() {
   local check_only=false do_backup=true assume_yes=false arg
   for arg in "$@"; do
@@ -44,8 +90,9 @@ main() {
     || die "The checkout is in a detached HEAD state. Pick a branch first: git -C ${SCRIPT_DIR} checkout main"
 
   net_guard "Fetching updates"
-  git -C "${SCRIPT_DIR}" fetch --quiet origin "${branch}" \
-    || die "Could not reach the remote. Check connectivity, and whether the kill switch is on: ${SCRIPT_DIR}/netmode.sh status"
+  if ! git -C "${SCRIPT_DIR}" fetch --quiet origin "${branch}"; then
+    fetch_failed "${branch}"   # always dies, naming the cause it actually found
+  fi
 
   local behind
   behind="$(git -C "${SCRIPT_DIR}" rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo 0)"

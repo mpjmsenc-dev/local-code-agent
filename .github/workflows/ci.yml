@@ -88,7 +88,25 @@ jobs:
           out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
           grep -q 'local modifications' <<<"${out}" \
             || { echo "FAIL: local edits were not reported"; printf '%s\n' "${out}"; exit 1; }
-          echo "update.sh --check: detection, no-op guarantee and dirty-tree warning all behave"
+
+          # A branch that exists only locally fails the SAME fetch a dead
+          # network does, and used to get the same message: "Could not reach
+          # the remote. Check connectivity, and whether the kill switch is on."
+          # Both are wrong here — net_guard has already ruled the kill switch
+          # out — and they send the reader to diagnose a network that is fine.
+          # Real git against a real bare origin, which is what this fixture is
+          # for; the unit suite covers the same three states through a stub.
+          git -C /tmp/upd-work checkout -q -b only-on-this-machine
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1 || true)"
+          printf '%s\n' "${out}"
+          if ! grep -q 'does not exist on the remote' <<<"${out}"; then
+            echo "FAIL: a branch missing from the remote was not diagnosed as one"; exit 1
+          fi
+          if grep -q 'kill switch' <<<"${out}"; then
+            echo "FAIL: a local-only branch is still blamed on connectivity"; exit 1
+          fi
+          git -C /tmp/upd-work checkout -q "${BR}"
+          echo "update.sh --check: detection, no-op guarantee, dirty-tree warning and fetch diagnosis all behave"
 
   system:
     name: System artifacts (nft ruleset + systemd units)
