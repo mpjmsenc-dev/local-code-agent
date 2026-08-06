@@ -75,7 +75,23 @@ apply_ollama() {
     return 0
   fi
   if ! systemd_available; then
-    info "Ollama:   no systemd — settings are applied by whatever starts ollama here."
+    # "applied by whatever starts ollama here" reads as "nothing to do", and
+    # with nothing else drifted the summary then said "Everything already
+    # matches .env — nothing to do." It does not match, and nothing looked.
+    #
+    # start_ollama_bg passes OLLAMA_CONTEXT_LENGTH and OLLAMA_KEEP_ALIVE to the
+    # server AT LAUNCH, so a value edited in .env afterwards is not in effect
+    # until that server is restarted — and this has not read what the running
+    # one was started with. "Could not be looked at" is what UNCHECKED already
+    # means in this file, so it is counted as one and the summary stops
+    # claiming a match it has no evidence for.
+    #
+    # A real answer is possible here — the launch environment of the background
+    # server is readable from /proc — and would turn this into "matches" or
+    # "drifted" like the other three. Not claiming it is the fix; measuring it
+    # would be a feature.
+    warn "Ollama:   no systemd here, so the running server keeps whatever it was started with — .env's context (${OLLAMA_CONTEXT_LENGTH}) and keep-alive (${OLLAMA_KEEP_ALIVE}) reach it only when it next starts, and this cannot read what it has now. To be sure: stop it (pkill -f 'ollama serve') and re-run any lca command, which starts it again."
+    UNCHECKED=$((UNCHECKED+1))
     return 0
   fi
   if ollama_dropin_matches; then
@@ -85,8 +101,30 @@ apply_ollama() {
   would "apply context ${OLLAMA_CONTEXT_LENGTH} / keep-alive ${OLLAMA_KEEP_ALIVE} to Ollama (restarts the server)." && return 0
   needs_root "Applying Ollama settings" || return 0
   info "Ollama:   applying context ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE} (this restarts the server)..."
-  render_ollama_dropin
-  restart_ollama
+  # In a SUBSHELL, and that is the whole point.
+  #
+  # The three appliers below each learned not to run their step bare under
+  # set -e — "a failed re-create aborted 'lca apply' right here: the inbound
+  # guard was never reconciled, no summary was printed". This one, which runs
+  # FIRST and therefore takes all three of them down with it, never did.
+  #
+  # And it cannot be fixed the way they were. render_ollama_dropin die()s when
+  # the drop-in cannot be written, and restart_ollama die()s when the API does
+  # not come back inside 90 s or when a stray 'ollama serve' holds the port —
+  # both reachable, both on a slow CPU box the likeliest failures here. die()
+  # exits, and an exit is not a non-zero return. Measured:
+  #
+  #   if ! boom; then echo CAUGHT; fi; echo AFTER    -> neither runs, exit 1
+  #   if ! ( boom ); then echo CAUGHT; fi; echo AFTER -> both run, exit 0
+  #
+  # lib.sh already states the rule for as_root — "'|| true' cannot catch an
+  # exit" — and this is the same trap one level up. Neither function sets
+  # anything the caller reads, so the subshell costs nothing.
+  if ! ( render_ollama_dropin && restart_ollama ); then
+    warn "Ollama:   could not be applied, so context ${OLLAMA_CONTEXT_LENGTH} and keep-alive ${OLLAMA_KEEP_ALIVE} are still not in effect — see the error above. Continuing with the rest; retry with: sudo ${REPO_ROOT}/bin/lca apply"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
   ok "Ollama:   applied."
   CHANGED=$((CHANGED+1))
 }

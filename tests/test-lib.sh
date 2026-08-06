@@ -5314,10 +5314,19 @@ check "nothing outside lib.sh re-implements the drop-in drift decision" \
 # again — on every run of a command whose whole promise is "applies whatever has
 # fallen behind and nothing that has not".
 apply_asks_before_rendering() {
-  awk '/^apply_ollama\(\) \{/ { inb = 1 }
-       inb && /ollama_dropin_matches/ { asked = NR }
-       inb && /^  render_ollama_dropin$/ { wrote = NR }
-       inb && /^\}/ { exit }
+  # The render is no longer a bare '  render_ollama_dropin' line — it moved
+  # inside 'if ! ( render_ollama_dropin && restart_ollama )' so a die() in
+  # either cannot end the whole apply. The PROPERTY is unchanged and still
+  # asserted: the drift question comes first. Only the anchor moved with it.
+  #
+  # Comments skipped, because the note explaining that change names the
+  # function four times and awk reads the raw file — the whole-file-grep trap
+  # this suite keeps re-learning, arriving from the other direction.
+  awk '/^apply_ollama\(\) \{/          { inb = 1 }
+       inb && /^[[:space:]]*#/         { next }
+       inb && /ollama_dropin_matches/  { asked = NR }
+       inb && /render_ollama_dropin/   { if (!wrote) wrote = NR }
+       inb && /^\}/                    { exit }
        END { exit !(asked > 0 && wrote > asked) }' "${REPO}/scripts/apply.sh"
 }
 check "apply.sh checks for drift before re-rendering the drop-in" \
@@ -8403,6 +8412,91 @@ check "the prompt check is reported as skipped, not passed"  prompt_check_is_not
 check "webui_prompt_comparable needs jq AND a readable container" \
   prompt_comparable_needs_both_sides
 check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_failed_rebuild
+# ...and so must the FIRST applier, which takes all three of the others down
+# with it. apply_ollama ran render_ollama_dropin and restart_ollama bare, and
+# it could not have been fixed the way apply_webui was: both of those die(),
+# and die() exits. An exit is not a non-zero return, so 'if ! restart_ollama'
+# would have looked like the fix and changed nothing. Measured:
+#
+#   if ! boom; then echo CAUGHT; fi; echo AFTER     -> neither runs, exit 1
+#   if ! ( boom ); then echo CAUGHT; fi; echo AFTER -> both run, exit 0
+#
+# Driven, not grepped, and the assertion is literally "the caller is still
+# alive afterwards" — the only thing that distinguishes the two forms.
+apply_ollama_run() {  # CASE -> its output, then counters, then a liveness line
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    CASE="$2"
+    have() { return 0; }
+    if [[ "${CASE}" == "nosystemd" ]]; then
+      systemd_available() { return 1; }
+    else
+      systemd_available() { return 0; }
+      can_root() { return 0; }
+      ollama_dropin_matches() { return 1; }   # drifted, so it will try to apply
+      render_ollama_dropin() {
+        if [[ "${CASE}" == "renderdies" ]]; then die "drop-in could not be written"; fi
+        return 0
+      }
+      restart_ollama() {
+        if [[ "${CASE}" == "restartdies" ]]; then die "Ollama did not answer after restart"; fi
+        return 0
+      }
+    fi
+    apply_ollama
+    printf "unchecked=%s changed=%s\n" "${UNCHECKED}" "${CHANGED}"
+    echo "CALLER STILL ALIVE"' _ "${REPO}/scripts/apply.sh" "$1" 2>&1
+}
+apply_ollama_survives_a_dying_step() {
+  local out bad=0 case
+  for case in renderdies restartdies; do
+    out="$(apply_ollama_run "${case}")"
+    if ! grep -q 'CALLER STILL ALIVE' <<<"${out}"; then
+      printf 'a %s ends the whole apply — the chat app, the timer and the guard are never reconciled and no summary is printed: %s\n' \
+        "${case}" "${out}" >&2
+      bad=1
+      continue
+    fi
+    grep -q 'unchecked=1' <<<"${out}" || {
+      printf '%s survived but was not counted, so the summary still reads as complete: %s\n' "${case}" "${out}" >&2
+      bad=1; }
+    grep -q 'Ollama:   applied' <<<"${out}" && {
+      printf '%s reported success for a step that died: %s\n' "${case}" "${out}" >&2
+      bad=1; }
+  done
+  # ...and a working apply must still apply. Without this the gate passes with
+  # apply_ollama replaced by a warn.
+  out="$(apply_ollama_run ok)"
+  if ! grep -q 'Ollama:   applied' <<<"${out}" || ! grep -q 'changed=1' <<<"${out}"; then
+    printf 'an Ollama apply that works no longer applies anything: %s\n' "${out}" >&2
+    bad=1
+  fi
+  return "${bad}"
+}
+check "...and a dying Ollama step does not take the whole apply with it" \
+  apply_ollama_survives_a_dying_step
+# ...and a host with no systemd is "could not look", not "already matches".
+# start_ollama_bg hands the server OLLAMA_CONTEXT_LENGTH and OLLAMA_KEEP_ALIVE
+# AT LAUNCH, so a value edited afterwards is not in effect until it restarts.
+# apply_ollama returned an info and no count, so with nothing else drifted the
+# summary said "Everything already matches .env — nothing to do." on a machine
+# where nothing had looked at the running server at all.
+apply_ollama_admits_it_cannot_look() {
+  local out
+  out="$(apply_ollama_run nosystemd)"
+  grep -q 'unchecked=1' <<<"${out}" || {
+    printf 'a host without systemd is counted as checked, so the summary claims a match nothing verified: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'changed=1' <<<"${out}" && {
+    printf 'a host without systemd was counted as a change: %s\n' "${out}" >&2
+    return 1; }
+  grep -qE 'starts|restart' <<<"${out}" || {
+    printf 'the message does not say the running server keeps its old values: %s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "...and 'no systemd' is reported as unchecked, not as a match" \
+  apply_ollama_admits_it_cannot_look
 check "an unattended update refuses to continue past a failed backup" \
   update_refuses_unattended_after_a_failed_backup
 check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list
