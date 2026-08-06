@@ -73,7 +73,7 @@ if ensure_ollama_up 60; then
   p_pass "Ollama API answering at $(ollama_url)"
   ollama_reachable=true
 else
-  p_fail "Ollama API not reachable at $(ollama_url) — try: sudo systemctl restart ollama (see: lca check)"
+  p_fail "Ollama API not reachable at $(ollama_url) — try: $(ollama_restart_hint) (see: lca check)"
   ollama_reachable=false
 fi
 
@@ -96,7 +96,7 @@ else
       info "Running on: ${gpu_proc}"
     fi
   else
-    p_fail "model '${MODEL_NAME}' did not respond — check RAM headroom (free -h) and: journalctl -u ollama"
+    p_fail "model '${MODEL_NAME}' did not respond — check RAM headroom (free -h) and: $(ollama_log_hint)"
   fi
 fi
 

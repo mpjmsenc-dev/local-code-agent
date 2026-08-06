@@ -6460,6 +6460,101 @@ docker_advice_is_conditional() {
 check "every 'start Docker' message asks the host how, instead of assuming systemd" \
   docker_advice_is_conditional
 
+echo "# ...and neither may the model engine's own diagnostics"
+# The same fault, in the messages that fire when inference fails — which is the
+# one moment the reader has nothing else to go on. Four of them, none guarded:
+#
+#   check-system.sh  "did not respond (RAM? see: free -h and journalctl -u ollama)"
+#   selftest.sh      "did not respond — check RAM headroom and: journalctl -u ollama"
+#   setup.sh         "did not respond. Check RAM headroom and: journalctl -u ollama"
+#   selftest.sh      "not reachable — try: sudo systemctl restart ollama"
+#
+# Where there is no systemd there is no journal for ollama either: this project
+# starts the server itself under nohup and writes OLLAMA_BG_LOG. So 'lca check',
+# 'lca test' and the install itself each offered one command at the moment the
+# engine failed, and it returns nothing at all here.
+#
+# run-agent.sh and tune.sh had already learned the rule and are deliberately
+# left alone — their arms differ in BEHAVIOUR, not wording (tune.sh writes the
+# tuned values to .env and exits 0). That is also why this gate allow-lists
+# files rather than banning the literals outright: the four sites above had no
+# arm at all, and a fifth added later is the regression to catch.
+ollama_hint_for() {  # HELPER yes|no-systemd -> its output
+  bash -c 'source "$1" >/dev/null 2>&1
+    load_env_readonly
+    SD="$3"
+    if [[ "${SD}" == "yes" ]]; then systemd_available() { return 0; }
+    else systemd_available() { return 1; }; fi
+    "$2"' _ "${REPO}/scripts/lib.sh" "$1" "$2" 2>/dev/null
+}
+literal_is_allow_listed() {  # LITERAL HELPER ALLOWED...
+  local literal="$1" helper="$2"; shift 2
+  local allowed=" $* " f rel body bad=0 found=0
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}"/bin/lca; do
+    rel="${f#"${REPO}"/}"
+    body="$(sed 's/#.*//' "${f}")"
+    grep -qF "${literal}" <<<"${body}" || continue
+    found=$((found + 1))
+    if [[ "${allowed}" != *" ${rel} "* ]]; then
+      # shellcheck disable=SC2016  # naming the call site to write, not running it
+      printf '%s hardcodes "%s" — use $(%s), which asks the host\n' "${rel}" "${literal}" "${helper}" >&2
+      bad=1
+      continue
+    fi
+    # An allow-listed file still has to branch. Whole-file, and said plainly:
+    # this proves the file knows about systemd, not that this particular line
+    # sits inside the guard. The behavioural checks above are what prove the
+    # helper works; this only stops a file being allow-listed and then losing
+    # its arm entirely.
+    grep -q 'systemd_available' <<<"${body}" || {
+      printf '%s is allowed to name "%s" but no longer checks systemd_available at all\n' \
+        "${rel}" "${literal}" >&2
+      bad=1
+    }
+  done
+  (( found > 0 )) || {
+    printf 'nothing in the tree contains "%s" — this gate stopped watching\n' "${literal}" >&2
+    return 1
+  }
+  return "${bad}"
+}
+ollama_advice_is_conditional() {
+  local out bad=0
+  # The helpers must branch, and the no-systemd arm must not hand back a
+  # systemd-only command. Checked as "does it name the systemd command",
+  # because the no-systemd text is allowed to mention systemd when explaining
+  # why it cannot be used — the lesson from the Docker gate one section up.
+  out="$(ollama_hint_for ollama_log_hint yes)"
+  grep -q 'journalctl -u ollama' <<<"${out}" || {
+    printf 'a systemd host is no longer pointed at the journal: %s\n' "${out}" >&2; bad=1; }
+  out="$(ollama_hint_for ollama_log_hint no)"
+  if grep -q 'journalctl' <<<"${out}" || [[ -z "${out}" ]]; then
+    printf 'a host with no journal is sent to journalctl anyway: %s\n' "${out}" >&2; bad=1
+  fi
+  grep -q 'logs.sh' <<<"${out}" || {
+    printf 'the no-systemd arm does not name a log this host actually has: %s\n' "${out}" >&2; bad=1; }
+
+  out="$(ollama_hint_for ollama_restart_hint yes)"
+  grep -q 'systemctl restart ollama' <<<"${out}" || {
+    printf 'a systemd host is no longer told how to restart the service: %s\n' "${out}" >&2; bad=1; }
+  out="$(ollama_hint_for ollama_restart_hint no)"
+  if grep -q 'systemctl' <<<"${out}" || [[ -z "${out}" ]]; then
+    printf 'a host without systemd is handed systemctl anyway: %s\n' "${out}" >&2; bad=1
+  fi
+
+  # scripts/lib.sh holds both helpers; logs.sh reads the journal itself behind
+  # its own '! systemd_available' early return; install_ollama.sh exits 0 on
+  # the no-systemd path long before either literal; run-agent.sh and tune.sh
+  # each carry a full second arm.
+  literal_is_allow_listed 'journalctl -u ollama' ollama_log_hint \
+    scripts/lib.sh scripts/logs.sh scripts/install_ollama.sh || bad=1
+  literal_is_allow_listed 'systemctl restart ollama' ollama_restart_hint \
+    scripts/lib.sh scripts/install_ollama.sh run-agent.sh scripts/tune.sh || bad=1
+  return "${bad}"
+}
+check "the engine's failure messages name a log and a restart this host has" \
+  ollama_advice_is_conditional
+
 echo "# a dead engine on a working box is not 'the install stopped before it finished'"
 # install_state cannot tell those apart: both are a verdict-less log. Its own
 # header comment describes the second case — an interrupted first boot on a

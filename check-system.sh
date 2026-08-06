@@ -256,7 +256,7 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
       if model_responds "${MODEL_NAME}" 240; then
         p_pass "model '${MODEL_NAME}' responds to a real generation"
       else
-        p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and journalctl -u ollama)"
+        p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and $(ollama_log_hint))"
       fi
     fi
   elif [[ "$(netmode_state)" == "offline" ]]; then

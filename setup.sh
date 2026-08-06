@@ -142,7 +142,7 @@ main() {
         ok "Model '${MODEL_NAME}' generates text — inference works."
         smoke_tested=true
       else
-        warn "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
+        warn "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: $(ollama_log_hint)"
         setup_ok=false
       fi
     fi

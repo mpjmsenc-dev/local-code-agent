@@ -241,6 +241,42 @@ docker_start_hint() {
   fi
 }
 
+# ollama_log_hint — where to read the model engine's own output ON THIS HOST.
+#
+# Three messages sent people to 'journalctl -u ollama' unconditionally:
+# check-system.sh and selftest.sh (both on "the model did not respond") and
+# setup.sh (on the same failure during the install). Where there is no systemd
+# there is no journal for ollama either — this project starts the server itself
+# under nohup and writes OLLAMA_BG_LOG — so the one command offered at the
+# moment inference fails returns nothing at all.
+#
+# scripts/logs.sh already makes exactly this decision and is the command the
+# rest of the project points at, so the no-systemd arm names it rather than the
+# raw path: it follows the file, and says where it would be when it is absent.
+ollama_log_hint() {
+  if systemd_available; then
+    printf 'journalctl -u ollama'
+  else
+    printf '%s ollama' "${REPO_ROOT}/scripts/logs.sh"
+  fi
+}
+
+# ollama_restart_hint — how to get the model engine running again ON THIS HOST.
+#
+# run-agent.sh and tune.sh both branch on systemd here already, and neither is
+# folded into this helper on purpose: their arms differ in BEHAVIOUR, not just
+# wording (tune.sh writes the tuned values to .env and exits 0 rather than
+# dying). selftest.sh had no arm at all and offered 'sudo systemctl restart
+# ollama' everywhere — on 'lca test', which is the command a new owner runs to
+# find out whether any of this works.
+ollama_restart_hint() {
+  if systemd_available; then
+    printf 'sudo systemctl restart ollama'
+  else
+    printf "start it yourself ('ollama serve') — there is no systemd here to manage it"
+  fi
+}
+
 # systemd_available — true when systemd is PID 1 and systemctl is usable.
 systemd_available() {
   have systemctl && [[ -d /run/systemd/system ]]
