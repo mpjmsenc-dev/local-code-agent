@@ -1,6 +1,6 @@
 # YOUR-TURN.md — the ONLY manual steps (phone-friendly, zero terminal experience needed)
 
-Everything else is automated. These six steps are the only things a human must do,
+Everything else is automated. These seven steps are the only things a human must do,
 in this order. Copy-paste blocks are exact; button names are exact.
 
 ---

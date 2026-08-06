@@ -2498,6 +2498,54 @@ walkthrough_reaches_the_coding_agent() {
 }
 check "YOUR-TURN.md ends with a real edit, not a chat message" \
   walkthrough_reaches_the_coding_agent
+# ...and the count it promises in its first paragraph must be the number of
+# steps it actually has. Adding the coding step made it seven while the opening
+# line still said six — drift introduced by the very commit above, in the file
+# whose whole job is being followed literally by someone with no terminal
+# experience. A reader who counts is the reader this document is written for.
+walkthrough_step_count_matches_its_own_promise() {
+  local doc="${REPO}/docs/YOUR-TURN.md" steps claimed word
+  steps="$(grep -c '^## Step [0-9]' "${doc}")"
+  # The number is written as a word, which is right for the sentence and means
+  # the check has to translate rather than grep for a digit.
+  local -a words=(zero one two three four five six seven eight nine ten)
+  word="${words[${steps}]:-}"
+  [[ -n "${word}" ]] || {
+    printf 'YOUR-TURN.md has %s steps, past what this gate can spell\n' "${steps}" >&2
+    return 1; }
+  claimed="$(grep -oE 'These [a-z]+ steps' "${doc}" | head -1)"
+  [[ -n "${claimed}" ]] || {
+    echo 'YOUR-TURN.md no longer opens by saying how many steps there are' >&2
+    return 1; }
+  [[ "${claimed}" == "These ${word} steps" ]] || {
+    printf 'YOUR-TURN.md says "%s" but has %s of them\n' "${claimed}" "${steps}" >&2
+    return 1; }
+}
+check "...and it promises the number of steps it actually has" \
+  walkthrough_step_count_matches_its_own_promise
+# Same class, checked because it was already correct rather than after it broke:
+# PHONE.md says the empty-chat screen "offers five starter questions", and the
+# questions live in a JSON file anyone can add a sixth to without reading a doc
+# two directories away.
+if have jq; then
+  starter_question_count_matches_the_doc() {
+    local n word claimed
+    n="$(jq length "${REPO}/config/prompt-suggestions.json" 2>/dev/null || echo 0)"
+    (( n > 0 )) || { echo 'config/prompt-suggestions.json is empty or unreadable' >&2; return 1; }
+    local -a words=(zero one two three four five six seven eight nine ten)
+    word="${words[${n}]:-}"
+    [[ -n "${word}" ]] || { printf 'there are now %s starter questions, past what this gate can spell\n' "${n}" >&2; return 1; }
+    claimed="$(grep -oE 'offers [a-z]+ starter questions' "${REPO}/docs/PHONE.md" | head -1)"
+    [[ -n "${claimed}" ]] || {
+      echo 'PHONE.md no longer says how many starter questions the chat offers' >&2
+      return 1; }
+    [[ "${claimed}" == "offers ${word} starter questions" ]] || {
+      printf 'PHONE.md says "%s" but config/prompt-suggestions.json has %s\n' "${claimed}" "${n}" >&2
+      return 1; }
+  }
+  check "PHONE.md counts the starter questions the chat really ships" \
+    starter_question_count_matches_the_doc
+fi
 
 echo "# ...and the README must not bury the coding agent below the chat either"
 # Same failure, third door. The README had two 'Quick start' sections — server,
