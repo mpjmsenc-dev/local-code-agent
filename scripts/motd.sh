@@ -142,6 +142,26 @@ log_age_human() {
   fi
 }
 
+# product_installed — did setup get far enough to leave the coding agent behind?
+#
+# This is the difference between "the install stopped partway" and "this box
+# has worked for days and the engine just died", and install_state cannot tell
+# them apart: both are a log with no verdict. Its own header comment describes
+# the second case — an interrupted first boot on a machine where everything
+# works — and banner_stalled was still chosen for it the moment ollama stopped.
+#
+# Measured on that machine. With ollama killed, the banner read "the install
+# stopped before it finished (nothing written to the log for 144 h)" and
+# offered 'sudo setup.sh': a 20-30 minute re-run, for a process that had died a
+# minute earlier. banner_attention's "installed, but the model engine is not
+# running · lca check · lca logs ollama" is the answer to what actually
+# happened.
+#
+# aider is installed by install_python.sh, near the end of setup.sh, so its
+# presence means the install got past everything that matters. A path test, so
+# it cannot hang — which this file requires of every probe.
+product_installed() { [[ -x "$(aider_bin)" ]]; }
+
 # engine_up — is the model engine actually serving? systemd first because it
 # cannot hang on a wedged HTTP listener; the curl fallback covers containers
 # and other places without systemd.
@@ -420,7 +440,7 @@ main() {
   # log saying COMPLETE is no comfort if ollama died an hour later.
   if engine_up; then
     banner_ready
-  elif [[ "${state}" == "stalled" ]]; then
+  elif [[ "${state}" == "stalled" ]] && ! product_installed; then
     banner_stalled
   else
     banner_attention

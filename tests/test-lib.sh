@@ -5751,6 +5751,44 @@ setup_banners_stay_quiet_about_lca() {
 check "...but the two setup banners stay quiet, and the ready one does not" \
   setup_banners_stay_quiet_about_lca
 
+echo "# a dead engine on a working box is not 'the install stopped before it finished'"
+# install_state cannot tell those apart: both are a verdict-less log. Its own
+# header comment describes the second case — an interrupted first boot on a
+# machine where everything works — and main() still chose banner_stalled for it
+# the moment ollama stopped.
+#
+# Measured on this machine with ollama killed: "the install stopped before it
+# finished (nothing written to the log for 144 h) · Finish it: sudo setup.sh".
+# A 20-30 minute re-run, offered for a process that had died a minute earlier,
+# on a box whose stack had been serving for days.
+motd_headline_for() {  # STATE  AIDER(yes|no) -> the headline
+  # Values into variables BEFORE the stubs: inside a function "$2" is the
+  # FUNCTION's argument, not the script's, and the first version of this probe
+  # returned empty for all three cases because of it.
+  bash -c 'source "$1" >/dev/null 2>&1; load_env_readonly
+    ST="$2"; AI="$3"
+    install_state() { printf "%s" "${ST}"; }
+    engine_up() { return 1; }
+    if [[ "${AI}" == "no" ]]; then aider_bin() { printf "/nonexistent/aider\n"; }; fi
+    main 2>&1' _ "${MOTD}" "$1" "$2" 2>/dev/null | grep -m1 'local-code-agent'
+}
+dead_engine_is_not_a_stalled_install() {
+  local out
+  # The product is installed: the engine is the problem, and the fix is a
+  # minute of looking at ollama, not half an hour of setup.
+  out="$(motd_headline_for stalled yes)"
+  grep -q 'model engine is not running' <<<"${out}" || {
+    printf 'a working box with a dead engine is told its install stopped: %s\n' "${out}" >&2
+    return 1; }
+  # ...and the genuinely-abandoned install must still be told to finish.
+  out="$(motd_headline_for stalled no)"
+  grep -q 'install stopped before it finished' <<<"${out}" || {
+    printf 'an install that really did stop partway no longer says so: %s\n' "${out}" >&2
+    return 1; }
+}
+check "a stalled log with the agent installed means the engine died, not the install" \
+  dead_engine_is_not_a_stalled_install
+
 echo "# ...and whether the chat app is still answering with an older assistant"
 # The container is created with the assistant's instructions baked in, so a
 # 'git pull' that fixes the assistant does not reach a running one and nothing
