@@ -601,9 +601,28 @@ case "$(gpu_state_for_placement "${GPU_PROC}")" in
 esac
 
 # Free disk where Ollama keeps its models (>= 15 GB wanted).
-MODELS_DIR=/usr/share/ollama/.ollama/models
-[[ -d "${MODELS_DIR}" ]] || MODELS_DIR=/
-FREE_GB="$(df -BG --output=avail "${MODELS_DIR}" 2>/dev/null | tail -1 | tr -dc '0-9')"
+# ollama_models_dir and free_gb, not a second copy of either.
+#
+# The path was hardcoded to /usr/share/ollama/.ollama/models — where the
+# SYSTEMD service keeps models — falling back to '/' when that is absent. On a
+# host with no systemd, which is the case this project supports specially
+# (start_ollama_bg, and uninstall.sh's note that "every blob lands in THEIR
+# home instead"), the models are under ${HOME} and this reported on the wrong
+# filesystem. Measured here: models in /root/.ollama/models, 6.2 GB of them,
+# and the report was about '/'. On a box whose /home is a separate volume that
+# is not a rounding difference, it is a different number entirely.
+#
+# And it WAS a different number even here. 'df -BG' rounds up, free_gb floors:
+#
+#   df -BG --output=avail /  ->  13
+#   free_gb /                ->  12
+#
+# pull_model refuses a download using free_gb. So at the threshold this check
+# passes a machine — "free disk: 15 GB (>= 15 GB)" — on which the very next
+# pull says there is not enough room. Two estimates of one number, which is the
+# drift model_disk_gb's own comment exists to prevent.
+MODELS_DIR="$(ollama_models_dir)"
+FREE_GB="$(free_gb "${MODELS_DIR}")"
 if [[ -z "${FREE_GB}" ]]; then
   p_warn "could not determine free disk space at ${MODELS_DIR}"
 elif (( FREE_GB >= 15 )); then

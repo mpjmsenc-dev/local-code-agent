@@ -4575,6 +4575,63 @@ no_hardcoded_ladder() { ! grep -qE 'TUNE_MODEL="[a-z0-9.]+-?[a-z]*:' "${REPO}/ch
 check "check-system.sh sources tune.sh's ladder" sources_the_real_ladder
 check "check-system.sh hardcodes no model in its ladder" no_hardcoded_ladder
 
+echo "# ...and it must not carry a second copy of the disk numbers either"
+# The free-disk check hardcoded /usr/share/ollama/.ollama/models — where the
+# SYSTEMD service keeps models — and fell back to '/' when that was absent. On
+# a host with no systemd, the case this project supports specially, the models
+# are under ${HOME} and the report was about the wrong filesystem. Measured:
+# 6.2 GB of models in /root/.ollama/models, and the line said '/'. On a box
+# whose /home is a separate volume that is a different number, not a rounding
+# difference.
+#
+# And it was a different number anyway. 'df -BG' rounds up, free_gb floors:
+#
+#   df -BG --output=avail /  ->  13
+#   free_gb /                ->  12
+#
+# pull_model refuses a download on free_gb's answer, so at the threshold this
+# check passed a machine — "free disk: 15 GB (>= 15 GB)" — that the very next
+# pull would refuse. Exactly the drift model_disk_gb's comment exists to stop.
+disk_check_uses_the_shared_helpers() {
+  local body
+  body="$(sed -n '/^# Free disk where Ollama keeps its models/,/^# --- Backups/p' \
+          "${REPO}/check-system.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find check-system.sh's free-disk block — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'ollama_models_dir' <<<"${body}" || {
+    echo "check-system.sh guesses where the models live instead of asking ollama_models_dir — on a host without systemd that is the wrong filesystem" >&2
+    return 1; }
+  grep -q 'free_gb' <<<"${body}" || {
+    echo 'check-system.sh measures free space itself instead of using free_gb, which is what pull_model enforces' >&2
+    return 1; }
+  # Comments stripped above, so this is the CODE running df, not the note
+  # explaining why it no longer does.
+  ! grep -qE '(^|[^[:alnum:]_])df( |$)' <<<"${body}" || {
+    echo 'check-system.sh is back to its own df — a second estimate of a number pull_model already computes' >&2
+    return 1; }
+}
+check "the free-disk check asks lib.sh rather than measuring it again" \
+  disk_check_uses_the_shared_helpers
+# ...and the two helpers it now leans on are asserted directly, because a
+# health check is only as good as they are.
+check "free_gb walks up to a directory that exists" \
+  test -n "$(free_gb /no/such/path/at/all)"
+check "...and answers for its nearest existing parent" \
+  test "$(free_gb /no/such/path/at/all)" = "$(free_gb /)"
+models_dir_with() {  # OLLAMA_MODELS HOME -> the directory chosen
+  bash -c 'source "$1" >/dev/null 2>&1
+    OLLAMA_MODELS="$2"; HOME="$3"
+    ollama_models_dir' _ "${SANDBOX}/scripts/lib.sh" "$1" "$2"
+}
+check "an explicit OLLAMA_MODELS wins" \
+  test "$(models_dir_with /somewhere/else /home/nobody)" = "/somewhere/else"
+# The fallback when neither candidate exists: the invoking user's home, which
+# is where start_ollama_bg's server puts them. Named even though it is absent,
+# because free_gb walks up from there — that pairing is the whole fix.
+check "...and without one it falls back to the invoking user's home" \
+  test "$(models_dir_with "" /home/nobody)" = "/home/nobody/.ollama/models"
+
 # Sourcing tune.sh recomputes SCRIPT_DIR from tune.sh's own location, silently
 # repointing the caller's at scripts/. Both callers restore it; if that restore
 # is ever dropped, the next line added below the source resolves against the
