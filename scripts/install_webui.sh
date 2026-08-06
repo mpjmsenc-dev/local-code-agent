@@ -16,9 +16,9 @@ load_env
 main() {
   step "Installing Open WebUI"
   if [[ "${SKIP_DOCKER}" == "true" ]]; then
-    die "SKIP_DOCKER=true in .env — Open WebUI needs Docker. Set SKIP_DOCKER=false and re-run ${REPO_ROOT}/scripts/install_docker.sh first."
+    die "SKIP_DOCKER=true in .env — Open WebUI needs Docker. Set SKIP_DOCKER=false and re-run sudo ${REPO_ROOT}/scripts/install_docker.sh first."
   fi
-  have docker || die "Docker is not installed. Run ${REPO_ROOT}/scripts/install_docker.sh first (or ${REPO_ROOT}/setup.sh)."
+  have docker || die "Docker is not installed. Run sudo ${REPO_ROOT}/scripts/install_docker.sh first (or sudo ${REPO_ROOT}/setup.sh)."
   # lib.sh's probe, which checks can_root before reaching for sudo. Written
   # out here as '... || as_root docker info || die', the as_root fired on a
   # host with neither root nor sudo and died with "Root privileges needed for:
@@ -69,7 +69,7 @@ main() {
     listeners="$(ss -ltn 2>/dev/null || true)"
   fi
   if [[ -n "${listeners}" ]] && grep -qE ":${WEBUI_PORT}[[:space:]]" <<<"${listeners}"; then
-    die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+    die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run sudo ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
   fi
 
   if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then

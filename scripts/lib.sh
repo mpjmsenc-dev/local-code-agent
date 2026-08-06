@@ -106,7 +106,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 require_cmd() {
   local cmd
   for cmd in "$@"; do
-    have "$cmd" || die "Required command '${cmd}' not found. Run ${REPO_ROOT}/setup.sh (or ${REPO_ROOT}/scripts/install_dependencies.sh) first."
+    have "$cmd" || die "Required command '${cmd}' not found. Run sudo ${REPO_ROOT}/setup.sh (or sudo ${REPO_ROOT}/scripts/install_dependencies.sh) first."
   done
 }
 

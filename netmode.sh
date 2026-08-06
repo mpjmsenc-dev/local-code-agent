@@ -214,7 +214,7 @@ render_inbound_rules() {
 # without nftables.
 apply_inbound_guard() {
   if ! have nft; then
-    warn "nft is not installed — cannot apply the inbound guard. Install nftables (${SCRIPT_DIR}/scripts/install_dependencies.sh) so the WebUI/Ollama ports are not publicly reachable."
+    warn "nft is not installed — cannot apply the inbound guard. Install nftables (sudo ${SCRIPT_DIR}/scripts/install_dependencies.sh) so the WebUI/Ollama ports are not publicly reachable."
     return 0
   fi
   as_root mkdir -p "${NETMODE_DIR}"

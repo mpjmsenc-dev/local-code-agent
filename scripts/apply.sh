@@ -178,7 +178,7 @@ apply_webui() {
     return 0
   fi
   if ! webui_container_exists; then
-    info "Chat app: not created yet — create it with: ${SCRIPT_DIR}/install_webui.sh"
+    info "Chat app: not created yet — create it with: sudo ${SCRIPT_DIR}/install_webui.sh"
     return 0
   fi
   local drifted
@@ -260,7 +260,7 @@ apply_guard() {
   # guard matches when we never read it is the failure this command exists to
   # end, one level up.
   if ! have nft; then
-    warn "Guard:    nftables is not installed, so the inbound guard was neither checked nor applied. Install it (${SCRIPT_DIR}/install_dependencies.sh), then re-run."
+    warn "Guard:    nftables is not installed, so the inbound guard was neither checked nor applied. Install it (sudo ${SCRIPT_DIR}/install_dependencies.sh), then re-run."
     UNCHECKED=$((UNCHECKED+1))
     return 0
   fi

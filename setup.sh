@@ -90,7 +90,7 @@ main() {
   # next block is happy to continue without, taking the model pull, the 'lca'
   # command, the boot services and the inbound guard with it.
   if ! "${SCRIPT_DIR}/scripts/install_docker.sh"; then
-    warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
+    warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run sudo ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
     setup_ok=false
   fi
   "${SCRIPT_DIR}/scripts/install_python.sh"
@@ -147,7 +147,7 @@ main() {
       fi
     fi
   else
-    warn "Ollama is not reachable — skipping model pull and smoke test (re-run ${SCRIPT_DIR}/setup.sh once Ollama runs)."
+    warn "Ollama is not reachable — skipping model pull and smoke test (re-run sudo ${SCRIPT_DIR}/setup.sh once Ollama runs)."
     setup_ok=false
   fi
 
@@ -155,7 +155,7 @@ main() {
     # A WebUI failure (e.g. the Docker daemon isn't running on a no-systemd
     # host) must NOT abort the rest of setup — the terminal stack still works.
     if ! "${SCRIPT_DIR}/scripts/install_webui.sh"; then
-      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run ${SCRIPT_DIR}/scripts/install_webui.sh once Docker is running."
+      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run sudo ${SCRIPT_DIR}/scripts/install_webui.sh once Docker is running."
       setup_ok=false
     fi
   else
@@ -168,7 +168,7 @@ main() {
   # aborted setup before the 'lca' command, the login banner, the boot services
   # and the inbound guard — none of which need Tailscale — had been installed.
   if ! "${SCRIPT_DIR}/scripts/install_tailscale.sh"; then
-    warn "Tailscale did not install — continuing without private phone access; the terminal stack is unaffected. Re-run ${SCRIPT_DIR}/scripts/install_tailscale.sh when the network is stable, or set SKIP_TAILSCALE=true in .env if you reach this box over a private network of your own."
+    warn "Tailscale did not install — continuing without private phone access; the terminal stack is unaffected. Re-run sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh when the network is stable, or set SKIP_TAILSCALE=true in .env if you reach this box over a private network of your own."
     setup_ok=false
   fi
 

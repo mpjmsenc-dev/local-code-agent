@@ -126,7 +126,7 @@ for bin in git curl jq python3 ollama nft; do
   if have "${bin}"; then
     p_pass "binary: ${bin}"
   else
-    p_fail "binary missing: ${bin} (run ${SCRIPT_DIR}/setup.sh)"
+    p_fail "binary missing: ${bin} (run sudo ${SCRIPT_DIR}/setup.sh)"
   fi
 done
 
@@ -159,10 +159,10 @@ else
     elif id -nG "${check_user}" 2>/dev/null | grep -qw docker; then
       p_pass "user '${check_user}' is in the docker group"
     else
-      p_warn "user '${check_user}' not in the docker group (log out/in after setup, or re-run ${SCRIPT_DIR}/scripts/install_docker.sh)"
+      p_warn "user '${check_user}' not in the docker group (log out/in after setup, or re-run sudo ${SCRIPT_DIR}/scripts/install_docker.sh)"
     fi
   else
-    p_fail "docker not installed (run ${SCRIPT_DIR}/scripts/install_docker.sh, or set SKIP_DOCKER=true)"
+    p_fail "docker not installed (run sudo ${SCRIPT_DIR}/scripts/install_docker.sh, or set SKIP_DOCKER=true)"
   fi
 fi
 
@@ -467,7 +467,7 @@ elif [[ "${SKIP_TAILSCALE}" == "true" ]]; then
   # unfixable-warning trap the auto-tune ladder had.
   info "tailscale skipped by configuration (SKIP_TAILSCALE=true) — phone access is via your own private network."
 else
-  p_warn "tailscale not installed (run ${SCRIPT_DIR}/scripts/install_tailscale.sh for phone access)"
+  p_warn "tailscale not installed (run sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh for phone access)"
 fi
 
 # --- Inbound guard ----------------------------------------------------------

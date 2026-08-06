@@ -88,7 +88,7 @@ main() {
   # for: docker info" and setup stopped, instead of the warning below and a
   # stack that carries on without Docker.
   if ! docker_daemon_reachable; then
-    warn "Docker daemon is not running (no init system started it?) — start it, then re-run ${REPO_ROOT}/scripts/install_webui.sh. Skipping the smoke test."
+    warn "Docker daemon is not running (no init system started it?) — start it, then re-run sudo ${REPO_ROOT}/scripts/install_webui.sh. Skipping the smoke test."
     return 0
   fi
 

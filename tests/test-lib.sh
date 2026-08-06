@@ -9098,6 +9098,51 @@ apt_failure_checks_sudo_first() {
 }
 check "...and the apt failure asks that before blaming the lock or the network" \
   apt_failure_checks_sudo_first
+
+# ...and no message may send someone to a script that needs root without
+# telling them so. That advice is how the misleading apt failure above was
+# reached in the first place: netmode.sh says "Install nftables
+# (scripts/install_dependencies.sh)" — no sudo — and following it literally is
+# what produced a complaint about a dpkg lock nobody held.
+#
+# Eighteen messages named one of the six root-requiring installers that way,
+# and seven more named setup.sh. The convention already existed: the login
+# banner and check-system.sh both write 'sudo .../setup.sh'.
+#
+# install_python.sh is deliberately NOT in the list. It writes the virtualenv
+# as the invoking user and needs root only when the checkout is owned by
+# someone else — which it now says itself, naming sudo at the moment that is
+# actually true. Requiring sudo in every mention would tell people to create a
+# root-owned venv they did not need.
+root_scripts_are_advised_with_sudo() {
+  local f body line bad=0 seen=0
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    body="$(sed 's/^[[:space:]]*#.*//' "${f}")"
+    while IFS= read -r line; do
+      # Only MESSAGES — a bare invocation is the script running the installer
+      # itself, where sudo would be wrong (setup.sh already runs as root).
+      [[ "${line}" =~ (warn|die|info|err|p_warn|p_fail|p_info|ok)[[:space:]]+\" ]] || continue
+      # Path-prefixed only. A mention without one is describing the script,
+      # not telling anyone to run it — tune.sh says "setup.sh will pull
+      # ${TUNE_MODEL}", which is a statement about what happens next and would
+      # read as nonsense with a sudo in front of it. The gate flagged exactly
+      # that on its first run.
+      [[ "${line}" =~ \$\{(SCRIPT_DIR|REPO_ROOT)\}/(scripts/)?(setup\.sh|install_(dependencies|docker|git|ollama|tailscale|webui)\.sh) ]] || continue
+      seen=$((seen + 1))
+      [[ "${line}" == *"sudo \${"* ]] && continue
+      printf '%s advises a script that needs root without sudo:\n  %s\n' \
+        "${f##*/}" "${line#"${line%%[![:space:]]*}"}" >&2
+      bad=1
+    done <<<"${body}"
+  done
+  (( seen >= 15 )) || {
+    printf 'only %s such messages found — this gate stopped watching\n' "${seen}" >&2
+    return 1
+  }
+  return "${bad}"
+}
+check "advice naming a script that needs root says sudo" \
+  root_scripts_are_advised_with_sudo
 # ...and install_python.sh must still RUN when executed, not only be sourceable.
 check "install_python.sh still runs main when executed" \
   grep -qE '^  main "\$@"$' "${REPO}/scripts/install_python.sh"

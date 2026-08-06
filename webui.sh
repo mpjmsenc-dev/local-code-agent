@@ -188,8 +188,8 @@ main() {
     exit 0
   fi
 
-  have docker || die "Docker is not installed. Run ${SCRIPT_DIR}/scripts/install_docker.sh first."
-  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it ($(docker_start_hint)), or add yourself to the docker group (${SCRIPT_DIR}/scripts/install_docker.sh) and log out/in, or re-run this as root."
+  have docker || die "Docker is not installed. Run sudo ${SCRIPT_DIR}/scripts/install_docker.sh first."
+  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it ($(docker_start_hint)), or add yourself to the docker group (sudo ${SCRIPT_DIR}/scripts/install_docker.sh) and log out/in, or re-run this as root."
 
   case "${cmd}" in
     start)
@@ -213,7 +213,7 @@ main() {
       ok "Open WebUI stopped (data kept in the 'open-webui' volume)."
       ;;
     restart)
-      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run ${SCRIPT_DIR}/scripts/install_webui.sh first."
+      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run sudo ${SCRIPT_DIR}/scripts/install_webui.sh first."
       "${DOCKER[@]}" restart "${WEBUI_CONTAINER}" >/dev/null
       local restart_why
       restart_why="$(port_mismatch_reason || true)"
@@ -225,7 +225,7 @@ main() {
       ;;
     status)
       if ! container_exists; then
-        warn "Container '${WEBUI_CONTAINER}' does not exist — run ${SCRIPT_DIR}/scripts/install_webui.sh to create it."
+        warn "Container '${WEBUI_CONTAINER}' does not exist — run sudo ${SCRIPT_DIR}/scripts/install_webui.sh to create it."
         exit 1
       fi
       local state live_port key

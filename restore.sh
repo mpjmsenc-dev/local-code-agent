@@ -72,7 +72,7 @@ restore_webui_volume() {
   # recovery. On the machine docs/MIGRATE.md is written for — a fresh box you
   # are restoring onto — a daemon that is not up yet is not an exotic state.
   if ! have docker; then
-    warn "Docker not installed — cannot restore the WebUI volume. Run ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
+    warn "Docker not installed — cannot restore the WebUI volume. Run sudo ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
     return 0
   fi
   if ! docker_daemon_reachable; then
@@ -320,7 +320,7 @@ main() {
         fi
       done < <(tail -n +2 "${workdir}/models.txt" | awk '{print $1}')
     else
-      warn "Ollama not reachable — skipping model re-pull. Run ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh."
+      warn "Ollama not reachable — skipping model re-pull. Run sudo ${SCRIPT_DIR}/setup.sh first, then re-run ${SCRIPT_DIR}/restore.sh."
     fi
   else
     warn "Backup contains no model list — skipping."
