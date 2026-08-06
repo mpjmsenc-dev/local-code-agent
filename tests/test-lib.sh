@@ -5498,6 +5498,66 @@ banner_names_a_command_that_exists() {
 }
 check "the banner says so when 'lca' is not on PATH, and stays quiet when it is" \
   banner_names_a_command_that_exists
+
+echo "# ...and neither surface may offer 'tailscale up' where tailscale is absent"
+# Two commands explain how to reach the chat: the login banner and 'lca chat'.
+# motd.sh's chat_address() learned the rule — "pointing at 'sudo tailscale up'
+# here would hand the user a command that does not exist" — and webui.sh did
+# not, so 'lca chat' printed exactly that on a box with no tailscale. Measured
+# here, where tailscale is genuinely absent. It is the command docs/PHONE.md
+# and YOUR-TURN.md both send people to for phone setup, so it is the first
+# thing a new owner runs and the first thing that fails.
+#
+# Gated on both files together, because one copy of a rule in two reporters is
+# how they drifted in the first place.
+#
+# SCOPED to the two regions that print the advice, and that scoping is the
+# gate. Written first as a whole-file grep for 'have tailscale' and
+# 'not installed', which passed with webui.sh's entire conditional deleted:
+# the file mentions tailscale once more when it fetches the IP, and says
+# "Docker is not installed" three hundred lines away. Both mutations came back
+# NOT CAUGHT — a gate satisfied by unrelated text elsewhere in the file, which
+# is the third time that exact fault has appeared on this branch.
+tailscale_advice_is_conditional() {
+  local body bad=0
+  # The 'url' subcommand of webui.sh — what 'lca chat' runs.
+  # Comments stripped from BOTH regions. Without that, motd.sh's own comment —
+  # "Not installed and not skipped: pointing at 'sudo tailscale up' here would
+  # hand the user a command that does not exist" — satisfies the check that the
+  # code still has a not-installed arm, and deleting the arm passes.
+  # shellcheck disable=SC2016  # the sed address is a literal, not an expansion
+  body="$(sed -n '/if \[\[ "${cmd}" == "url" \]\]; then/,/^  fi$/p' "${REPO}/webui.sh" \
+          | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find webui.sh's url block — this gate stopped watching" >&2; return 1; }
+  # if/fi rather than 'A && B || C', which shellcheck rightly flags (SC2015)
+  # and which CONTRIBUTING trap #2 already tells you not to write. An earlier
+  # draft put a comment inside the && chain as well, where a trailing backslash
+  # continues INTO the comment and silently drops the command after it.
+  #
+  # The SKIP_TAILSCALE match is the CONDITION, not the word: the skipped arm's
+  # own message says "SKIP_TAILSCALE=true", so a bare name match survives
+  # replacing the test with 'elif false' and a dead arm passes. '.*' rather
+  # than '[^"]*' because the condition is "${SKIP_TAILSCALE:-false}" == "true"
+  # and the quote inside the expansion stopped the tighter pattern reaching the
+  # '=='  — which made the gate fail on a clean tree.
+  if ! grep -q 'tailscale up' <<<"${body}" \
+     || ! grep -qi 'not installed' <<<"${body}" \
+     || ! grep -qE 'SKIP_TAILSCALE.*==' <<<"${body}"; then
+    echo "'lca chat' no longer distinguishes tailscale down / absent / skipped — it hands a box without tailscale a command that does not exist" >&2
+    bad=1
+  fi
+  # ...and the login banner, which learned this rule first.
+  body="$(sed -n '/^chat_address() {/,/^}/p' "${REPO}/scripts/motd.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find motd.sh's chat_address — this gate stopped watching" >&2; return 1; }
+  grep -qi 'not installed' <<<"${body}" || {
+    echo 'the login banner offers tailscale advice without a "not installed" arm' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "both 'lca chat' and the banner check for tailscale before naming it" \
+  tailscale_advice_is_conditional
 # ...from headline(), so a sixth banner state added later cannot forget it.
 # Every banner calls exactly one headline, and the note has to sit above the
 # rows it is about.

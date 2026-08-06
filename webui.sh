@@ -165,8 +165,24 @@ main() {
       fi
       info "(then: mkdir -p ~/my-project && cd ~/my-project && lca — see docs/PHONE.md for SSH apps)"
     else
-      warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
-      info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      # Which of the three reasons matters, because 'sudo tailscale up' on a
+      # box without tailscale is a command that does not exist — the rule
+      # motd.sh's chat_address() already states in as many words and this
+      # branch did not, on the exact command docs/PHONE.md and YOUR-TURN.md
+      # both send people to for phone setup.
+      if have tailscale; then
+        warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
+        info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      elif [[ "${SKIP_TAILSCALE:-false}" == "true" ]]; then
+        # No "once connected" line here: Tailscale is deliberately not the
+        # route on this box, so a tailscale-ip URL is not what this reader is
+        # ever going to type.
+        warn "Tailscale is skipped (SKIP_TAILSCALE=true) — reach port ${WEBUI_PORT} over the private network you provide."
+      else
+        warn "Tailscale is not installed, so there is no private address yet."
+        info "Install it: sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh   (then: sudo tailscale up)"
+        info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      fi
     fi
     info "On this machine:  http://127.0.0.1:${WEBUI_PORT}"
     exit 0
