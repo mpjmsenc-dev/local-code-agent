@@ -42,6 +42,31 @@ first_boot_failed() {
 }
 
 main() {
+  # First statement, above every side effect — the same rule setup.sh,
+  # install.sh, restore.sh and uninstall.sh each had to learn, and the fourth
+  # entry point never did. This one did not even RECEIVE its arguments: the
+  # last line called 'main' without "$@", so --help was dropped on the floor
+  # and the full unattended install ran instead. Measured, with apt stubbed and
+  # the clone pointed at a local mirror:
+  #
+  #   $ bash deploy/do-user-data.sh --help
+  #   === local-code-agent first-boot install started ===
+  #   --- Installing git ... ---
+  #   --- Cloning ... ---        (33 MB)
+  #   --- Installing the login banner ... ---
+  #
+  # ...on a droplet that would be apt-get, a clone and 20-30 minutes of setup.
+  # It also rewrote /etc/update-motd.d, which is how this was noticed: the
+  # probe repointed this machine's login banner at a throwaway directory.
+  #
+  # Inside main(), not above it, so the wrapper still holds: a paste that
+  # arrives truncated cannot run anything at all.
+  case "${1:-}" in
+    -h|--help)
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      return 0
+      ;;
+  esac
   echo "=== local-code-agent first-boot install started: $(date) ==="
   export DEBIAN_FRONTEND=noninteractive
   # cloud-init runs this without a login environment, so $HOME is unset — and
@@ -141,4 +166,4 @@ main() {
 # For a file whose stated purpose is to "always end with exactly one of three
 # lines", a trailing "command not found" and a false failure status is the
 # precise opposite.
-main 2>&1 | tee -a "${LOG_FILE}"; exit $?
+main "$@" 2>&1 | tee -a "${LOG_FILE}"; exit $?

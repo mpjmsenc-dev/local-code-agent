@@ -8284,7 +8284,13 @@ check "the --help list covers everything bin/lca dispatches to" \
 # and the behaviour itself was verified by hand once the shape was in place.
 installers_answer_help_before_acting() {
   local f
-  for f in install.sh setup.sh; do
+  # deploy/do-user-data.sh joined this list, as the fourth entry point and the
+  # one that was worst off: it did not even RECEIVE its arguments — the last
+  # line called 'main' without "$@" — so --help ran the full unattended
+  # install. Measured, apt stubbed and the clone pointed at a local mirror:
+  # apt-get, a 33 MB clone, and /etc/update-motd.d rewritten, which is how it
+  # was noticed at all.
+  for f in install.sh setup.sh deploy/do-user-data.sh; do
     awk '/^main\(\) \{/            { inm = 1; next }
          inm && /^[[:space:]]*#/   { next }
          inm && /^[[:space:]]*$/   { next }
@@ -8295,8 +8301,49 @@ installers_answer_help_before_acting() {
     }
   done
 }
-check "install.sh and setup.sh explain themselves before they install anything" \
+check "install.sh, setup.sh and the first-boot script explain themselves before they install anything" \
   installers_answer_help_before_acting
+# ...and the flag has to REACH main(), which is a separate fault from handling
+# it. do-user-data.sh's last line was 'main 2>&1 | tee ...' — arguments dropped
+# on the floor — so a --help case inside main would have been dead code.
+entry_points_forward_their_arguments() {
+  local f last bad=0
+  for f in install.sh deploy/do-user-data.sh; do
+    last="$(grep -vE '^\s*(#|$)' "${REPO}/${f}" | tail -1)"
+    [[ "${last}" == *'main "$@"'* ]] || {
+      printf '%s calls main without "$@" — every flag it accepts is unreachable: %s\n' \
+        "${f}" "${last}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "...and the arguments actually reach main()" \
+  entry_points_forward_their_arguments
+# ...and asking must still touch nothing. Pointed at a repository that cannot
+# exist, so even a regression cannot get as far as the clone — and therefore
+# cannot rewrite /etc/update-motd.d on the machine running the tests, which a
+# probe of this exact script did while it was being written.
+first_boot_help_touches_nothing() {
+  local sb="${SANDBOX}/dudhelp" out rc=0
+  rm -rf "${sb}"; mkdir -p "${sb}/stub"
+  printf '#!/bin/sh\necho "(apt-get ran)"\nexit 0\n' > "${sb}/stub/apt-get"
+  chmod +x "${sb}/stub/apt-get"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${sb}/stub:${PATH}" LCA_REPO_URL="${sb}/nonexistent.git" \
+         LCA_DIR="${sb}/target" LCA_LOG="${sb}/log" \
+         timeout 60 bash "${REPO}/deploy/do-user-data.sh" --help 2>&1)" || rc=$?
+  (( rc == 0 )) || {
+    printf 'do-user-data.sh --help exited %s: %s\n' "${rc}" "${out}" >&2; return 1; }
+  grep -q 'first-boot installer' <<<"${out}" || {
+    printf 'do-user-data.sh --help printed no usage: %s\n' "${out}" >&2; return 1; }
+  grep -q 'apt-get ran' <<<"${out}" && {
+    printf 'do-user-data.sh --help ran apt: %s\n' "${out}" >&2; return 1; }
+  [[ ! -e "${sb}/target" ]] || {
+    echo 'do-user-data.sh --help cloned the repository' >&2; return 1; }
+}
+check "...and the first-boot script's --help installs nothing" \
+  first_boot_help_touches_nothing
 
 # The scripts answering --help only helps if the flag reaches them. 'chat' was
 # 'exec webui.sh url' with no "$@", so 'lca chat --help' printed the chat
