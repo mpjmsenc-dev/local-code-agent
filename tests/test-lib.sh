@@ -55,6 +55,34 @@ source "${SANDBOX}/scripts/lib.sh"
 # In-process only. Tests that run a script as a subprocess get lib.sh's real
 # functions, which is right — those exercise the script, and they carry their
 # own stubs.
+# ...and nothing in this suite may call a command that does not exist.
+#
+# A gate whose helper is defined BELOW the 'check' line that runs it compares
+# nothing: the function is not yet defined, the call fails, and inside a
+# process substitution or a subshell that failure is silent. Measured, with
+# exactly that mistake re-introduced:
+#
+#   tests/test-lib.sh: line 2024: prompt_lca_commands: command not found
+#   RESULT: all tests passed
+#
+# Green suite, green CI, and a gate comparing zero things. I shipped that
+# mistake an hour ago and only found it by mutating the code it was supposed
+# to watch — which works, and only works if you remember to do it.
+#
+# bash calls command_not_found_handle for any unqualified name it cannot
+# resolve, so this catches the whole class at the moment it happens rather
+# than the next time somebody thinks to check. A path that does not exist
+# ('/nonexistent/aider', which several fixtures use on purpose) does NOT come
+# through here — that is an exec failure, not a lookup failure — so the
+# deliberate stubs stay deliberate.
+LCA_MISSING_CMD_LOG="${SANDBOX}/commands-that-do-not-exist"
+: > "${LCA_MISSING_CMD_LOG}"
+command_not_found_handle() {
+  printf '%s\n' "${1:-}" >> "${LCA_MISSING_CMD_LOG}"
+  printf 'test suite called a command that does not exist: %s\n' "${1:-}" >&2
+  return 127
+}
+
 LCA_UNSTUBBED_LOG="${SANDBOX}/unstubbed-docker-calls"
 : > "${LCA_UNSTUBBED_LOG}"
 webui_container_running() {
@@ -10222,6 +10250,18 @@ no_test_asked_the_real_docker() {
 }
 check "no test read the real docker daemon instead of its fixture" \
   no_test_asked_the_real_docker
+# ...and the counterpart for vacuity. If this fails, some gate called a
+# function that did not exist at that moment — most likely a helper defined
+# below its caller — and whatever it was meant to compare, it compared nothing
+# while reporting ok.
+no_test_called_a_missing_command() {
+  [[ -s "${LCA_MISSING_CMD_LOG}" ]] || return 0
+  printf 'a test called a command that does not exist, so whatever it checked, it checked nothing:\n' >&2
+  sort -u "${LCA_MISSING_CMD_LOG}" | sed 's/^/  /' >&2
+  return 1
+}
+check "no test called a command that does not exist" \
+  no_test_called_a_missing_command
 
 echo
 if (( FAILED > 0 )); then

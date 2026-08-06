@@ -14,6 +14,19 @@ FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
 
+# Nothing here may call a command that does not exist — the same rule
+# tests/test-lib.sh carries, and for the same measured reason: a helper defined
+# below the line that calls it makes its check compare nothing, and inside a
+# subshell that failure is silent. Green suite, green CI, gate watching air.
+# This suite guards the SSH-lockout invariant, so a check that quietly stops
+# checking is the last thing it can afford.
+MISSING_CMD_LOG="$(mktemp)"
+command_not_found_handle() {
+  printf '%s\n' "${1:-}" >> "${MISSING_CMD_LOG}"
+  printf 'test suite called a command that does not exist: %s\n' "${1:-}" >&2
+  return 127
+}
+
 # What every render-* must put on its first line, and nothing may precede.
 # Shared, so the purity check inside render_with_env and the one applied to the
 # two renders below cannot drift apart.
@@ -21,7 +34,7 @@ NFT_SHEBANG='#!/usr/sbin/nft -f'
 
 RULES="$(mktemp)"
 INBOUND="$(mktemp)"
-trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}"' EXIT
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${MISSING_CMD_LOG:-}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 "${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 
@@ -415,6 +428,17 @@ if grep -q 'is unchanged' <<<"${FAILED_RENDER_OUT}"; then
   t_ok "...and says so"
 else
   t_fail "a failed render did not report the file was left alone: ${FAILED_RENDER_OUT}"
+fi
+
+# The counterpart to command_not_found_handle above: if anything reached it,
+# some check called a function that did not exist and compared nothing while
+# reporting ok.
+if [[ -s "${MISSING_CMD_LOG}" ]]; then
+  printf 'a test called a command that does not exist, so whatever it checked, it checked nothing:\n' >&2
+  sort -u "${MISSING_CMD_LOG}" | sed 's/^/  /' >&2
+  t_fail "no test called a command that does not exist"
+else
+  t_ok "no test called a command that does not exist"
 fi
 
 echo
