@@ -5769,7 +5769,14 @@ motd_headline_for() {  # STATE  AIDER(yes|no) -> the headline
     ST="$2"; AI="$3"
     install_state() { printf "%s" "${ST}"; }
     engine_up() { return 1; }
-    if [[ "${AI}" == "no" ]]; then aider_bin() { printf "/nonexistent/aider\n"; }; fi
+    # BOTH directions stubbed. Leaving the "present" case to the real
+    # aider_bin() made the gate depend on whether .venv exists — true on this
+    # machine, false in the unit-test CI job, which never runs
+    # install_python.sh. It passed here and turned CI red, which is the same
+    # environment-dependence that made guarded_ports fail on a real install
+    # earlier in this branch. /bin/sh is an executable that always exists.
+    if [[ "${AI}" == "no" ]]; then aider_bin() { printf "/nonexistent/aider\n"; }
+    else aider_bin() { printf "/bin/sh\n"; }; fi
     main 2>&1' _ "${MOTD}" "$1" "$2" 2>/dev/null | grep -m1 'local-code-agent'
 }
 dead_engine_is_not_a_stalled_install() {
