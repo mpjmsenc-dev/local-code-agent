@@ -9015,6 +9015,89 @@ venv_failure_names_the_real_cause() {
 }
 check "a virtualenv that cannot be created names the cause it found" \
   venv_failure_names_the_real_cause
+
+# ...and an apt step that failed because sudo could not ask for a password
+# must say so, rather than guessing at the two causes it did not check.
+# Measured as an ordinary user with no terminal, running the script netmode.sh
+# names WITHOUT sudo:
+#
+#   sudo: a terminal is required to read the password ...
+#   sudo: a password is required
+#   [FAIL] apt update failed. Another apt/dpkg process held the lock past the
+#          timeout (see docs/TROUBLESHOOTING.md) or the network is down.
+#
+# No lock was held and the network was fine. sudo had just said what was wrong
+# and the project's own message talked over it, sending the reader to a
+# troubleshooting page about a lock nobody held.
+sudo_block_says() {  # ROOT_NOW CAN_ROOT TTY -> yes|no
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    RN="$2"; CR="$3"; TT="$4"
+    can_root_now() { [[ "${RN}" == "yes" ]]; }
+    can_root()     { [[ "${CR}" == "yes" ]]; }
+    # have_terminal, not a re-declared sudo_would_block. Stubbing the whole
+    # predicate for the terminal case meant the real one was never run there,
+    # and a mutation replacing its tty test with "return 0" came back NOT
+    # CAUGHT — the gate was testing its own stub.
+    have_terminal() { [[ "${TT}" == "yes" ]]; }
+    if sudo_would_block; then echo yes; else echo no; fi' \
+    _ "${SANDBOX}/scripts/lib.sh" "$1" "$2" "$3" 2>/dev/null
+}
+sudo_would_block_answers() {
+  local bad=0
+  # The measured case: sudo present, needs a password, nothing to type into.
+  [[ "$(sudo_block_says no yes no)" == "yes" ]] || {
+    echo 'sudo needing a password with no terminal is not recognised' >&2; bad=1; }
+  # Already root, or passwordless sudo — nothing is blocked.
+  [[ "$(sudo_block_says yes yes no)" == "no" ]] || {
+    echo 'a root (or passwordless-sudo) run is reported as blocked' >&2; bad=1; }
+  # No sudo at all: as_root's own message is better than anything this could
+  # add, so this must stand aside rather than pre-empt it.
+  [[ "$(sudo_block_says no no no)" == "no" ]] || {
+    echo 'a box with no sudo is claimed as a password problem, pre-empting as_root' >&2; bad=1; }
+  # A terminal is present: sudo can and will ask, so nothing is blocked.
+  [[ "$(sudo_block_says no yes yes)" == "no" ]] || {
+    echo 'a run with a terminal is reported as blocked, though sudo could ask' >&2; bad=1; }
+  return "${bad}"
+}
+check "'sudo will need a password and there is no terminal' is its own answer" \
+  sudo_would_block_answers
+# ...and the one line the harness has to stub, pinned directly. Asserted with
+# an explicit '< /dev/null' rather than on the suite's own stdin: run from an
+# interactive shell that IS a terminal, and a test written the obvious way
+# would fail on the maintainer's machine and pass in CI.
+have_terminal_knows_a_pipe_is_not_one() { ! have_terminal < /dev/null; }
+check "...and have_terminal says no when stdin is not a terminal" \
+  have_terminal_knows_a_pipe_is_not_one
+apt_failure_checks_sudo_first() {
+  local body
+  body="$(sed -n '/if ! apt_get update -y; then/,/^  fi$/p' \
+          "${REPO}/scripts/install_dependencies.sh" | sed 's/^[[:space:]]*#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find install_dependencies.sh's apt-update branch — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'sudo_would_block' <<<"${body}" || {
+    echo 'install_dependencies.sh blames the dpkg lock and the network without asking whether sudo could run at all' >&2
+    return 1; }
+  # ...and the lock/network message must survive, because it is right whenever
+  # sudo was not the problem.
+  grep -q 'held the lock' <<<"${body}" || {
+    echo 'the dpkg-lock explanation was lost — it is still the right answer when root was available' >&2
+    return 1; }
+  # The order matters: the guess must not be reached before the fact.
+  local n_sudo n_lock line n=0
+  n_sudo=0; n_lock=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [[ "${line}" == *sudo_would_block* && ${n_sudo} -eq 0 ]]; then n_sudo="${n}"; fi
+    if [[ "${line}" == *"held the lock"* && ${n_lock} -eq 0 ]]; then n_lock="${n}"; fi
+  done <<<"${body}"
+  (( n_sudo > 0 && n_sudo < n_lock )) || {
+    echo 'the dpkg-lock guess is reached before the sudo question is asked' >&2
+    return 1; }
+}
+check "...and the apt failure asks that before blaming the lock or the network" \
+  apt_failure_checks_sudo_first
 # ...and install_python.sh must still RUN when executed, not only be sourceable.
 check "install_python.sh still runs main when executed" \
   grep -qE '^  main "\$@"$' "${REPO}/scripts/install_python.sh"

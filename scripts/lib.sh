@@ -203,6 +203,32 @@ apt_get() {
     apt-get -o DPkg::Lock::Timeout=600 "$@"
 }
 
+# sudo_would_block — true when becoming root is possible in principle but not
+# in THIS run: sudo is installed, it will ask for a password, and there is no
+# terminal to type it into.
+#
+# A predicate, never a die. It is consulted by failure branches that already
+# have their own handling — some callers tolerate an apt failure with '|| warn'
+# — and turning a survivable step into an exit is exactly the shape this
+# project keeps removing.
+#
+# The distinction it draws is the one can_root_now already makes for probes,
+# applied to an action that has just failed: "could have escalated" and "could
+# escalate here, now, without a human" are different, and only the second one
+# was ever going to work in a pipe, a cron job or a CI step.
+# have_terminal — its own function so sudo_would_block can be tested in all
+# four of its states. '[[ -t 0 ]]' cannot be stubbed from outside, so a test
+# either re-declares the whole predicate (and stops testing it) or depends on
+# whether a pty happened to be allocated. Both were tried; the first let a
+# mutation through.
+have_terminal() { [[ -t 0 ]]; }
+
+sudo_would_block() {
+  can_root_now && return 1     # root already, or sudo needs no password
+  can_root || return 1         # no sudo at all — as_root's own message is better
+  ! have_terminal
+}
+
 # confirm PROMPT — ask yes/no. Auto-answers YES when non-interactive so
 # unattended installs (cloud-init user-data) never hang on a prompt.
 confirm() {
