@@ -76,7 +76,7 @@ restore_webui_volume() {
     return 0
   fi
   if ! docker_daemon_reachable; then
-    warn "The Docker daemon is not responding, so the WebUI volume was NOT restored — nothing was touched and any existing data is intact. Start it (sudo systemctl start docker), then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
+    warn "The Docker daemon is not responding, so the WebUI volume was NOT restored — nothing was touched and any existing data is intact. Start it ($(docker_start_hint)), then re-run ${SCRIPT_DIR}/restore.sh; continuing with the model restore."
     return 0
   fi
   info "Restoring the 'open-webui' docker volume..."

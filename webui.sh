@@ -189,7 +189,7 @@ main() {
   fi
 
   have docker || die "Docker is not installed. Run ${SCRIPT_DIR}/scripts/install_docker.sh first."
-  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it (sudo systemctl start docker), or add yourself to the docker group (${SCRIPT_DIR}/scripts/install_docker.sh) and log out/in, or re-run this as root."
+  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it ($(docker_start_hint)), or add yourself to the docker group (${SCRIPT_DIR}/scripts/install_docker.sh) and log out/in, or re-run this as root."
 
   case "${cmd}" in
     start)

@@ -151,7 +151,7 @@ else
     elif ! can_root_now; then
       p_warn "cannot query the docker daemon from this account — it was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
     else
-      p_fail "docker daemon not responding (sudo systemctl start docker)"
+      p_fail "docker daemon not responding ($(docker_start_hint))"
     fi
     check_user="${SUDO_USER:-$(id -un)}"
     if [[ "${check_user}" == "root" ]]; then

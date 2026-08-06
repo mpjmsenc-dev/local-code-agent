@@ -216,6 +216,31 @@ confirm() {
   [[ -z "${reply}" || "${reply}" =~ ^[Yy] ]]
 }
 
+# docker_start_hint — how to start the Docker daemon ON THIS HOST.
+#
+# Five separate messages said "sudo systemctl start docker" unconditionally:
+# webui.sh, restore.sh, apply.sh, install_webui.sh and check-system.sh. On a
+# host with no systemd — containers and WSL, the same hosts start_ollama_bg()
+# exists for — that is a dead end, and a confusing one. Measured here:
+#
+#   $ systemctl start docker
+#   System has not been booted with systemd as init system (PID 1). Can't operate.
+#   Failed to connect to bus: Host is down
+#
+# Note systemctl is PRESENT on such a box; it is systemd that is not running,
+# which is why 'have systemctl' is not the question and systemd_available()
+# below — which this project already had, and already used elsewhere — is.
+#
+# Same rule as chat_address() and the 'lca' rows in the banner: do not hand the
+# reader a command that cannot work where they are standing.
+docker_start_hint() {
+  if systemd_available; then
+    printf 'sudo systemctl start docker'
+  else
+    printf 'start the Docker daemon for this host — there is no systemd here, so systemctl cannot do it'
+  fi
+}
+
 # systemd_available — true when systemd is PID 1 and systemctl is usable.
 systemd_available() {
   have systemctl && [[ -d /run/systemd/system ]]

@@ -6014,6 +6014,95 @@ setup_banners_stay_quiet_about_lca() {
 check "...but the two setup banners stay quiet, and the ready one does not" \
   setup_banners_stay_quiet_about_lca
 
+echo "# ...and no failure message may tell a systemd-less box to 'systemctl start docker'"
+# Same family as the tailscale rule above, found the same way — by standing on
+# the box. This container has systemctl on PATH and systemd nowhere near PID 1:
+#
+#   $ systemctl start docker
+#   System has not been booted with systemd as init system (PID 1). Can't operate.
+#   Failed to connect to bus: Host is down
+#
+# Five messages recommended exactly that, unconditionally: webui.sh, restore.sh,
+# apply.sh, install_webui.sh and check-system.sh. Every one of them fires at the
+# moment the daemon is already down, i.e. the only moment the reader needs the
+# command to work. systemd_available() has been in lib.sh the whole time and
+# answers correctly here; the messages simply never asked it.
+#
+# Three assertions, because each one alone passes a different way of breaking it:
+#   1. behaviour — the helper actually branches (a helper that ignores its
+#      condition passes any amount of grepping for systemd_available);
+#   2. no literal outside the helper — a sixth message added later, or one of
+#      the five edited back, is caught;
+#   3. the call sites are still there — deleting '$(docker_start_hint)' from all
+#      five leaves no literal to find, so (2) alone would go green on it.
+docker_hint_for() {  # yes|no -> the hint that host is given
+  # Stubs AFTER the source, and the argument read into a variable first: inside
+  # a function "$2" is the FUNCTION's argument. Both directions stubbed rather
+  # than trusting the host, so this reads the same in CI as it does here.
+  bash -c 'source "$1" >/dev/null 2>&1
+    SD="$2"
+    if [[ "${SD}" == "yes" ]]; then systemd_available() { return 0; }
+    else systemd_available() { return 1; }; fi
+    docker_start_hint' _ "${REPO}/scripts/lib.sh" "$1" 2>/dev/null
+}
+docker_advice_is_conditional() {
+  local out bad=0 files=() f body callers=0
+  out="$(docker_hint_for yes)"
+  grep -q 'systemctl start docker' <<<"${out}" || {
+    printf 'a systemd host is no longer told the command that works there: %s\n' "${out}" >&2
+    bad=1; }
+  # 'systemctl start', not the bare word: the no-systemd text names systemctl on
+  # purpose — "there is no systemd here, so systemctl cannot do it" — because a
+  # reader who already tried it deserves to know why it failed. The bare-word
+  # form was the first draft and it failed on a clean tree, flagging the fix for
+  # explaining itself. What must not appear is the imperative.
+  out="$(docker_hint_for no)"
+  if grep -q 'systemctl start' <<<"${out}" || [[ -z "${out}" ]]; then
+    printf 'a host without systemd is handed systemctl anyway: %s\n' "${out}" >&2
+    bad=1
+  fi
+  [[ "$(docker_hint_for no)" != "$(docker_hint_for yes)" ]] || {
+    echo 'docker_start_hint gives both hosts the same answer — it stopped branching' >&2
+    bad=1; }
+  # ...and nothing outside the helper may hardcode it. Comments stripped: the
+  # helper's own note quotes the command three times, and the first draft of
+  # this gate flagged lib.sh for its own explanation of the fix. The helper's
+  # body is then cut out by name, so the one legitimate copy is not a special
+  # case in the pattern.
+  mapfile -t files < <(printf '%s\n' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+                                     "${REPO}"/deploy/*.sh "${REPO}"/bin/lca)
+  (( ${#files[@]} >= 20 )) || {
+    printf 'the file sweep found only %s scripts — this gate stopped watching\n' \
+      "${#files[@]}" >&2
+    return 1
+  }
+  for f in "${files[@]}"; do
+    body="$(sed 's/#.*//' "${f}" | sed '/^docker_start_hint() {$/,/^}$/d')"
+    if grep -q 'systemctl start docker' <<<"${body}"; then
+      # shellcheck disable=SC2016  # naming the call site to write, not running it
+      printf '%s hardcodes "systemctl start docker" — use $(docker_start_hint)\n' \
+        "${f##*/}" >&2
+      bad=1
+    fi
+    # if/fi rather than 'A && B': CONTRIBUTING trap #2, and errexit reads an
+    # AND-list's tail differently from a plain command.
+    if [[ "${f}" != */lib.sh ]] && grep -q 'docker_start_hint' <<<"${body}"; then
+      callers=$((callers + 1))
+    fi
+  done
+  # webui.sh, restore.sh, scripts/apply.sh, scripts/install_webui.sh and
+  # check-system.sh. Counted, so silently dropping the hint from a message is a
+  # failure rather than one fewer literal to find.
+  (( callers >= 5 )) || {
+    printf 'only %s scripts still ask docker_start_hint; five messages need it\n' \
+      "${callers}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every 'start Docker' message asks the host how, instead of assuming systemd" \
+  docker_advice_is_conditional
+
 echo "# a dead engine on a working box is not 'the install stopped before it finished'"
 # install_state cannot tell those apart: both are a verdict-less log. Its own
 # header comment describes the second case — an interrupted first boot on a
