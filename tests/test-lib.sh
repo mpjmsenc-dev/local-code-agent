@@ -8101,6 +8101,78 @@ check "the login banner explains itself on --help" \
   answers_help "${REPO}/scripts/motd.sh"
 # ...and nothing was cloned or installed while proving it.
 check "install.sh --help touched nothing" test ! -e "${HELP_SB}/target"
+# ...and it has to explain itself through the PIPE it is advertised with, which
+# is not the same invocation. 'curl -fsSL <url>/install.sh | bash' streams the
+# script into bash, and inside a function BASH_SOURCE[0] is then the literal
+# string 'main' — bash's placeholder for a stdin script, measured on 5.2.21.
+# The usage function had no file to read, so the documented one-liner answered:
+#
+#   $ curl -fsSL <url>/install.sh | bash -s -- --help
+#   sed: can't read main: No such file or directory
+#   exit=1
+#
+# ...on the first command anyone runs, from the invocation the README leads
+# with. Driven through a redirect rather than a real pipe: bash reads the whole
+# script either way, and it reproduces the failure identically (checked against
+# the unfixed file), without adding a producer this suite would then have to
+# reason about.
+install_help_survives_the_pipe() {
+  local out rc=0
+  out="$(LCA_DIR="${HELP_SB}/target" LCA_REPO_URL="${HELP_SB}/nonexistent.git" \
+         timeout 20 bash -s -- --help < "${HELP_SB}/install.sh" 2>&1)" || rc=$?
+  (( rc == 0 )) || {
+    printf 'piped --help exited %s: %s\n' "${rc}" "${out}" >&2; return 1; }
+  # The exact failure, named: 'main' is not a path, and sed said so.
+  ! grep -q "can't read" <<<"${out}" || {
+    printf 'piped --help still tries to read a file that is not there: %s\n' "${out}" >&2
+    return 1; }
+  # It must say something useful, not just exit quietly — and the useful thing
+  # is how to get the real help, since the stream it would have read is gone.
+  grep -q 'install.sh' <<<"${out}" || {
+    printf 'piped --help printed nothing that names this script: %s\n' "${out}" >&2
+    return 1; }
+  grep -qi 'curl' <<<"${out}" || {
+    printf 'piped --help does not say how to fetch a readable copy: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and explains itself through the curl | bash pipe too" \
+  install_help_survives_the_pipe
+# ...without that becoming the answer everywhere. Read from a real file it must
+# still print the header block, or the fallback has quietly replaced the help.
+install_help_from_a_file_is_the_real_thing() {
+  local out
+  out="$(LCA_DIR="${HELP_SB}/target" LCA_REPO_URL="${HELP_SB}/nonexistent.git" \
+         timeout 20 bash "${HELP_SB}/install.sh" --help 2>&1)"
+  grep -q 'LCA_BRANCH' <<<"${out}" || {
+    printf 'the file-backed --help no longer prints the header block: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...while a readable copy still prints the full header" \
+  install_help_from_a_file_is_the_real_thing
+# ...and 'main' is excluded by NAME as well as by -r, because it is a path as
+# far as the shell is concerned. Found while mutating the guard away: with only
+# the -r test, a file called 'main' in the working directory is read and
+# printed as this installer's help. Measured, in a directory holding one:
+#
+#   $ bash -s -- --help < install.sh
+#   NOT the installer help
+#
+# Which is a stranger's text presented as the installer's own, on the command
+# people run to decide whether to trust it.
+install_help_ignores_a_file_called_main() {
+  local d="${HELP_SB}/mainprobe" out
+  rm -rf "${d}"; mkdir -p "${d}"
+  printf '#\n# NOT the installer help\n#\nx\n' > "${d}/main"
+  out="$( cd "${d}" && LCA_DIR="${d}/target" LCA_REPO_URL="${d}/nonexistent.git" \
+          timeout 20 bash -s -- --help < "${HELP_SB}/install.sh" 2>&1 )"
+  rm -rf "${d}"
+  ! grep -q 'NOT the installer help' <<<"${out}" || {
+    printf "a file called 'main' in the working directory was printed as the installer's help: %s\\n" "${out}" >&2
+    return 1
+  }
+}
+check "...and a file called 'main' nearby is not mistaken for the script" \
+  install_help_ignores_a_file_called_main
 
 # uninstall.sh is asserted statically, deliberately. Running it cannot be
 # bounded the way install.sh can: it does not act on a directory this test

@@ -37,6 +37,45 @@ say()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 fail() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
 
+# usage — this file's header comment block, which IS the help text.
+#
+# Except that reading it needs a file, and this is the one script in the
+# project that often has none: it is advertised as 'curl -fsSL ... | bash',
+# where bash reads from stdin. Inside a function BASH_SOURCE[0] is then the
+# literal string 'main' — bash's placeholder for a stdin script, measured on
+# 5.2.21 — so asking the documented installer for help through the documented
+# pipe answered:
+#
+#   $ curl -fsSL <url>/install.sh | bash -s -- --help
+#   sed: can't read main: No such file or directory
+#   exit=1
+#
+# ...as the very first thing anyone runs. The stream is consumed by the time
+# this could look at it, so there is nothing to print instead. Say that, and
+# point at the download-first route the header already recommends.
+#
+# 'main' is excluded by name as well as by -r, because a file called 'main' in
+# the working directory would otherwise be read and printed as this script's
+# own help.
+usage() {
+  local self="${BASH_SOURCE[0]:-}"
+  if [[ "${self}" != "main" && -r "${self}" ]]; then
+    sed -n '2,/^[^#]/p' "${self}" | grep '^#' | sed 's/^# \{0,1\}//'
+    return 0
+  fi
+  cat <<EOF
+install.sh — one-command installer for local-code-agent.
+
+This copy was piped into bash, so there is no file here to read the help out
+of. Fetch it first — which is the safer way to run it anyway, and what the
+header of this script recommends:
+
+  curl -fsSL ${REPO_URL%.git}/raw/${BRANCH}/install.sh -o install.sh
+  less install.sh          # read it
+  bash install.sh --help   # the full help, from the file
+EOF
+}
+
 # Root without assuming sudo exists (containers often lack it) and without
 # assuming we are not already root (cloud-init, Docker).
 # Everything below runs inside main(), called on the very last line.
@@ -56,10 +95,7 @@ main() {
   # into ${INSTALL_DIR} — measured, not theorised: './install.sh --help' had to
   # be killed by a timeout, and left a checkout behind.
   case "${1:-}" in
-    -h|--help)
-      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
+    -h|--help) usage; exit 0 ;;
   esac
   if [[ "${EUID}" -eq 0 ]]; then
     SUDO=()
