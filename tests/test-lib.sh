@@ -2014,6 +2014,16 @@ check "system prompt forbids inventing flags" prompt_says "never invent"
 # renamed in bin/lca and not here, the assistant confidently teaches a command
 # that does not exist — the exact failure the prompt itself warns against.
 # Extract every "  lca <word>" line and require bin/lca to actually dispatch it.
+# Defined ABOVE its caller, and that is not style. It started below the
+# 'check' line that runs prompt_commands_all_real, so at call time the
+# function did not exist, the process substitution produced nothing, the loop
+# body never ran and the gate passed having compared zero commands. A mutation
+# putting a fake command in the prompt came back green — which is how it was
+# found, and the reason mutations are run at all.
+prompt_lca_commands() {
+  lca_system_prompt | grep -oE '\blca [a-z][a-z-]*' | awk '{ print $2 }' | sort -u
+}
+
 prompt_commands_all_real() {
   local sub bad=0
   while read -r sub; do
@@ -2026,10 +2036,53 @@ prompt_commands_all_real() {
       printf 'system prompt advertises unknown command: lca %s\n' "${sub}" >&2
       bad=1
     }
-  done < <(lca_system_prompt | sed -n 's/^  lca \([a-z]\{1,\}\).*/\1/p')
+  done < <(prompt_lca_commands)
   return "${bad}"
 }
 check "every 'lca' command named in the system prompt exists in bin/lca" prompt_commands_all_real
+# ...and the scanner has to SEE the whole prompt, which it did not.
+#
+# It was 's/^  lca \(...\)/' — only a line beginning with exactly two spaces
+# and 'lca '. The prompt names twelve commands and that pattern found ten:
+#
+#   'lca ask'                          quoted, mid-sentence, line 17
+#   lca offline ... ; lca online ...   second one mid-line, line 41
+#
+# Both are real commands, so nothing was broken — but rename either and the
+# prompt would go on advertising it with this gate green, which is the exact
+# failure it exists to prevent, on the command its handover rule leans on
+# hardest. Same class as the baked-settings scanner's blind spot: a gate whose
+# reach is invisible is worse than no gate.
+#
+# Deliberately broad now — every 'lca <word>' anywhere. If prose ever says
+# something like "lca writes files", this fails, and that is right: a MODEL
+# reads this prompt, and an unquoted verb after 'lca' is exactly how it learns
+# to tell someone a command that does not exist.
+prompt_scanner_sees_the_whole_prompt() {
+  local found bad=0 want
+  found="$(prompt_lca_commands)"
+  # The two the old pattern could not reach, asserted by name so a future
+  # narrowing is caught rather than silently shrinking the gate above.
+  for want in ask online; do
+    grep -qx "${want}" <<<"${found}" || {
+      printf "the prompt scanner cannot see 'lca %s' — it is named in the prompt\n" "${want}" >&2
+      bad=1
+    }
+  done
+  # ...and it must not invent commands either: everything it yields has to
+  # appear in the prompt after the word 'lca'.
+  local sub
+  while read -r sub; do
+    [[ -n "${sub}" ]] || continue
+    lca_system_prompt | grep -qE "\blca ${sub}\b" || {
+      printf "the scanner produced '%s', which the prompt never names\n" "${sub}" >&2
+      bad=1
+    }
+  done <<<"${found}"
+  return "${bad}"
+}
+check "...and the prompt scanner reads quoted and mid-line mentions too" \
+  prompt_scanner_sees_the_whole_prompt
 # A real deployment asked the phone chat to "build the whole functioning
 # project". The 3b model emitted a fabricated tool call —
 # {"name": "build_expense_tracker", "arguments": {...}} — then refused with
