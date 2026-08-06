@@ -204,6 +204,27 @@ do_backup() {
     warn "Docker is installed but its daemon is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
   else
     warn "No 'open-webui' docker volume on this machine — skipping WebUI data."
+    # ENABLE_WEBUI=true says the chat app is meant to exist here, so a missing
+    # volume is a fault — deleted by hand, or docker removed — not a
+    # configuration. An older backup may hold the only surviving copy of that
+    # data, and this is exactly the moment it matters.
+    #
+    # Without this the 'none' state pruned. Measured with docker installed, its
+    # daemon reachable, and the volume simply absent:
+    #
+    #   [warn] No 'open-webui' docker volume on this machine — skipping WebUI data.
+    #   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+    #   [info] Retention: keeping the newest 1; removing 2 older backup(s).
+    #
+    # A 4 KB backup with no chat history deleted two complete ones — the exact
+    # loss the note above prune_old_backups says it exists to prevent. It
+    # covered the daemon-down case ('unknown') and not this one.
+    #
+    # With ENABLE_WEBUI=false there is genuinely nothing to capture, so
+    # retention still runs and backups cannot pile up forever.
+    if [[ "${ENABLE_WEBUI}" == "true" ]]; then
+      webui_state="missed"
+    fi
   fi
 
   # 2. .env

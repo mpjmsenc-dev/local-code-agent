@@ -1029,6 +1029,51 @@ retention_ignores_enable_webui() {
        inb && /^\}/ { exit }
        END { exit bad }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
 }
+echo "# a backup that missed the chat data must not prune the ones that have it"
+# The note above prune_old_backups says this exists so "an unattended timer run
+# with docker down would not, over BACKUP_KEEP nights, silently delete every
+# backup that still had the WebUI accounts and chat history". It covered the
+# daemon-down case and not the missing-volume one. Measured with docker
+# installed, its daemon reachable, and the volume simply absent — which is what
+# 'docker volume rm open-webui' leaves behind:
+#
+#   [warn] No 'open-webui' docker volume on this machine — skipping WebUI data.
+#   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+#   [info] Retention: keeping the newest 1; removing 2 older backup(s).
+#
+# A 4 KB backup with no chat history deleted two complete ones, at exactly the
+# moment those older copies were the only ones left holding it.
+#
+# Driven rather than grepped: the property is "the old files still exist
+# afterwards", and no amount of reading the source proves that.
+backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran>"
+  local b="${SANDBOX}/retention-$1"
+  rm -rf "${b}"; mkdir -p "${b}/scripts" "${b}/backups" "${b}/fakebin"
+  cp "${REPO}/backup.sh" "${b}/"; cp "${REPO}/scripts/lib.sh" "${b}/scripts/"
+  cp "${REPO}/.env.example" "${b}/.env"
+  sed -i "s/^BACKUP_KEEP=.*/BACKUP_KEEP=1/; s/^ENABLE_WEBUI=.*/ENABLE_WEBUI=$1/" "${b}/.env"
+  # docker present and its daemon fine; the volume is what is missing.
+  # shellcheck disable=SC2016  # $1/$2 belong to the fake docker, not to us
+  printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit 0; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
+    > "${b}/fakebin/docker"
+  chmod +x "${b}/fakebin/docker"
+  local d
+  for d in 20260101-000000 20260102-000000; do
+    echo old > "${b}/backups/local-code-agent-backup-${d}.tar.gz"
+  done
+  local out old
+  out="$(PATH="${b}/fakebin:${PATH}" bash "${b}/backup.sh" 2>&1 || true)"
+  old="$(find "${b}/backups" -name 'local-code-agent-backup-2026010*.tar.gz' | wc -l)"
+  if grep -q 'skipping retention' <<<"${out}"; then printf '%s skipped\n' "${old}"
+  else printf '%s ran\n' "${old}"; fi
+}
+check "with the chat app configured, an incomplete backup keeps the older ones" \
+  test "$(backup_retention_case true)" = "2 skipped"
+# ...and the other half: with no chat app there is genuinely nothing to miss,
+# so retention must still run or backups accumulate forever.
+check "...and with ENABLE_WEBUI=false it still prunes" \
+  test "$(backup_retention_case false)" = "0 ran"
+
 check "the retention decision never reads ENABLE_WEBUI" \
   retention_ignores_enable_webui
 # ...and do_backup must actually branch on the answer. A pure helper that
