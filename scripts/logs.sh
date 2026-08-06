@@ -76,6 +76,27 @@ logs_webui() {
     info "Docker is not installed, so the chat app is not running here."
     return 0
   fi
+  # "Cannot ask" is not "was never created", and run_reader's probe collapses
+  # them: 'docker container inspect' returns non-zero for a missing container
+  # and for a daemon that is not answering alike. Measured with the daemon
+  # unreachable while the container was running and serving:
+  #
+  #   [warn] Could not read logs for container 'open-webui'
+  #          (is it created? try: lca webui status).
+  #
+  # It is created. It is running. And 'lca webui status' cannot answer either,
+  # because it needs the same daemon — so the one command people run when
+  # things are broken sent them in a circle. Same fault docker_daemon_reachable
+  # was written for, and the same one uninstall.sh had.
+  #
+  # ONE message for both causes on purpose. This is a log viewer, not a
+  # diagnostician: whether the daemon is down or simply unreachable from this
+  # account, the reader does the same two things. check-system.sh splits them
+  # because telling them apart IS its job; here it would be noise.
+  if ! docker_daemon_reachable; then
+    info "The Docker daemon could not be reached from this account, so the chat app's logs were not read — which says nothing about whether it is running. Start the daemon ($(docker_start_hint)), or re-run as root, then try again."
+    return 0
+  fi
   local -a cmd=(docker logs --tail "${lines}" "${WEBUI_CONTAINER}")
   [[ "${follow}" == "true" ]] && cmd+=( -f )
   run_reader docker container inspect "${WEBUI_CONTAINER}" -- "${cmd[@]}" \

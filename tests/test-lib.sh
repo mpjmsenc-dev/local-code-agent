@@ -6772,6 +6772,51 @@ ollama_advice_is_conditional() {
 check "the engine's failure messages name a log and a restart this host has" \
   ollama_advice_is_conditional
 
+echo "# ...and 'lca logs webui' must not blame the container for a daemon it never reached"
+# run_reader's probe collapses two answers: 'docker container inspect' returns
+# non-zero for a missing container and for a daemon that is not answering
+# alike. Measured with the daemon unreachable while the container was running
+# and serving:
+#
+#   [warn] Could not read logs for container 'open-webui'
+#          (is it created? try: lca webui status).
+#
+# It is created, it is running, and 'lca webui status' needs the same daemon —
+# so the command people run when things are broken sent them in a circle. The
+# same fault docker_daemon_reachable exists for, and the same one uninstall.sh
+# had two commits ago.
+#
+# Driven with a stubbed 'docker' that fails everything, so 'have docker' is
+# true and the daemon is unreachable on every machine — not just on one where
+# docker happens to be installed or absent.
+logs_webui_with_a_dead_daemon() {
+  local sb="${SANDBOX}/logsweb" out
+  rm -rf "${sb}"; mkdir -p "${sb}/stub"
+  printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/docker"
+  chmod +x "${sb}/stub/docker"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${sb}/stub:${PATH}" timeout 60 bash "${REPO}/scripts/logs.sh" webui 2>&1 || true)"
+  rm -rf "${sb}"
+  printf '%s' "${out}"
+}
+logs_does_not_blame_the_container() {
+  local out
+  out="$(logs_webui_with_a_dead_daemon)"
+  grep -qi 'is it created' <<<"${out}" && {
+    printf 'a daemon that could not be reached is reported as a container that may never have existed: %s\n' "${out}" >&2
+    return 1; }
+  grep -qi 'daemon could not be reached' <<<"${out}" || {
+    printf 'the daemon problem is not named at all: %s\n' "${out}" >&2
+    return 1; }
+  # ...and it must say the silence proves nothing about the chat app, which is
+  # the whole correction.
+  grep -qi 'says nothing about whether it is running' <<<"${out}" || {
+    printf 'it does not say the result is silent about the chat app: %s\n' "${out}" >&2
+    return 1; }
+}
+check "'lca logs webui' says the daemon was unreachable, not that the container is missing" \
+  logs_does_not_blame_the_container
+
 echo "# ...and 'pull the model' must know whether the kill switch will allow it"
 # Seven messages tell someone their model is missing. THREE asked first —
 # check-system.sh, restore.sh and run-agent.sh each wrote the same two-arm
