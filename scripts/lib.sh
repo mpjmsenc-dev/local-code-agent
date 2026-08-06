@@ -55,6 +55,16 @@ SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
 # shellcheck disable=SC2034
 MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
 
+# Where start_ollama_bg() sends Ollama's output on a host with no service
+# manager — and therefore where 'lca logs ollama' has to look on that host.
+# Named once for the reason git_identity() gives: two places asking the same
+# question drift, and these two already had. logs.sh answered "check the
+# terminal you started 'ollama serve' in" on a box where this project started
+# it itself, under 'nohup ... &', so there was no terminal to check and the log
+# it wrote was sitting right here.
+# shellcheck disable=SC2034
+OLLAMA_BG_LOG="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+
 # The Open WebUI image, named once. Three scripts use it and only one owned
 # the string: install_webui.sh created the container with it, while backup.sh
 # and restore.sh hardcoded the same literal to borrow a tar binary next to the
@@ -1217,7 +1227,7 @@ ollama_dropin_matches() {
 start_ollama_bg() {
   wait_for_ollama 2 && return 0
   have ollama || return 1
-  local logf="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+  local logf="${OLLAMA_BG_LOG}"
   warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
   OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
   OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \

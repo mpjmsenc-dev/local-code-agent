@@ -42,8 +42,25 @@ logs_ollama() {
   local lines="$1" follow="$2"
   heading "ollama (the model server)"
   if ! systemd_available; then
+    # On a host with no service manager, start_ollama_bg() is what runs Ollama
+    # — under 'nohup ... &', redirecting into OLLAMA_BG_LOG. So "check the
+    # terminal you started it in" was doubly wrong there: this project started
+    # it, and a nohup'd background process has no terminal to check. The log it
+    # wrote was next to us the whole time, and this is the command the login
+    # banner and TROUBLESHOOTING.md both send people to when Ollama misbehaves.
+    if [[ -r "${OLLAMA_BG_LOG}" ]]; then
+      info "No systemd here — reading the background 'ollama serve' log this project writes:"
+      info "  ${OLLAMA_BG_LOG}"
+      if [[ "${follow}" == "true" ]]; then
+        tail -n "${lines}" -f "${OLLAMA_BG_LOG}"
+      else
+        tail -n "${lines}" "${OLLAMA_BG_LOG}"
+      fi
+      return 0
+    fi
     info "No systemd on this machine, so there is no service journal."
     info "Ollama's output goes wherever you started 'ollama serve' — check that terminal."
+    info "(If this project started it for you, the log would be at ${OLLAMA_BG_LOG}.)"
     return 0
   fi
   local -a cmd=(journalctl -u ollama --no-pager -n "${lines}")

@@ -2175,6 +2175,45 @@ logs_setup_tells_the_two_apart() {
 check "'lca logs' separates an unreadable install log from a missing one" \
   logs_setup_tells_the_two_apart
 
+echo "# ...and on a host with no systemd it must read the log THIS project wrote"
+# start_ollama_bg() is what runs Ollama where there is no service manager —
+# containers and WSL, which its own comment names as the reason it exists — and
+# it redirects into OLLAMA_BG_LOG under 'nohup ... &'. logs.sh answered "check
+# the terminal you started 'ollama serve' in", which is wrong twice over there:
+# this project started it, and a nohup'd process has no terminal. Meanwhile the
+# log was sitting next to the script. That is the command the login banner and
+# TROUBLESHOOTING.md both point at when Ollama misbehaves, so the one host type
+# without a journal is the one that most needs an answer.
+logs_ollama_reads_the_background_log() {
+  local body
+  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
+  grep -q 'OLLAMA_BG_LOG' <<<"${body}" || {
+    echo "'lca logs ollama' never looks at the background log this project writes" >&2
+    return 1; }
+  # ...and actually prints it, rather than only naming it in a hint.
+  grep -qE 'tail .*OLLAMA_BG_LOG' <<<"${body}" || {
+    echo "'lca logs ollama' names the background log but never reads it out" >&2
+    return 1; }
+}
+check "'lca logs ollama' reads the background log where there is no journal" \
+  logs_ollama_reads_the_background_log
+# ...and the path itself must exist in exactly one place. It was written as a
+# literal inside start_ollama_bg while logs.sh knew nothing about it, which is
+# precisely how the two drifted.
+ollama_bg_log_path_is_named_once() {
+  local hits
+  hits="$(grep -rn '\.ollama-serve\.log' "${REPO}"/scripts/*.sh "${REPO}"/*.sh 2>/dev/null \
+            | grep -v 'OLLAMA_BG_LOG=' | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'the background-log path is written out again instead of using OLLAMA_BG_LOG:\n%s\n' "${hits}" >&2
+    return 1; }
+}
+check "...and that path is spelled out in exactly one place" \
+  ollama_bg_log_path_is_named_once
+
 # 'lca ask' streams the answer through a pipeline. Bare under 'set -o pipefail'
 # that pipeline was the last statement of main, so a curl that died mid-answer
 # — the 600s cap, or Ollama being OOM-killed by the model it just loaded — took
