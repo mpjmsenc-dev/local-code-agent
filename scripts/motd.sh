@@ -344,12 +344,37 @@ banner_ready() {
   elif [[ -n "${hint}" ]]; then
     row "Chat on your phone" "${hint}"
   fi
+  chat_down_row
   chat_stale_row
   coding_row
   row "Ask right here" "lca ask \"why is this box slow?\""
   row "All commands" "lca help"
   offline_row
   printf '\n'
+}
+
+# chat_down_row — the chat app is enabled and not answering at all.
+#
+# The row below this one warns when the chat is up but running an older
+# assistant. Not warning when it is simply DOWN covered the milder fault and
+# left the louder one silent: the headline still says "ready" and the line
+# above hands out a phone URL that answers nothing. Measured by stopping the
+# container — 'lca check' reported it twice, with the command to fix it, and
+# the one screen you get without asking still said ready and offered the link.
+#
+# A direct bounded curl rather than webui_responds(), which is the same probe
+# with --max-time 3: this file's rule is that every probe goes through quick()
+# at 2 seconds, and quick() runs 'timeout', which cannot wrap a shell function.
+# 'have curl' first so a box without curl is never told its chat is down on the
+# strength of a missing binary.
+chat_down_row() {
+  [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
+  have curl || return 0
+  quick curl -fsS "$(webui_url)/health" >/dev/null 2>&1 && return 0
+  # 18 characters: row() pads labels to 20, so a longer one eats its own
+  # separator and the value no longer lines up with every other row. "Chat is
+  # NOT answering" was 21 and did exactly that.
+  row "Chat NOT answering" "sudo lca webui start   ·   then: lca check"
 }
 
 # chat_stale_row — the chat app is healthy AND running an older assistant than

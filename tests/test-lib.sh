@@ -5789,6 +5789,54 @@ dead_engine_is_not_a_stalled_install() {
 check "a stalled log with the agent installed means the engine died, not the install" \
   dead_engine_is_not_a_stalled_install
 
+echo "# ...and a chat app that is DOWN is louder than one that is merely stale"
+# chat_stale_row warns when the chat is up but running an older assistant. The
+# banner said nothing at all when it was simply not answering: headline still
+# "ready", and the row above still handing out a phone URL. Measured by
+# stopping the container — 'lca check' reported it twice with the fix, and the
+# one screen you get without asking offered the link anyway.
+motd_chat_down_row() {  # answering | down -> the rendered row
+  bash -c 'source "$1" >/dev/null 2>&1; load_env_readonly
+    ANS="$2"
+    ENABLE_WEBUI=true; SKIP_DOCKER=false
+    have() { [[ "$1" == "curl" ]]; }
+    quick() { [[ "${ANS}" == "answering" ]]; }
+    chat_down_row' _ "${MOTD}" "$1" 2>/dev/null
+}
+banner_reports_a_chat_that_is_down() {
+  local down up
+  down="$(motd_chat_down_row down)"
+  up="$(motd_chat_down_row answering)"
+  [[ -n "${down}" ]] || {
+    echo 'the banner says "ready" and offers a chat URL that answers nothing' >&2
+    return 1; }
+  grep -q 'webui start' <<<"${down}" || {
+    echo 'the banner reports the chat down without naming the command that starts it' >&2
+    return 1; }
+  [[ -z "${up}" ]] || {
+    echo 'the banner nags about a chat app that is answering perfectly well' >&2
+    return 1; }
+  # row() pads labels to 20; a longer one eats its own separator and the value
+  # stops lining up with every other row. The first version was 21.
+  local label
+  label="$(sed -e 's/^   //' -e 's/  .*//' <<<"${down}")"
+  (( ${#label} <= 20 )) || {
+    printf 'the label "%s" is %s characters and breaks the banner alignment\n' \
+      "${label}" "${#label}" >&2
+    return 1; }
+}
+check "the banner says when the chat app is not answering, and is quiet when it is" \
+  banner_reports_a_chat_that_is_down
+# ...and it has to be drawn, not merely defined.
+ready_banner_draws_the_chat_down_row() {
+  awk '/^banner_ready\(\) \{/ { inb = 1 }
+       inb && /chat_down_row/  { found = 1 }
+       inb && /^\}/            { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
+}
+check "...and the ready banner actually draws it" \
+  ready_banner_draws_the_chat_down_row
+
 echo "# ...and whether the chat app is still answering with an older assistant"
 # The container is created with the assistant's instructions baked in, so a
 # 'git pull' that fixes the assistant does not reach a running one and nothing
