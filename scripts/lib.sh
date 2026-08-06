@@ -900,6 +900,24 @@ model_disk_gb() {
   awk -v p="${params}" 'BEGIN { printf "%d\n", p * 0.6 + 1 }'
 }
 
+# model_fits_ram TAG RAM_GIB — rough q4 sizing: ~0.6 GB per billion parameters
+# plus ~1 GB for context and overhead. Deliberately approximate; its only job is
+# to stop something being selected that cannot possibly load. An unparseable tag
+# returns true, so an unusual naming scheme is never blocked.
+#
+# Moved here from tune.sh, unchanged. It belongs beside model_disk_gb — same
+# 0.6 GB per billion — and update-model.sh's manual-pin path needs it without
+# sourcing tune.sh, which would redefine main() out from under its caller. Its
+# own tag parse rather than model_params_b's: this one also accepts a tag with
+# no trailing 'b' and keeps fractions (1.5b stays 1.5), and the tune ladder is
+# tested against exactly that behaviour.
+model_fits_ram() {
+  local tag="${1##*:}" ram="$2" params
+  params="${tag%[bB]}"
+  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
+  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
+}
+
 pull_model() {
   local model="$1" attempt need="" free_now="" store
   store="$(ollama_models_dir)"

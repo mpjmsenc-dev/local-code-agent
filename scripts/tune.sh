@@ -77,16 +77,10 @@ family_sizes() {
   esac
 }
 
-# model_fits_ram TAG RAM_GIB — rough q4 sizing: ~0.6 GB per billion parameters
-# plus ~1 GB for context and overhead. Deliberately approximate; its only job is
-# to stop the ladder selecting something that cannot possibly load. An
-# unparseable tag returns true, so an unusual naming scheme is never blocked.
-model_fits_ram() {
-  local tag="${1##*:}" ram="$2" params
-  params="${tag%[bB]}"
-  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
-  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
-}
+# model_fits_ram lives in lib.sh now, beside model_disk_gb — they are the same
+# ~0.6 GB per billion parameters, and the manual-pin path in update-model.sh
+# needed it without sourcing this file (which would redefine main() over its
+# caller's). Unchanged otherwise; this file gets it from lib.sh above.
 
 choose_for_ram() {
   local ram="$1" fam small mid big

@@ -4587,6 +4587,79 @@ check "check-system.sh restores SCRIPT_DIR after sourcing tune.sh" \
 check "update-model.sh restores SCRIPT_DIR after sourcing tune.sh" \
   restores_script_dir "${REPO}/update-model.sh"
 
+echo "# ...and a hand-picked model must be sized BEFORE the gigabytes cross the wire"
+# choose_for_ram refuses to auto-pick something this machine cannot hold, and
+# its own comment says why: "silently pulling ~10 GB and then OOMing on first
+# use is the worst outcome". The MANUAL pin — the path where a person types a
+# size by hand, so the likeliest place to overreach — had no such check.
+# 'lca model qwen2.5-coder:32b' on a 16 GiB box downloaded ~20 GB over a VPS
+# line and only then failed model_responds with "Does this machine have enough
+# RAM for it?", a question the code could have answered before the first byte.
+# pull_model already gives this guarantee for DISK ("Asked BEFORE the download,
+# not after it"); this is the same one for RAM.
+#
+# model_fits_ram moved to lib.sh to make that possible without sourcing tune.sh
+# from inside main() — which would redefine main() out from under its caller —
+# so the numbers are asserted directly here for the first time.
+too_big_for() { ! model_fits_ram "$1" "$2"; }
+check "16 GiB holds 7b"                 model_fits_ram qwen2.5-coder:7b  16
+check "16 GiB holds 14b"                model_fits_ram qwen2.5-coder:14b 16
+check "16 GiB does NOT hold 32b"        too_big_for    qwen2.5-coder:32b 16
+check "8 GiB does NOT hold 16b"         too_big_for    deepseek-coder-v2:16b 8
+# An unusual naming scheme must never become a refusal — the rule the ladder
+# has always had, and the reason this can warn on a guess without blocking.
+check "a tag with no size is never refused"   model_fits_ram mymodel:latest 4
+check "...nor is a bare name"                 model_fits_ram mymodel 4
+pin_is_sized_before_the_pull() {
+  local body line n=0 n_fit=0 n_pull=0
+  # Scoped to main(): list_recommended calls model_fits_ram too, and a
+  # whole-file grep is satisfied by that call alone with the pin left blind.
+  body="$(sed -n '/^main() {/,/^}/p' "${REPO}/update-model.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find update-model.sh main() — this gate stopped watching" >&2
+    return 1; }
+  # Read line by line rather than 'grep -n | head -1': a reader that exits
+  # early takes its writer with it under pipefail, which is the trap this
+  # suite bans outright further down.
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [[ "${line}" == *model_fits_ram* && ${n_fit}  -eq 0 ]]; then n_fit="${n}";  fi
+    if [[ "${line}" == *pull_model*     && ${n_pull} -eq 0 ]]; then n_pull="${n}"; fi
+  done <<<"${body}"
+  (( n_pull > 0 )) || {
+    echo 'update-model.sh no longer pulls in main() — this gate stopped watching' >&2
+    return 1; }
+  (( n_fit > 0 )) || {
+    echo "'lca model' pulls without ever asking whether the model fits this machine's RAM" >&2
+    return 1; }
+  (( n_fit < n_pull )) || {
+    echo "'lca model' sizes the model only AFTER downloading it — the gigabytes are already spent by then" >&2
+    return 1; }
+}
+check "'lca model' checks the RAM before it starts the download" \
+  pin_is_sized_before_the_pull
+# ...and reclaiming disk afterwards must not be able to swallow the advice.
+# 'ollama rm' ran bare under set -e, so a failure ended the script THERE —
+# after MODEL_NAME and AUTO_TUNE were both written, and before the lines that
+# say the chat app is still on the old model and needs 'lca apply'. The one
+# instruction the command exists to give, lost on the run where the user asked
+# for the most to happen.
+remove_old_failure_is_reported() {
+  local body
+  body="$(sed -n '/remove_old}" == "true"/,/^  fi$/p' "${REPO}/update-model.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find update-model.sh's --remove-old block — this gate stopped watching" >&2
+    return 1; }
+  grep -qE '(if|elif) +ollama rm ' <<<"${body}" || {
+    echo "update-model.sh runs 'ollama rm' bare — a failure ends the script before it says the chat app still needs 'lca apply'" >&2
+    return 1; }
+  grep -qi 'could not remove' <<<"${body}" || {
+    echo "update-model.sh tests the removal but says nothing when it fails" >&2
+    return 1; }
+}
+check "...and a removal that fails is reported instead of ending the run" \
+  remove_old_failure_is_reported
+
 echo "# 'lca help' must not advertise a command bin/lca cannot run"
 # The same class of bug as the system-prompt check above, one layer out: help
 # text drifts when a command is renamed, and a user following it gets "Unknown

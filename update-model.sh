@@ -116,6 +116,30 @@ main() {
     info "'${new_model}' is already the default — verifying it anyway."
   fi
 
+  # Sized BEFORE the download, not after it. choose_for_ram already refuses to
+  # auto-pick something this machine cannot hold, and says why in its own
+  # comment — "silently pulling ~10 GB and then OOMing on first use is the worst
+  # outcome". The manual pin, which is the path where a person types a size by
+  # hand and is therefore the likeliest place to overreach, had no such check:
+  # 'lca model qwen2.5-coder:32b' on a 16 GiB box pulled ~20 GB over a VPS line
+  # and only then failed model_responds with "Does this machine have enough RAM
+  # for it?" — a question the code could have answered before the first byte.
+  #
+  # pull_model already does this for DISK ("Asked BEFORE the download, not after
+  # it"). This is the same guarantee for RAM, using the ladder's own rule rather
+  # than a second copy of it, and an unparseable tag returns "fits" so an
+  # unusual naming scheme is never turned into a refusal.
+  #
+  # A warning, not a refusal: the machine may be about to be resized, and the
+  # person typed a specific model on purpose.
+  local ram
+  ram="$(detect_ram_gib)"
+  if ! model_fits_ram "${new_model}" "${ram}"; then
+    warn "'${new_model}' looks too big for ${ram} GiB of RAM (roughly 0.6 GB per billion parameters, plus about 1 GB). It will most likely fail to load, or thrash. 'lca model --list-recommended' shows what fits."
+    confirm "Continue anyway?" \
+      || die "Cancelled — nothing was downloaded and MODEL_NAME is unchanged (still ${old_model})."
+  fi
+
   if model_present "${new_model}"; then
     ok "Model '${new_model}' is already downloaded."
   else
@@ -147,8 +171,17 @@ main() {
   if [[ "${remove_old}" == "true" && "${old_model}" != "${new_model}" ]]; then
     if model_present "${old_model}"; then
       if confirm "Remove the previous default '${old_model}' from disk?"; then
-        ollama rm "${old_model}"
-        ok "Removed '${old_model}'."
+        # Reported, not fatal. A bare 'ollama rm' under set -e ends the script
+        # HERE — after MODEL_NAME and AUTO_TUNE have both been written, and
+        # before the two lines below that say the chat app is still running the
+        # old model and needs 'lca apply'. Failing to reclaim some disk would
+        # have silently swallowed the one instruction this command exists to
+        # give, on the run where the user asked for the most to happen.
+        if ollama rm "${old_model}"; then
+          ok "Removed '${old_model}'."
+        else
+          warn "Could not remove '${old_model}' — it is still on disk. The switch itself is done. Retry with: ollama rm ${old_model}"
+        fi
       else
         info "Keeping '${old_model}' on disk."
       fi
