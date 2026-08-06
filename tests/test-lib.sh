@@ -6171,6 +6171,50 @@ motd_bounds_the_docker_read() {
        inb && /^\}/ { exit }
        END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
+echo "# the three small helpers 'make coverage' had never seen run"
+# apt_get and the two GPU probes cannot run here — one installs packages, two
+# need a card CI does not have either. These three can, and each has a failure
+# mode with teeth: webui_url() is where every health check and the banner's new
+# chat probe point, webui_responds() is what 'webui.sh start' waits on before
+# declaring success, and require_cmd() is what turns a missing dependency into
+# a sentence instead of a raw error later on.
+url_for() { ( WEBUI_PORT="$1"; webui_url ); }
+check "webui_url uses the configured port" test "$(url_for 8080)" = "http://127.0.0.1:8080"
+check "...and defaults to 3000 when unset" test "$( ( unset WEBUI_PORT; webui_url ) )" = "http://127.0.0.1:3000"
+# A plain function, not 'bash -c': a fresh shell has never sourced lib.sh, so
+# url_for would be undefined there. Written the other way first and it failed
+# exactly like that — the stub-scope trap this file keeps re-learning.
+url_is_loopback() { [[ "$(url_for 3000)" == http://127.0.0.1:* ]]; }
+check "...and always asks loopback, never the tailscale address" url_is_loopback
+webui_responds_probes_health() {
+  # The stub writes to a FILE. webui_responds sends curl's stdout AND stderr to
+  # /dev/null itself, so a stub that printed would be swallowed and this check
+  # would pass on an empty string forever — which is how it first behaved.
+  local spy="${SANDBOX}/curl-args" seen
+  rm -f "${spy}"
+  ( WEBUI_PORT=3000
+    curl() { printf '%s\n' "$*" > "${spy}"; }
+    webui_responds || true )
+  seen="$(cat "${spy}" 2>/dev/null || true)"
+  [[ -n "${seen}" ]] || { echo 'webui_responds never called curl at all' >&2; return 1; }
+  grep -q '/health' <<<"${seen}" || {
+    printf 'webui_responds no longer asks /health: %s\n' "${seen}" >&2; return 1; }
+  grep -q -- '--max-time' <<<"${seen}" || {
+    echo 'webui_responds has no timeout, so a wedged port hangs whatever waits on it' >&2
+    return 1; }
+}
+check "webui_responds asks /health, with a timeout" webui_responds_probes_health
+# require_cmd must DIE on a missing tool, not merely return non-zero.
+require_cmd_rc() {  # COMMAND -> the status require_cmd exits with
+  # Read AFTER the subshell rather than printed inside it: require_cmd calls
+  # die, die exits, and an echo placed after it never runs.
+  local rc=0
+  ( require_cmd "$1" ) >/dev/null 2>&1 || rc=$?
+  printf '%s' "${rc}"
+}
+check "require_cmd passes a command that exists" test "$(require_cmd_rc sh)" = "0"
+check "...and dies on one that does not" test "$(require_cmd_rc no-such-command-xyz)" = "1"
+
 check "the banner asks docker with a short leash, not the default one" \
   motd_bounds_the_docker_read
 
