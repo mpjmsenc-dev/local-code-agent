@@ -5735,6 +5735,19 @@ banner_render() {  # BANNER -> its output, with lca absent
 }
 setup_banners_stay_quiet_about_lca() {
   local b out
+  # banner_no_model keeps the path half and drops the "Install the name" half:
+  # it ends with "Finish it: sudo setup.sh" of its own, so the full note
+  # printed that command twice two lines apart — but its last row is
+  # "Details: lca check", so going silent would leave its own advice unusable.
+  out="$(banner_render banner_no_model)"
+  if [[ "$(grep -c 'setup\.sh' <<<"${out}")" != "1" ]]; then
+    printf 'banner_no_model names setup.sh %s times; it should say it once\n' \
+      "$(grep -c 'setup\.sh' <<<"${out}")" >&2
+    return 1
+  fi
+  grep -q 'NOT on PATH' <<<"${out}" || {
+    echo 'banner_no_model dropped the path note, and its own last row says "lca check"' >&2
+    return 1; }
   for b in banner_installing banner_stalled; do
     out="$(banner_render "${b}")"
     ! grep -q 'NOT on PATH' <<<"${out}" || {

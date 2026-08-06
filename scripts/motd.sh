@@ -242,16 +242,25 @@ headline() {
 #
 # Default is to SHOW, so a future banner that forgets to opt out prints one
 # redundant row rather than hiding a needed one.
-BANNER_SUPPRESS_LCA_ROW=false
+# full | path | none — how much of the note this banner wants.
+#
+# 'path' exists because banner_no_model already ends with "Finish it: sudo
+# setup.sh", so the full note printed that same command again two lines above
+# it. The translation half is still needed there — that banner's last row is
+# "Details: lca check" — so suppressing the whole thing would leave its own
+# advice unusable. Seen by rendering the no-model banner on a box without the
+# symlink.
+BANNER_LCA_ROW=full
 missing_lca_row() {
-  [[ "${BANNER_SUPPRESS_LCA_ROW}" == "true" ]] && return 0
+  [[ "${BANNER_LCA_ROW}" == "none" ]] && return 0
   have lca && return 0
   row "'lca' NOT on PATH" "run them as ${REPO_ROOT}/bin/lca"
+  [[ "${BANNER_LCA_ROW}" == "path" ]] && return 0
   row "Install the name" "sudo ${REPO_ROOT}/setup.sh"
 }
 
 banner_installing() {
-  BANNER_SUPPRESS_LCA_ROW=true   # setup is running; it installs the symlink itself
+  BANNER_LCA_ROW=none   # setup is running; it installs the symlink itself
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
@@ -286,7 +295,7 @@ banner_attention() {
 # install really did give up partway. Re-running setup is safe (it is
 # idempotent) and is the actual fix, which "run lca check" would not have said.
 banner_stalled() {
-  BANNER_SUPPRESS_LCA_ROW=true   # this banner already says "sudo setup.sh"
+  BANNER_LCA_ROW=none   # this banner already says "sudo setup.sh"
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
@@ -320,6 +329,7 @@ model_missing() {
 }
 
 banner_no_model() {
+  BANNER_LCA_ROW=path   # this banner ends with "Finish it: sudo setup.sh"
   headline "engine running, but model ${MODEL_NAME} is NOT downloaded"
   row "Nothing can answer" "until it is pulled — this is a download, not a bug"
   row "Finish it" "sudo ${REPO_ROOT}/setup.sh"
