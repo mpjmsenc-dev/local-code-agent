@@ -142,11 +142,17 @@ body="$(sed -n '/^the_function() {/,/^}/p' "${REPO}/scripts/lib.sh")"
 awk '...' <<<"${body}"
 ```
 
-A `sed` range reads to the end and exits early nowhere. Several call sites in
-`tests/test-lib.sh` still use the piped form and are safe only by file size;
-converting them is a mechanical change, and a first attempt at doing it in bulk
-broke two gates by mis-detecting where an awk program ended (`' || {`), so do it
-one at a time and re-run the suite after each.
+A `sed` range reads to the end and exits early nowhere. All ten call sites in
+`tests/test-lib.sh` have been converted and a gate now forbids the shape
+outright — blanket, not scoped to awk programs that visibly `exit`, because the
+safe ones are safe only until someone adds an `exit` to them.
+
+Converting them is mechanical but not scriptable: a first attempt in bulk broke
+two gates by mis-detecting where an awk program ended (the line closed `' || {`),
+and it left them running awk with **no input at all** — still exiting 0, still
+reported as passing. If you ever redo this kind of sweep, change one call site
+at a time, and prove each converted gate still fails when you break the thing it
+watches. An unchanged assertion count proves nothing: a vacuous gate counts too.
 
 **2. `grep -q PATTERN && { echo FAIL; exit 1; }` under `set -e`.** Here a
 *non*-matching grep is the passing case, and the AND-list's non-zero status

@@ -944,11 +944,10 @@ check "no docker on the machine -> nothing to lose" \
   data_state_is none    false false false
 # And the decision must not consult .env's chat-app switch again.
 retention_ignores_enable_webui() {
-  sed 's/#.*//' "${REPO}/backup.sh" \
-    | awk '/^webui_data_state\(\) \{/ { inb = 1 }
-           inb && /ENABLE_WEBUI/ { bad = 1 }
-           inb && /^\}/ { exit }
-           END { exit bad }'
+  awk '/^webui_data_state\(\) \{/ { inb = 1 }
+       inb && /ENABLE_WEBUI/ { bad = 1 }
+       inb && /^\}/ { exit }
+       END { exit bad }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
 }
 check "the retention decision never reads ENABLE_WEBUI" \
   retention_ignores_enable_webui
@@ -956,12 +955,11 @@ check "the retention decision never reads ENABLE_WEBUI" \
 # nothing consults is decoration, and the five checks above would all still
 # pass while backup.sh went on deciding for itself.
 backup_asks_the_state_helper() {
-  sed 's/#.*//' "${REPO}/backup.sh" \
-    | awk '/^do_backup\(\) \{/ { inb = 1 }
-           inb && /webui_data_state/       { called = 1 }
-           inb && /data_state.*"present"/  { branched = 1 }
-           inb && /^\}/ { exit }
-           END { exit !(called && branched) }'
+  awk '/^do_backup\(\) \{/ { inb = 1 }
+       inb && /webui_data_state/       { called = 1 }
+       inb && /data_state.*"present"/  { branched = 1 }
+       inb && /^\}/ { exit }
+       END { exit !(called && branched) }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
 }
 check "backup.sh decides retention through that helper, not its own reading" \
   backup_asks_the_state_helper
@@ -3210,9 +3208,9 @@ check "the backup and restore commands survive the kill switch being on" \
   recovery_scripts_survive_offline
 # ...and net_guard must still be the dying one, for the installers that want it.
 net_guard_still_dies() {
-  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
-    | awk '/^net_guard\(\) \{/ { inb = 1 } inb && /die / { found = 1 }
-           inb && /^\}/ { exit } END { exit !found }' || {
+  awk '/^net_guard\(\) \{/ { inb = 1 } inb && /die / { found = 1 }
+       inb && /^\}/ { exit } END { exit !found }' \
+      <<<"$(sed 's/#.*//' "${REPO}/scripts/lib.sh")" || {
     echo "net_guard no longer dies, so every installer now continues without a network" >&2
     return 1
   }
@@ -3601,8 +3599,8 @@ fi
 # reason to drift back.
 bench_asks_the_chat_endpoint() {
   local body
-  body="$(sed 's/#.*//' "${REPO}/scripts/prompt-bench.sh" \
-    | awk '/^ask\(\) \{/ { inb = 1 } inb { print } inb && /^\}/ { exit }')"
+  body="$(awk '/^ask\(\) \{/ { inb = 1 } inb { print } inb && /^\}/ { exit }' \
+            <<<"$(sed 's/#.*//' "${REPO}/scripts/prompt-bench.sh")")"
   [[ -n "${body}" ]] || {
     echo "could not find prompt-bench.sh's ask() — this gate stopped watching" >&2
     return 1
@@ -5114,8 +5112,8 @@ check "...and the note points at the one command that applies it" \
 # is the same trap: it starts the container that is already there.
 start_and_restart_draw_the_note() {
   local body
-  body="$(sed 's/#.*//' "${REPO}/webui.sh" \
-    | awk '/^  case "\$\{cmd\}" in/ { inb = 1 } inb')"
+  body="$(awk '/^  case "\$\{cmd\}" in/ { inb = 1 } inb' \
+            <<<"$(sed 's/#.*//' "${REPO}/webui.sh")")"
   [[ -n "${body}" ]] || {
     echo "could not find webui.sh's command dispatch — this gate stopped watching" >&2
     return 1
@@ -5368,11 +5366,10 @@ check "an unparseable answer is not evidence of missing" \
 ready_banner_asks_about_the_model() {
   # Comments stripped: the note above banner_ready names the helper, and a
   # whole-file grep would be satisfied by that alone.
-  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
-    | awk '/^banner_ready\(\) \{/ { inb = 1 }
-           inb && /model_missing/  { found = 1 }
-           inb && /^\}/            { exit }
-           END { exit !found }'
+  awk '/^banner_ready\(\) \{/ { inb = 1 }
+       inb && /model_missing/  { found = 1 }
+       inb && /^\}/            { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
 check "the ready banner asks whether the model is there" \
   ready_banner_asks_about_the_model
@@ -5433,11 +5430,10 @@ check "...and says so when the coding agent is not installed" \
 # The helper is worth nothing if the ready banner never calls it. Same
 # comment-stripped, function-scoped shape as the model probe above.
 ready_banner_offers_the_coding_agent() {
-  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
-    | awk '/^banner_ready\(\) \{/ { inb = 1 }
-           inb && /coding_row/     { found = 1 }
-           inb && /^\}/            { exit }
-           END { exit !found }'
+  awk '/^banner_ready\(\) \{/ { inb = 1 }
+       inb && /coding_row/     { found = 1 }
+       inb && /^\}/            { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
 check "...and the ready banner actually prints that row" \
   ready_banner_offers_the_coding_agent
@@ -5506,11 +5502,10 @@ check "the banner says so when 'lca' is not on PATH, and stays quiet when it is"
 # Every banner calls exactly one headline, and the note has to sit above the
 # rows it is about.
 every_banner_state_gets_the_warning() {
-  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
-    | awk '/^headline\(\) \{/     { inb = 1 }
-           inb && /missing_lca_row/ { found = 1 }
-           inb && /^\}/           { exit }
-           END { exit !found }'
+  awk '/^headline\(\) \{/       { inb = 1 }
+       inb && /missing_lca_row/ { found = 1 }
+       inb && /^\}/             { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
 check "...and every banner state inherits it, not just the ready one" \
   every_banner_state_gets_the_warning
@@ -5600,11 +5595,10 @@ fi
 # ...and the ready banner has to draw it, or the probe is decoration — the same
 # trap as model_missing, which is why that check exists directly above.
 ready_banner_warns_about_a_stale_chat() {
-  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
-    | awk '/^banner_ready\(\) \{/ { inb = 1 }
-           inb && /chat_stale_row/ { found = 1 }
-           inb && /^\}/            { exit }
-           END { exit !found }'
+  awk '/^banner_ready\(\) \{/ { inb = 1 }
+       inb && /chat_stale_row/ { found = 1 }
+       inb && /^\}/            { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
 check "the ready banner draws the stale-chat warning" \
   ready_banner_warns_about_a_stale_chat
@@ -5612,11 +5606,10 @@ check "the ready banner draws the stale-chat warning" \
 # than a health check. webui_container_env is bounded (proved above); this is
 # the caller actually asking for the short leash.
 motd_bounds_the_docker_read() {
-  sed 's/#.*//' "${REPO}/scripts/motd.sh" \
-    | awk '/^chat_stale_row\(\) \{/ { inb = 1 }
-           inb && /LCA_INSPECT_TIMEOUT=[0-9]/ { found = 1 }
-           inb && /^\}/ { exit }
-           END { exit !found }'
+  awk '/^chat_stale_row\(\) \{/ { inb = 1 }
+       inb && /LCA_INSPECT_TIMEOUT=[0-9]/ { found = 1 }
+       inb && /^\}/ { exit }
+       END { exit !found }' <<<"$(sed 's/#.*//' "${REPO}/scripts/motd.sh")"
 }
 check "the banner asks docker with a short leash, not the default one" \
   motd_bounds_the_docker_read
@@ -8096,6 +8089,34 @@ no_pipe_into_grep_q_in_the_suite() {
 }
 check "the test suite never pipes a file read into 'grep -q'" \
   no_pipe_into_grep_q_in_the_suite
+# ...and awk is the same reader, which the rule above did not say and this
+# suite therefore kept writing. 'sed file | awk /^fn\(\)/ ... { exit }' is how
+# a dozen gates here read one function out of a script, and every one of them
+# is the trap above wearing a different hat: awk stops at the closing brace,
+# sed still has writes queued, SIGPIPE, 141.
+#
+# It turned CI red on ollama_models_dir, which sits halfway up lib.sh — the
+# largest file here, so ~600 lines were still unread. The identical checks
+# against motd.sh had never failed because that file fits inside the pipe
+# buffer, which is luck rather than design, and exactly the reasoning the note
+# above forbids ("Do not reason about whether the output fits").
+#
+# Blanket, not scoped to awk programs that visibly exit: the safe ones are safe
+# only until someone adds an exit to them, and a here-string costs nothing.
+# All ten call sites were converted before this gate went in.
+no_file_read_piped_into_awk() {
+  local suite hits
+  suite="$(cat "${REPO}"/tests/*.sh)"
+  hits="$(awk 'prev ~ /sed .*\\$/ && /^[[:space:]]*\|[[:space:]]*awk/ { print NR ": " $0 }
+               { prev = $0 }' <<<"${suite}")"
+  [[ -z "${hits}" ]] || {
+    printf 'the suite pipes a file read into awk (an awk that exits takes the writer with it; capture the text and use a here-string):\n%s\n' \
+      "${hits}" >&2
+    return 1
+  }
+}
+check "...and never pipes one into awk either" \
+  no_file_read_piped_into_awk
 
 echo "# a script that rewrites its own file must not let bash read on"
 # bash reads a script incrementally from an open fd. update.sh fast-forwards
