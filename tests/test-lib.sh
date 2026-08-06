@@ -3543,6 +3543,70 @@ update_fetch_failure_is_diagnosed() {
 }
 check "...and 'branch not on the remote' is not reported as a network fault" \
   update_fetch_failure_is_diagnosed
+# ...and a git that will not answer AT ALL is not a detached HEAD either.
+#
+# '|| echo HEAD' collapsed every refusal into that one diagnosis, and a real
+# detached HEAD is not among them: that case SUCCEEDS and prints the word HEAD.
+# Measured as an ordinary user against a checkout owned by root — what 'sudo
+# setup.sh' leaves behind, on the documented path where you install as root and
+# then use 'lca' as yourself:
+#
+#   fatal: detected dubious ownership in repository at '...'
+#   To add an exception for this directory, call:
+#       git config --global --add safe.directory /home/user/local-code-agent
+#
+#   [FAIL] The checkout is in a detached HEAD state. Pick a branch first:
+#          git -C /home/user/local-code-agent checkout main
+#
+# On a branch the whole time, and the suggested command fails the same way.
+# git had already printed the fix and this threw it away.
+update_branch_says() {  # REVPARSE_RC -> what 'lca update --check' dies with
+  local stub="${SANDBOX}/gitstub2"
+  mkdir -p "${stub}" "${SANDBOX}/.git"
+  cp "${REPO}/update.sh" "${SANDBOX}/update.sh"
+  cat > "${stub}/git" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"rev-parse --abbrev-ref HEAD"*)
+    if [[ "${RP_RC}" != "0" ]]; then
+      echo "fatal: detected dubious ownership in repository at '/somewhere'" >&2
+      echo "  git config --global --add safe.directory /somewhere" >&2
+      exit "${RP_RC}"
+    fi
+    echo "${RP_OUT:-a-branch}"; exit 0 ;;
+  *ls-remote*) exit 0 ;;
+  *fetch*)     exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "${stub}/git"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  RP_RC="$1" RP_OUT="${2:-a-branch}" PATH="${stub}:${PATH}" \
+    timeout 30 bash "${SANDBOX}/update.sh" --check 2>&1 || true
+}
+update_reads_the_branch_honestly() {
+  local out bad=0
+  # git refuses outright: not a detached HEAD, and its own words must survive.
+  out="$(update_branch_says 128)"
+  grep -qi 'detached HEAD' <<<"${out}" && {
+    printf 'a git that would not answer is reported as a detached HEAD: %s\n' "${out}" >&2
+    bad=1; }
+  grep -q 'dubious ownership' <<<"${out}" || {
+    printf "git's own explanation was thrown away: %s\n" "${out}" >&2
+    bad=1; }
+  grep -q 'safe.directory' <<<"${out}" || {
+    printf 'the fix git printed was not passed through: %s\n' "${out}" >&2
+    bad=1; }
+  # ...and a REAL detached HEAD, which succeeds and prints HEAD, must still be
+  # reported as one. Without this the gate passes with that branch deleted.
+  out="$(update_branch_says 0 HEAD)"
+  grep -qi 'detached HEAD' <<<"${out}" || {
+    printf 'a real detached HEAD is no longer reported: %s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and a git that refuses to answer is not called a detached HEAD" \
+  update_reads_the_branch_honestly
 
 echo "# CI's e2e must compare the WHOLE prompt, not a substring of it"
 # The only end-to-end proof that the assistant's instructions reach a real

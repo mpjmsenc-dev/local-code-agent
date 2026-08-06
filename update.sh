@@ -84,8 +84,35 @@ main() {
     || die "${SCRIPT_DIR} is not a git checkout, so there is nothing to update from. If you unpacked a tarball, re-install over it with the one-liner from the README: curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash"
 
   step "Checking for updates"
-  local branch
-  branch="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  # '|| echo HEAD' turned every way git can refuse into "detached HEAD state",
+  # and a real detached HEAD is not one of them: that case SUCCEEDS and prints
+  # the word HEAD. A non-zero exit means git would not answer at all.
+  #
+  # Measured as an ordinary user against a checkout owned by root — which is
+  # what 'sudo setup.sh' and the install one-liner both leave behind, on the
+  # documented path where you install as root and then use 'lca' as yourself:
+  #
+  #   $ git -C /home/user/local-code-agent rev-parse --abbrev-ref HEAD
+  #   fatal: detected dubious ownership in repository at '...'
+  #   To add an exception for this directory, call:
+  #       git config --global --add safe.directory /home/user/local-code-agent
+  #
+  #   $ lca update --check
+  #   [FAIL] The checkout is in a detached HEAD state. Pick a branch first:
+  #          git -C /home/user/local-code-agent checkout main
+  #
+  # The checkout was on a branch the whole time, and the suggested command
+  # fails exactly the same way. git had already printed the fix; this threw it
+  # away and invented a different problem.
+  #
+  # git's own text is passed through rather than summarised: it names the
+  # directory and the exact 'safe.directory' line to run, which is more than
+  # this could reconstruct.
+  local branch rc=0
+  branch="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>&1)" || rc=$?
+  if (( rc != 0 )); then
+    die "Could not read the current branch of ${SCRIPT_DIR}, so there is nothing to update from yet. git said: ${branch}"
+  fi
   [[ "${branch}" != "HEAD" ]] \
     || die "The checkout is in a detached HEAD state. Pick a branch first: git -C ${SCRIPT_DIR} checkout main"
 
