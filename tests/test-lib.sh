@@ -2629,6 +2629,42 @@ md_anchor_links_resolve() {
 check "every anchor link in the docs points at a real heading" \
   md_anchor_links_resolve
 
+echo "# ...and every doc a SCRIPT sends you to must exist too"
+# The docs gate above covers markdown pointing at markdown. Shell scripts point
+# at markdown constantly — "see docs/TROUBLESHOOTING.md", "docs/GPU.md" — and
+# those are the ones a reader meets at the moment something has gone wrong.
+# Rename a doc and every message naming it goes quietly nowhere.
+#
+# All of them resolve today; this went in while it was correct rather than
+# after it broke. Two false positives on the first sweep are why the resolution
+# below tries three roots: CONVENTIONS.md lives in config/, not docs/, and a
+# comment in this very file mentions a made-up 'OTHER.md' when explaining the
+# gate above — hence comments are stripped first.
+script_doc_references_resolve() {
+  local -a scripts=()
+  mapfile -t scripts < <(git -C "${REPO}" ls-files '*.sh' 'bin/*' '.githooks/*' 2>/dev/null || true)
+  (( ${#scripts[@]} > 0 )) || {
+    echo "could not list tracked scripts (not a git checkout?)" >&2; return 1; }
+  local f ref bad=0 found root
+  for f in "${scripts[@]}"; do
+    while IFS= read -r ref; do
+      [[ -n "${ref}" ]] || continue
+      found=no
+      for root in "" docs/ config/; do
+        [[ -e "${REPO}/${root}${ref}" ]] && { found=yes; break; }
+      done
+      [[ "${found}" == yes ]] || {
+        printf '%s names %s, which is not a file in the repo, docs/ or config/\n' \
+          "${f}" "${ref}" >&2
+        bad=1; }
+    done < <(sed 's/#.*//' "${REPO}/${f}" \
+               | grep -ohE '[A-Za-z][A-Za-z0-9_/-]*\.md' | sort -u)
+  done
+  return "${bad}"
+}
+check "every doc a script points at is a file that exists" \
+  script_doc_references_resolve
+
 echo "# ...and so must the list setup.sh prints the moment it finishes"
 # Fifth door, and the one printed at the exact moment someone is deciding what
 # this box is for. Coding was there — at number 4, underneath two chat steps
