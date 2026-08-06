@@ -162,6 +162,26 @@ else
     # "check your edit format" is useless advice to someone whose model was
     # never going to emit a filename.
     #
+    # And it was nearly as useless in the OTHER branch. "Check LCA_EDIT_FORMAT
+    # in .env and the context window" named two causes nothing had looked at.
+    # Observed on this box with qwen2.5-coder:7b, the rung auto-tune picks for
+    # 9-15 GiB, at ctx 8192 with LCA_EDIT_FORMAT unset: the model answers with
+    # the right intent — "To create a file called hello.py ... use the
+    # following *SEARCH/REPLACE* block" — and emits a block aider rejects, on a
+    # 2.8k-token prompt with an 8192 window. Neither named setting was
+    # involved, and the same model, context and box passed this check several
+    # times the same afternoon.
+    #
+    # So the message now says what is known: aider's reason is in the log, the
+    # outcome varies at this size, re-run first, and a bigger model is the fix
+    # that actually helps.
+    #
+    # Deliberately NOT a change to aider_edit_format's 4b threshold, which is
+    # what "7b should use whole" would mean. CONTRIBUTING requires a prompt or
+    # format change to be measured on ~20 samples, and warns that six have
+    # pointed the WRONG WAY. Two observations are enough to say the outcome
+    # varies; they are not enough to move a threshold, and this does not.
+    #
     # EDIT_FLOOR_B is 3 because that is the smallest rung scripts/tune.sh will
     # ever auto-select for qwen2.5-coder (3b/7b/14b). A gate in
     # tests/test-lib.sh fails if that table moves without this moving with it.
@@ -169,7 +189,7 @@ else
     if [[ "${params}" =~ ^[0-9]+$ ]] && (( params > 0 && params < EDIT_FLOOR_B )); then
       p_fail "aider answered but wrote no file, and '${MODEL_NAME}' is below the smallest model this project auto-selects (${EDIT_FLOOR_B}b). Measured: qwen2.5-coder:0.5b wrote the requested file 0 times out of 10 — it replies with a code block carrying no filename, so aider has nothing to apply. Fix: sudo ${REPO_ROOT}/bin/lca model qwen2.5-coder:3b. Full log: ${out}"
     else
-      p_fail "aider answered but wrote no file — and writing files is the only thing 'lca' does that 'lca ask' does not. Check LCA_EDIT_FORMAT in .env and the context window. Full log: ${out}"
+      p_fail "aider answered but wrote no file — and writing files is the only thing 'lca' does that 'lca ask' does not. aider's own reason is in the log (usually 'The LLM did not conform to the edit format'), and on a model this size that outcome VARIES between runs: the same model, context and box both passed and failed this check within one afternoon. Re-run 'lca test' first. If it keeps failing, a bigger model is the fix that helps — 'lca model --list-recommended' shows what fits — and LCA_EDIT_FORMAT / OLLAMA_CONTEXT_LENGTH in .env are worth checking only if you have changed them. Full log: ${out}"
     fi
     tail -n 15 "${out}" 2>/dev/null | sed 's/^/    /' >&2 || true
     trap - EXIT

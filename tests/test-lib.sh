@@ -3515,6 +3515,60 @@ selftest_checks_the_live_prompt() {
     return 1
   }
 }
+# The "wrote no file" advice must not name causes nothing looked at.
+# "Check LCA_EDIT_FORMAT in .env and the context window" was a guess: observed
+# on qwen2.5-coder:7b — the rung auto-tune picks for 9-15 GiB — at ctx 8192
+# with LCA_EDIT_FORMAT unset, the model answers with the right intent and emits
+# a block aider rejects, on a 2.8k-token prompt. Neither named setting was
+# involved, and the same model on the same box passed this check several times
+# the same afternoon.
+#
+# It must STILL be a FAIL, and it must still be the general branch — the
+# too-small-model branch beside it has its own sentence and its own gate.
+selftest_edit_failure_says_what_is_known() {
+  local body
+  # ONE line, selected by a phrase unique to this branch — not a sed RANGE.
+  #
+  # Two mutations came back NOT CAUGHT here before this line was right, and
+  # both were the gate's fault rather than the mutation's:
+  #
+  #   1. '/aider answered but wrote no file/,/Full log/' anchored on a phrase
+  #      that appears TWICE — the too-small-model branch says it first — so it
+  #      extracted the wrong message entirely.
+  #   2. Anchoring on a unique phrase did not help, because the start and end
+  #      patterns are on the SAME line. A sed range needs its end match on a
+  #      LATER line, so it ran to EOF and swept in every p_fail below,
+  #      including the Open WebUI ones. Downgrading this p_fail to p_warn
+  #      passed on the strength of those.
+  #
+  # The message is one line. Select the line.
+  body="$(sed -n '/and writing files is the only thing/p' "${REPO}/scripts/selftest.sh")"
+  [[ -n "${body}" ]] || {
+    echo "could not find selftest.sh's wrote-no-file message — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'p_fail' <<<"${body}" || {
+    echo 'the wrote-no-file outcome stopped being a failure' >&2; return 1; }
+  grep -qi 'varies' <<<"${body}" || {
+    echo 'the message does not say the outcome varies between runs at this model size, so a reader takes one failure as a broken stack' >&2
+    return 1; }
+  grep -qi 're-run' <<<"${body}" || {
+    echo 'the message does not name the cheapest next step' >&2; return 1; }
+  # ...and the settings it used to blame outright must now be qualified rather
+  # than led with, or nothing has changed for the reader.
+  grep -qi 'only if you have changed them' <<<"${body}" || {
+    echo 'the message still presents LCA_EDIT_FORMAT / the context window as the likely cause' >&2
+    return 1; }
+}
+check "'lca test' explains a rejected edit without blaming settings it never read" \
+  selftest_edit_failure_says_what_is_known
+# ...and the 4b edit-format threshold is deliberately untouched: two
+# observations say the outcome varies, which is not the ~20 samples
+# CONTRIBUTING requires before moving it.
+check "the edit-format threshold still sends 7b to diff" \
+  test "$(aider_edit_format qwen2.5-coder:7b)" = "diff"
+check "...and 3b to whole" \
+  test "$(aider_edit_format qwen2.5-coder:3b)" = "whole"
+
 check "'lca test' checks the chat app's assistant prompt is current" \
   selftest_checks_the_live_prompt
 
