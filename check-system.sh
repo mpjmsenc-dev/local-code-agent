@@ -639,12 +639,32 @@ esac
 # drift model_disk_gb's own comment exists to prevent.
 MODELS_DIR="$(ollama_models_dir)"
 FREE_GB="$(free_gb "${MODELS_DIR}")"
+# Name that directory only when it is really there.
+#
+# ollama_models_dir falls back to ${HOME}/.ollama/models, and for a NON-ROOT
+# reporter that is a path the models will never be in: the server on a
+# systemd-less host runs as whoever started it — root here — and /root is not
+# readable from another account, so nothing can see where they actually are.
+# Measured as the 'ubuntu' user, with 6.2 GB of models in /root/.ollama/models:
+#
+#   [FAIL] only 13 GB free at /home/ubuntu/.ollama/models
+#
+# The NUMBER is right — free_gb walks up to the filesystem, and it is the same
+# one — but presenting a directory that does not exist as "where the models
+# are" is the confidently-wrong shape this project keeps taking out. It arrived
+# with the fix that replaced a hardcoded /usr/share/ollama path, which was
+# wrong in a different way; found by running 'lca check' as an ordinary user,
+# which is what the docs tell people to do.
+MODELS_WHERE="${MODELS_DIR}"
+if [[ ! -d "${MODELS_DIR}" ]]; then
+  MODELS_WHERE="the filesystem holding ${MODELS_DIR} (no models directory there yet)"
+fi
 if [[ -z "${FREE_GB}" ]]; then
-  p_warn "could not determine free disk space at ${MODELS_DIR}"
+  p_warn "could not determine free disk space at ${MODELS_WHERE}"
 elif (( FREE_GB >= 15 )); then
-  p_pass "free disk at ${MODELS_DIR}: ${FREE_GB} GB (>= 15 GB)"
+  p_pass "free disk at ${MODELS_WHERE}: ${FREE_GB} GB (>= 15 GB)"
 else
-  p_fail "only ${FREE_GB} GB free at ${MODELS_DIR} — models need headroom (>= 15 GB); clean up with: ollama rm <model>"
+  p_fail "only ${FREE_GB} GB free at ${MODELS_WHERE} — models need headroom (>= 15 GB); clean up with: ollama rm <model>"
 fi
 
 # --- Backups (warn-only: backups are optional) ------------------------------

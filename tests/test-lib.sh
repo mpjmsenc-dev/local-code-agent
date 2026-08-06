@@ -70,6 +70,7 @@ guarded_without() {   # WEBUI_PORT value -> the list guarded_ports produces
     source "$1" >/dev/null 2>&1
     load_env
     ENABLE_WEBUI=true; WEBUI_PORT="$2"; OLLAMA_HOST=127.0.0.1:11434
+    webui_container_running() { return 1; }
     webui_container_env() { return 1; }
     guarded_ports || true' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
 }
@@ -4698,6 +4699,46 @@ disk_check_uses_the_shared_helpers() {
 }
 check "the free-disk check asks lib.sh rather than measuring it again" \
   disk_check_uses_the_shared_helpers
+# ...and it must not present a directory that does not exist as the one the
+# models are in. ollama_models_dir falls back to ${HOME}/.ollama/models, which
+# for a NON-ROOT reporter is a path they will never be in: the server here runs
+# as root, and /root is unreadable from another account, so nothing can see
+# where they really are. Found by running 'lca check' as an ordinary user —
+# which is what the docs tell people to do — with 6.2 GB of models sitting in
+# /root/.ollama/models:
+#
+#   [FAIL] only 13 GB free at /home/ubuntu/.ollama/models
+#
+# The number is right; free_gb walks up to the filesystem and it is the same
+# one. Naming a directory that is not there as "where the models are" is not.
+# This arrived with the fix that replaced the hardcoded /usr/share/ollama path,
+# so it is a regression of my own, caught by using the product rather than by
+# reading it.
+disk_check_names_a_directory_that_exists() {
+  local body
+  body="$(sed -n '/^# Free disk where Ollama keeps its models/,/^# --- Backups/p' \
+          "${REPO}/check-system.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find check-system.sh's free-disk block — this gate stopped watching" >&2
+    return 1; }
+  # shellcheck disable=SC2016  # the pattern is source text, not an expansion
+  grep -q 'd "${MODELS_DIR}"' <<<"${body}" || {
+    echo 'check-system.sh names the models directory without checking it exists — on any account that is not the one running the server, that path is a guess' >&2
+    return 1; }
+  # ...and all three messages must use the checked description, not the raw
+  # path. Two of three would have been the easy mistake.
+  local n
+  n="$(grep -c 'MODELS_WHERE' <<<"${body}")"
+  (( n >= 4 )) || {
+    printf 'only %s uses of the checked location — one of the three messages still names the raw path\n' "${n}" >&2
+    return 1
+  }
+  ! grep -qE '(free disk at|GB free at|free disk space at) \$\{MODELS_DIR\}' <<<"${body}" || {
+    echo 'a free-disk message still names MODELS_DIR directly' >&2
+    return 1; }
+}
+check "...and never names a models directory that is not there" \
+  disk_check_names_a_directory_that_exists
 # ...and the two helpers it now leans on are asserted directly, because a
 # health check is only as good as they are.
 check "free_gb walks up to a directory that exists" \
@@ -7554,22 +7595,31 @@ check "'lca apply' says when .env disabled the chat app but it is still running"
 # public connections. Stubbed, because the real answer needs a docker daemon.
 live_port_is_guarded_too() {
   local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  # BOTH seams. guarded_ports asks webui_container_running first — a stopped
+  # container listens on nothing — so stubbing only webui_container_env leaves
+  # the answer depending on whether a container happens to be up on the machine
+  # running the tests. That is the environment dependence this branch has hit
+  # three times now, and the third was this file.
+  webui_container_running() { return 0; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434|live WebUI 3000" ]]
 }
 live_port_adds_nothing_when_it_agrees() {
   local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_running() { return 0; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 3000|Ollama 11434" ]]
 }
 live_port_is_silent_without_docker() {
   local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_running() { return 1; }
   webui_container_env() { return 1; }   # docker unreadable — cannot ask
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434" ]]
 }
 # ...and the uncovered check must name it, since that is the exposed one.
 live_port_reads_as_uncovered() {
   local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_running() { return 0; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   # a guard built from .env alone: 8080 and 11434, not 3000
   [[ "$(inbound_guard_uncovered 'tcp dport { 8080, 11434 } drop')" == "live WebUI 3000" ]]
@@ -7583,6 +7633,8 @@ check "a guard built from .env alone leaves the live port uncovered" \
 
 covers_everything() {
   local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
+  webui_container_running() { return 1; }
+  webui_container_env() { return 1; }
   ! inbound_guard_uncovered "${GUARD_DUMP}"
 }
 check "a guard covering both ports reports no gap" covers_everything
@@ -9385,6 +9437,7 @@ guard_round_trip() {  # $1 = .env content, $2 = label
       # actually running on this machine adds its live port to the reader and
       # nothing to the renderer, so without the stub the check failed on any
       # box with the container up — which is a real install.
+      webui_container_running() { return 1; }
       webui_container_env() { return 1; }
       inbound_guard_uncovered "$3" || true
     ' _ "${REPO}/scripts/lib.sh" "$1" "${dump}")" || rc=$?
