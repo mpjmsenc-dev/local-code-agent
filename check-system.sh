@@ -472,8 +472,25 @@ fi
 
 # --- Inbound guard ----------------------------------------------------------
 step "Inbound guard"
-if [[ "${ENABLE_WEBUI}" != "true" ]] && ! ollama_bind_is_public; then
-  info "WebUI disabled and Ollama on loopback — no public service ports to guard."
+# guarded_ports, not a fourth hand-written copy of the decision — the note in
+# the else-branch below already says why: "'lca apply' now fixes what this
+# reports, and the two must not be able to disagree about which ports count."
+# This line was written before that and never joined it.
+#
+# It read: ENABLE_WEBUI != true AND Ollama on loopback -> "no public service
+# ports to guard". Measured with ENABLE_WEBUI=false and the container left
+# running, which is what happens when someone turns the chat app off in .env:
+#
+#   [info] WebUI disabled and Ollama on loopback — no public service ports to guard.
+#   $ curl -fsS 127.0.0.1:3000/health
+#   {"status":true}
+#
+# Open WebUI runs with --network=host, and signups are open by default. A
+# health check whose job is to report exposure said there was none, about a
+# live unauthenticated service on every interface.
+GUARD_WANT="$(guarded_ports || true)"
+if [[ -z "${GUARD_WANT}" ]]; then
+  info "Nothing binds a public service port — no inbound guard needed."
 elif ! have nft; then
   p_warn "nft not installed — the inbound guard is not enforced (WebUI/Ollama ports may be publicly reachable)"
 elif ! can_root_now; then
@@ -493,7 +510,8 @@ else
   # because 'lca apply' now fixes what this reports, and the two must not be
   # able to disagree about which ports count.
   INBOUND_DUMP="$(as_root nft list table inet lca_inbound 2>/dev/null)"
-  GUARD_WANT="$(guarded_ports || true)"
+  # GUARD_WANT was asked once, above, and is reused here — one docker probe per
+  # run, and one answer for the whole section.
   GUARD_MISSING="$(inbound_guard_uncovered "${INBOUND_DUMP}" || true)"
   if [[ -n "${GUARD_MISSING}" ]]; then
     p_fail "inbound guard is loaded but does NOT cover: ${GUARD_MISSING//$'\n'/, } — it went stale after a config change. Fix: sudo lca apply"

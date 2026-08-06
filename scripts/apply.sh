@@ -131,6 +131,22 @@ apply_ollama() {
 
 apply_webui() {
   if [[ "${ENABLE_WEBUI}" != "true" || "${SKIP_DOCKER}" == "true" ]]; then
+    # "disabled in .env — nothing to apply" was true only about SETTINGS. The
+    # container is not a setting: turning the chat app off in .env does not
+    # stop it, so it kept running and serving on every interface while this
+    # command — whose one promise is to make the running system match .env —
+    # reported nothing to do about the single setting that turns it off.
+    #
+    # Reported, not acted on. Removing a container because a config line
+    # changed is a bigger step than reconciling settings, and this command
+    # should not take it without being asked; naming 'lca webui stop' leaves
+    # that call where it belongs. Counted, so the summary stops saying
+    # everything matches.
+    if [[ "${SKIP_DOCKER}" != "true" ]] && webui_container_running; then
+      warn "Chat app: .env has it disabled, but its container is still RUNNING — Open WebUI binds every interface, and nothing in this command stops it. Stop it with: sudo ${REPO_ROOT}/bin/lca webui stop"
+      UNCHECKED=$((UNCHECKED+1))
+      return 0
+    fi
     info "Chat app: disabled in .env — nothing to apply."
     return 0
   fi

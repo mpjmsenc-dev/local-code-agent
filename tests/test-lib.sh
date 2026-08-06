@@ -7379,23 +7379,33 @@ GUARD_DUMP='table inet lca_inbound {
 #
 # The subshell matters: a function defined inside a function is global from
 # then on in bash, so a bare stub would silently follow every later test.
+#
+# webui_container_running is stubbed alongside webui_container_env in every
+# fixture below, and it has to be. Left to the real probe these read one answer
+# on a machine with the chat app up and another on a clean checkout — the
+# environment dependence that has turned CI red on this branch twice. "No
+# container" is what these fixtures mean, so they say it.
 ports_for() {  # ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
   ( ENABLE_WEBUI="$1"; WEBUI_PORT="$2"; OLLAMA_HOST="$3"
     webui_container_env() { return 1; }
+    webui_container_running() { return 1; }
     guarded_ports | paste -sd'|' - )
 }
 uncovered_for() {  # DUMP ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
   ( local dump="$1"; ENABLE_WEBUI="$2"; WEBUI_PORT="$3"; OLLAMA_HOST="$4"
     webui_container_env() { return 1; }
+    webui_container_running() { return 1; }
     inbound_guard_uncovered "${dump}" | paste -sd'|' - )
 }
 # ...and the live-container case itself, which nothing covered deterministically
 # because it depended on whether a container happened to be running. A chat app
 # left on the OLD port after a .env edit is unauthenticated on every interface,
 # so this is the one the guard most needs to hear about.
-live_ports_for() {  # WEBUI_PORT LIVE_PORT
-  ( ENABLE_WEBUI=true; WEBUI_PORT="$1"; OLLAMA_HOST=127.0.0.1:11434
+live_ports_for() {  # WEBUI_PORT LIVE_PORT [ENABLE_WEBUI] [RUNNING]
+  ( ENABLE_WEBUI="${3:-true}"; WEBUI_PORT="$1"; OLLAMA_HOST=127.0.0.1:11434
     LIVE="$2"; webui_container_env() { printf '%s' "${LIVE}"; }
+    RUNNING="${4:-yes}"
+    webui_container_running() { [[ "${RUNNING}" == "yes" ]]; }
     guarded_ports | paste -sd'|' - )
 }
 check "a chat app still on the old port is named alongside the new one" \
@@ -7416,10 +7426,126 @@ check "a chat app on port 22 is not called a gap" \
 check "an Ollama on port 22 is not called a gap" \
   test "$(ports_for true 3000 127.0.0.1:22)" = "WebUI 3000"
 nothing_to_guard() {
-  local ENABLE_WEBUI=false OLLAMA_HOST=127.0.0.1:22
-  ! guarded_ports
+  ( ENABLE_WEBUI=false; OLLAMA_HOST=127.0.0.1:22
+    webui_container_env() { return 1; }
+    webui_container_running() { return 1; }
+    ! guarded_ports )
 }
 check "and with neither, there is nothing to guard" nothing_to_guard
+
+# ...but ENABLE_WEBUI=false does NOT mean nothing is listening, and that gap
+# was a security hole. Turning the chat app off in .env does not stop its
+# container: setting it and running the documented 'sudo lca apply' left Open
+# WebUI serving on every interface — it runs with --network=host, and signups
+# are open by default — while the two commands that decide what the guard
+# covers both said there was nothing there. Measured on this box with
+# ENABLE_WEBUI=false and the container untouched:
+#
+#   guarded_ports:  Ollama 11434                  (3000 simply absent)
+#   curl 127.0.0.1:3000/health -> {"status":true}
+#   lca check:      "no public service ports to guard"
+#
+# Before the edit port 3000 was guarded; after it, it was not. Turning a
+# feature off made the box more exposed. netmode.sh's own renderer never
+# agreed — it guards WEBUI_PORT regardless of ENABLE_WEBUI — so there were
+# three answers to one question and the two driving 'lca check' and 'lca
+# apply' were the wrong ones.
+#
+# ENABLE_WEBUI is a statement of intent. A listening socket is a fact.
+check "a chat app .env has disabled but that is still running is still guarded" \
+  test "$(live_ports_for 3000 3000 false yes)" = "Ollama 11434|live WebUI 3000"
+# ...and a STOPPED one is not, because it listens on nothing — and because
+# 'lca webui stop' leaves the container and its baked-in PORT in place, so
+# reporting it would be a gap nothing could ever clear.
+check "...while a stopped one is not called a gap" \
+  test "$(live_ports_for 3000 3000 false no)" = "Ollama 11434"
+# ...and the fix must not double-count on the ordinary path.
+check "...and an enabled, running chat app is still named exactly once" \
+  test "$(live_ports_for 3000 3000 true yes)" = "WebUI 3000|Ollama 11434"
+# The whole point is that netmode's ruleset already covers it, so this reports
+# no gap the user cannot close. If these two ever disagree, 'lca check' would
+# demand an 'lca apply' that could not help — the loop this function's header
+# calls worse than saying nothing.
+guard_ruleset_covers_a_disabled_but_live_chat_app() {
+  local dump gaps
+  dump="$(ENABLE_WEBUI=false WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434 \
+          bash "${REPO}/netmode.sh" render-inbound 2>/dev/null)"
+  [[ -n "${dump}" ]] || { echo 'render-inbound produced nothing' >&2; return 1; }
+  gaps="$( ENABLE_WEBUI=false; WEBUI_PORT=3000; OLLAMA_HOST=127.0.0.1:11434
+           webui_container_env() { printf '3000'; }
+           webui_container_running() { return 0; }
+           inbound_guard_uncovered "${dump}" || true )"
+  [[ -z "${gaps}" ]] || {
+    printf 'the guard netmode writes does not cover what guarded_ports asks for: %s\n' "${gaps}" >&2
+    return 1
+  }
+}
+check "...and netmode's ruleset really does cover it, so the report is closable" \
+  guard_ruleset_covers_a_disabled_but_live_chat_app
+# ...and the two reporters must ASK that function rather than keep their own
+# copy of the decision. check-system.sh opened its inbound section with a
+# fourth hand-written condition — ENABLE_WEBUI != true and Ollama on loopback
+# -> "no public service ports to guard" — which short-circuited guarded_ports
+# entirely. The note in its own else-branch already said why that is wrong:
+# "'lca apply' now fixes what this reports, and the two must not be able to
+# disagree about which ports count."
+check_system_asks_for_the_port_list() {
+  local body
+  body="$(sed -n '/^step "Inbound guard"$/,/^step /p' "${REPO}/check-system.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo "could not find check-system.sh's inbound guard section — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'guarded_ports' <<<"${body}" || {
+    echo 'check-system.sh decides what needs guarding without asking guarded_ports' >&2
+    return 1; }
+  # The regression exactly: the section must not branch on ENABLE_WEBUI itself.
+  ! grep -q 'ENABLE_WEBUI' <<<"${body}" || {
+    echo 'check-system.sh is back to reading ENABLE_WEBUI directly — a chat app left running while .env disables it goes unreported' >&2
+    return 1; }
+}
+check "'lca check' asks lib.sh which ports need guarding" \
+  check_system_asks_for_the_port_list
+# ...and 'lca apply', whose one promise is to make the running system match
+# .env, must not answer "nothing to apply" about the single setting that turns
+# the chat app off while its container is still running.
+apply_webui_run() {  # ENABLE_WEBUI RUNNING -> output, then counters
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    ENABLE_WEBUI="$2"; RUN="$3"; SKIP_DOCKER=false
+    have() { return 0; }
+    docker_daemon_reachable() { return 0; }
+    webui_container_running() { [[ "${RUN}" == "yes" ]]; }
+    webui_container_exists() { [[ "${RUN}" == "yes" ]]; }
+    webui_drift() { return 1; }
+    apply_webui
+    printf "unchecked=%s changed=%s\n" "${UNCHECKED}" "${CHANGED}"' \
+    _ "${REPO}/scripts/apply.sh" "$1" "$2" 2>&1
+}
+apply_reports_a_disabled_chat_app_still_running() {
+  local out
+  out="$(apply_webui_run false yes)"
+  grep -qi 'still RUNNING' <<<"${out}" || {
+    printf 'apply says nothing about a chat app it disabled but did not stop: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'webui stop' <<<"${out}" || {
+    printf 'apply does not say how to stop it: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'unchecked=1' <<<"${out}" || {
+    printf 'it is not counted, so the summary still claims everything matches: %s\n' "${out}" >&2
+    return 1; }
+  # ...and a genuinely-off chat app must stay quiet, or this becomes a nag on
+  # every run of a correctly configured machine.
+  out="$(apply_webui_run false no)"
+  grep -qi 'still RUNNING' <<<"${out}" && {
+    printf 'a chat app that really is off is warned about anyway: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'unchecked=0' <<<"${out}" || {
+    printf 'a chat app that really is off is counted as unchecked: %s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "'lca apply' says when .env disabled the chat app but it is still running" \
+  apply_reports_a_disabled_chat_app_still_running
 
 # The port the container is REALLY on. Open WebUI bakes its port in at
 # creation and runs with --network=host, so editing WEBUI_PORT leaves it

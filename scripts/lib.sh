@@ -1728,6 +1728,23 @@ webui_container_exists() {
   root_for_probe && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
+# webui_container_running — true when the chat app's container is not merely
+# present but actually running, i.e. actually listening on something.
+#
+# webui_container_exists deliberately answers "in any state", which is right
+# for "has it been created". It is the wrong question for exposure: a stopped
+# container accepts no connections, and reporting its port as an unguarded gap
+# would be a finding nothing can clear — 'lca webui stop' does not remove the
+# container, so the port stays in its Config.Env for ever.
+webui_container_running() {
+  have docker || return 1
+  local state
+  state="$(docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+           || true)"
+  [[ "${state}" == "true" ]]
+}
+
 # webui_volume_has_data — true when the chat app's volume exists AND has
 # something in it, i.e. there is something in there to lose.
 #
@@ -1916,10 +1933,42 @@ guarded_ports() {
   # here the live port and .env agree again. Where docker cannot be read at
   # all this yields nothing, which is the right answer to a question we cannot
   # ask.
-  local live
-  live="$(webui_container_env PORT 2>/dev/null || true)"
-  if [[ "${live}" =~ ^[0-9]+$ && "${live}" != "22" && "${live}" != "${WEBUI_PORT}" ]]; then
-    out+=("live WebUI ${live}")
+  #
+  # Deduplicated against what is ALREADY in the list, not against WEBUI_PORT,
+  # and that distinction is the whole of a security hole. With
+  # ENABLE_WEBUI=false the first branch above adds nothing, so 'live == WEBUI_PORT'
+  # suppressed the only entry there was — and a chat app that .env says is off
+  # but that is still running went unlisted. Measured on this box with
+  # ENABLE_WEBUI=false, the container untouched and answering:
+  #
+  #   guarded_ports:  Ollama 11434                 (3000 simply absent)
+  #   curl 127.0.0.1:3000/health -> {"status":true}
+  #   lca apply --dry-run: "apply the inbound guard ... to Ollama 11434"
+  #   lca check:           "no public service ports to guard"
+  #
+  # Turning a feature OFF in .env made the box more exposed, not less: before
+  # the edit port 3000 was in the guard, after it the two commands that decide
+  # what the guard covers both said there was nothing there. netmode.sh's own
+  # renderer never agreed — it guards WEBUI_PORT regardless of ENABLE_WEBUI —
+  # so this was three answers to one question, and the two that drive 'lca
+  # check' and 'lca apply' were the wrong ones.
+  #
+  # ENABLE_WEBUI is a statement of intent. A listening socket is a fact.
+  #
+  # ...and only while it is RUNNING. A stopped container listens on nothing, so
+  # its port is not an exposure — and reporting it would be a gap nothing can
+  # close, because 'lca webui stop' leaves the container (and its baked-in
+  # PORT) in place. That is the "unfixable failure" this function's own header
+  # says is worse than saying nothing.
+  local live already=0 entry
+  if webui_container_running; then
+    live="$(webui_container_env PORT 2>/dev/null || true)"
+  fi
+  if [[ "${live:-}" =~ ^[0-9]+$ && "${live}" != "22" ]]; then
+    for entry in ${out[@]+"${out[@]}"}; do
+      [[ "${entry}" == *" ${live}" ]] && already=1
+    done
+    (( already )) || out+=("live WebUI ${live}")
   fi
   (( ${#out[@]} )) || return 1
   printf '%s\n' "${out[@]}"
