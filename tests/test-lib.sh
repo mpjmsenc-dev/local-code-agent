@@ -3023,6 +3023,158 @@ uninstall_clears_user_model_dirs() {
 }
 check "uninstall clears models pulled without systemd" uninstall_clears_user_model_dirs
 
+echo "# ...and a chat app it could not even LOOK at is not a chat app it removed"
+# The WebUI block asked 'docker container inspect' straight out. With dockerd
+# down that returns non-zero for the same reason "there is no container" does,
+# so both removals were skipped in silence. Measured with the daemon stopped
+# and the container and volume both present — this is everything the run said:
+#
+#   ==> Uninstall complete
+#   [info] Kept on purpose: Docker Engine, Tailscale, git, this repository and .env.
+#
+# One screen earlier the prompt had asked to remove "the WebUI container and
+# its data" and been told yes. lib.sh's docker_daemon_reachable exists to keep
+# "cannot ask" apart from "nothing there" — its header says exactly that, and
+# backup.sh routes through it. uninstall.sh was the file that did not.
+#
+# Driven through the stubs rather than grepped, the same way report_ollama_removal
+# above is: the fault was a missing DISTINCTION, and no amount of matching the
+# word 'docker' in this file would have seen it.
+remove_webui_run() {  # CASE [KEEP] -> the output, with "rc=N" as its last line
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    CASE="$2"; KEEP="$3"
+    # Stubs AFTER the source: inside a function "$2" is the FUNCTION argument.
+    if [[ "${CASE}" == "nodocker" ]]; then have() { [[ "$1" != "docker" ]]; }
+    else have() { return 0; }; fi
+    if [[ "${CASE}" == "daemondown" ]]; then docker_daemon_reachable() { return 1; }
+    else docker_daemon_reachable() { return 0; }; fi
+    # Both inspects answer "present", so every case below is a machine that
+    # really does still have a container and a volume to lose.
+    as_root() {
+      case "$*" in
+        *"rm -f"*)     [[ "${CASE}" == "rmfails"  ]] && return 1 ;;
+        *"volume rm"*) [[ "${CASE}" == "volfails" ]] && return 1 ;;
+      esac
+      return 0
+    }
+    rc=0; remove_webui "${KEEP}" 2>&1 || rc=$?
+    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${2:-false}"
+}
+uninstall_reports_the_chat_app_it_left() {
+  local out bad=0
+  # THE regression. Nothing removed, and the caller must be told so it can stop
+  # printing "Uninstall complete" over the top of it.
+  out="$(remove_webui_run daemondown)"
+  if ! grep -q 'NOT removed' <<<"${out}" || ! grep -q 'rc=1' <<<"${out}"; then
+    printf 'a daemon that cannot be reached is reported as a chat app removed: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # ...and it must not claim any of it happened.
+  ! grep -qE '\[ ok \].*removed' <<<"${out}" || {
+    printf 'the unreachable-daemon path still announces a removal: %s\n' "${out}" >&2
+    bad=1; }
+  # A working daemon still does the work, and says rc=0 so the run reads as
+  # complete. Without this the gate passes with remove_webui gutted to a warn.
+  out="$(remove_webui_run live false)"
+  if ! grep -q "container 'open-webui' removed" <<<"${out}" \
+     || ! grep -q 'data volume removed' <<<"${out}" \
+     || ! grep -q 'rc=0' <<<"${out}"; then
+    printf 'an ordinary uninstall no longer removes the chat app: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # --keep-data keeps the volume and still removes the container.
+  out="$(remove_webui_run live true)"
+  if ! grep -q "container 'open-webui' removed" <<<"${out}" \
+     || ! grep -q 'Keeping' <<<"${out}" \
+     || grep -q 'data volume removed' <<<"${out}"; then
+    printf '--keep-data no longer means what it says: %s\n' "${out}" >&2
+    bad=1
+  fi
+  # No docker at all: nothing exists, so nothing is left behind and nothing is
+  # said. This is the one silent answer that is honest.
+  out="$(remove_webui_run nodocker)"
+  grep -q 'rc=0' <<<"${out}" || {
+    printf 'a machine with no docker is reported as having a chat app left on it: %s\n' "${out}" >&2
+    bad=1; }
+  # A removal that FAILS is the third answer, and the reason the removals are
+  # reported instead of fatal: a bare 'as_root docker rm -f' under set -e ends
+  # the run, and the four steps after it — models, virtualenv, 'lca', the login
+  # banner — never happen on a box that has already lost its boot services.
+  local case
+  for case in rmfails volfails; do
+    out="$(remove_webui_run "${case}")"
+    if ! grep -q 'could not be removed' <<<"${out}" || ! grep -q 'rc=1' <<<"${out}"; then
+      printf 'a %s removal is not reported as one: %s\n' "${case}" "${out}" >&2
+      bad=1
+    fi
+  done
+  return "${bad}"
+}
+check "an uninstall that could not reach docker says the chat app is still here" \
+  uninstall_reports_the_chat_app_it_left
+# ...and the closing line has to agree with it, because that is the line people
+# read. "Uninstall complete" directly above "Kept on purpose: ..." is a full
+# accounting of what survived, and it was signed off on a machine still holding
+# every account and chat.
+closing_banner_run() {  # WEBUI_LEFT -> the closing lines
+  bash -c 'source "$1" >/dev/null 2>&1; closing_banner "$2" 2>&1' \
+    _ "${REPO}/uninstall.sh" "$1"
+}
+uninstall_closing_line_matches_what_happened() {
+  local out
+  out="$(closing_banner_run 0)"
+  grep -q 'Uninstall complete' <<<"${out}" || {
+    printf 'a clean uninstall no longer reads as complete: %s\n' "${out}" >&2
+    return 1; }
+  out="$(closing_banner_run 1)"
+  ! grep -q 'Uninstall complete' <<<"${out}" || {
+    printf 'an uninstall that left the chat app behind still says complete: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'chat app' <<<"${out}" || {
+    printf 'the closing line does not say what was left behind: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and the closing line stops saying 'complete' when it is not" \
+  uninstall_closing_line_matches_what_happened
+
+echo "# ...and every removal an uninstall makes must be able to make it"
+# Step 5 removed the virtualenv with a bare 'rm -rf' while all nine other
+# removals in the file went through as_root. setup.sh runs under sudo, so .venv
+# is root-owned — measured, drwxr-xr-x root root — which makes that the one step
+# a non-root run cannot do. Under set -e it does not skip, it ENDS the run.
+# Reproduced as an ordinary user against a root-owned .venv:
+#
+#   rm: cannot remove '.../.venv/bin/aider': Permission denied
+#
+# ...with Ollama, the models, the chat app and the boot services already gone,
+# and the 'lca' command, the login banner and the cache not yet touched. What
+# is left greets every SSH login with a banner for a stack that no longer
+# exists. Blanket rather than pinned to that one line: the next removal added
+# here will be written by copying a neighbour, and half the neighbours were
+# right by accident.
+uninstall_removals_can_reach_root() {
+  local body bare escalated
+  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
+  # 'as_root' must come BEFORE the rm on the line — 'as_root docker rm -f' is
+  # escalated, a trailing '&& as_root something-else' is not.
+  escalated="$(grep -cE 'as_root( +[^ ]+)* +rm +-' <<<"${body}" || true)"
+  (( escalated >= 8 )) || {
+    printf 'only %s escalated removals found in uninstall.sh — this gate stopped watching\n' \
+      "${escalated}" >&2
+    return 1
+  }
+  bare="$(grep -nE '(^|[^_[:alnum:]])rm +-' <<<"${body}" \
+          | grep -vE 'as_root( +[^ ]+)* +rm +-' || true)"
+  [[ -z "${bare}" ]] || {
+    printf 'uninstall.sh removes something without as_root (a root-owned target ends the run there, and every later step is skipped):\n%s\n' \
+      "${bare}" >&2
+    return 1
+  }
+}
+check "uninstall.sh escalates every removal, so one it cannot do does not end it" \
+  uninstall_removals_can_reach_root
+
 echo "# install.sh is piped into bash — a partial download must do nothing"
 # It is advertised as 'curl -fsSL ... | bash', which streams the file and runs
 # each statement as it arrives. A connection dropping part-way would otherwise

@@ -49,6 +49,87 @@ report_ollama_removal() {
   fi
 }
 
+# remove_webui KEEP_DATA — take the chat app out, and say what actually
+# happened. Echoes nothing; returns non-zero when something is knowingly left
+# behind, so the closing summary can stop calling the run complete.
+#
+# The block this replaces asked 'docker container inspect' directly. With the
+# daemon down that returns non-zero for exactly the same reason "there is no
+# container" does, so both removals were skipped and the chat app went by in
+# total silence. Measured with the daemon unreachable and the container and
+# volume both present — this is the WHOLE of what the run said about them:
+#
+#   ==> Uninstall complete
+#   [info] Kept on purpose: Docker Engine, Tailscale, git, this repository and .env.
+#
+# The prompt one screen earlier had asked permission to remove "the WebUI
+# container and its data" and been given it. Every account and every chat was
+# still on the machine, and the person who had just asked for them to be gone
+# had been told the job was done — on a VPS about to be resold or handed on,
+# that is the failure that matters.
+#
+# lib.sh's docker_daemon_reachable exists precisely to keep "cannot ask" apart
+# from "nothing there" — its own header says so in as many words — and
+# backup.sh already routes through it. This file was the one that did not.
+#
+# Its own function so all five answers can be exercised without uninstalling
+# anything, the same reason report_ollama_removal above is one.
+remove_webui() {
+  local keep_data="$1" left=0
+  # No docker at all: there is no container and no volume, so there is also
+  # nothing being left behind. Silence is honest here.
+  have docker || return 0
+  if ! docker_daemon_reachable; then
+    warn "The Docker daemon is not responding, so the chat app was NOT removed — its container and the 'open-webui' volume (every account and chat) are still on this machine. Start it ($(docker_start_hint)), then re-run this script to finish."
+    return 1
+  fi
+  if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
+    # Reported rather than fatal. A bare 'as_root docker rm -f' under set -e
+    # ends the run here, and the four steps after this one — Ollama's models,
+    # the virtualenv, the 'lca' command, the login banner — would silently not
+    # happen on a machine that had already lost its boot services.
+    if as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
+      ok "WebUI container '${WEBUI_CONTAINER}' removed."
+    else
+      warn "The WebUI container '${WEBUI_CONTAINER}' could not be removed and is still on this machine."
+      left=1
+    fi
+  fi
+  if [[ "${keep_data}" == "true" ]]; then
+    info "Keeping the 'open-webui' data volume (--keep-data)."
+  elif as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    if as_root docker volume rm open-webui >/dev/null 2>&1; then
+      ok "WebUI data volume removed."
+    else
+      # The usual cause is another container still holding it — docker refuses
+      # while anything has it mounted.
+      warn "The 'open-webui' data volume could not be removed — accounts and chats are still on this machine. Check what is still using it: sudo docker ps -a --filter volume=open-webui"
+      left=1
+    fi
+  fi
+  return "${left}"
+}
+
+# closing_banner WEBUI_LEFT — the last thing an uninstall says.
+#
+# "complete" has to mean it. A warning printed sixty lines earlier is not where
+# anyone looks, and "Uninstall complete" sitting directly above "Kept on
+# purpose: ..." reads as a full accounting of what survived — which is exactly
+# how a machine that still held every account and chat was signed off as done.
+#
+# A function, like report_ollama_removal and remove_webui, so both endings can
+# be read without uninstalling anything.
+closing_banner() {
+  if (( $1 )); then
+    step "Uninstall finished — but the chat app is still here"
+    warn "The chat app was NOT removed (see above). Everything else was."
+  else
+    step "Uninstall complete"
+  fi
+  info "Kept on purpose: Docker Engine, Tailscale, git, this repository and .env."
+  info "To finish completely:  sudo tailscale logout   and delete this directory:  ${REPO_ROOT}"
+}
+
 main() {
   local force=false keep_data=false arg
   for arg in "$@"; do
@@ -106,18 +187,8 @@ main() {
   ok "Boot services and netmode state removed."
 
   # 3. Open WebUI.
-  if have docker; then
-    if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
-      as_root docker rm -f "${WEBUI_CONTAINER}" >/dev/null
-      ok "WebUI container '${WEBUI_CONTAINER}' removed."
-    fi
-    if [[ "${keep_data}" == "true" ]]; then
-      info "Keeping the 'open-webui' data volume (--keep-data)."
-    elif as_root docker volume inspect open-webui >/dev/null 2>&1; then
-      as_root docker volume rm open-webui >/dev/null
-      ok "WebUI data volume removed."
-    fi
-  fi
+  local webui_left=0
+  remove_webui "${keep_data}" || webui_left=1
 
   # Homes to clean. Under sudo, ${HOME} is root's while the files that matter
   # were written by the human's own runs, so both are in scope. Computed here
@@ -161,10 +232,22 @@ main() {
   report_ollama_removal "${ollama_was_installed}"
 
   # 5. Project virtualenv.
+  # as_root, like every other removal in this file. setup.sh runs under sudo,
+  # so .venv is owned by root — measured here, drwxr-xr-x root root. A bare rm
+  # is therefore the one step a non-root run cannot do, and under set -e it does
+  # not just skip: it ENDS the uninstall. Reproduced as an ordinary user against
+  # a root-owned .venv:
+  #
+  #   rm: cannot remove '.../.venv/bin/aider': Permission denied
+  #
+  # ...after Ollama, the models, the chat app and the boot services were already
+  # gone, and before the 'lca' command, the login banner and the cache were
+  # touched. What is left is a machine that greets every SSH login with a banner
+  # for a stack that no longer exists and an 'lca' that runs deleted scripts.
   local venv
   venv="$(venv_dir)"
   if [[ -d "${venv}" ]]; then
-    rm -rf "${venv}"
+    as_root rm -rf "${venv}"
     ok "Virtualenv ${venv} removed."
   fi
 
@@ -206,9 +289,7 @@ main() {
     fi
   done
 
-  step "Uninstall complete"
-  info "Kept on purpose: Docker Engine, Tailscale, git, this repository and .env."
-  info "To finish completely:  sudo tailscale logout   and delete this directory:  ${REPO_ROOT}"
+  closing_banner "${webui_left}"
 }
 
 # Sourceable so report_ollama_removal can be tested without uninstalling
