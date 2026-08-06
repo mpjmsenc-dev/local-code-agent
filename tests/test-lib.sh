@@ -1723,6 +1723,90 @@ performance_doc_warns_about_the_prompt_cache() {
 check "PERFORMANCE.md warns that a repeated prompt measures the cache" \
   performance_doc_warns_about_the_prompt_cache
 
+echo "# a hand-edited .env must fail with the file's name, not a file descriptor"
+# Every document in this project tells the reader to edit this file — 'sed -i'
+# on .env appears in YOUR-TURN.md, PHONE.md and the README — so a typo in it is
+# a likely error, not an exotic one. Sourcing it happens through a process
+# substitution, so bash reported the damage against /dev/fd/63:
+#
+#   /dev/fd/63: line 60: unexpected EOF while looking for matching `"'
+#   /dev/fd/63: line 14: coder:7b: command not found
+#
+# ...followed by no banner at all, on every SSH login, with nothing anywhere
+# saying the word '.env'.
+# SC2031: shellcheck's flow analysis decides LCA_ENV_LINE_RE was "modified in a
+# subshell" because load_env assigns inside one; it is a constant set at source
+# time and read here, which is the whole point of holding it in a variable.
+# shellcheck disable=SC2031
+env_line_ok()  { grep -qE "${LCA_ENV_LINE_RE}" <<<"$1"; }
+env_line_bad() { ! env_line_ok "$1"; }
+check "a plain assignment is fine"        env_line_ok 'MODEL_NAME=qwen2.5-coder:7b'
+check "an empty value is fine"            env_line_ok 'AIDER_VERSION='
+check "a quoted value with spaces is fine" env_line_ok 'BACKUP_SCHEDULE="*-*-* 03:30:00"'
+check "a comment is fine"                 env_line_ok '# this is a comment'
+check "a blank line is fine"              env_line_ok ''
+check "a trailing comment is fine"        env_line_ok 'WEBUI_PORT=3000   # the port'
+check "'export' is tolerated"             env_line_ok 'export WEBUI_PORT=3000'
+# ...and the three shapes a hand edit really produces.
+check "an unterminated quote is refused"  env_line_bad 'WEBUI_PORT="3000'
+check "an unquoted space is refused"      env_line_bad 'MODEL_NAME=qwen2.5 coder:7b'
+# shellcheck disable=SC2016  # the backtick is the test data, not an expansion
+check "command substitution is refused"   env_line_bad 'WEBUI_PORT=`id -u`'
+# The shipped example has to satisfy its own rule, or first-run creates a .env
+# that load_env then refuses.
+example_env_is_valid() {
+  local bad
+  # shellcheck disable=SC2031  # same constant, same false positive
+  bad="$(grep -nvE "${LCA_ENV_LINE_RE}" "${REPO}/.env.example" || true)"
+  [[ -z "${bad}" ]] || {
+    printf '.env.example does not satisfy the rule load_env enforces:\n%s\n' "${bad}" >&2
+    return 1; }
+}
+check ".env.example passes the check load_env applies to it" example_env_is_valid
+# ...and load_env must check BEFORE it sources, or the message never arrives.
+load_env_validates_before_sourcing() {
+  local body check_at source_at
+  body="$(awk '/^load_env\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  check_at="$(grep -n 'LCA_ENV_LINE_RE' <<<"${body}" | head -1 | cut -d: -f1)"
+  source_at="$(grep -n '^ *source ' <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${check_at}" ]] || {
+    echo 'load_env sources .env without checking it is assignments only' >&2
+    return 1; }
+  [[ -n "${source_at}" ]] || {
+    echo 'load_env no longer sources .env at all — this gate stopped watching' >&2
+    return 1; }
+  (( check_at < source_at )) || {
+    echo 'load_env checks .env only after sourcing it, which is after the damage' >&2
+    return 1; }
+}
+check "...and it checks before sourcing, not after" \
+  load_env_validates_before_sourcing
+# The two validators must stay different, and this pins the difference so
+# nobody tidies them into one. env_file_is_inert() guards a .env that arrived
+# in a tarball and is about to be sourced as ROOT, so it refuses '$' outright.
+# LCA_ENV_LINE_RE guards the file the user typed, where an expansion is their
+# business and has always worked — applying the tarball rule there would reject
+# a config that is valid today.
+the_two_env_rules_disagree_on_purpose() {
+  local f="${SANDBOX}/expansion-env"
+  # An expansion with no path in it: an earlier fixture used
+  # PYTHON_BIN=$HOME/bin/python3, which is a real expansion and also exactly
+  # the shape venv_python_is_the_only_source() forbids — that gate caught this
+  # file, correctly, and the fixture was the thing that was wrong.
+  # shellcheck disable=SC2016  # $USER must reach the file unexpanded
+  printf 'WEBUI_NAME=$USER-box\n' > "${f}"
+  # shellcheck disable=SC2016  # ...and unexpanded here too, for the same reason
+  env_line_ok 'WEBUI_NAME=$USER-box' || {
+    echo "load_env's rule now rejects an expansion in the user's own .env, which used to work" >&2
+    return 1; }
+  ! env_file_is_inert "${f}" || {
+    echo 'env_file_is_inert now accepts an expansion — it guards a file from a tarball, sourced as root' >&2
+    return 1; }
+}
+check "the hand-edit rule and the tarball rule are not the same rule" \
+  the_two_env_rules_disagree_on_purpose
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has

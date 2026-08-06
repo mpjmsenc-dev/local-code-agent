@@ -228,6 +228,23 @@ systemd_available() {
 # load_env — create .env from .env.example on first run, source it, then
 # apply defaults for anything left unset. Safe to call repeatedly; a repeat
 # call re-reads the file, so changes made via set_env_var become visible.
+# What a .env line is allowed to be: blank, a comment, or one assignment whose
+# value is bare (no whitespace) or fully quoted. 'export ' is accepted because
+# people write it out of habit and source handles it; a trailing '# comment' is
+# accepted because bash does.
+#
+# Held in a variable rather than inlined so the gate that proves it can feed it
+# the same expression the loader uses, instead of a second copy that drifts.
+#
+# DELIBERATELY LOOSER than env_file_is_inert() below, and the two must not be
+# merged. That one guards a .env that arrived inside a tarball named on the
+# command line and is about to be sourced as root, so it rejects '$', backticks
+# and every other construct outright. This one guards the file the user edited
+# themselves, where 'FOO=$HOME/x' is their business and works today — applying
+# the tarball rule here would refuse a config that has always been valid.
+# Different threat, different answer; a gate asserts they still disagree.
+LCA_ENV_LINE_RE='^[[:space:]]*(#|$)|^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]'\''"]*)[[:space:]]*(#.*)?$'
+
 load_env() {
   if [[ ! -f "${ENV_FILE}" ]]; then
     if [[ "${LCA_ENV_READONLY:-false}" == "true" ]]; then
@@ -243,11 +260,36 @@ load_env() {
     fi
   fi
   if [[ -f "${ENV_FILE}" ]]; then
-    set -a
     # Strip CR first so a CRLF (Windows-edited) .env never leaves a trailing
     # '\r' in values — which would break numeric checks, ports and URLs.
+    local cleaned bad
+    cleaned="$(tr -d '\r' < "${ENV_FILE}")"
+    # Checked BEFORE sourcing, because every doc in this project tells the
+    # reader to edit this file by hand — 'sed -i' on it appears in
+    # YOUR-TURN.md, PHONE.md and the README — and sourcing a typo is the one
+    # failure the reader cannot diagnose. Measured on two realistic slips:
+    #
+    #   WEBUI_PORT="3000               -> /dev/fd/63: line 60: unexpected EOF
+    #                                     while looking for matching `"'
+    #   MODEL_NAME=qwen2.5 coder:7b    -> /dev/fd/63: line 14: coder:7b:
+    #                                     command not found
+    #
+    # ...and then no banner at all, on every SSH login. '/dev/fd/63' is the
+    # process substitution below; it names nothing the reader can open, and
+    # nothing anywhere says the word '.env'.
+    #
+    # 'bash -n' alone is not enough: the second line is valid bash. It parses
+    # as an assignment followed by a command, which is exactly the damage. So
+    # the rule is the real invariant of the file — assignments only.
+    bad="$(grep -nvE "${LCA_ENV_LINE_RE}" <<<"${cleaned}" || true)"
+    bad="${bad%%$'\n'*}"
+    if [[ -n "${bad}" ]]; then
+      die "${ENV_FILE} line ${bad%%:*}: ${bad#*:}
+A .env holds KEY=value lines only, and this is not one — sourcing it would run part of the line as a command. Quote any value with spaces in it: KEY=\"a b\"."
+    fi
+    set -a
     # shellcheck disable=SC1090
-    source <(tr -d '\r' < "${ENV_FILE}")
+    source <(printf '%s\n' "${cleaned}")
     set +a
   fi
   AUTO_TUNE="${AUTO_TUNE:-true}"
