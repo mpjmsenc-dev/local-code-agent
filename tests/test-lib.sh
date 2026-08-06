@@ -8283,6 +8283,66 @@ backup_checks_paused_before_running() {
     return 1
   }
 }
+echo "# an interrupted backup must not leave a partial archive behind"
+# 'if ! tar ...; then rm -f "${tarball}"; fi' covers tar FAILING. It does not
+# cover tar being INTERRUPTED: bash exits without taking the else branch.
+# Measured directly, with a group SIGINT during tar —
+#
+#   $ bash -c 'if ! tar czf /tmp/probe.tar.gz -C /tmp/bigsrc .; then
+#              echo CLEANUP RAN; rm -f /tmp/probe.tar.gz; fi'
+#   (no output at all)
+#   -rw-r--r-- 1 root root 153616384 /tmp/probe.tar.gz
+#
+# ...and a separate probe confirmed an EXIT trap DOES run on that signal, which
+# is why the fix hangs off the trap this script already had rather than adding
+# INT/TERM/HUP. A truncated archive cannot be restored — restore.sh runs
+# 'tar tzf' first — but it looks like a backup in 'ls' and counts toward
+# BACKUP_KEEP, so enough interrupted runs evict the real ones.
+backup_cleans_up_a_partial_archive() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/backup.sh")"
+  # shellcheck disable=SC2016  # the literal ${tarball} is what we search for
+  grep -q 'PARTIAL_TARBALL="${tarball}"' <<<"${body}" || {
+    echo 'backup.sh never records the archive it is part-way through writing' >&2
+    return 1; }
+  grep -qE 'PARTIAL_TARBALL:-.*rm -f' <<<"${body}" || {
+    echo 'nothing removes the partial archive on the way out' >&2
+    return 1; }
+  grep -q 'PARTIAL_TARBALL=""' <<<"${body}" || {
+    echo 'backup.sh never clears the marker, so a COMPLETE archive gets deleted at exit' >&2
+    return 1; }
+  # Every EXIT trap has to go through the one cleanup, or a future trap
+  # silently opts out of it. Three of them re-arm around the pause/unpause.
+  local traps
+  traps="$(grep -c 'trap .*EXIT' <<<"${body}")"
+  local via
+  via="$(grep -c 'trap .*backup_cleanup.*EXIT' <<<"${body}")"
+  [[ "${traps}" == "${via}" ]] || {
+    printf '%s of backup.sh %s EXIT traps bypass backup_cleanup\n' \
+      "$(( traps - via ))" "${traps}" >&2
+    return 1; }
+}
+check "an interrupted backup takes its half-written archive with it" \
+  backup_cleans_up_a_partial_archive
+# ...and the cleanup itself, driven rather than grepped.
+partial_cleanup_behaves() {
+  local f="${SANDBOX}/partial.tar.gz" out
+  : > "${f}"
+  out="$(bash -c 'source "$1" >/dev/null 2>&1
+    workdir=""; PARTIAL_TARBALL="$2"
+    backup_cleanup() { [[ -z "${PARTIAL_TARBALL:-}" ]] || rm -f "${PARTIAL_TARBALL}"; rm -rf "${workdir:-}"; }
+    backup_cleanup' _ "${REPO}/scripts/lib.sh" "${f}" 2>&1 || true)"
+  [[ ! -e "${f}" ]] || { echo "the cleanup left ${f} behind" >&2; return 1; }
+  # ...and a cleared marker must not delete anything.
+  : > "${f}"
+  bash -c 'PARTIAL_TARBALL=""; workdir=""
+    backup_cleanup() { [[ -z "${PARTIAL_TARBALL:-}" ]] || rm -f "${PARTIAL_TARBALL}"; rm -rf "${workdir:-}"; }
+    backup_cleanup' >/dev/null 2>&1
+  [[ -e "${f}" ]] || { echo 'the cleanup deletes a completed archive when the marker is cleared' >&2; return 1; }
+  rm -f "${f}"
+}
+check "...and it deletes only while the marker is set" partial_cleanup_behaves
+
 check "backup.sh notices a container left paused by an earlier run" \
   backup_checks_paused_before_running
 

@@ -65,7 +65,7 @@ do_backup() {
   # workdir stays global: the EXIT trap runs after main() returns, where a
   # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
-  trap 'rm -rf "${workdir:-}"' EXIT
+  trap backup_cleanup EXIT
   mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
   # Owner-only. Every archive in here holds the Open WebUI database — account
   # password hashes and the JWT signing key that mints valid sessions — plus a
@@ -170,12 +170,12 @@ do_backup() {
       warn "'${WEBUI_CONTAINER}' was already paused — an earlier backup was probably killed before it could unpause. Archiving it as it is, then unpausing."
       paused=true
       # shellcheck disable=SC2064
-      trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; rm -rf \"${workdir:-}\"" EXIT
+      trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; backup_cleanup" EXIT
     elif as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
       if as_root docker pause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
         paused=true
         # shellcheck disable=SC2064
-        trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; rm -rf \"${workdir:-}\"" EXIT
+        trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; backup_cleanup" EXIT
       else
         warn "Could not pause '${WEBUI_CONTAINER}' — archiving live (snapshot may be inconsistent)."
       fi
@@ -194,7 +194,7 @@ do_backup() {
       # the unpause on exit) and warn, so the container can never be left
       # paused and unreachable from the phone.
       if as_root docker unpause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
-        trap 'rm -rf "${workdir:-}"' EXIT
+        trap backup_cleanup EXIT
       else
         warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
       fi
@@ -259,12 +259,16 @@ do_backup() {
   # only closes it once the secrets are already on disk.
   local prev_umask; prev_umask="$(umask)"
   umask 077
+  # Armed before the write and cleared only once the archive is complete, so an
+  # interrupt anywhere inside tar takes the partial file with it.
+  PARTIAL_TARBALL="${tarball}"
   if ! tar czf "${tarball}" -C "${workdir}" .; then
     umask "${prev_umask}"
     rm -f "${tarball}"
     die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
   fi
   umask "${prev_umask}"
+  PARTIAL_TARBALL=""
   # Only needed when root created the file (the timer runs as root). Guard with
   # can_root: for an unprivileged user without sudo the file is already theirs,
   # and an unguarded as_root would die() here — aborting a backup that had
@@ -460,6 +464,27 @@ uninstall_timer() {
 # help) whenever the header above gains or loses a line.
 usage() {
   sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# backup_cleanup — what every EXIT trap in here runs.
+#
+# PARTIAL_TARBALL is the half of this that a signal needs. 'if ! tar ...; then
+# rm -f "${tarball}"; fi' covers tar FAILING; it does not cover tar being
+# INTERRUPTED, because bash exits on SIGINT without taking the else branch.
+# Measured directly:
+#
+#   $ bash -c 'if ! tar czf /tmp/probe.tar.gz -C /tmp/bigsrc .; then
+#              echo CLEANUP RAN; rm -f /tmp/probe.tar.gz; fi'   # then Ctrl-C
+#   (no output at all)
+#   -rw-r--r-- 1 root root 153616384 /tmp/probe.tar.gz
+#
+# So a Ctrl-C during a backup left a truncated .tar.gz in backups/. restore.sh
+# refuses it — it runs 'tar tzf' first — so it can never be restored by
+# mistake, but it still looks like a backup in 'ls' and still counts toward
+# BACKUP_KEEP, so over enough interrupted runs it evicts real ones.
+backup_cleanup() {
+  [[ -z "${PARTIAL_TARBALL:-}" ]] || rm -f "${PARTIAL_TARBALL}"
+  rm -rf "${workdir:-}"
 }
 
 main() {
