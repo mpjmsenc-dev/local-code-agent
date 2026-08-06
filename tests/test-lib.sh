@@ -8969,6 +8969,55 @@ venv_can_lack_pip() {
 check "the chat app port is checked before the container is removed" \
   port_is_checked_before_the_container_is_destroyed
 check "a venv with no working pip is rebuilt, not reused"  venv_without_pip_is_rebuilt
+# ...and a venv that cannot be created must name the cause it actually found.
+# One message covered both failures: "Could not create a virtualenv. On
+# Debian/Ubuntu install it with: sudo apt-get install -y python3-venv".
+# Measured as an ordinary user against a checkout owned by root — which is
+# exactly what 'sudo setup.sh' leaves behind:
+#
+#   Error: [Errno 13] Permission denied: '.../.venv'
+#   [FAIL] Could not create a virtualenv. On Debian/Ubuntu install it with:
+#          sudo apt-get install -y python3-venv
+#
+# python3-venv is already installed; it got far enough to try. And this is the
+# command scripts/selftest.sh sends people to when aider is missing, so it is
+# read by someone who is already stuck.
+#
+# venv_target_writable is stubbed rather than tested through a real directory:
+# as root '[[ -w ]]' is true for every path, so a suite running as root could
+# never reach one branch and a suite running as anyone else could never reach
+# the other. A test whose result depends on WHO runs it is the environment
+# dependence this branch has been bitten by three times.
+venv_failure_says() {  # writable(yes|no) -> the message
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    if [[ "$2" == "yes" ]]; then venv_target_writable() { return 0; }
+    else venv_target_writable() { return 1; }; fi
+    venv_create_failed /some/checkout/.venv 2>&1' \
+    _ "${REPO}/scripts/install_python.sh" "$1" 2>&1
+}
+venv_failure_names_the_real_cause() {
+  local out bad=0
+  out="$(venv_failure_says no)"
+  grep -q 'not writable' <<<"${out}" || {
+    printf 'an unwritable checkout is not reported as one: %s\n' "${out}" >&2; bad=1; }
+  grep -qi 'sudo' <<<"${out}" || {
+    printf 'it does not say to re-run with sudo: %s\n' "${out}" >&2; bad=1; }
+  grep -q 'python3-venv' <<<"${out}" && {
+    printf 'an unwritable checkout is still blamed on a missing package: %s\n' "${out}" >&2; bad=1; }
+  # ...and the package advice must survive where it IS the likely cause.
+  out="$(venv_failure_says yes)"
+  grep -q 'python3-venv' <<<"${out}" || {
+    printf 'a writable checkout no longer gets the venv-module advice: %s\n' "${out}" >&2; bad=1; }
+  grep -q 'not writable' <<<"${out}" && {
+    printf 'a writable checkout is reported as unwritable: %s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "a virtualenv that cannot be created names the cause it found" \
+  venv_failure_names_the_real_cause
+# ...and install_python.sh must still RUN when executed, not only be sourceable.
+check "install_python.sh still runs main when executed" \
+  grep -qE '^  main "\$@"$' "${REPO}/scripts/install_python.sh"
 check "an interpreter can exist with no usable pip"        venv_can_lack_pip
 
 echo "# three claims the code one function away already contradicted"

@@ -30,6 +30,38 @@ pip_install() {
   fi
 }
 
+# venv_target_writable DIR — its own function purely so the two messages below
+# can be exercised. As root '[[ -w ]]' is true for every path, so a test that
+# runs as root could never reach one of the branches, and a test that depends
+# on WHO runs it is the environment dependence this project has been bitten by
+# repeatedly.
+venv_target_writable() { [[ -w "$1" ]]; }
+
+# venv_create_failed VENV — never returns; dies naming the cause it found.
+#
+# One message covered both failures: "Could not create a virtualenv. On
+# Debian/Ubuntu install it with: sudo apt-get install -y python3-venv".
+# Measured as an ordinary user against a checkout owned by root, which is what
+# 'sudo setup.sh' leaves behind:
+#
+#   Error: [Errno 13] Permission denied: '.../.venv'
+#   [FAIL] Could not create a virtualenv. On Debian/Ubuntu install it with:
+#          sudo apt-get install -y python3-venv
+#
+# python3-venv is already installed — it got far enough to try — and installing
+# it again changes nothing. This is the command scripts/selftest.sh sends
+# people to when aider is missing, so it is reached by someone already stuck.
+venv_create_failed() {
+  local venv="$1" target="$1"
+  # The venv itself when it exists (the rebuild path), otherwise its parent —
+  # those are different directories and only one of them is the obstacle.
+  [[ -e "${target}" ]] || target="$(dirname "${venv}")"
+  if ! venv_target_writable "${target}"; then
+    die "Cannot create the virtualenv at ${venv} — '${target}' is not writable by '$(id -un)'. A checkout installed with 'sudo setup.sh' is owned by root, so this needs the same: sudo ${REPO_ROOT}/scripts/install_python.sh"
+  fi
+  die "Could not create a virtualenv at ${venv}, and '${target}' is writable — so the venv module itself is the likely problem. On Debian/Ubuntu install it with: sudo apt-get install -y python3-venv"
+}
+
 main() {
   step "Setting up Python virtualenv + aider"
   require_cmd "${PYTHON_BIN}"
@@ -57,8 +89,7 @@ main() {
       info "Creating virtualenv at ${venv}..."
     fi
     # --clear so a half-built one is replaced rather than reused in place.
-    "${PYTHON_BIN}" -m venv --clear "${venv}" \
-      || die "Could not create a virtualenv. On Debian/Ubuntu install it with: sudo apt-get install -y python3-venv"
+    "${PYTHON_BIN}" -m venv --clear "${venv}" || venv_create_failed "${venv}"
   fi
 
   net_guard "Installing Python packages"
@@ -85,4 +116,8 @@ main() {
   info "Run it from any project directory with: ${REPO_ROOT}/bin/lca"
 }
 
-main "$@"
+# Sourceable so venv_create_failed's two branches can be driven without
+# building a virtualenv — the same pattern as scripts/tune.sh and apply.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
