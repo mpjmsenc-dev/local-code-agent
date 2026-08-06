@@ -247,7 +247,17 @@ main() {
   # stops has been pointed away from the product every time.
   info "1. Code in the terminal: cd <your-project> && lca   (edits real files, commits each change)"
   info "2. Ask one question:     lca ask \"how do I find the biggest files here?\"   (answers only — no files)"
-  info "3. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
+  # Conditional, because this same run tolerates a failed Tailscale install and
+  # carries on by design — so the unconditional version handed a command that
+  # setup.sh had just finished failing to provide, in its own closing advice.
+  # Same rule motd.sh and 'lca chat' follow.
+  if have tailscale; then
+    info "3. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
+  elif [[ "${SKIP_TAILSCALE}" == "true" ]]; then
+    info "3. Private phone access: skipped (SKIP_TAILSCALE=true) — reach port ${WEBUI_PORT} over your own private network"
+  else
+    info "3. Private phone access: Tailscale did not install — retry: sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh"
+  fi
   info "4. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
   info "   Install the Tailscale app on the phone first — docs/PHONE.md"
   info "5. Prove it end-to-end:  lca test        · health check: lca check"

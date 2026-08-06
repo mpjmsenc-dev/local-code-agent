@@ -5597,6 +5597,27 @@ tailscale_advice_is_conditional() {
 }
 check "both 'lca chat' and the banner check for tailscale before naming it" \
   tailscale_advice_is_conditional
+# ...and so must setup.sh's own closing advice, which is the third surface that
+# names the command. That run tolerates a failed Tailscale install by design —
+# "Tailscale did not install — continuing without private phone access" — and
+# then finished by telling the reader to run 'sudo tailscale up'. It knew.
+setup_next_steps_check_for_tailscale() {
+  local body
+  body="$(awk '/^  step "Next steps"/ { inb = 1; next }
+               inb && /VERDICT_PRINTED/ { exit }
+               inb' "${REPO}/setup.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo 'could not find setup.sh Next steps — this gate stopped watching' >&2; return 1; }
+  grep -q 'tailscale up' <<<"${body}" || return 0   # no suggestion, nothing to guard
+  grep -q 'have tailscale' <<<"${body}" || {
+    echo "setup.sh's closing advice offers 'tailscale up' without checking it installed" >&2
+    return 1; }
+  grep -qi 'did not install' <<<"${body}" || {
+    echo "setup.sh checks for tailscale but says nothing when the install it just ran failed" >&2
+    return 1; }
+}
+check "...and so does setup.sh's closing advice" \
+  setup_next_steps_check_for_tailscale
 # ...from headline(), so a sixth banner state added later cannot forget it.
 # Every banner calls exactly one headline, and the note has to sit above the
 # rows it is about.
