@@ -11287,7 +11287,77 @@ perf_baseline_is_stated_once() {
     return 1
   }
 }
+# ...and the same rule for a figure that is not bold. The gate above requires
+# '**N tokens/second**' preceded within 120 characters by the FULL model tag,
+# which is a formatting convention, not the property. A later commit wrote:
+#
+#   Measured on a host with no /dev/dri, no display device and no nvidia-smi,
+#   at 5.3 tokens/second on 7B — exactly CPU speed.
+#
+# Not bold, and "7B" rather than "qwen2.5-coder:7b" — invisible to it twice
+# over. So the page went back to two measured speeds for one model, 5.3 against
+# the table's 6.1, in the document whose own commit history contains "The
+# performance page gave three different numbers for one measurement" and whose
+# thesis is that a change you cannot measure is not an improvement. lca speed
+# calls anything under 10% no real change; these are 13% apart.
+#
+# The property, stated directly: a figure PRESENTED AS A MEASUREMENT, near a
+# reference to a model, must be that model's number in the table. That keeps
+# the deliberate non-measurements out on their own evidence rather than by
+# formatting — "~5.5" is what the bandwidth arithmetic PREDICTS, and the
+# 160-213 reading-speed figure is not a generation speed and names no model.
+perf_measured_figures_match_the_table() {
+  local perf_flat wrong=() rows=0 model measured alias figure win
+  # The measured table itself is removed first: it IS the source of truth, not
+  # a claim to be checked against one, and its two rows sit inside each other's
+  # windows — 12.3 and 6.1 are forty characters apart, so each row reads as a
+  # second speed for the other's model.
+  perf_flat="$(sed '/^| Model | Measured |/,/^$/d' "${REPO}/docs/PERFORMANCE.md" \
+                 | tr '\n' ' ' | tr -s ' ')"
+  local perf_bt; perf_bt="$(printf '\140')"
+  while read -r model measured; do
+    [[ -n "${model}" ]] || continue
+    rows=$(( rows + 1 ))
+    # The tag as written, and the bare size — "7B" is how prose refers to it.
+    alias="${model##*:}"
+    while read -r figure; do
+      [[ -n "${figure}" ]] || continue
+      [[ "${figure}" == "${measured}" ]] && continue
+      # Every occurrence of this figure, with the 150 characters before it and
+      # 150 after. Presented as a measurement, and about this model?
+      while read -r win; do
+        [[ -n "${win}" ]] || continue
+        # NOT "does the word measured appear nearby". That was the first
+        # version, and its own mutation disarmed it: rewording the sentence
+        # from "Measured on a host" to "Seen on a host" made the figure
+        # invisible again, which is a gate a copy-edit can switch off.
+        #
+        # A tilde is the page's own mark for a number that is not a
+        # measurement — "~5.5 tokens/second" is what the bandwidth arithmetic
+        # predicts, and saying so is the point of that paragraph. Everything
+        # else stated to one decimal place beside a model is a claim about
+        # what the model does. (The 160-213 reading figure never reaches here:
+        # it has no decimal point and names no model.)
+        [[ "${win}" == *"~${figure} tokens/second"* ]] && continue
+        grep -qiE "${model}|[^0-9a-z]${alias}[^0-9a-z]" <<<"${win}" || continue
+        wrong+=("${model}: the table says ${measured}, the page also quotes ${figure} (if that is a prediction rather than a measurement, write it as ~${figure} the way the bandwidth paragraph does)")
+      done < <(grep -oE ".{0,150}${figure} tokens/second.{0,150}" <<<"${perf_flat}")
+    done < <(grep -oE '[0-9]+\.[0-9]+ tokens/second' <<<"${perf_flat}" \
+               | grep -oE '^[0-9.]+' | sort -u)
+  done < <(sed -n '/^| Model | Measured |/,/^$/p' "${REPO}/docs/PERFORMANCE.md" \
+             | grep -E "^[|] ${perf_bt}" \
+             | sed -E "s/^[|] ${perf_bt}([^${perf_bt}]+)${perf_bt} [|] [*][*]([0-9.]+) tokens.*/\\1 \\2/")
+  (( rows > 0 )) || {
+    echo 'the measured-speeds table could not be read from PERFORMANCE.md' >&2; return 1; }
+  (( ${#wrong[@]} == 0 )) || {
+    printf 'PERFORMANCE.md quotes a second speed for a model the table already answers for:\n' >&2
+    printf '  %s\n' "${wrong[@]}" | sort -u >&2
+    return 1
+  }
+}
 check "PERFORMANCE.md quotes one measured speed per model" perf_baseline_is_stated_once
+check "...and quotes no second measured speed, bold or not" \
+  perf_measured_figures_match_the_table
 
 # ...and its "fits comfortably" figures may never exceed what GPU.md's table —
 # now derived from the code — says fits at all. Two VRAM tables in two

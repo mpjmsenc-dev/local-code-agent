@@ -141,10 +141,11 @@ ollama ps                  # raw PROCESSOR column, if you want to see it yoursel
 ### `ollama ps` can say "GPU" on a machine that has none
 
 On a CPU-only box, Ollama 0.32.5 will happily print a `PROCESSOR` column like
-`13%/87% CPU/GPU`. Measured on a host with no `/dev/dri`, no display device and
-no `nvidia-smi`, at 5.3 tokens/second on 7B — exactly CPU speed. The percentages
-are Ollama's own accounting for memory it manages; they are not evidence of a
-card.
+`13%/87% CPU/GPU`. Seen on a host with no `/dev/dri`, no display device and no
+`nvidia-smi`, generating at the CPU speed the measured table above gives for
+that model — nowhere near the tens of tokens/second a card produces. The
+percentages are Ollama's own accounting for memory it manages; they are not
+evidence of a card.
 
 `lca check` and `lca speed` therefore classify placement against the hardware
 and not against that string. On a machine with no usable NVIDIA GPU they say so
