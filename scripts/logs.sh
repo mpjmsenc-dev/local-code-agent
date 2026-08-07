@@ -48,14 +48,31 @@ logs_ollama() {
     # it, and a nohup'd background process has no terminal to check. The log it
     # wrote was next to us the whole time, and this is the command the login
     # banner and TROUBLESHOOTING.md both send people to when Ollama misbehaves.
-    if [[ -r "${OLLAMA_BG_LOG}" ]]; then
+    # '-e', not '-r'. Asking whether we can READ it collapsed "there is no log"
+    # into the same branch as "there is a log and this account cannot open it",
+    # and the branch below is written for the first. The log is created by
+    # 'nohup ollama serve >LOG' under whatever umask started it, so a root
+    # install from a shell with umask 077 leaves it 0600 root-owned — after
+    # which an ordinary 'lca logs ollama' was told, measured:
+    #
+    #   [info] Ollama's output goes wherever you started 'ollama serve' —
+    #          check that terminal.
+    #   [info] (If this project started it for you, the log would be at
+    #          /home/user/local-code-agent/.ollama-serve.log.)
+    #
+    # ...about a file that was sitting at exactly that path. The last line is
+    # the worst of the three: it names the log in the subjunctive while the log
+    # is there.
+    #
+    # run_reader, the same escalation the journal branch below uses, so a
+    # reader who can sudo simply gets their log instead of a lecture.
+    if [[ -e "${OLLAMA_BG_LOG}" ]]; then
       info "No systemd here — reading the background 'ollama serve' log this project writes:"
       info "  ${OLLAMA_BG_LOG}"
-      if [[ "${follow}" == "true" ]]; then
-        tail -n "${lines}" -f "${OLLAMA_BG_LOG}"
-      else
-        tail -n "${lines}" "${OLLAMA_BG_LOG}"
-      fi
+      local -a tail_cmd=(tail -n "${lines}" "${OLLAMA_BG_LOG}")
+      [[ "${follow}" != "true" ]] || tail_cmd=(tail -n "${lines}" -f "${OLLAMA_BG_LOG}")
+      run_reader test -r "${OLLAMA_BG_LOG}" -- "${tail_cmd[@]}" \
+        || warn "That file is there, but '$(id -un)' cannot read it — it is owned by $(stat -c %U "${OLLAMA_BG_LOG}" 2>/dev/null || echo 'another account'), because whoever started Ollama did so under a umask that kept it private. Nothing is wrong with the log; re-run this with sudo."
       return 0
     fi
     info "No systemd on this machine, so there is no service journal."

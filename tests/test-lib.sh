@@ -2965,6 +2965,48 @@ logs_ollama_reads_the_background_log() {
 }
 check "'lca logs ollama' reads the background log where there is no journal" \
   logs_ollama_reads_the_background_log
+# ...and "I cannot read it" must not fall into the branch written for "there is
+# no log". That branch was reached on '-r' being false, which is also what a
+# 0600 root-owned log looks like to an ordinary account — and the log is
+# created by 'nohup ollama serve >LOG' under whatever umask started it, so a
+# root install from a umask 077 shell produces exactly that. Measured, with the
+# file sitting right there:
+#
+#   [info] Ollama's output goes wherever you started 'ollama serve' —
+#          check that terminal.
+#   [info] (If this project started it for you, the log would be at
+#          /home/user/local-code-agent/.ollama-serve.log.)
+#
+# The last line names the log in the subjunctive while the log exists. And the
+# first is the sentence this whole branch was written to remove.
+logs_ollama_separates_absent_from_unreadable() {
+  local body
+  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || {
+    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
+  # Existence, not readability, decides which branch you land in.
+  grep -qE '\[\[ -e "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" || {
+    echo 'logs_ollama still branches on whether it can READ the log, so an unreadable one is treated as an absent one' >&2
+    return 1; }
+  grep -qE '\[\[ -r "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" && {
+    echo 'logs_ollama is back to deciding the branch on readability' >&2
+    return 1; }
+  # ...and the read escalates, the same way the journal branch below it does,
+  # so somebody who can sudo gets their log rather than an explanation.
+  # 'run_reader test -r', not bare 'run_reader': the journal branch at the
+  # bottom of this same function uses run_reader too, and matching that one let
+  # the background-log read lose its escalation entirely while the gate passed.
+  grep -qE 'run_reader test -r "\$\{OLLAMA_BG_LOG\}"' <<<"${body}" || {
+    echo 'the background log is read without the escalation the journal gets' >&2
+    return 1; }
+  # ...and if it still cannot be read, that is said as a permission problem.
+  grep -qi 'cannot read it' <<<"${body}" || {
+    echo 'an unreadable background log is not reported as a permission problem' >&2
+    return 1; }
+}
+check "...and an unreadable log is not reported as a missing one" \
+  logs_ollama_separates_absent_from_unreadable
 # ...and the path itself must exist in exactly one place. It was written as a
 # literal inside start_ollama_bg while logs.sh knew nothing about it, which is
 # precisely how the two drifted.
