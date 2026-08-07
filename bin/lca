@@ -95,7 +95,16 @@ case "${cmd}" in
   # Placed after the help branch so -h and --help keep their meaning.
   -*)              exec "${REPO}/run-agent.sh" "${cmd}" "$@" ;;
   *)
-    usage
+    # >&2, like every other failing path in this project. It was on stdout: a
+    # mistyped command wrote 1747 bytes of help into whatever the caller was
+    # capturing, and left the error stream holding 31 bytes on its own. This is
+    # the entry point every other command is reached through, and it was the
+    # last one still doing it.
+    #
+    # No [FAIL] prefix, deliberately: that lives in lib.sh's err(), and this
+    # file forwards rather than sources — a second copy of the colour codes
+    # here is exactly the drift the rest of this work has been removing.
+    usage >&2
     printf '\nUnknown command: %s\n' "${cmd}" >&2
     exit 1
     ;;

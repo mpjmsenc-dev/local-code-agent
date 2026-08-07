@@ -13066,7 +13066,13 @@ check "no test makes docker unreachable through the environment" \
 # unaffected and must stay on stdout: it is an answer, not a diagnostic.
 usage_on_an_error_path_goes_to_stderr() {
   local f body hits bad=0 seen=0
-  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh; do
+  # bin/* and .githooks/* too, not just *.sh — bin/lca has no extension, and it
+  # is the entry point every other command is reached through. It was the last
+  # script still writing its usage to stdout on a failing path, and this gate
+  # could not see it: enumerating by file suffix missed the most important
+  # file in the project. The same list ShellCheck is run against.
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh \
+           "${REPO}"/bin/* "${REPO}"/.githooks/*; do
     [[ -f "${f}" ]] || continue
     body="$(grep -vn '^[[:space:]]*#' "${f}")"
     seen=$((seen+1))
@@ -13081,15 +13087,27 @@ usage_on_an_error_path_goes_to_stderr() {
   done
   # ...and the multi-line spelling of the same thing: a bare 'usage' line whose
   # next non-blank line gives up. This is the form webui.sh's dispatch used.
-  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh; do
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh \
+           "${REPO}"/bin/* "${REPO}"/.githooks/*; do
     [[ -f "${f}" ]] || continue
+    # A WINDOW, not just the next line. bin/lca writes
+    #
+    #   usage
+    #   printf \'\\nUnknown command: %s\\n\' "${cmd}" >&2
+    #   exit 1
+    #
+    # and a next-line-only scan walks straight past the printf — measured, the
+    # mutation that put its usage back on stdout survived this gate until the
+    # window opened. Three lines is enough for a message between the two and
+    # short enough that an unrelated later exit cannot be blamed on it.
     awk -v name="${f##*/}" '
       /^[[:space:]]*#/ { next }
-      prev && $0 ~ /^[[:space:]]*(exit 1|die |fail )/ {
-        printf "%s prints its usage to stdout, then fails on the next line (%s)\n", name, NR > "/dev/stderr"
-        bad = 1
+      countdown > 0 && $0 ~ /^[[:space:]]*(exit 1|die |fail )/ {
+        printf "%s prints its usage to stdout and then fails (line %s)\n", name, NR > "/dev/stderr"
+        bad = 1; countdown = 0; next
       }
-      { prev = ($0 ~ /^[[:space:]]*usage[[:space:]]*$/) }
+      countdown > 0 { countdown-- }
+      $0 ~ /^[[:space:]]*usage[[:space:]]*$/ { countdown = 3 }
       END { exit bad ? 1 : 0 }' "${f}" || bad=1
   done
   (( seen > 5 )) || {
