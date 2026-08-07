@@ -11648,6 +11648,56 @@ ollama_error_is_not_silence() {
 }
 check "an error from Ollama is reported, with its own words" \
   ollama_error_is_not_silence
+# A -f file that cannot be used is an argument error, and none of the three
+# reasons needs a model server running to diagnose. ask.sh started one first:
+# ensure_ollama_up_announced waits up to 60 seconds, and the check that catches
+# the typo sat 55 lines below it. Measured on this box with Ollama down:
+#
+#   $ lca ask -f /etc "what is this"
+#   [info] Ollama is not answering — starting it (this can take up to 60s)...
+#   [FAIL] /etc is a directory, and -f takes a file.
+#
+# A minute of booting a model in order to report a misspelling — and a model
+# server left running afterwards, for a command that never asked anything.
+#
+# The assertion is that nothing was REACHED, not that the message came back
+# quickly: a stubbed curl and ollama that record every call, and a run that
+# must leave the record empty. Timing would be a flaky way to ask the same
+# question.
+ask_touches_nothing_for() {  # -f ARG -> "<calls>|<output>"
+  local sb="${SANDBOX}/askearly"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
+  local log="${sb}/calls"
+  : > "${log}"
+  # Every command ask.sh could use to reach a model server, recording itself.
+  local c
+  for c in curl ollama; do
+    { printf '#!/bin/sh\n'; printf 'printf "%%s\\\\n" "%s" >> "%s"\n' "${c}" "${log}"
+      printf 'exit 1\n'; } > "${sb}/stub/${c}"
+    chmod +x "${sb}/stub/${c}"
+  done
+  local out
+  out="$(PATH="$(stub_path "${sb}/stub")" timeout 60 bash "${REPO}/scripts/ask.sh" \
+         -f "$1" "a question" </dev/null 2>&1 || true)"
+  printf '%s|%s' "$(tr -d '\n' < "${log}")" "${out}"
+}
+ask_refuses_a_bad_file_before_starting_anything() {
+  local r bad=0 case_
+  for case_ in "${SANDBOX}/definitely-not-here.py:No such file" "${SANDBOX}:is a directory"; do
+    r="$(ask_touches_nothing_for "${case_%%:*}")"
+    [[ "${r}" == "|"* ]] || {
+      printf 'ask.sh reached %s before refusing %s\n' "${r%%|*}" "${case_%%:*}" >&2
+      bad=1
+    }
+    grep -qF "${case_##*:}" <<<"${r}" || {
+      printf 'ask.sh did not say "%s" for %s: %s\n' "${case_##*:}" "${case_%%:*}" "${r}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "'lca ask -f' refuses a file it cannot use before starting a model" \
+  ask_refuses_a_bad_file_before_starting_anything
 empty_answer_is_not_success() {
   local out
   out="$(ask_with_stubbed_curl _ '{"response":"","done":true}')"
