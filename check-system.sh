@@ -706,8 +706,24 @@ else
   TIMER_ON=false
   TIMER_SCHED=""
 fi
+# Three states, not two. A nullglob that matches nothing means "no backups",
+# "no backups directory" and "this account cannot read the backups directory"
+# alike — and backups/ is deliberately 0700 root-owned, because an archive
+# holds the chat app's session-signing key. Measured as an ordinary user on
+# this box, with a backup sitting in that directory:
+#
+#   [info] no backups yet — create one with: /home/user/local-code-agent/backup.sh
+#
+# There was one. And backup.sh drives docker through as_root throughout, so
+# the command offered would not have worked from that account either. Three
+# checks above, this same file says "neither confirmed nor ruled out" about
+# docker, the container and nftables for exactly this situation.
+BACKUPS_PATH="${REPO_ROOT}/backups"
+if [[ -d "${BACKUPS_PATH}" ]] && ! readable_by_us "${BACKUPS_PATH}"; then
+  p_warn "cannot read ${BACKUPS_PATH} from this account — whether you have backups was neither confirmed nor ruled out. It is owner-only on purpose: an archive contains the chat app's session-signing key. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
+else
 shopt -s nullglob
-BKS=( "${REPO_ROOT}"/backups/local-code-agent-backup-*.tar.gz )
+BKS=( "${BACKUPS_PATH}"/local-code-agent-backup-*.tar.gz )
 shopt -u nullglob
 if (( ${#BKS[@]} )); then
   mapfile -t BKS_SORTED < <(printf '%s\n' "${BKS[@]}" | sort)
@@ -721,10 +737,15 @@ if (( ${#BKS[@]} )); then
     # be wrong advice — it is already enabled.
     info "${#BKS[@]} backup(s); newest ${NEWEST_AGE_DAYS} day(s) old — the timer is enabled (${TIMER_SCHED}), so this follows your schedule"
   else
-    p_warn "${#BKS[@]} backup(s) present but the newest is ${NEWEST_AGE_DAYS} days old — run ${REPO_ROOT}/backup.sh or enable the timer"
+    p_warn "${#BKS[@]} backup(s) present but the newest is ${NEWEST_AGE_DAYS} days old — run sudo ${REPO_ROOT}/backup.sh or enable the timer"
   fi
 else
-  info "no backups yet — create one with: ${REPO_ROOT}/backup.sh"
+  # sudo, because backup.sh drives docker through as_root from end to end and
+  # writes into an owner-only root directory. Advice that cannot be followed
+  # from the account reading it is how the misleading apt failure two commits
+  # back was reached.
+  info "no backups yet — create one with: sudo ${REPO_ROOT}/backup.sh"
+fi
 fi
 
 # --- Summary ----------------------------------------------------------------

@@ -211,6 +211,14 @@ apt_get() {
 # as anybody else can never reach the other.
 writable_by_us() { [[ -w "$1" ]]; }
 
+# readable_by_us DIR — true when this process could actually list DIR.
+#
+# Both bits, because a directory needs r to list the names and x to stat what
+# is in them, and a glob over a directory with only one of the two comes back
+# empty rather than failing. Same seam, same reason: root reads everything, so
+# the arm that matters is unreachable on a suite running as root.
+readable_by_us() { [[ -r "$1" && -x "$1" ]]; }
+
 # sudo_would_block — true when becoming root is possible in principle but not
 # in THIS run: sudo is installed, it will ask for a password, and there is no
 # terminal to type it into.

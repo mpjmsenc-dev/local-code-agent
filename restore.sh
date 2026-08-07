@@ -210,6 +210,19 @@ main() {
   local tarball="${1:-}"
   if [[ -z "${tarball}" ]]; then
     [[ -d "${BACKUP_DIR}" ]] || die "No tarball given and ${BACKUP_DIR} does not exist. Usage: ${SCRIPT_DIR}/restore.sh <backup.tar.gz>"
+    # ...and "it exists" is not "I can look in it". backup.sh creates this
+    # directory 0700 root-owned on purpose, because an archive holds the chat
+    # app's session-signing key, so 'find' in it returns nothing for an
+    # ordinary user in exactly the way an empty directory does. Measured as
+    # 'ubuntu' on a box with a backup sitting right there:
+    #
+    #   [FAIL] No tarball given and none found in .../backups.
+    #
+    # Told to somebody in the middle of recovering something. Asked before the
+    # find rather than after, so the message is about the real problem instead
+    # of about a result that means nothing.
+    readable_by_us "${BACKUP_DIR}" \
+      || die "No tarball given, and ${BACKUP_DIR} cannot be read by '$(id -un)' — so whether there is a backup in it is unknown, not answered. It is owner-only on purpose: an archive contains the chat app's session-signing key. Re-run this with sudo, or name the tarball yourself: ${SCRIPT_DIR}/restore.sh <backup.tar.gz>"
     # '|| true' keeps the empty-directory case from aborting the whole
     # script under set -euo pipefail (find exits nonzero) — the explicit
     # emptiness check below emits the helpful message instead.

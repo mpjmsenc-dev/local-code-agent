@@ -1419,6 +1419,72 @@ identity_label_matches_value() {
 }
 check "the account named is the account whose config was read" \
   identity_label_matches_value
+
+echo "# 'I found no backups' and 'I could not look' are not the same sentence"
+# backup.sh creates backups/ as 0700 root-owned on purpose — an archive holds
+# the chat app's session-signing key, and there is a gate above on exactly that.
+# So for any other account a glob or a find in it comes back empty in precisely
+# the way an empty directory does. Measured as 'ubuntu', with a backup sitting
+# in that directory:
+#
+#   lca check     [info]  no backups yet — create one with: .../backup.sh
+#   lca restore   [FAIL]  No tarball given and none found in .../backups.
+#
+# There was one. The first told someone they had no backups and handed them a
+# command that needs root; the second told it to somebody in the middle of
+# recovering something. Three checks away, check-system.sh already says
+# "neither confirmed nor ruled out" about docker, the container and nftables.
+check "a readable directory reads as readable" readable_by_us "${SANDBOX}"
+# In-process, not 'bash -c': a fresh shell has not sourced lib.sh, so the call
+# fails as "command not found" and the leading '!' turns that into a pass. The
+# first version of this line did exactly that and reported ok — caught by the
+# command_not_found_handle guard at the top of this file, which is what it is
+# for.
+missing_path_is_not_readable() { ! readable_by_us "${SANDBOX}/no-such-dir-here"; }
+check "...and a path that does not exist does not" missing_path_is_not_readable
+# Both bits: a directory with r and no x lists names but cannot stat them, and
+# a glob over it comes back empty — the same silence this whole check exists to
+# stop being mistaken for an answer.
+readable_needs_both_bits() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/lib.sh")"
+  grep -qE 'readable_by_us\(\).*-r .*&&.*-x ' <<<"${body}"
+}
+check "readability means both list and stat" readable_needs_both_bits
+# ...and the two readers must ask before they conclude. Ordering, not mere
+# presence: a readability check AFTER the search is a check about a result that
+# already means nothing.
+asks_before_it_concludes() {  # FILE  SEARCH-PATTERN
+  awk -v pat="$2" '
+    /^[[:space:]]*#/ { next }
+    /readable_by_us/ { seen = 1 }
+    $0 ~ pat { found = NR; if (!seen) { print "the search at line " NR " runs before anything checks it can be read"; bad = 1 } }
+    END {
+      if (!found) { print "the backup search is gone from this file — this gate has lost its subject"; bad = 1 }
+      exit bad
+    }' "$1"
+}
+check "'lca check' asks whether it can read backups/ before saying there are none" \
+  asks_before_it_concludes "${REPO}/check-system.sh" 'local-code-agent-backup-\\*'
+check "...and so does 'lca restore' before saying it found none" \
+  asks_before_it_concludes "${REPO}/restore.sh" "find .*BACKUP_DIR"
+# ...and neither may state the negative it cannot know.
+unreadable_is_not_reported_as_empty() {
+  local bad=0 f body
+  for f in check-system.sh restore.sh; do
+    body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/${f}")"
+    grep -qE 'readable_by_us "\$\{(BACKUPS_PATH|BACKUP_DIR)\}"' <<<"${body}" || {
+      printf '%s does not test the backup directory for readability\n' "${f}" >&2
+      bad=1; continue; }
+    # The message on that branch has to say the answer is unknown, not absent.
+    grep -qE 'neither confirmed nor ruled out|unknown, not answered' <<<"${body}" || {
+      printf '%s checks readability but still reports a definite answer\n' "${f}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "an unreadable backups directory is reported as unknown, not as empty" \
+  unreadable_is_not_reported_as_empty
 # ...and it must NOT escalate when there is nobody to escalate to: a needless
 # 'sudo -u me' on a box without passwordless sudo is a health check that stops
 # for a password.
