@@ -12003,11 +12003,21 @@ echo "# ...and a misspelled one is a misspelling, not a broken machine"
 # above the daemon check for this exact reason, in a comment saying so; the
 # unknown-command case was left behind it.
 #
-# An unreachable DOCKER_HOST rather than a stub: the property is what happens
-# when the daemon genuinely cannot be reached, and a socket that is not there
-# is the cheapest honest way to be in that state.
+# A stubbed docker rather than an unreachable DOCKER_HOST, and that is the
+# whole of CI run 31211168655. select_docker tries 'docker info' and then
+# 'as_root docker info', and sudo's env_reset drops DOCKER_HOST exactly as it
+# replaces PATH — so on CI, a non-root passwordless sudoer with a real daemon
+# on the runner, the escalating branch found that daemon and succeeded. Green
+# here (as root, nothing is escalated and the variable survives), red there.
+# The same lesson make_stub_dir carries about PATH, one variable over.
+#
+# make_stub_dir + stub_path, so the fake is what BOTH branches reach.
 webui_says() {  # ARG -> what webui.sh prints when docker cannot be reached
-  DOCKER_HOST="unix:///nonexistent-$$.sock" timeout 30 bash "${REPO}/webui.sh" "$1" \
+  local sb="${SANDBOX}/webuistub"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
+  printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/docker"
+  chmod +x "${sb}/stub/docker"
+  PATH="$(stub_path "${sb}/stub")" timeout 30 bash "${REPO}/webui.sh" "$1" \
     </dev/null 2>&1 || true
 }
 webui_names_a_bad_command_rather_than_the_daemon() {
@@ -12513,6 +12523,45 @@ every_path_stub_survives_sudo() {
 }
 check "every PATH stub is reached through sudo as well as directly" \
   every_path_stub_survives_sudo
+# ...and the same trap one variable over. sudo's env_reset does to the whole
+# environment what secure_path does to PATH, so anything a test sets to make a
+# command fail is gone the moment the script under test escalates.
+#
+# DOCKER_HOST is the one that bites, because select_docker's second attempt is
+# 'as_root docker info'. Measured on this box:
+#
+#   $ DOCKER_HOST=unix:///nope.sock sudo -n sh -c 'echo "${DOCKER_HOST:-<stripped>}"'
+#   <stripped>
+#   $ DOCKER_HOST=unix:///nope.sock sudo -n docker info   -> the real daemon
+#
+# That is the whole of CI run 31211168655: a test of mine pointed DOCKER_HOST
+# at a socket that was not there, passed here (as root nothing escalates, so
+# the variable survives) and failed on CI, where the runner is a non-root
+# passwordless sudoer with a real daemon behind it. The suite's way to make a
+# command unreachable is a stub directory, which make_stub_dir's pass-through
+# carries THROUGH sudo; the environment does not survive the trip.
+no_test_breaks_docker_through_the_environment() {
+  local var corpus hits
+  # Assembled from pieces: this gate greps the file it lives in, and a
+  # contiguous literal would match its own error message. Third time in this
+  # suite — a whole-file grep always finds its own explanation.
+  var='DOCKER'"_HOST"
+  # Comment lines dropped first, so the measurement written above this function
+  # is not mistaken for a test doing it.
+  corpus="$(grep -vh '^[[:space:]]*#' "${TESTS_DIR}"/*.sh)"
+  [[ -n "${corpus}" ]] || {
+    echo 'this gate read no test files at all, so it is checking nothing' >&2
+    return 1
+  }
+  hits="$(grep -F "${var}" <<<"${corpus}" || true)"
+  [[ -z "${hits}" ]] || {
+    printf 'a test sets %s to make docker unreachable, and sudo strips it — the escalating branch then finds the real daemon. Use make_stub_dir + stub_path instead:\n%s\n' \
+      "${var}" "${hits}" >&2
+    return 1
+  }
+}
+check "no test makes docker unreachable through the environment" \
+  no_test_breaks_docker_through_the_environment
 
 echo
 if (( FAILED > 0 )); then
