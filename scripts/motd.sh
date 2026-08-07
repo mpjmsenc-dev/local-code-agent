@@ -494,7 +494,20 @@ install_motd() {
   # (which is how pam_motd invokes it) skips files with dots in the name.
   if as_root ln -sfn "${SCRIPT_DIR}/motd.sh" "${MOTD_FILE}" 2>/dev/null; then
     as_root chmod +x "${SCRIPT_DIR}/motd.sh" 2>/dev/null || true
-    ok "Login banner installed — SSH in and it reports whether the stack is ready."
+    # Checked, not assumed. run-parts executes only files it can execute, and
+    # this one is a symlink, so the bit that matters is on the target. The
+    # chmod above is best-effort and its failure is swallowed by '|| true' —
+    # after which this printed "Login banner installed — SSH in and it reports
+    # whether the stack is ready" about a banner that would never print, on
+    # the one screen somebody gets without asking for it.
+    #
+    # '[[ -x ]]' answers this for any account: unlike a directory, a regular
+    # file needs a real execute bit even for root.
+    if [[ -x "${SCRIPT_DIR}/motd.sh" ]]; then
+      ok "Login banner installed — SSH in and it reports whether the stack is ready."
+    else
+      warn "The login banner is linked at ${MOTD_FILE}, but ${SCRIPT_DIR}/motd.sh is not executable — run-parts only runs files that are, so nothing would print at login. Fix it with: sudo chmod +x ${SCRIPT_DIR}/motd.sh"
+    fi
   else
     warn "Could not install the login banner at ${MOTD_FILE} — not fatal, everything else works."
   fi

@@ -11632,6 +11632,52 @@ no_conditional_caller_relies_on_errexit() {
 }
 check "no lib function called from a condition relies on errexit" \
   no_conditional_caller_relies_on_errexit
+
+echo "# 'Login banner installed' must mean a banner that can actually run"
+# install_motd links MOTD_FILE at scripts/motd.sh and then chmods the target
+# '|| true'. run-parts executes only files it can execute, and for a symlink
+# that is the target — so a swallowed chmod failure left the link in place,
+# the banner unable to run, and this printed:
+#
+#   [ ok ] Login banner installed — SSH in and it reports whether the stack
+#          is ready.
+#
+# ...on the one screen somebody gets without asking for it, and the screen the
+# only real bug report this project has ever had was about.
+#
+# Driven for real against a sandbox copy with as_root stubbed to fail the
+# chmod, which is exactly the state '|| true' creates. '[[ -x ]]' answers this
+# for any account: unlike a directory, a regular file needs a real execute bit
+# even for root, so both arms run here and in CI alike.
+motd_install_says() {  # chmod-succeeds(yes|no) -> what install_motd printed
+  local sb="${SANDBOX}/motdinstall"
+  rm -rf "${sb}"; mkdir -p "${sb}/etc" "${sb}/scripts"
+  cp "${REPO}/scripts/motd.sh" "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+  cp "${REPO}/.env.example" "${sb}/" 2>/dev/null || true
+  chmod 644 "${sb}/scripts/motd.sh"
+  bash -c '
+    source "$1/scripts/lib.sh" >/dev/null 2>&1
+    source "$1/scripts/motd.sh" >/dev/null 2>&1
+    SCRIPT_DIR="$1/scripts"; MOTD_FILE="$1/etc/99-local-code-agent"
+    CHMOD_OK="$2"
+    as_root() { if [[ "$1" == chmod && "${CHMOD_OK}" != yes ]]; then return 1; fi; command "$@"; }
+    install_motd 2>&1' _ "${sb}" "$2"
+}
+motd_install_is_honest() {
+  local good bad
+  good="$(motd_install_says _ yes)"
+  bad="$(motd_install_says _ no)"
+  grep -qi 'banner installed' <<<"${good}" || {
+    printf 'a working install does not report success: %s\n' "${good}" >&2; return 1; }
+  grep -qi 'banner installed' <<<"${bad}" && {
+    printf 'a banner that cannot run is still reported as installed: %s\n' "${bad}" >&2; return 1; }
+  grep -qi 'not executable' <<<"${bad}" || {
+    printf 'a banner that cannot run does not say why: %s\n' "${bad}" >&2; return 1; }
+  grep -qF 'chmod +x' <<<"${bad}" || {
+    printf 'a banner that cannot run is not given a fix: %s\n' "${bad}" >&2; return 1; }
+}
+check "a banner that cannot run is not reported as installed" \
+  motd_install_is_honest
 # ...and the counterpart for stubs that escalation walks straight past. Every
 # directory this suite puts in front of PATH must come from make_stub_dir, so
 # the fake is reached whether the script calls the command directly or through
