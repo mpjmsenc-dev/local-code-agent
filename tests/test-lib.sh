@@ -1552,6 +1552,56 @@ identity_does_not_escalate_to_itself() {
 }
 check "...and it never sudos to the account it already is" \
   identity_does_not_escalate_to_itself
+# ...and the same question, asked by hand, gave the same wrong answer in four
+# other places. Measured as 'ubuntu', four lines from the git-identity line
+# above and in the same file:
+#
+#   [info] running as root — docker group membership not needed.
+#
+# The reader is not root, and the branch that sentence replaces is the one
+# that says "user 'ubuntu' not in the docker group" — the single diagnostic
+# that explains an unreachable daemon. It was skipped and a claim that no
+# check was needed printed instead.
+#
+# webui.sh had it for the SSH line it prints beside the phone URL, with its own
+# comment saying why it matters: "handing someone a root SSH line that their
+# server most likely refuses is worse than printing nothing". backup.sh chowns
+# backups/ to it, install_docker.sh adds it to the docker group.
+no_script_asks_who_by_hand() {
+  local bad=0 seen=0 f body
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh; do
+    [[ "${f}" == */lib.sh ]] && continue      # where invoking_user decides it
+    body="$(sed 's/^[[:space:]]*#.*//' "${f}")"
+    # Double-quoted with an escaped $, so the literal is exact and shellcheck
+    # does not read it as an expansion that failed to expand.
+    grep -qF "SUDO_USER:-\$(id -un)" <<<"${body}" || continue
+    printf '%s works out who the user is by hand instead of asking invoking_user\n' \
+      "${f##*/}" >&2
+    bad=1
+  done
+  # The four that used to, now asking properly. Counted, so quietly dropping
+  # the question from one of them is a failure rather than one fewer match.
+  for f in "${REPO}/check-system.sh" "${REPO}/webui.sh" \
+           "${REPO}/scripts/install_docker.sh" "${REPO}/backup.sh"; do
+    grep -q 'invoking_user' "${f}" && seen=$((seen+1))
+  done
+  (( seen == 4 )) || {
+    printf 'only %s of the 4 scripts ask invoking_user\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no script works out who the user is by hand" no_script_asks_who_by_hand
+# The docker-group branch is the one with a consequence, so it is asserted on
+# its own: it must key off invoking_user, not off a second reading of EUID.
+group_check_asks_about_the_reader() {
+  awk '/^[[:space:]]*#/ { next }
+       /check_user=/ { src = $0 }
+       /check_user\}" == "root"/ { used = NR }
+       END { exit !(src ~ /invoking_user/ && used > 0) }' "${REPO}/check-system.sh"
+}
+check "the docker-group check asks about the account reading it" \
+  group_check_asks_about_the_reader
 
 echo "# .env keys must not collide with aider's own env vars (load_env exports them)"
 # load_env sources .env under 'set -a', so every key becomes an environment

@@ -156,7 +156,7 @@ main() {
       # SUDO_USER first: run under sudo, 'id -un' says root, and handing someone
       # a root SSH line that their server most likely refuses is worse than
       # printing nothing.
-      local ssh_user="${SUDO_USER:-$(id -un)}"
+      local ssh_user; ssh_user="$(invoking_user)"
       echo
       ok "For the coding agent (aider), SSH from the phone:  ssh ${ssh_user}@${ts_ip}"
       if have qrencode; then

@@ -439,7 +439,7 @@ install_timer() {
   # './backup.sh' would fail on tar with a permission error.
   as_root mkdir -p "${BACKUP_DIR}"
   as_root chmod 700 "${BACKUP_DIR}"
-  as_root chown "${SUDO_USER:-$(id -un)}" "${BACKUP_DIR}" 2>/dev/null || true
+  as_root chown "$(invoking_user)" "${BACKUP_DIR}" 2>/dev/null || true
   {
     echo "[Unit]"
     echo "Description=local-code-agent backup (WebUI data + .env + model list)"

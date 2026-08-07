@@ -66,7 +66,7 @@ main() {
   fi
 
   # Let the invoking (non-root) user run docker without sudo.
-  local docker_user="${SUDO_USER:-$(id -un)}"
+  local docker_user; docker_user="$(invoking_user)"
   if [[ "${docker_user}" != "root" ]]; then
     if id -nG "${docker_user}" | grep -qw docker; then
       ok "User '${docker_user}' is already in the docker group."

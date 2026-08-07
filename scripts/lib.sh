@@ -611,10 +611,10 @@ load_env_readonly() {
 # exist a few hundred lines up.
 am_root() { [[ "${EUID}" -eq 0 ]]; }
 
-# git_identity_user — whose git config actually matters here.
+# invoking_user — the human this command is acting for.
 #
-# Under sudo that is the human, not root: aider runs as them, and root's empty
-# identity would be the wrong answer to report.
+# Under 'sudo lca X' that is SUDO_USER rather than root: they are the account
+# that will own the files, run aider, need the docker group and SSH in.
 #
 # But SUDO_USER names whoever INVOKED sudo, which is not the account this
 # process is running as when sudo dropped privileges rather than raised them.
@@ -623,22 +623,32 @@ am_root() { [[ "${EUID}" -eq 0 ]]; }
 #
 #   [warn] no global git identity for 'root' — ... Fix once:
 #          git config --global user.name 'Ada Lovelace' && ...
+#   [info] running as root — docker group membership not needed.
 #
-# It named an account that was neither the one it read (ubuntu's config, via
-# git_identity's else-branch) nor the one the reader was using, and offered a
-# fix that would set a third party's identity — after which the warning comes
-# back unchanged, for ever.
+# Neither sentence is about the reader. The first names an account that is not
+# the one whose config was read, and offers a fix that would set a third
+# party's identity. The second SKIPS the group check entirely — so the one
+# diagnostic that would explain an unreachable daemon is replaced by a claim
+# that no check is needed, on an account that may well need it.
 #
-# So SUDO_USER only counts while we are actually root. That is the same
-# condition git_identity uses to decide whose config to read, which is the
-# point: the label and the value must be the same account.
-git_identity_user() {
+# So SUDO_USER only counts while we are actually root. Four scripts wrote
+# '${SUDO_USER:-$(id -un)}' out by hand and all four had this; there is a gate
+# below on writing it again.
+#
+# 'have sudo' as well: without it we cannot act as another account at all, so
+# naming one would produce a label nothing can honour.
+invoking_user() {
   if am_root && [[ -n "${SUDO_USER:-}" ]] && have sudo; then
     printf '%s\n' "${SUDO_USER}"
   else
     id -un
   fi
 }
+
+# git_identity_user — whose git config actually matters here. The same person
+# invoking_user names; kept as its own name because git_identity below is paired
+# with it and the two must be read together.
+git_identity_user() { invoking_user; }
 
 # git_identity — "Name <email>" from that user's GLOBAL git config, or nothing
 # (and non-zero) when either half is unset.

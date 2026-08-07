@@ -153,7 +153,7 @@ else
     else
       p_fail "docker daemon not responding ($(docker_start_hint))"
     fi
-    check_user="${SUDO_USER:-$(id -un)}"
+    check_user="$(invoking_user)"
     if [[ "${check_user}" == "root" ]]; then
       info "running as root — docker group membership not needed."
     elif id -nG "${check_user}" 2>/dev/null | grep -qw docker; then
