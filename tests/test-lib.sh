@@ -5406,10 +5406,17 @@ echo "# ...and it must not carry a second copy of the disk numbers either"
 # pull would refuse. Exactly the drift model_disk_gb's comment exists to stop.
 disk_check_uses_the_shared_helpers() {
   local body
-  body="$(sed -n '/^# Free disk where Ollama keeps its models/,/^# --- Backups/p' \
-          "${REPO}/check-system.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo "could not find check-system.sh's free-disk block — this gate stopped watching" >&2
+  # The whole file, comments stripped, not the reporting block. This gate used
+  # to window the search between two comment lines, and the measurement then
+  # moved above the auto-tune section — which needs the same number to say what
+  # its recommendation would cost — so the window went empty and the gate
+  # failed while the property it guards was intact. A window that has to be
+  # kept in step with where the code lives is a second thing to get wrong;
+  # searching the file catches a stray df anywhere in it as well.
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  # ...and it is still the disk check being watched, not just any file.
+  grep -q 'models need headroom' <<<"${body}" || {
+    echo "could not find check-system.sh's free-disk report — this gate stopped watching" >&2
     return 1; }
   grep -q 'ollama_models_dir' <<<"${body}" || {
     echo "check-system.sh guesses where the models live instead of asking ollama_models_dir — on a host without systemd that is the wrong filesystem" >&2
@@ -10392,6 +10399,56 @@ check "the model listing says nothing about disk when there is room" \
   listing_is_quiet_when_the_disk_is_ample
 check "the model listing asks no disk for a model already downloaded" \
   listing_does_not_demand_disk_for_a_model_already_here
+# ...and the same contradiction in 'lca check', which recommended a 9 GB
+# download eleven lines above FAILING the machine for having too little disk.
+# tune_cost_note is pure, so these drive it directly rather than the whole
+# health check. 14b -> 9 GB and 7b -> 5 GB by model_disk_gb.
+tune_note() { tune_cost_note "$1" "$2" 15 /models qwen2.5-coder:7b; }
+tune_note_warns_when_the_pull_would_be_refused() {
+  local out; out="$(tune_note qwen2.5-coder:14b 4)"     # needs 9, has 4
+  grep -q 'would be refused' <<<"${out}" || {
+    echo "recommended a pull that cannot happen: '${out}'" >&2; return 1; }
+}
+tune_note_warns_when_it_would_leave_the_box_short() {
+  # The measured case: 14 GB free, 9 GB model, 5 GB left, under the 15 wanted.
+  local out; out="$(tune_note qwen2.5-coder:14b 14)"
+  grep -q 'leave about 5 GB free' <<<"${out}" || {
+    echo "did not say what applying it costs: '${out}'" >&2; return 1; }
+  # And it must not claim the pull is impossible — it is not.
+  ! grep -q 'would be refused' <<<"${out}" || {
+    echo "called a pull that fits impossible: '${out}'" >&2; return 1; }
+}
+tune_note_is_silent_when_the_disk_can_take_it() {
+  # 9 GB model, 40 GB free, 31 left — above the headroom, so nothing to say.
+  local out; out="$(tune_note qwen2.5-coder:14b 40)"
+  [[ -z "${out}" ]] || { echo "warned with 40 GB free: '${out}'" >&2; return 1; }
+}
+tune_note_says_nothing_about_a_size_it_cannot_read() {
+  # An unparseable tag must not become a warning, for the same reason
+  # pull_model will not let it become a refusal.
+  local out; out="$(tune_note some-model:latest 1)"
+  [[ -z "${out}" ]] || { echo "guessed at an unreadable size: '${out}'" >&2; return 1; }
+  out="$(tune_note qwen2.5-coder:14b '')"          # free space unknown
+  [[ -z "${out}" ]] || { echo "warned without knowing the free space: '${out}'" >&2; return 1; }
+}
+tune_note_quotes_the_number_pull_model_uses() {
+  # The whole point of it living beside model_disk_gb: one estimate, not two.
+  local need out
+  need="$(model_disk_gb qwen2.5-coder:14b)"
+  out="$(tune_note qwen2.5-coder:14b 14)"
+  grep -q "downloads about ${need} GB" <<<"${out}" || {
+    echo "the note and model_disk_gb disagree: '${out}' vs ${need}" >&2; return 1; }
+}
+check "the tune advice says so when the pull would be refused" \
+  tune_note_warns_when_the_pull_would_be_refused
+check "the tune advice says what it costs when the box is left short" \
+  tune_note_warns_when_it_would_leave_the_box_short
+check "the tune advice is silent when the disk can take it" \
+  tune_note_is_silent_when_the_disk_can_take_it
+check "the tune advice guesses at no size it cannot read" \
+  tune_note_says_nothing_about_a_size_it_cannot_read
+check "the tune advice quotes the number pull_model uses" \
+  tune_note_quotes_the_number_pull_model_uses
 check "the FAQ does not promise more than the ruleset delivers" \
   faq_does_not_overclaim_offline
 

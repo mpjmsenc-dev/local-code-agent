@@ -324,6 +324,14 @@ unset CHECK_DIR
 # Asked before the ladder line below, which reports a model chosen from a
 # family the reader may not have asked for. family_sizes is tune.sh's own, so
 # this cannot drift from what auto-tune actually accepts.
+# Measured here rather than beside the disk check that reports it, because the
+# recommendation below has to be able to say what applying it would cost. The
+# full explanation of both is with that check, under "Hardware".
+MODELS_DIR="$(ollama_models_dir)"
+FREE_GB="$(free_gb "${MODELS_DIR}")"
+# The headroom models want, written once. It was spelled out four times, and
+# the sentence added below is a fifth reader of it.
+MODELS_HEADROOM_GB=15
 FAM_NOTE="$(unknown_family_note)" && p_warn "${FAM_NOTE}"
 choose_for_ram "${RAM_GIB}"
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"
@@ -332,7 +340,12 @@ if [[ "${AUTO_TUNE}" != "true" ]]; then
 elif [[ "${MODEL_NAME}" == "${TUNE_MODEL}" ]]; then
   p_pass "configured model matches the tune recommendation"
 else
-  p_warn "configured model (${MODEL_NAME}) differs from the recommendation (${TUNE_MODEL}) — run ${SCRIPT_DIR}/scripts/tune.sh"
+  # What running it would cost, when the disk cannot comfortably take it —
+  # this report recommended a 9 GB download and then FAILED the machine for
+  # having too little disk. tune_cost_note carries the measurement and both
+  # arms; it is in lib.sh so the sentence and the numbers cannot drift.
+  TUNE_COST="$(tune_cost_note "${TUNE_MODEL}" "${FREE_GB}" "${MODELS_HEADROOM_GB}" "${MODELS_DIR}" "${MODEL_NAME}")"
+  p_warn "configured model (${MODEL_NAME}) differs from the recommendation (${TUNE_MODEL}) — run ${SCRIPT_DIR}/scripts/tune.sh${TUNE_COST}"
 fi
 # AUTO_TUNE only actually adapts to a resized VM if the boot unit runs it.
 # Without this, "resize the droplet and the model follows" is a promise with
@@ -659,8 +672,8 @@ esac
 # passes a machine — "free disk: 15 GB (>= 15 GB)" — on which the very next
 # pull says there is not enough room. Two estimates of one number, which is the
 # drift model_disk_gb's own comment exists to prevent.
-MODELS_DIR="$(ollama_models_dir)"
-FREE_GB="$(free_gb "${MODELS_DIR}")"
+# Measured further up, before the auto-tune section, which needs the same
+# number to say what its recommendation would cost. One df, one answer.
 # Name that directory only when it is really there.
 #
 # ollama_models_dir falls back to ${HOME}/.ollama/models, and for a NON-ROOT
@@ -683,10 +696,10 @@ if [[ ! -d "${MODELS_DIR}" ]]; then
 fi
 if [[ -z "${FREE_GB}" ]]; then
   p_warn "could not determine free disk space at ${MODELS_WHERE}"
-elif (( FREE_GB >= 15 )); then
-  p_pass "free disk at ${MODELS_WHERE}: ${FREE_GB} GB (>= 15 GB)"
+elif (( FREE_GB >= MODELS_HEADROOM_GB )); then
+  p_pass "free disk at ${MODELS_WHERE}: ${FREE_GB} GB (>= ${MODELS_HEADROOM_GB} GB)"
 else
-  p_fail "only ${FREE_GB} GB free at ${MODELS_WHERE} — models need headroom (>= 15 GB); clean up with: ollama rm <model>"
+  p_fail "only ${FREE_GB} GB free at ${MODELS_WHERE} — models need headroom (>= ${MODELS_HEADROOM_GB} GB); clean up with: ollama rm <model>"
 fi
 
 # --- Backups (warn-only: backups are optional) ------------------------------

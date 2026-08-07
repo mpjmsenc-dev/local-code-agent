@@ -1199,6 +1199,47 @@ model_ram_gb() {
   awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
 }
 
+# tune_cost_note NEW_MODEL FREE_GB HEADROOM_GB MODELS_DIR OLD_MODEL — what
+# applying the auto-tune recommendation would cost in disk, or nothing at all
+# when the disk can take it comfortably.
+#
+# 'lca check' recommended a 9 GB download and, eleven lines later, FAILED the
+# machine for having less disk than it wants. Measured on this project's own
+# box, at 14 GB free:
+#
+#   [warn] configured model (qwen2.5-coder:7b) differs from the recommendation
+#          (qwen2.5-coder:14b) — run .../scripts/tune.sh
+#   [FAIL] only 14 GB free at /root/.ollama/models — models need headroom
+#
+# Following the report's own advice deepens the failure the same report makes,
+# and tune.sh keeps the old model as a rollback, so nothing is reclaimed on the
+# way either. That is the same contradiction 'lca model --list-recommended'
+# carried for RAM and then for disk: a question answered in one place and
+# ignored in another.
+#
+# Two arms, because they are two different facts — pull_model would refuse the
+# download outright, or it would go through and leave the machine short. Here
+# rather than inline in check-system.sh so the sentence and the numbers it
+# quotes (model_disk_gb and free_gb, the ones pull_model and the disk check
+# actually use) cannot drift apart, and so it can be tested without driving the
+# whole health check.
+#
+# Nothing when the size cannot be read or the free space is unknown: an
+# unparseable tag must not become a warning any more than it may become a
+# refusal.
+tune_cost_note() {
+  local new="$1" free="$2" headroom="$3" dir="$4" old="$5" need
+  need="$(model_disk_gb "${new}")" || return 0
+  [[ -n "${free}" ]] || return 0
+  if (( free < need )); then
+    printf ' — but it needs about %s GB and only %s GB is free at %s, so the download would be refused; free some space first' \
+      "${need}" "${free}" "${dir}"
+  elif (( free - need < headroom )); then
+    printf " — note that it downloads about %s GB and would leave about %s GB free at %s, under the %s GB this check wants (the old model is kept as a rollback; 'ollama rm %s' reclaims it)" \
+      "${need}" "$(( free - need ))" "${dir}" "${headroom}" "${old}"
+  fi
+}
+
 pull_model() {
   local model="$1" attempt need="" free_now="" store
   store="$(ollama_models_dir)"
