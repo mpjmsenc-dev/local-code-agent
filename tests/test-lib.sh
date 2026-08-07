@@ -11957,6 +11957,76 @@ every_command_explains_itself() {
 check "every 'lca <command> --help' explains that command" \
   every_command_explains_itself
 
+echo "# ...and a misspelled one is a misspelling, not a broken machine"
+# webui.sh checked the Docker daemon before it looked at which command it had
+# been given. Measured with the daemon down:
+#
+#   $ lca webui nosuchcmd
+#   [FAIL] Cannot reach the Docker daemon as 'root'. Start it: ...
+#
+# A typo diagnosed as a Docker outage. That file had already hoisted --help
+# above the daemon check for this exact reason, in a comment saying so; the
+# unknown-command case was left behind it.
+#
+# An unreachable DOCKER_HOST rather than a stub: the property is what happens
+# when the daemon genuinely cannot be reached, and a socket that is not there
+# is the cheapest honest way to be in that state.
+webui_says() {  # ARG -> what webui.sh prints when docker cannot be reached
+  DOCKER_HOST="unix:///nonexistent-$$.sock" timeout 30 bash "${REPO}/webui.sh" "$1" \
+    </dev/null 2>&1 || true
+}
+webui_names_a_bad_command_rather_than_the_daemon() {
+  local out; out="$(webui_says nosuchcmd)"
+  grep -q 'Unknown command: nosuchcmd' <<<"${out}" || {
+    printf 'a misspelled subcommand was not named as one: %s\n' "${out}" >&2; return 1; }
+  ! grep -q 'Cannot reach the Docker daemon' <<<"${out}" || {
+    printf 'a misspelled subcommand was reported as a Docker outage: %s\n' "${out}" >&2
+    return 1; }
+}
+webui_still_reports_a_daemon_it_cannot_reach() {
+  # The complement: the guard must not have swallowed the real diagnosis for a
+  # command that genuinely needs the daemon.
+  local out; out="$(webui_says status)"
+  grep -q 'Cannot reach the Docker daemon' <<<"${out}" || {
+    printf 'an unreachable daemon was not reported for a real command: %s\n' "${out}" >&2
+    return 1; }
+}
+webui_command_lists_agree() {
+  # Three lists of the same commands — the guard, the dispatch and the usage
+  # text — and nothing made them agree. A command in the guard but not the
+  # dispatch matches no arm, falls out of the case and exits 0: succeeding
+  # silently while doing nothing.
+  local guard dispatch used
+  guard="$(sed -n 's/^    \(start|[a-z|]*\)) ;;$/\1/p' "${REPO}/webui.sh" | tr '|' '\n' | sort -u)"
+  [[ -n "${guard}" ]] || { echo "could not find webui.sh's command guard" >&2; return 1; }
+  # The dispatch arms. Matched on their own shape rather than by windowing the
+  # case block: the window would need 'case "${cmd}" in' as a literal, which
+  # puts a ${...} inside a single-quoted sed script and reads as an expansion
+  # that failed — the same reason lca_subcommands above matches on '^case '.
+  # An arm alone on its line is unambiguous here; the guard's own arm carries
+  # alternation and a ';;', so it cannot be mistaken for one.
+  dispatch="$(sed -n 's/^    \([a-z][a-z0-9]*\))$/\1/p' "${REPO}/webui.sh" | sort -u)"
+  # ...plus 'url', which is answered above the dispatch precisely because it
+  # needs no daemon.
+  dispatch="$(printf '%s\nurl\n' "${dispatch}" | sed '/^$/d' | sort -u)"
+  [[ "${guard}" == "${dispatch}" ]] || {
+    printf 'webui.sh guards a different set of commands than it implements:\n  guard:    %s\n  dispatch: %s\n' \
+      "$(tr '\n' ' ' <<<"${guard}")" "$(tr '\n' ' ' <<<"${dispatch}")" >&2
+    return 1; }
+  # ...and each is documented, or the reader cannot find it.
+  used="$(sed -n '/^Commands:$/,/^$/p' "${REPO}/webui.sh" | sed -n 's/^  \([a-z][a-z0-9]*\) .*/\1/p' | sort -u)"
+  [[ "${guard}" == "${used}" ]] || {
+    printf 'webui.sh implements a different set of commands than its usage lists:\n  guard: %s\n  usage: %s\n' \
+      "$(tr '\n' ' ' <<<"${guard}")" "$(tr '\n' ' ' <<<"${used}")" >&2
+    return 1; }
+}
+check "a misspelled 'lca webui' command is named, not blamed on docker" \
+  webui_names_a_bad_command_rather_than_the_daemon
+check "...and a real one still reports a daemon it cannot reach" \
+  webui_still_reports_a_daemon_it_cannot_reach
+check "webui.sh guards, implements and documents the same commands" \
+  webui_command_lists_agree
+
 echo "# a big piped input must not kill the command that exists to read it"
 # 'lca logs | lca ask "why did this fail?"' is the first thing
 # docs/TROUBLESHOOTING.md tells you to run. It died outright — exit 141, no

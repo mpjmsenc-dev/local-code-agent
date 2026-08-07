@@ -134,6 +134,27 @@ main() {
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "Unknown extra argument: ${2}" ;;
   esac
+  # WHICH command it is, before anything that needs a working machine — the
+  # same argument that hoisted --help above, and it was left half applied.
+  # Measured with the daemon down:
+  #
+  #   $ lca webui nosuchcmd
+  #   [FAIL] Cannot reach the Docker daemon as 'root'. Start it: ...
+  #
+  # A typo diagnosed as a Docker outage, sending the reader to debug a daemon
+  # over a misspelling — and on a box where the daemon really is down they
+  # never learn the command was wrong at all. Nothing about spelling needs
+  # docker to be running, so it is answered here.
+  #
+  # 'usage >&2' and die, matching the extra-argument guard above rather than
+  # the dispatch's own bare 'usage; exit 1', which named nothing: 'lca logs'
+  # has said "Unknown argument: X" for a while and this said only "here is the
+  # usage", leaving the reader to spot the difference themselves.
+  case "${cmd}" in
+    start|stop|restart|status|url|logs) ;;
+    *) usage >&2; die "Unknown command: ${cmd}" ;;
+  esac
+
   # 'url' only reads .env and Tailscale — it must keep working when Docker is
   # down or the container was never created, since that is exactly when someone
   # is trying to work out where their chat app lives.
@@ -288,8 +309,11 @@ main() {
       exit 0
       ;;
     *)
-      usage
-      exit 1
+      # Unreachable: the guard at the top of main() accepts exactly the arms
+      # above. Kept, and loud, because without it a command added to that list
+      # and not to this case would match nothing, fall out of the case and exit
+      # 0 — succeeding silently while doing nothing at all.
+      die "internal error: '${cmd}' passed validation but has no implementation"
       ;;
   esac
 }
