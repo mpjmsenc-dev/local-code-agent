@@ -294,8 +294,30 @@ do_backup() {
   # can_root: for an unprivileged user without sudo the file is already theirs,
   # and an unguarded as_root would die() here — aborting a backup that had
   # already been written and verified.
+  #
+  # invoking_user, not 'id -un'. The documented way to run this is 'sudo lca
+  # backup' — it drives docker through as_root from end to end — and under sudo
+  # 'id -un' is root, so this chowned the archive to the account that already
+  # owned it and the line did nothing at all. Meanwhile install_timer chowns
+  # backups/ itself to the human, deliberately, so the directory belonged to
+  # them and the archives inside it did not. Reproduced exactly:
+  #
+  #   drwx------ 2 ubuntu root   backups/
+  #   -rw------- 1 root   root   local-code-agent-backup-TEST.tar.gz
+  #   $ sudo -u ubuntu cat .../local-code-agent-backup-TEST.tar.gz
+  #   NO — permission denied
+  #
+  # umask 077 above makes the archive 0600 because it holds the chat app's
+  # session-signing key, so root-owned means unreadable rather than merely
+  # not-theirs — and the line printed a few seconds later says "Copy it off the
+  # machine (e.g. scp)". A backup you cannot copy is the same problem as one
+  # you cannot restore.
+  #
+  # The timer, which has no human to attribute anything to, still gets root:
+  # invoking_user falls back to 'id -un' with no SUDO_USER set, so that path is
+  # unchanged.
   if can_root; then
-    as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
+    as_root chown "$(invoking_user)" "${tarball}" 2>/dev/null || true
   fi
 
   # A backup you cannot restore is not a backup. Read the archive back and

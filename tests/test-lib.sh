@@ -1592,6 +1592,36 @@ no_script_asks_who_by_hand() {
   return "${bad}"
 }
 check "no script works out who the user is by hand" no_script_asks_who_by_hand
+# ...and the archive must end up owned by the same person as the directory
+# holding it. install_timer chowns backups/ to the human on purpose; the
+# finished tarball was chowned to '$(id -un)', which under the documented
+# 'sudo lca backup' is root — so the line did nothing and the human owned a
+# directory full of files they could not read. umask 077 makes that literal,
+# because the archive holds the chat app's session-signing key. Reproduced:
+#
+#   drwx------ 2 ubuntu root   backups/
+#   -rw------- 1 root   root   local-code-agent-backup-TEST.tar.gz
+#   $ sudo -u ubuntu cat .../local-code-agent-backup-TEST.tar.gz
+#   NO — permission denied
+#
+# ...with "Copy it off the machine (e.g. scp)" printed seconds later.
+backup_ownership_is_consistent() {
+  local body bad=0 n
+  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/backup.sh")"
+  # Every chown in this file asks the same question.
+  n="$(grep -cE 'chown "\$\(invoking_user\)"' <<<"${body}")"
+  (( n >= 2 )) || {
+    printf 'only %s of backup.sh chowns ask invoking_user; the directory and the archive must agree\n' "${n}" >&2
+    bad=1
+  }
+  grep -qE 'chown "\$\(id -un\)"' <<<"${body}" && {
+    echo "backup.sh chowns to the running account again, which is root under the documented sudo invocation" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a backup ends up owned by the same person as the directory holding it" \
+  backup_ownership_is_consistent
 # The docker-group branch is the one with a consequence, so it is asserted on
 # its own: it must key off invoking_user, not off a second reading of EUID.
 group_check_asks_about_the_reader() {
