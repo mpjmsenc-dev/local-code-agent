@@ -8505,6 +8505,70 @@ first_boot_refuses_a_tree_with_no_setup() {
 }
 check "the first-boot script refuses a clone that is not this project" \
   first_boot_refuses_a_tree_with_no_setup
+# ...and an argument it does not take, before it installs anything. It takes
+# NONE — every setting is an environment variable and there is no $1 anywhere
+# below the case — and the case had a --help arm with no fallback, so
+#
+#   bash deploy/do-user-data.sh --dry-run
+#
+# ran apt, cloned into ${INSTALL_DIR} and handed over to setup.sh, on the first
+# boot of a fresh machine, while appearing to have been told not to. Its own
+# comment records four entry points learning to answer --help before doing
+# anything; it learned that half and left the rest of the option space, exactly
+# as install.sh had.
+#
+# Through first_boot_failed, so the log still ends in one of the three lines
+# this file promises and docs/YOUR-TURN.md relies on.
+dud_run_with() {  # ARG -> the log contents, then "rc=N"
+  local rc=0 out
+  rm -rf "${DUD_SB}/target" "${DUD_SB}/log"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="$(stub_path "${DUD_SB}/stub")" LCA_DIR="${DUD_SB}/target" \
+         LCA_LOG="${DUD_SB}/log" LCA_RUN_SETUP=false \
+         timeout 60 bash "${REPO}/deploy/do-user-data.sh" "$1" 2>&1)" || rc=$?
+  printf '%s\nrc=%s\n' "${out}" "${rc}"
+}
+first_boot_refuses_an_argument_it_cannot_honour() {
+  local out; out="$(dud_run_with --dry-run)"
+  grep -qF -- '--dry-run' <<<"${out}" || {
+    printf 'an unrecognised argument was not named:\n%s\n' "${out}" >&2; return 1; }
+  grep -q 'LCA_REPO_URL' <<<"${out}" || {
+    printf 'refused without naming the environment overrides that do work:\n%s\n' "${out}" >&2
+    return 1; }
+  # The promised verdict line, and a status to match it.
+  # Anchored to the start of a line. The --help text is this file's own header,
+  # which DOCUMENTS the three verdict lines — indented, because the sed strips
+  # "# " and leaves the list's own indent. An unanchored match reads that
+  # documentation as a verdict, which is how the sibling check below first
+  # failed against a --help run that was working perfectly.
+  grep -q '^FIRST-BOOT INSTALL FAILED' <<<"${out}" || {
+    printf 'the refusal does not end in one of this file three verdict lines:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'rc=0' <<<"${out}" && {
+    printf 'it exited 0 having refused to run:\n%s\n' "${out}" >&2; return 1; }
+  # ...and nothing was installed on the way to saying so.
+  [[ ! -e "${DUD_SB}/target" ]] || {
+    echo 'it cloned into the install directory before refusing the argument' >&2
+    return 1; }
+  ! grep -q 'Installing git' <<<"${out}" || {
+    printf 'it ran apt before looking at its arguments:\n%s\n' "${out}" >&2; return 1; }
+}
+first_boot_still_answers_help() {
+  # The complement: --help is an answer, not a failure, and must not have been
+  # swept into the refusal.
+  local out; out="$(dud_run_with --help)"
+  grep -q 'rc=0' <<<"${out}" || {
+    printf '--help no longer exits 0:\n%s\n' "${out}" >&2; return 1; }
+  ! grep -q '^FIRST-BOOT INSTALL FAILED' <<<"${out}" || {
+    printf '--help was reported as a failed install:\n%s\n' "${out}" >&2; return 1; }
+  # ...and it really did print the help, rather than nothing at all.
+  grep -q 'first-boot installer' <<<"${out}" || {
+    printf '--help printed no help:\n%s\n' "${out}" >&2; return 1; }
+}
+check "the first-boot script refuses an argument it would have ignored" \
+  first_boot_refuses_an_argument_it_cannot_honour
+check "...and still answers --help without installing" \
+  first_boot_still_answers_help
 
 echo "# the install's verdict must carry an exit status, not just a line"
 # setup.sh printed "SETUP FINISHED WITH ERRORS" and then exited 0. That made

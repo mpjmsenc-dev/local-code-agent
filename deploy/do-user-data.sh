@@ -62,9 +62,27 @@ main() {
   # Inside main(), not above it, so the wrapper still holds: a paste that
   # arrives truncated cannot run anything at all.
   case "${1:-}" in
+    "") ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
       return 0
+      ;;
+    # ...and everything else, refused. The comment above records four entry
+    # points learning to answer --help before doing anything; this one learned
+    # that half and left the rest of the option space open, exactly as
+    # install.sh did. It takes NO arguments — every setting is an environment
+    # variable, and there is no $1 anywhere below — so 'do-user-data.sh
+    # --dry-run' ran apt, cloned into ${INSTALL_DIR} and handed over to
+    # setup.sh, on the first boot of a fresh machine, while appearing to have
+    # been told not to. The header calls this safe to re-run by hand, which is
+    # where a typed flag actually comes from.
+    #
+    # Through first_boot_failed, not a bare echo: this file promises the log
+    # ends in exactly one of three lines, and "never got as far as running
+    # setup" is precisely what happened.
+    *)
+      first_boot_failed "Unrecognised argument '${1}'. This installer takes none — every setting is an environment variable: LCA_REPO_URL, LCA_DIR, LCA_LOG, LCA_RUN_SETUP."
+      return 1
       ;;
   esac
   echo "=== local-code-agent first-boot install started: $(date) ==="
