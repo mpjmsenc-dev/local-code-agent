@@ -8536,13 +8536,24 @@ first_boot_refuses_an_argument_it_cannot_honour() {
     printf 'refused without naming the environment overrides that do work:\n%s\n' "${out}" >&2
     return 1; }
   # The promised verdict line, and a status to match it.
-  # Anchored to the start of a line. The --help text is this file's own header,
-  # which DOCUMENTS the three verdict lines — indented, because the sed strips
-  # "# " and leaves the list's own indent. An unanchored match reads that
-  # documentation as a verdict, which is how the sibling check below first
-  # failed against a --help run that was working perfectly.
-  grep -q '^FIRST-BOOT INSTALL FAILED' <<<"${out}" || {
-    printf 'the refusal does not end in one of this file three verdict lines:\n%s\n' "${out}" >&2
+  # ...and NO install verdict. This asserted the opposite first time, on the
+  # reasoning that the file promises its log always ends in one of three lines.
+  # That was wrong, and measuring it said so: everything here is teed into
+  # /var/log/local-code-agent-setup.log, and motd.sh's install_state reads that
+  # log — a FIRST-BOOT INSTALL FAILED line makes the login banner report a
+  # failed install to every SSH session. Cloud-init runs this bare and can
+  # never reach the refusal, so the only way in is a person re-running it by
+  # hand, on a machine that is usually working. A typo would have flipped the
+  # banner. The promise is about an install RUN, which is why --help prints no
+  # verdict either.
+  #
+  # Anchored to the start of a line: the --help text is this file's own header,
+  # which DOCUMENTS the three verdict lines, indented.
+  ! grep -q '^FIRST-BOOT INSTALL FAILED' <<<"${out}" || {
+    printf 'a mistyped argument was written into the install log as a failed install, which the login banner reads:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'Nothing was installed' <<<"${out}" || {
+    printf 'the refusal does not say that nothing happened:\n%s\n' "${out}" >&2
     return 1; }
   grep -q 'rc=0' <<<"${out}" && {
     printf 'it exited 0 having refused to run:\n%s\n' "${out}" >&2; return 1; }
@@ -8596,13 +8607,113 @@ check "the failure verdict prints SETUP FINISHED WITH ERRORS" \
 # setup.sh must actually USE it — printing the line by hand again would
 # reintroduce exactly the bug above while leaving these tests green.
 setup_uses_verdict() {
+  local body
   grep -qE '^[[:space:]]*setup_verdict "\$\{setup_ok\}"' "${REPO}/setup.sh" || {
     echo "setup.sh no longer ends on setup_verdict" >&2; return 1
   }
   # And nothing may re-hardcode a verdict line outside lib.sh.
-  ! grep -qF 'SETUP FINISHED WITH ERRORS' "${REPO}/setup.sh"
+  #
+  # Comments stripped. This grepped the whole file, and the comment explaining
+  # why setup.sh's argument refusal must keep the EXIT trap quiet has to name
+  # the line it is avoiding — so the gate matched its own explanation and
+  # failed a file that was correct. Fifth time in this suite; the same fix as
+  # listing_flags_models_that_do_not_fit, for the same reason.
+  # Captured, not piped: 'grep -q' leaves on its first match, the reader takes
+  # SIGPIPE, and under pipefail 141 reads as "not found" — which this suite has
+  # its own gate against, and which caught this line when it was written as a
+  # pipe.
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/setup.sh")"
+  ! grep -qF 'SETUP FINISHED WITH ERRORS' <<<"${body}"
 }
 check "setup.sh reports through setup_verdict" setup_uses_verdict
+# ...and an option it does not take must not be an install, nor a failed one.
+#
+# setup.sh had the hole install.sh and deploy/do-user-data.sh had: a case with
+# one arm for --help and no fallback, and no $1 anywhere below it. So
+# 'setup.sh --dry-run' installed packages, a model and system services as root
+# while appearing to have been told not to. Its own comment records --help
+# being fixed for exactly that reading.
+#
+# The second half is the one measurement made necessary. Refusing with a
+# non-zero exit fires the EXIT trap, which prints SETUP FINISHED WITH ERRORS —
+# and motd.sh's install_state reads that line out of the setup log and reports
+# 'failed', so every SSH login on a working machine would announce a broken
+# install because somebody mistyped a flag. VERDICT_PRINTED keeps the trap
+# quiet, the same silence --help gets.
+# Checked statically, and only statically. That is a measured decision, not a
+# shortcut.
+#
+# setup.sh installs packages, a model and system services as root. A first
+# version of this ran 'setup.sh --dry-run' for real, which is safe while the
+# guard is there and catastrophic the moment it is not — and the mutation that
+# removes the guard is exactly the one this check exists to catch. Measured,
+# twice: 17294 bytes of output, the machine's login banner repointed at a
+# throwaway directory, Docker restarted, and a 9 GB model pull started, killed
+# only by the 30s timeout.
+#
+# A second version copied the tree into ${SANDBOX} and stubbed apt, docker,
+# ollama and systemctl. It still repointed the login banner, because motd.sh
+# installs into /etc/update-motd.d and no amount of sandboxing the SOURCE tree
+# contains an absolute path. Containing it properly means enumerating every
+# command that writes outside the sandbox, which is the fragile shape this
+# work keeps removing.
+#
+# So the behaviour was verified by hand, once, and recorded here:
+#
+#   $ ./setup.sh --dry-run
+#   [FAIL] Unknown option: --dry-run — setup.sh takes none. It is configured
+#          through .../.env: edit it, then re-run. 'lca apply' applies changes
+#          to an install that already exists.
+#   stdout: 0 bytes   rc: 1   no verdict line
+#
+# and the regression is caught below by reading the file. A gate whose failure
+# mode is a message beats one whose failure mode is an operating system.
+# ...and the arm itself is still there, ahead of everything. This is the half
+# that catches the regression, because running it is what must not happen.
+setup_refusal_precedes_every_side_effect() {
+  local body arm_at first_effect_at marker silence_at
+  # Stripped WITHOUT -n, then numbered once: 'grep -vn' prefixes every line
+  # with its original number, so a later '^[[:space:]]*chmod' anchor matches
+  # nothing at all and this gate silently found no side effect to compare
+  # against. It said so rather than passing, which is why the guard below is
+  # not decoration.
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/setup.sh")"
+  # The catch-all arm of main()'s argument case, naming what it refused.
+  # Assembled, or the literal ${1} reads to ShellCheck as an expansion that
+  # failed to expand — the same reason lca_subcommands matches on '^case '.
+  local marker; marker='Unknown option: $'"{1}"
+  arm_at="$(grep -nF "${marker}" <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${arm_at}" ]] || {
+    echo 'setup.sh has no arm refusing an option it does not take — a mistyped flag installs packages, a model and system services as root' >&2
+    return 1; }
+  # The first thing that changes the machine. chmod on the checkout is the
+  # earliest; step/info only print.
+  first_effect_at="$(grep -nE '^[[:space:]]*(chmod|as_root|"\$\{SCRIPT_DIR\}"/scripts/install_)' <<<"${body}" \
+                     | head -1 | cut -d: -f1)"
+  [[ -n "${first_effect_at}" ]] || {
+    echo 'could not find setup.sh first side effect — this gate has stopped watching' >&2
+    return 1; }
+  (( arm_at < first_effect_at )) || {
+    printf 'setup.sh refuses an unknown option only AFTER it has begun installing (arm at %s, first side effect at %s)\n' \
+      "${arm_at}" "${first_effect_at}" >&2
+    return 1; }
+  # VERDICT_PRINTED must be set BY THE REFUSAL, or the EXIT trap writes SETUP
+  # FINISHED WITH ERRORS into the install log and motd.sh reports a failed
+  # install over a typo.
+  #
+  # Positional, not a whole-file grep: setup.sh sets the same flag where it
+  # prints the REAL verdict, so "the string appears somewhere" was satisfied by
+  # that line and the mutation removing it from the refusal survived. Measured.
+  local silence_at
+  silence_at="$(grep -n 'VERDICT_PRINTED=true' <<<"${body}" | cut -d: -f1 \
+                | awk -v a="${arm_at}" '$1 < a && a - $1 <= 3')"
+  [[ -n "${silence_at}" ]] || {
+    echo 'setup.sh refusal does not silence the exit-trap verdict, so a mistyped flag makes the login banner report a failed install' >&2
+    return 1; }
+  return 0
+}
+check "setup.sh refuses an option before it installs anything" \
+  setup_refusal_precedes_every_side_effect
 
 # ...on EVERY failing exit, not only the orderly one at the end of main.
 #

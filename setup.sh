@@ -49,9 +49,28 @@ main() {
   # root, so answering "--help" by starting is the worst possible reading of
   # it — and it was the reading: './setup.sh --help' began installing.
   case "${1:-}" in
+    "") ;;
     -h|--help)
       sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
       exit 0
+      ;;
+    # ...and anything else, refused here for the same reason and in the same
+    # breath. This script takes NO arguments — there is no $1 below this case
+    # — so 'setup.sh --dry-run' fell straight through and installed packages,
+    # a model and system services as root, while appearing to have been told
+    # not to. The comment above records --help being fixed for exactly that
+    # reading; the rest of the option space was left open, as it was in
+    # install.sh and deploy/do-user-data.sh.
+    *)
+      # VERDICT_PRINTED, so the EXIT trap stays quiet. Without it a mistyped
+      # flag exits non-zero, the trap prints "SETUP FINISHED WITH ERRORS" into
+      # /var/log/local-code-agent-setup.log, and motd.sh's install_state reads
+      # that log and reports 'failed' — so every SSH login on a perfectly
+      # healthy machine would say the install failed, because of a typo.
+      # An argument error is not an install verdict, exactly as --help is not.
+      VERDICT_PRINTED=true
+      err "Unknown option: ${1} — setup.sh takes none. It is configured through ${ENV_FILE}: edit it, then re-run. 'lca apply' applies changes to an install that already exists."
+      exit 1
       ;;
   esac
   step "local-code-agent setup starting"

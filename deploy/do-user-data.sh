@@ -77,11 +77,20 @@ main() {
     # been told not to. The header calls this safe to re-run by hand, which is
     # where a typed flag actually comes from.
     #
-    # Through first_boot_failed, not a bare echo: this file promises the log
-    # ends in exactly one of three lines, and "never got as far as running
-    # setup" is precisely what happened.
+    # NOT through first_boot_failed, which was the first thing tried here and
+    # was wrong. Everything this script prints is teed into
+    # /var/log/local-code-agent-setup.log, and motd.sh's install_state reads
+    # that log: a FIRST-BOOT INSTALL FAILED line makes the login banner report
+    # a failed install to every SSH session. On a real first boot cloud-init
+    # runs this bare and can never reach here, so the only way in is a person
+    # re-running it by hand — on a machine that is usually working. A typo
+    # would have flipped the banner.
+    #
+    # The three-line promise is about an install RUN, the same reason --help
+    # above prints no verdict either.
     *)
-      first_boot_failed "Unrecognised argument '${1}'. This installer takes none — every setting is an environment variable: LCA_REPO_URL, LCA_DIR, LCA_LOG, LCA_RUN_SETUP."
+      echo "Unrecognised argument '${1}'. This installer takes none — every setting is an environment variable: LCA_REPO_URL, LCA_DIR, LCA_LOG, LCA_RUN_SETUP." >&2
+      echo "Nothing was installed." >&2
       return 1
       ;;
   esac
