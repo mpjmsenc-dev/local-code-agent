@@ -11502,6 +11502,110 @@ aider_pin_is_watched() {
 }
 check "an aider pin that is not installed is reported as not in effect" \
   aider_pin_is_watched
+
+echo "# the two GPU probes nothing had ever executed"
+# tests/coverage.sh reports which lib.sh functions no suite runs OR names.
+# After everything else on this branch it was down to exactly two, and they
+# are not obscure: gpu_hardware_present and gpu_vram_mib feed classify_gpu,
+# which decides whether 'lca check' and 'lca speed' say "no NVIDIA GPU" or
+# "your model is only partially offloaded — pick one that fits your VRAM".
+# That path has already produced a real defect on this branch: on a CPU-only
+# box Ollama prints "13%/87% CPU/GPU", and both callers believed it.
+#
+# A CPU-only machine can only ever exercise the negative arm of either, so
+# both are driven against stubbed lspci and nvidia-smi.
+# PATH is narrowed INSIDE the child and AFTER lib.sh is sourced. Set on the
+# invocation instead, the "no lspci" case removed bash itself from PATH and the
+# gate died as command-not-found — caught by the handler at the top of this
+# file, which is what it is for.
+#
+# LCA_FAKE_BULK rather than a 200 KiB environment variable: passing the big
+# listing through the environment failed with "Argument list too long", so the
+# stub generates the filler itself.
+gpu_probe() {  # LSPCI-OUTPUT, or __nolspci__ -> yes|no
+  local sb="${SANDBOX}/gpuprobe" path
+  rm -rf "${sb}"; make_stub_dir "${sb}"
+  path="${sb}"
+  if [[ "$2" != "__nolspci__" ]]; then
+    # The trailing 'exit $?' is the whole point of the bulk arm. A real program
+    # writing into a closed pipe dies of SIGPIPE and exits 141; a stub that
+    # ends in a bare 'exit 0' swallows that, the pipeline reads 0 under
+    # pipefail, and the piped form passes. Written that way first, and the
+    # mutation to the piped form survived because of it.
+    cat > "${sb}/lspci" <<'STUB'
+#!/bin/sh
+printf '%s\n' "${LCA_FAKE_LSPCI}"
+if [ -n "${LCA_FAKE_BULK:-}" ]; then
+  head -c 200000 /dev/zero | tr '\0' 'x' | fold -w 120
+  exit $?
+fi
+exit 0
+STUB
+    chmod +x "${sb}/lspci"
+    path="${sb}:/usr/bin:/bin"
+  fi
+  # 'set -o pipefail' because every one of the 26 scripts that sources lib.sh
+  # sets it, and this function's shape exists FOR that: measured, a match at
+  # the head of a 200 KiB stream reads as found without pipefail and NOT FOUND
+  # (141) with it. A child shell that omits it cannot fail on the very
+  # regression these cases are here to catch — the first version of this
+  # harness did not, and both mutations survived.
+  LCA_FAKE_LSPCI="$2" LCA_FAKE_BULK="${3:-}" LCA_TEST_PATH="${path}" bash -c '
+    set -euo pipefail
+    source "$1" >/dev/null 2>&1
+    PATH="${LCA_TEST_PATH}"
+    gpu_hardware_present && printf yes || printf no' _ "${REPO}/scripts/lib.sh"
+}
+check "no lspci at all means no card, not a crash" \
+  test "$(gpu_probe _ __nolspci__)" = no
+check "an NVIDIA line in lspci is a card" \
+  test "$(gpu_probe _ '01:00.0 VGA compatible controller: NVIDIA Corporation GA104 [RTX 3070]')" = yes
+check "...matched whatever case the vendor string uses" \
+  test "$(gpu_probe _ '01:00.0 VGA compatible controller: nVidia Corporation')" = yes
+check "a listing with no NVIDIA in it is no card" \
+  test "$(gpu_probe _ '00:02.0 VGA compatible controller: Intel Corporation UHD Graphics')" = no
+# lspci present and answering nothing is a container, not a card.
+check "an empty listing is no card" test "$(gpu_probe _ '')" = no
+# The reason this function captures instead of piping. Its comment records the
+# measurement — 'lspci | grep -qi' returns 141 under pipefail when grep exits
+# on an early match while the producer is still writing, so a card at the head
+# of a long listing read as ABSENT. Reproduced here with the match first and
+# ~200 KiB behind it.
+nvidia_at_the_head_of_a_long_listing() {
+  [[ "$(gpu_probe _ '01:00.0 VGA compatible controller: NVIDIA Corporation GA104' bulk)" == yes ]]
+}
+check "...and a card at the HEAD of a huge listing is still found" \
+  nvidia_at_the_head_of_a_long_listing
+
+gpu_vram() {  # SMI-OUTPUT, or __nosmi__ -> the MiB, or "none"
+  local sb="${SANDBOX}/gpuvram"
+  rm -rf "${sb}"; make_stub_dir "${sb}"
+  if [[ "$2" != "__nosmi__" ]]; then
+    cat > "${sb}/nvidia-smi" <<'STUB'
+#!/bin/sh
+printf '%s\n' "${LCA_FAKE_SMI}"
+STUB
+    chmod +x "${sb}/nvidia-smi"
+  fi
+  LCA_FAKE_SMI="$2" LCA_TEST_PATH="${sb}:/usr/bin:/bin" bash -c '
+    set -euo pipefail
+    source "$1" >/dev/null 2>&1
+    PATH="${LCA_TEST_PATH}"
+    gpu_vram_mib || printf none' _ "${REPO}/scripts/lib.sh"
+}
+check "no nvidia-smi means the VRAM is unknown, not zero" \
+  test "$(gpu_vram _ __nosmi__)" = none
+check "one card reports its own VRAM" test "$(gpu_vram _ '24576')" = 24576
+# Largest, not first: a display adapter alongside a compute card can list the
+# small one first, and every recommendation built on it would be wrong.
+# BOTH orders. With the larger card listed last, "take the last" and "take the
+# largest" give the same answer, so the small-first case alone cannot catch a
+# regression to either. Mutating the comparison away passed until this was
+# split in two.
+check "two cards report the LARGER one, listed second" \
+  test "$(gpu_vram _ "$(printf '4096\n24576')")" = 24576
+check "...and listed first" \
+  test "$(gpu_vram _ "$(printf '24576\n4096')")" = 24576
 # ...and nothing else may land on that stream either. lib.sh states the rule
 # and names this command while doing it — "in 'lca ask' the model's answer is
 # stdout, and progress must not end up inside a piped or redirected answer" —
