@@ -11342,6 +11342,38 @@ a_real_answer_still_works() {
   grep -qF 'ready' <<<"${out}" || { printf 'the answer itself is gone: %s\n' "${out}" >&2; return 1; }
 }
 check "...while a real answer is untouched" a_real_answer_still_works
+# ...and nothing else may land on that stream either. lib.sh states the rule
+# and names this command while doing it — "in 'lca ask' the model's answer is
+# stdout, and progress must not end up inside a piped or redirected answer" —
+# and redirects two of its own notices for exactly that reason. ask.sh's own
+# two info lines did not. Measured before the fix, the whole of stdout for a
+# cold 'lca ask -c' was:
+#
+#   [info] continuing from your last question
+#
+# Every other message in that file is die/warn/err, all of which are already
+# stderr; these two were the only exceptions.
+ask_keeps_its_answer_stream_clean() {
+  local body bad=0 line
+  # usage() writes the help text to stdout on purpose, so it is excluded.
+  body="$(awk '/^usage\(\) \{/ { inu = 1 } inu && /^\}/ { inu = 0; next } !inu' \
+            "${REPO}/scripts/ask.sh" | sed 's/^[[:space:]]*#.*//')"
+  while IFS= read -r line; do
+    [[ "${line}" =~ (^|[[:space:]\;\&\|])(info|ok|step)[[:space:]]+\" ]] || continue
+    [[ "${line}" == *">&2"* ]] && continue
+    printf 'ask.sh writes a status line to stdout, where the answer goes: %s\n' \
+      "${line#"${line%%[![:space:]]*}"}" >&2
+    bad=1
+  done <<<"${body}"
+  # ...and the rule must still be stated where the other callers can find it.
+  grep -q "in 'lca ask' the model's answer is stdout" "${REPO}/scripts/lib.sh" || {
+    echo 'lib.sh no longer records why these notices go to stderr' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca ask' puts nothing but the answer on stdout" \
+  ask_keeps_its_answer_stream_clean
 
 echo "# a big piped input must not kill the command that exists to read it"
 # 'lca logs | lca ask "why did this fail?"' is the first thing

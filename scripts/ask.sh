@@ -83,7 +83,12 @@ main() {
     [[ "${dup}" == "true" ]] && continue
     files+=( "${w}" )
     auto=$(( auto + 1 ))
-    info "including ${w} from the current directory"
+    # >&2 like every other message here: this command's stdout IS the model's
+    # answer, and lib.sh states the rule while naming this command — "in 'lca
+    # ask' the model's answer is stdout, and progress must not end up inside a
+    # piped or redirected answer". Measured before the fix, the whole of stdout
+    # for a cold 'lca ask -c' was "[info] continuing from your last question".
+    info "including ${w} from the current directory" >&2
   done
 
   # Build the prompt: the previous exchange (with -c), then file context, then
@@ -94,7 +99,7 @@ main() {
       # Capped: a long previous answer would otherwise crowd out the files and
       # the new question, and on CPU every extra token is time on the clock.
       context+="--- the previous exchange, for context ---"$'\n'"$(head -c 6000 "${ASK_LAST}")"$'\n\n'
-      info "continuing from your last question"
+      info "continuing from your last question" >&2
     else
       warn "No previous question to continue from — answering this one on its own."
     fi
