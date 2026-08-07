@@ -11425,6 +11425,41 @@ bare_words_are_still_the_question() {
     printf 'plain words no longer form the question: %s\n' "${p}" >&2; return 1; }
 }
 check "...while plain words are still the question" bare_words_are_still_the_question
+
+echo "# '-f' pointed at a directory must say so, in this project's voice"
+# '[[ -r ]]' is true for a directory, so 'lca ask -f src/ "explain this"' — the
+# obvious thing to try — passed the guard and failed inside head:
+#
+#   head: error reading '/home/you/src': Is a directory
+#
+# which reads as an I/O or permission fault and says nothing about what to do.
+ask_file_error_for() {  # PATH -> stderr
+  local sb="${SANDBOX}/askfile"
+  rm -rf "${sb}"; write_ask_stubs "${sb}"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+    timeout 60 bash "${REPO}/scripts/ask.sh" -f "$2" "q" </dev/null 2>&1 >/dev/null || true
+}
+attaching_a_directory_says_so() {
+  local sb="${SANDBOX}/askfiles" out
+  rm -rf "${sb}"; mkdir -p "${sb}/adir"; printf 'hello\n' > "${sb}/afile"
+  out="$(ask_file_error_for _ "${sb}/adir")"
+  grep -qi 'is a directory' <<<"${out}" || {
+    printf 'a directory is not named as one: %s\n' "${out}" >&2; return 1; }
+  grep -qi 'head:' <<<"${out}" && {
+    printf "head's own error is still what the reader gets: %s\\n" "${out}" >&2; return 1; }
+  # ...and the two other states stay distinct from it.
+  out="$(ask_file_error_for _ "${sb}/no-such-file")"
+  grep -qi 'no such file' <<<"${out}" || {
+    printf 'a missing file is not named as missing: %s\n' "${out}" >&2; return 1; }
+  # A real file must still be attached, not refused.
+  out="$(ask_file_error_for _ "${sb}/afile")"
+  grep -qiE 'is a directory|no such file|cannot read' <<<"${out}" && {
+    printf 'a perfectly good file is refused: %s\n' "${out}" >&2; return 1; }
+  return 0
+}
+check "a directory passed to -f is refused as a directory" \
+  attaching_a_directory_says_so
 # ...and nothing else may land on that stream either. lib.sh states the rule
 # and names this command while doing it — "in 'lca ask' the model's answer is
 # stdout, and progress must not end up inside a piped or redirected answer" —

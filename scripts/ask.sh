@@ -128,7 +128,18 @@ main() {
     fi
   fi
   for f in ${files[@]+"${files[@]}"}; do
-    [[ -r "${f}" ]] || die "Cannot read ${f}"
+    # Three states, not one. '[[ -r ]]' is true for a DIRECTORY, so pointing -f
+    # at one — 'lca ask -f src/ "explain this"', which is the obvious thing to
+    # try — passed this guard and then failed inside head with its own words:
+    #
+    #   head: error reading '/home/you/src': Is a directory
+    #
+    # which reads as an I/O or permission fault and says nothing about what to
+    # do instead.
+    [[ -e "${f}" ]] || die "No such file: ${f}"
+    [[ ! -d "${f}" ]] || die "${f} is a directory, and -f takes a file. Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
+    readable_by_us "${f}" \
+      || die "Cannot read ${f} — it is owned by $(stat -c %U "${f}" 2>/dev/null || echo 'another account') and this account cannot open it. Re-run with sudo, or copy it somewhere you can read."
     # Cap each file so one large file cannot blow the whole context window.
     context+="--- file: ${f} ---"$'\n'"$(head -c 12000 "${f}")"$'\n\n'
   done
