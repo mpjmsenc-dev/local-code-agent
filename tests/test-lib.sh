@@ -92,6 +92,60 @@ webui_container_env() {
   printf 'webui_container_env %s\n' "${1:-}" >> "${LCA_UNSTUBBED_LOG}"; return 1
 }
 
+# make_stub_dir DIR — create DIR for PATH stubs, and put a 'sudo' in it.
+#
+# A test that runs a script as a subprocess stubs commands by putting a fake
+# one first on PATH. That works right up to the moment the script escalates,
+# and then it silently stops working: sudo REPLACES the caller's PATH with
+# sudoers' secure_path, so the fake is not merely deprioritised, it is
+# invisible. Measured on this box, with a stub first on PATH:
+#
+#   $ command -v docker
+#   /tmp/.../stub/docker
+#   $ sudo -n sh -c 'command -v docker; echo "PATH=$PATH"'
+#   /usr/bin/docker
+#   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+#
+# So every lib.sh helper of the shape "try it directly, then try it as root"
+# — docker_daemon_reachable, webui_container_exists, webui_container_running,
+# apt_get — reaches the REAL command on its second attempt, and the test's
+# answer comes from the machine instead of the fixture.
+#
+# Whether that happens depends on who runs the suite, which is why it hid: as
+# root, as_root runs the command itself and PATH is honoured, so it passes
+# here and on any developer box. CI's runner is a non-root passwordless
+# sudoer, takes the sudo branch, and finds a working Docker daemon. That is
+# the whole of CI run 31140625333 — 'lca logs webui' was handed a docker that
+# fails everything, reported the daemon reachable anyway, and the gate for a
+# real fixed defect failed on the one machine that mattered.
+#
+# The pass-through below makes the two paths agree: sudo's own options are
+# consumed, and the command runs with PATH intact so it resolves to the same
+# stub the direct call got. It grants no privilege and is not trying to — the
+# question these tests ask is "what does the script do when this command
+# fails", and that answer must not depend on the account running them.
+#
+# It also keeps 'sudo -n true' succeeding, so can_root_now stays true and the
+# escalating branch is genuinely exercised rather than skipped.
+make_stub_dir() {
+  local dir="$1"
+  mkdir -p "${dir}"
+  cat > "${dir}/sudo" <<'STUB'
+#!/bin/sh
+# Consume sudo's own options, then run the rest with PATH left alone.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u|-g|-p|-C|-r|-t|-T) shift 2 ;;         # these take a value
+    --) shift; break ;;
+    -*) shift ;;                             # -n, -E, -H, -S, -k, ...
+    *) break ;;
+  esac
+done
+exec "$@"
+STUB
+  chmod +x "${dir}/sudo"
+}
+
 echo "# load_env creates .env from .env.example and applies defaults"
 load_env
 check ".env auto-created" test -f "${SANDBOX}/.env"
@@ -6936,7 +6990,7 @@ echo "# ...and 'lca logs webui' must not blame the container for a daemon it nev
 # docker happens to be installed or absent.
 logs_webui_with_a_dead_daemon() {
   local sb="${SANDBOX}/logsweb" out
-  rm -rf "${sb}"; mkdir -p "${sb}/stub"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
   printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/docker"
   chmod +x "${sb}/stub/docker"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
@@ -7409,7 +7463,7 @@ dud_run() {  # REPO_DIR -> the log contents, then "rc=N"
 }
 first_boot_refuses_a_tree_with_no_setup() {
   local out
-  mkdir -p "${DUD_SB}/stub" "${DUD_SB}/notours"
+  make_stub_dir "${DUD_SB}/stub"; mkdir -p "${DUD_SB}/notours"
   printf '#!/bin/sh\nexit 0\n' > "${DUD_SB}/stub/apt-get"
   chmod +x "${DUD_SB}/stub/apt-get"
   if [[ ! -d "${DUD_SB}/notours/.git" ]]; then
@@ -8776,7 +8830,7 @@ check "...and the arguments actually reach main()" \
 # probe of this exact script did while it was being written.
 first_boot_help_touches_nothing() {
   local sb="${SANDBOX}/dudhelp" out rc=0
-  rm -rf "${sb}"; mkdir -p "${sb}/stub"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
   printf '#!/bin/sh\necho "(apt-get ran)"\nexit 0\n' > "${sb}/stub/apt-get"
   chmod +x "${sb}/stub/apt-get"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
@@ -10570,6 +10624,38 @@ no_test_called_a_missing_command() {
 }
 check "no test called a command that does not exist" \
   no_test_called_a_missing_command
+# ...and the counterpart for stubs that escalation walks straight past. Every
+# directory this suite puts in front of PATH must come from make_stub_dir, so
+# the fake is reached whether the script calls the command directly or through
+# as_root. A plain 'mkdir -p .../stub' compiles, runs, and passes for whoever
+# is root — and only for them; see make_stub_dir for the CI run that cost.
+every_path_stub_survives_sudo() {
+  local bad=0 seen=0 use dir_expr
+  # Deliberately built from pieces: this gate greps the file it lives in, and
+  # a contiguous literal here would match itself.
+  local pat='PATH="[^"]*'"/stub:"
+  while IFS= read -r use; do
+    seen=$((seen+1))
+    dir_expr="${use#PATH=\"}"        # -> ${sb}  or  ${DUD_SB}
+    dir_expr="${dir_expr%/stub:}"
+    grep -qF "make_stub_dir \"${dir_expr}/stub\"" "${TESTS_DIR}"/*.sh || {
+      printf 'a stub directory is put on PATH without make_stub_dir, so sudo will not see it: %s/stub\n' \
+        "${dir_expr}" >&2
+      bad=1
+    }
+  done < <(grep -oh "${pat}" "${TESTS_DIR}"/*.sh | sort -u)
+  # A gate that matched nothing passes, and this one recognises stub
+  # directories by a naming convention it does not enforce. If the convention
+  # moves, say so rather than reporting ok about zero directories — the exact
+  # shape of the vacuous gate two checks above exists to catch.
+  (( seen > 0 )) || {
+    echo 'this gate found no PATH stub directories at all — the idiom it recognises has moved, and it is now checking nothing' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every PATH stub is reached through sudo as well as directly" \
+  every_path_stub_survives_sudo
 
 echo
 if (( FAILED > 0 )); then
