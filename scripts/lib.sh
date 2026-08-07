@@ -1654,7 +1654,12 @@ render_ollama_dropin() {
   local content
   content="$(render_ollama_dropin_content)" \
     || die "Could not render the Ollama settings — ${OLLAMA_DROPIN} is unchanged."
-  as_root mkdir -p "${OLLAMA_DROPIN_DIR}"
+  # Explicit for the same reason as restart_ollama below: apply.sh calls this
+  # inside a condition, where errexit does not fire. Bare, a failed mkdir let
+  # execution reach the write, which then failed for the obvious reason and
+  # blamed a full disk — the one cause it could be sure it was not.
+  as_root mkdir -p "${OLLAMA_DROPIN_DIR}" \
+    || die "Could not create ${OLLAMA_DROPIN_DIR}, so there is nowhere to write the Ollama settings. ${OLLAMA_DROPIN} is unchanged."
   printf '%s\n' "${content}" | write_root_file "${OLLAMA_DROPIN}" \
     || die "Could not write ${OLLAMA_DROPIN} — a full disk is the usual cause, so check 'df -h'. The previous settings are still in place."
   ok "Wrote ${OLLAMA_DROPIN}"
@@ -1747,8 +1752,29 @@ ollama_bg_env() {
 # for the API to come back. Warns (does not crash) where systemd is absent.
 restart_ollama() {
   if systemd_available; then
-    as_root systemctl daemon-reload
-    as_root systemctl restart ollama
+    # Explicit, not bare under errexit. This function is called by apply.sh as
+    #
+    #   if ! ( render_ollama_dropin && restart_ollama ); then
+    #
+    # — a subshell, deliberately, because both of them die() and an exit is not
+    # a non-zero return. But a command inside a condition does not trigger
+    # errexit, so every bare line in here stopped aborting the moment that
+    # caller was written. Measured:
+    #
+    #   f() { false; echo REACHED; return 0; }
+    #   f                          -> aborts, exit 1
+    #   if ! ( f ); then ... fi    -> REACHED, and reports SUCCESS
+    #
+    # The consequence is specific: daemon-reload is what makes systemd re-read
+    # the drop-in we just rendered. If it fails and the restart succeeds, the
+    # service comes back on its OLD configuration, wait_for_ollama is satisfied,
+    # 'is-active' is satisfied, and this printed "Ollama restarted and
+    # answering" — with 'lca apply' reporting the new context and keep-alive
+    # applied. Success for the one piece of work the command exists to do.
+    as_root systemctl daemon-reload \
+      || die "'systemctl daemon-reload' failed, so systemd is still holding the previous unit definition and a restart now would come back on the OLD settings. Nothing was restarted and ${OLLAMA_DROPIN} is already written; re-run once systemd is answering."
+    as_root systemctl restart ollama \
+      || die "Could not restart the ollama service, so the settings in ${OLLAMA_DROPIN} are not in effect yet. Inspect it with: sudo systemctl status ollama"
     if wait_for_ollama 90; then
       # The API answering is not proof OUR service is healthy: a stray
       # 'ollama serve' holding the port answers too while the unit crash-loops

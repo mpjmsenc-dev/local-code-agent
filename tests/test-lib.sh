@@ -11582,6 +11582,56 @@ no_unsourced_subshell_calls_lib() {
 }
 check "no subshell gate calls a lib function it never sourced" \
   no_unsourced_subshell_calls_lib
+# ...and no lib function may rely on errexit while a caller invokes it where
+# errexit does not apply.
+#
+# apply.sh runs 'if ! ( render_ollama_dropin && restart_ollama ); then' — a
+# subshell, deliberately, because both die() and an exit is not a non-zero
+# return. That decision is recorded in apply.sh. What it also does, silently,
+# is switch errexit off for everything inside those two functions: a command in
+# a condition does not trigger it. Measured:
+#
+#   f() { false; echo REACHED; return 0; }
+#   f                          -> aborts, exit 1
+#   if ! ( f ); then ... fi    -> REACHED, and reports SUCCESS
+#
+# restart_ollama had 'as_root systemctl daemon-reload' bare. daemon-reload is
+# what makes systemd re-read the drop-in just rendered; if it failed and the
+# restart succeeded, the service came back on its OLD configuration and this
+# still printed "Ollama restarted and answering", with 'lca apply' reporting
+# the new settings applied.
+no_conditional_caller_relies_on_errexit() {
+  local -a lines
+  mapfile -t lines < "${REPO}/scripts/lib.sh"
+  local n=${#lines[@]} i j fn bad=0 seen=0 s
+  # State-changing commands whose failure errexit is the only thing catching.
+  local risky='^(as_root |systemctl |docker |mkdir |cp |mv |rm |chmod |chown |tar |ln |install )'
+  for (( i = 0; i < n; i++ )); do
+    [[ "${lines[i]}" =~ ^([a-z_][a-z0-9_]*)\(\)[[:space:]]*\{ ]] || continue
+    fn="${BASH_REMATCH[1]}"
+    # Is it called from a condition anywhere outside the tests?
+    grep -rqE "(if[[:space:]]+!?[[:space:]]*\(?[[:space:]]*|while[[:space:]]+|&&[[:space:]]+|\|\|[[:space:]]+)${fn}\b" \
+      "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null || continue
+    seen=$((seen+1))
+    for (( j = i + 1; j < n; j++ )); do
+      [[ "${lines[j]}" == "}" ]] && break
+      s="${lines[j]#"${lines[j]%%[![:space:]]*}"}"      # strip leading blanks
+      [[ "${s}" =~ ${risky} ]] || continue
+      # An explicit outcome on the same line, or continued onto the next.
+      [[ "${s}" == *"||"* || "${s}" == *"&&"* || "${s}" == *"\\" ]] && continue
+      printf '%s() is called from a condition, where errexit does not fire, but relies on it at: %s\n' \
+        "${fn}" "${s:0:70}" >&2
+      bad=1
+    done
+  done
+  (( seen > 0 )) || {
+    echo 'no lib function appears to be called from a condition at all — this gate stopped watching' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no lib function called from a condition relies on errexit" \
+  no_conditional_caller_relies_on_errexit
 # ...and the counterpart for stubs that escalation walks straight past. Every
 # directory this suite puts in front of PATH must come from make_stub_dir, so
 # the fake is reached whether the script calls the command directly or through
