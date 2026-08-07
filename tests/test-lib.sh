@@ -476,6 +476,47 @@ numeric_settings_are_checked() {
 }
 check "'lca check' names a setting that should be a number and is not" \
   numeric_settings_are_checked
+# ...and the list it iterates is written by hand, so a numeric setting added to
+# .env.example tomorrow is validated by nothing and nobody finds out.
+#
+# The boolean half does not have this problem: boolean_settings() reads
+# .env.example, and check-system.sh's comment says why — "a new switch is
+# covered the day it ships". The numeric half names three settings inline, and
+# the test above names the same three, so both move together and neither
+# notices a fourth.
+#
+# A gate rather than a derived list on purpose. These four need four different
+# rules — WEBUI_PORT is a port, BACKUP_KEEP may be 0, the others must be
+# positive — and four different consequences, and the check above rightly
+# insists the message say what actually goes wrong. A generic loop could not.
+# So this asks a human to write that sentence, rather than writing a worse one
+# for them.
+every_numeric_setting_is_guarded() {
+  local body lists k seen=0 bad=0
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  # Every 'for setting in ...' list in the file: the port/host one and the
+  # numeric one both count, because a setting guarded by valid_port is guarded.
+  lists="$(grep -oE 'for setting in [A-Z_ ]+; do' <<<"${body}" || true)"
+  [[ -n "${lists}" ]] || {
+    echo 'check-system.sh no longer iterates any list of settings by name' >&2
+    return 1; }
+  while read -r k; do
+    [[ -n "${k}" ]] || continue
+    seen=$((seen+1))
+    grep -qF "${k}" <<<"${lists}" || {
+      printf '%s is a number in .env.example and no check-system.sh loop validates it — a typo in it fails somewhere else, later, as something else\n' \
+        "${k}" >&2
+      bad=1
+    }
+  done < <(grep -oE '^[A-Z_]+=[0-9]+$' "${REPO}/.env.example" | cut -d= -f1 | sort -u)
+  (( seen >= 4 )) || {
+    printf 'only %s numeric settings found in .env.example — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every numeric setting in .env.example is validated by 'lca check'" \
+  every_numeric_setting_is_guarded
 # ...and the headline command warns about an edit format aider will reject,
 # before aider answers with its usage text.
 run_agent_warns_on_an_odd_edit_format() {
