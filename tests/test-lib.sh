@@ -7848,6 +7848,53 @@ echo "# ...and a chat app that is DOWN is louder than one that is merely stale"
 # "ready", and the row above still handing out a phone URL. Measured by
 # stopping the container — 'lca check' reported it twice with the fix, and the
 # one screen you get without asking offered the link anyway.
+echo "# the banner's two parsers, which nothing had executed"
+# strip_ansi and last_step are how the banner turns a tee of coloured terminal
+# output into one line saying how far the install got. Neither was named by a
+# test. The install log on this box carries 662 lines containing carriage
+# returns, so the shapes below are the real format, not invented ones.
+motd_parse() {  # FUNCTION  LOG-TEXT -> what it prints
+  LCA_LOGTEXT="$3" bash -c '
+    set -euo pipefail
+    source "$1" >/dev/null 2>&1
+    current_run_log() { printf "%s" "${LCA_LOGTEXT}"; }
+    "$2"' _ "${MOTD}" "$2" 2>/dev/null
+}
+strip_ansi_removes_colour() {
+  local out
+  out="$(printf '\033[0;32m==> Installing Ollama\033[0m\n' | bash -c '
+    source "$1" >/dev/null 2>&1; strip_ansi' _ "${MOTD}" 2>/dev/null)"
+  [[ "${out}" == '==> Installing Ollama' ]]
+}
+check "strip_ansi removes the colour codes a tee leaves behind" \
+  strip_ansi_removes_colour
+strip_ansi_splits_carriage_returns() {
+  local out
+  # A model pull's progress bar is one enormous CR-laden line. Splitting on CR
+  # is what lets last_step take the final fragment instead of the whole thing.
+  out="$(printf 'pulling  10%%\rpulling  90%%\rpulling 100%%\n' | bash -c '
+    source "$1" >/dev/null 2>&1; strip_ansi' _ "${MOTD}" 2>/dev/null | wc -l)"
+  (( out == 3 ))
+}
+check "...and turns a carriage-return progress line into separate lines" \
+  strip_ansi_splits_carriage_returns
+check "last_step reports the most recent heading, without its marker" \
+  test "$(motd_parse _ last_step "$(printf '==> Installing Ollama\n==> Auto-tune: detected 16 GiB RAM\n')")" \
+     = "Auto-tune: detected 16 GiB RAM"
+# Deliberately not the last LINE: the pull's progress bar comes after the
+# heading and means nothing out of context. That is the whole reason this
+# greps for '==>' first.
+check "...and not the noisy progress line that follows it" \
+  test "$(motd_parse _ last_step "$(printf '==> Pulling the model\npulling manifest\rpulling 47%%\rpulling 100%%\n')")" \
+     = "Pulling the model"
+check "...and a log with no heading yet reports nothing" \
+  test -z "$(motd_parse _ last_step "$(printf 'starting up\nsome output\n')")"
+# The colour codes have to be gone from what the banner prints, or the row
+# renders as garbage inside a box drawn to a fixed width.
+check "...and the heading it reports carries no escape sequences" \
+  test "$(motd_parse _ last_step "$(printf '\033[1;34m==> Installing Ollama\033[0m\n')")" \
+     = "Installing Ollama"
+
 motd_chat_down_row() {  # answering | down -> the rendered row
   bash -c 'source "$1" >/dev/null 2>&1; load_env_readonly
     ANS="$2"
