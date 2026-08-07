@@ -11303,6 +11303,15 @@ write_ask_stubs() {  # DIR
   make_stub_dir "$1"
   cat > "$1/curl" <<'STUB'
 #!/bin/sh
+# With LCA_CAPTURE set, keep the request body: some gates need to see the
+# prompt that would have reached the model, not just the reply.
+if [ -n "${LCA_CAPTURE:-}" ]; then
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "-d" ] && printf '%s' "$a" > "${LCA_CAPTURE}"
+    prev="$a"
+  done
+fi
 for a in "$@"; do
   case "$a" in
     */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit 0 ;;
@@ -11360,6 +11369,62 @@ a_real_answer_still_works() {
   grep -qF 'ready' <<<"${out}" || { printf 'the answer itself is gone: %s\n' "${out}" >&2; return 1; }
 }
 check "...while a real answer is untouched" a_real_answer_still_works
+
+echo "# a flag one letter wrong must not become part of the question"
+# Fourteen scripts here refuse an unknown option. 'lca ask' — which has the
+# most flags of any of them, and documents -f, -c and -m in 'lca help' —
+# folded them into the question instead. Measured, one letter off:
+#
+#   $ lca ask --contine "and why?"
+#   prompt sent -> "--contine and why?"        exit 0
+#
+# against --continue, whose prompt begins "--- the previous exchange, for
+# context ---". So the feature silently did not happen, the typo went to the
+# model as part of the question, and the status said success.
+ask_prompt_for() {  # ARGS... -> the prompt that reached the model
+  local sb="${SANDBOX}/askargs"
+  rm -rf "${sb}"; write_ask_stubs "${sb}"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  PATH="${sb}:${PATH}" LCA_CAPTURE="${sb}/body.json" \
+    LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+    timeout 60 bash "${REPO}/scripts/ask.sh" "$@" </dev/null >/dev/null 2>&1 || true
+  jq -r '.prompt // empty' <"${sb}/body.json" 2>/dev/null || true
+}
+ask_rc_for() {  # ARGS... -> "rc=N" and stderr
+  local sb="${SANDBOX}/askargs2" rc=0 out
+  rm -rf "${sb}"; write_ask_stubs "${sb}"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+         timeout 60 bash "${REPO}/scripts/ask.sh" "$@" </dev/null 2>&1 >/dev/null)" || rc=$?
+  printf 'rc=%s\n%s\n' "${rc}" "${out}"
+}
+unknown_flag_is_refused() {
+  local out
+  out="$(ask_rc_for --contine "and why?")"
+  grep -q '^rc=0$' <<<"${out}" && {
+    printf 'a typo-ed flag is accepted and exits 0: %s\n' "${out}" >&2; return 1; }
+  grep -qF -- '--contine' <<<"${out}" || {
+    printf 'the refusal does not name the flag: %s\n' "${out}" >&2; return 1; }
+  # ...and it must not have been sent to the model as question text.
+  [[ "$(ask_prompt_for --contine "and why?")" != *"--contine"* ]] || {
+    echo 'the typo-ed flag still reaches the model inside the question' >&2; return 1; }
+}
+check "a flag one letter wrong is refused, not answered" unknown_flag_is_refused
+dash_question_still_possible() {
+  local p
+  p="$(ask_prompt_for -- --contine and why)"
+  [[ "${p}" == *"--contine and why"* ]] || {
+    printf 'a question after -- does not reach the model intact: %s\n' "${p}" >&2; return 1; }
+}
+check "...and a question that really starts with a dash still works, after --" \
+  dash_question_still_possible
+bare_words_are_still_the_question() {
+  local p
+  p="$(ask_prompt_for why is this slow)"
+  [[ "${p}" == *"why is this slow"* ]] || {
+    printf 'plain words no longer form the question: %s\n' "${p}" >&2; return 1; }
+}
+check "...while plain words are still the question" bare_words_are_still_the_question
 # ...and nothing else may land on that stream either. lib.sh states the rule
 # and names this command while doing it — "in 'lca ask' the model's answer is
 # stdout, and progress must not end up inside a piped or redirected answer" —

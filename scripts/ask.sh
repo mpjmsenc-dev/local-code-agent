@@ -44,6 +44,29 @@ main() {
       # way that actually works.
       -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
+      # Everything after '--' is question text, whatever it starts with. The
+      # escape hatch has to exist before the refusal below can be safe: a
+      # question really can begin with a dash.
+      --)        shift
+                 while [[ $# -gt 0 ]]; do
+                   question="${question:+${question} }$1"; shift
+                 done ;;
+      # An unrecognised FLAG is refused; an unrecognised WORD is still question
+      # text, which is the whole point of the arm below.
+      #
+      # Fourteen scripts in this project refuse an unknown option. This one,
+      # which has the most flags of any of them and documents all three in 'lca
+      # help', swallowed them into the question instead. Measured, one letter
+      # off '--continue':
+      #
+      #   $ lca ask --contine "and why?"
+      #   prompt sent -> "--contine and why?"      exit 0
+      #
+      # against '--continue', whose prompt begins "--- the previous exchange,
+      # for context ---". So the feature silently did not happen, the typo was
+      # sent to the model as part of the question, and the status said success.
+      -?*)       usage >&2
+                 die "Unknown option: ${1} — 'lca ask' takes -f, -c, -m and -h. If it is part of your question, put the question after --:  lca ask -- ${1} ..." ;;
       *)         arg="$1"; question="${question:+${question} }${arg}"; shift ;;
     esac
   done
