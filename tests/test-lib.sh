@@ -11460,6 +11460,48 @@ attaching_a_directory_says_so() {
 }
 check "a directory passed to -f is refused as a directory" \
   attaching_a_directory_says_so
+
+echo "# a version pinned in .env that is not the one installed must be reported"
+# AIDER_VERSION is read once, by install_python.sh, when the virtualenv is
+# built: it becomes 'aider-chat==X' in the pip spec and nothing looks at it
+# again. So a pin added or changed in .env afterwards does nothing at all,
+# silently — and a pin exists precisely because the version matters to whoever
+# wrote it, usually a regression they are avoiding.
+#
+# The Ollama drop-in, the chat container's baked-in settings and the backup
+# timer are all applied at one moment and drift-checked afterwards. This was
+# the fourth setting of that kind and the only one with nothing watching it.
+#
+# Driven on the source rather than by installing aider twice: the check has to
+# compare the pin against what --version reports, and say the pin is not in
+# effect when they differ.
+aider_pin_is_watched() {
+  local body bad=0
+  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/check-system.sh")"
+  grep -q 'AIDER_VERSION' <<<"${body}" || {
+    echo 'check-system.sh never looks at AIDER_VERSION, so a pin in .env is unobservable' >&2
+    return 1; }
+  # Compared against the INSTALLED version, not merely printed.
+  grep -qE 'AIDER_INSTALLED_V=' <<<"${body}" || {
+    echo 'check-system.sh mentions AIDER_VERSION without reading what is installed' >&2
+    bad=1; }
+  grep -qi 'not in effect' <<<"${body}" || {
+    echo 'check-system.sh does not say that a mismatched pin is not in effect' >&2
+    bad=1; }
+  # ...and names the one command that would apply it.
+  grep -q 'install_python.sh' <<<"${body}" || {
+    echo 'check-system.sh does not name the command that applies the pin' >&2
+    bad=1; }
+  # An empty pin is the documented default ("Empty = latest") and must stay
+  # silent, or every stock install grows a warning about nothing.
+  awk '/AIDER_VERSION/ { if (/-n "\$\{AIDER_VERSION\}"/) found = 1 }
+       END { exit !found }' <<<"${body}" || {
+    echo 'check-system.sh reports the pin even when none is set' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "an aider pin that is not installed is reported as not in effect" \
+  aider_pin_is_watched
 # ...and nothing else may land on that stream either. lib.sh states the rule
 # and names this command while doing it — "in 'lca ask' the model's answer is
 # stdout, and progress must not end up inside a piped or redirected answer" —

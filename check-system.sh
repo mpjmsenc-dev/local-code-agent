@@ -184,6 +184,24 @@ if [[ -x "${AIDER}" ]]; then
   aider_version="$("${AIDER}" --version 2>/dev/null)"
   if [[ -n "${aider_version}" ]]; then
     p_pass "aider works: ${aider_version}"
+    # AIDER_VERSION is read once, by install_python.sh, when the virtualenv is
+    # built — it becomes 'aider-chat==X' in the pip spec and nothing looks at
+    # it again. So a pin added or changed in .env afterwards does nothing at
+    # all, silently, and a pin exists precisely because the version matters to
+    # whoever wrote it: the usual reason is a regression they are avoiding.
+    #
+    # The same shape as the Ollama drop-in, the container's baked-in settings
+    # and the backup timer, all of which this file already reports drift for.
+    # This was the fourth apply-at-install-time setting and the only one with
+    # nothing watching it.
+    if [[ -n "${AIDER_VERSION}" ]]; then
+      AIDER_INSTALLED_V="${aider_version##* }"
+      if [[ "${AIDER_INSTALLED_V}" == "${AIDER_VERSION}" ]]; then
+        p_pass "aider is the pinned version (AIDER_VERSION=${AIDER_VERSION})"
+      else
+        p_warn "AIDER_VERSION=${AIDER_VERSION} in ${ENV_FILE}, but ${AIDER_INSTALLED_V} is installed — the pin is NOT in effect. It is applied only when the virtualenv is built: sudo ${SCRIPT_DIR}/scripts/install_python.sh"
+      fi
+    fi
   else
     p_fail "aider binary exists but --version failed (re-run ${SCRIPT_DIR}/scripts/install_python.sh)"
   fi
