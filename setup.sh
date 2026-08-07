@@ -137,12 +137,12 @@ main() {
       fi
     fi
     if [[ "${have_model}" == "true" ]]; then
-      info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
+      info "Smoke test: asking ${MODEL_NAME} for a real generation. The model is loaded first, which on a CPU-only box has been measured at up to 5 minutes..."
       if model_responds "${MODEL_NAME}"; then
         ok "Model '${MODEL_NAME}' generates text — inference works."
         smoke_tested=true
       else
-        warn "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: $(ollama_log_hint)"
+        warn "Model '${MODEL_NAME}' did not respond — $(model_silence_reason)"
         setup_ok=false
       fi
     fi

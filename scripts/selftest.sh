@@ -85,8 +85,8 @@ if [[ "${ollama_reachable}" != "true" ]]; then
 elif ! model_present "${MODEL_NAME}"; then
   p_fail "model '${MODEL_NAME}' is not downloaded (or re-run sudo ${REPO_ROOT}/setup.sh). $(pull_advice "${MODEL_NAME}")"
 else
-  info "Asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
-  if model_responds "${MODEL_NAME}" 300; then
+  info "Asking ${MODEL_NAME} for a real generation. An unloaded model is loaded first, measured at up to 5 minutes on a busy CPU-only box..."
+  if model_responds "${MODEL_NAME}"; then
     p_pass "model '${MODEL_NAME}' generated text — inference works on this hardware"
     model_ready=true
     # The model is loaded right now, so this is the moment its CPU/GPU
@@ -96,7 +96,7 @@ else
       info "Running on: ${gpu_proc}"
     fi
   else
-    p_fail "model '${MODEL_NAME}' did not respond — check RAM headroom (free -h) and: $(ollama_log_hint)"
+    p_fail "model '${MODEL_NAME}' did not respond — $(model_silence_reason)"
   fi
 fi
 

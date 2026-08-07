@@ -303,9 +303,9 @@ main() {
   fi
 
   if [[ "${validate}" == "true" ]]; then
-    info "Validating ${chosen_model} with a real generation (first load can take a minute)..."
+    info "Validating ${chosen_model} with a real generation. It is loaded first, which on a CPU-only box has been measured at up to 5 minutes..."
     if ! model_responds "${chosen_model}"; then
-      die "${chosen_model} did not produce a response — nothing changed (still ${old_model}, ctx ${old_ctx}). Check RAM headroom with: free -h"
+      die "${chosen_model} did not produce a response — nothing changed (still ${old_model}, ctx ${old_ctx}). $(model_silence_reason)"
     fi
     ok "${chosen_model} validated."
   fi

@@ -252,11 +252,11 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
       # "works", and this is the only check that proves inference at all.
       info "--quick: skipping the real-generation probe (run 'lca check' without it to test inference)"
     else
-      info "asking '${MODEL_NAME}' for a real generation (may take a minute on first load)..."
-      if model_responds "${MODEL_NAME}" 240; then
+      info "asking '${MODEL_NAME}' for a real generation. If the model is not loaded yet this loads it first, which on a CPU-only box has taken up to 5 minutes here..."
+      if model_responds "${MODEL_NAME}"; then
         p_pass "model '${MODEL_NAME}' responds to a real generation"
       else
-        p_fail "model '${MODEL_NAME}' did not respond (RAM? see: free -h and $(ollama_log_hint))"
+        p_fail "model '${MODEL_NAME}' did not respond — $(model_silence_reason)"
       fi
     fi
   else

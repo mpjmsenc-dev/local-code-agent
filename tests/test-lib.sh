@@ -7843,6 +7843,93 @@ setup_skips_only_what_it_already_proved() {
 check "setup.sh skips the re-test only when it already proved inference" \
   setup_skips_only_what_it_already_proved
 
+echo "# a model that is still loading is not a model the box has too little RAM for"
+# Five messages named RAM when a real generation did not come back, four of
+# them first. Measured from this project's own CPU-only VPS — every model load
+# its Ollama log holds, "loading model via llama-server" to "loaded runners":
+#
+#   298.6s  77.6s  39.6s  34.8s  26.0s  30.3s  64.8s
+#
+# 'lca check' allowed 240s for the load AND the generation, so on a box that
+# had just rebooted — which is exactly when somebody runs it — the command
+# that exists to diagnose this stack called a healthy model broken and sent
+# its owner to 'free -h'. RAM was not the cause once.
+#
+# curl's exit 28 is "operation timed out", documented and locale-independent,
+# and it is the difference between "still loading" and "said no".
+probe_outcome() {  # timeout | empty | ok | dead -> the recorded outcome
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    case "$2" in
+      timeout) curl() { return 28; } ;;
+      empty)   curl() { printf "{}"; } ;;
+      ok)      curl() { printf "{\"response\":\"ready\"}"; } ;;
+      *)       curl() { return 7; } ;;
+    esac
+    model_responds fake-model 5 >/dev/null 2>&1
+    printf "%s" "${MODEL_PROBE_OUTCOME}"' _ "${REPO}/scripts/lib.sh" "$1"
+}
+check "a probe that ran out of time is recorded as a timeout" \
+  test "$(probe_outcome timeout)" = timeout
+check "a server that answered with nothing is not a timeout" \
+  test "$(probe_outcome empty)" = refused
+check "a connection that failed outright is not a timeout either" \
+  test "$(probe_outcome dead)" = refused
+check "a real answer is recorded as ok" \
+  test "$(probe_outcome ok)" = ok
+# ...and the distinction has to reach the reader, in the right order. RAM does
+# cause this, so it stays — after the cause the measurements actually produced,
+# not instead of it.
+silence_reason_for() {  # outcome -> the sentence
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    MODEL_PROBE_OUTCOME="$2"; MODEL_PROBE_SECONDS=240
+    model_silence_reason' _ "${REPO}/scripts/lib.sh" "$2"
+}
+silence_reason_leads_with_the_measured_cause() {
+  local slow refused ram_at load_at
+  slow="$(silence_reason_for _ timeout)"
+  refused="$(silence_reason_for _ refused)"
+  [[ "${slow}" != "${refused}" ]] || {
+    echo 'a timeout and a refusal are given the same explanation' >&2; return 1; }
+  grep -q '240s' <<<"${slow}" || {
+    printf 'the timeout message does not say how long it waited: %s\n' "${slow}" >&2; return 1; }
+  # RAM must appear, and must appear AFTER the load explanation.
+  ram_at="$(awk '{ print index($0, "RAM: free -h") }' <<<"${slow}")"
+  load_at="$(awk '{ print index($0, "load") }' <<<"${slow}")"
+  (( ram_at > 0 )) || {
+    printf 'the timeout message drops RAM entirely, which is a real cause: %s\n' "${slow}" >&2; return 1; }
+  (( load_at > 0 && load_at < ram_at )) || {
+    printf 'the timeout message reaches RAM before it explains the load: %s\n' "${slow}" >&2; return 1; }
+  grep -qi 'not a slow load' <<<"${refused}" || {
+    printf 'the refusal message does not rule out "it is just still loading": %s\n' "${refused}" >&2
+    return 1; }
+}
+check "a slow load and a refusal are explained differently, load first" \
+  silence_reason_leads_with_the_measured_cause
+# ...and no script may go back to asserting RAM by hand.
+no_script_blames_ram_on_its_own() {
+  local bad=0 seen=0 f body
+  for f in check-system.sh setup.sh update-model.sh scripts/tune.sh scripts/selftest.sh; do
+    grep -q 'model_responds' "${REPO}/${f}" || {
+      printf '%s no longer probes the model at all — this gate has lost its subject\n' "${f}" >&2
+      bad=1; continue; }
+    seen=$((seen+1))
+    grep -q 'model_silence_reason' "${REPO}/${f}" || {
+      printf '%s reports a model that did not respond without saying why\n' "${f}" >&2
+      bad=1; }
+    body="$(sed 's/#.*//' "${REPO}/${f}")"
+    if grep -qE 'RAM headroom|enough RAM for it|RAM\? see' <<<"${body}"; then
+      printf '%s names RAM by hand again, ahead of the cause that was actually measured\n' "${f}" >&2
+      bad=1
+    fi
+  done
+  (( seen == 5 )) || { echo "expected 5 model probes, found ${seen}" >&2; bad=1; }
+  return "${bad}"
+}
+check "no script blames RAM for a generation that merely ran out of time" \
+  no_script_blames_ram_on_its_own
+
 echo "# the inbound guard bakes its ports in, so .env can drift away from it"
 # Change a port in .env and the guard goes on dropping the old one while the
 # service listens on the new one — unauthenticated, on every interface. 'lca

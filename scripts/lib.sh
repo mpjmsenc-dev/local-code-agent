@@ -1084,18 +1084,81 @@ pull_model() {
   return 1
 }
 
+# MODEL_PROBE_TIMEOUT — how long a real generation is allowed to take before
+# we stop calling it a generation.
+#
+# It was 300s by default and 240s in 'lca check', and both were guesses. The
+# first request after a restart does not just generate: it loads the whole
+# model into RAM first. Measured from this project's own CPU-only VPS, every
+# model load its Ollama log holds — "loading model via llama-server" to
+# "loaded runners":
+#
+#   298.6s   77.6s   39.6s   34.8s   26.0s   30.3s   64.8s
+#
+# The 298.6s one is not an outlier to be waved away, it is the ordinary case
+# this project is built for: the box had just rebooted and Ollama was loading
+# a 7b model on the same cores Open WebUI was using to load its embedding
+# model. 'lca check' allowed 240s for load AND generation, so on a freshly
+# rebooted box — the exact moment somebody runs it — the one command that
+# exists to diagnose this stack reported the model broken.
+MODEL_PROBE_TIMEOUT="${MODEL_PROBE_TIMEOUT:-600}"
+
+# Set by model_responds so its callers can say WHY without probing twice:
+# ok | timeout | refused, and the deadline that applied.
+MODEL_PROBE_OUTCOME=""
+MODEL_PROBE_SECONDS=""
+
 # model_responds MODEL [TIMEOUT] — prove MODEL can actually generate text by
 # asking the running Ollama server for a tiny real completion.
 model_responds() {
-  local model="$1" timeout="${2:-300}"
-  local url payload response
+  local model="$1" timeout="${2:-${MODEL_PROBE_TIMEOUT}}"
+  local url payload raw rc=0 response
+  MODEL_PROBE_OUTCOME="refused"
+  MODEL_PROBE_SECONDS="${timeout}"
   url="$(ollama_url)"
   payload="$(jq -n --arg model "${model}" \
     '{model: $model, prompt: "Reply with the single word: ready", stream: false, options: {num_predict: 16}}')"
-  response="$(curl -fsS --max-time "${timeout}" -X POST "${url}/api/generate" \
-    -H 'Content-Type: application/json' -d "${payload}" 2>/dev/null \
-    | { jq -r '.response // empty' || true; })"
-  [[ -n "${response}" ]]
+  # Not piped into jq: a pipeline's exit status is the LAST command's, and
+  # curl's is the whole point here — 28 is its documented "operation timed
+  # out", which is the difference between "still loading" and "said no".
+  raw="$(curl -fsS --max-time "${timeout}" -X POST "${url}/api/generate" \
+    -H 'Content-Type: application/json' -d "${payload}" 2>/dev/null)" || rc=$?
+  if (( rc == 28 )); then
+    MODEL_PROBE_OUTCOME="timeout"
+    return 1
+  fi
+  (( rc == 0 )) || return 1
+  response="$(jq -r '.response // empty' <<<"${raw}" 2>/dev/null || true)"
+  [[ -n "${response}" ]] || return 1
+  MODEL_PROBE_OUTCOME="ok"
+}
+
+# model_silence_reason — why the last model_responds did not answer.
+#
+# Five messages named RAM, and four of them named it FIRST:
+#
+#   check-system.sh  "did not respond (RAM? see: free -h ...)"
+#   selftest.sh      "did not respond — check RAM headroom (free -h) ..."
+#   setup.sh         "did not respond. Check RAM headroom (free -h) ..."
+#   update-model.sh  "Does this machine have enough RAM for it?"
+#   tune.sh          "Check RAM headroom with: free -h"
+#
+# On the box those numbers above were measured on, RAM was never the cause
+# once — a cold load on busy cores was. update-model.sh's is the plainest:
+# it runs model_fits_ram BEFORE downloading and would have refused or warned
+# already, so by the time it asks, it has its own answer and is ignoring it.
+#
+# RAM is still worth naming, because a model too big for the box does fail
+# here. It belongs after the cause that measurement actually produced, not
+# instead of it.
+model_silence_reason() {
+  if [[ "${MODEL_PROBE_OUTCOME}" == "timeout" ]]; then
+    printf 'it was still not answering after %ss. The first request after a restart has to load the whole model into RAM before it can generate anything, and on this kind of CPU-only box that has been measured at anywhere from 26s to 5 minutes depending on what else is using the cores — so this may be a load that simply had not finished. %s shows "loading model" while it is working and "loaded runners" when it is done. If it never gets there, then check RAM: free -h.' \
+      "${MODEL_PROBE_SECONDS}" "$(ollama_log_hint)"
+  else
+    printf 'the server answered rather than running out of time, so this is not a slow load — it refused or returned nothing. Its own reason is in the log: %s' \
+      "$(ollama_log_hint)"
+  fi
 }
 
 # detect_ram_gib — usable RAM in GiB, rounded to the nearest GiB (a nominal

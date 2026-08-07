@@ -148,9 +148,9 @@ main() {
     model_present "${new_model}" || die "'${new_model}' still not present after pull — MODEL_NAME is unchanged."
   fi
 
-  info "Validating '${new_model}' with a real generation (first load can take a while)..."
+  info "Validating '${new_model}' with a real generation. It is loaded first, which on a CPU-only box has been measured at up to 5 minutes..."
   if ! model_responds "${new_model}"; then
-    die "'${new_model}' did not produce a response — MODEL_NAME is unchanged (still ${old_model}). Does this machine have enough RAM for it?"
+    die "'${new_model}' did not produce a response — MODEL_NAME is unchanged (still ${old_model}). $(model_silence_reason)"
   fi
   ok "'${new_model}' validated."
 
