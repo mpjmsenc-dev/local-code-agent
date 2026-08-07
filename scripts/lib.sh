@@ -203,6 +203,14 @@ apt_get() {
     apt-get -o DPkg::Lock::Timeout=600 "$@"
 }
 
+# writable_by_us PATH — true when this process could create or modify PATH.
+#
+# Its own function, like have_terminal beside it, so failure branches that
+# depend on it can be tested. As root '[[ -w ]]' is true for every path, so a
+# suite running as root can never reach the "not writable" arm and one running
+# as anybody else can never reach the other.
+writable_by_us() { [[ -w "$1" ]]; }
+
 # sudo_would_block — true when becoming root is possible in principle but not
 # in THIS run: sudo is installed, it will ask for a password, and there is no
 # terminal to type it into.
@@ -665,6 +673,36 @@ write_env_or_die() {
     # 1 is what a failed append returns, which is a write failure and needs
     # the message below.
     exit 1
+  fi
+  # Permission before disk space, because sed has usually just said so.
+  #
+  # 'a full disk is the usual cause' was the only explanation offered, and it
+  # is the wrong one for anybody using a checkout they do not own — which is
+  # every ordinary user of a stack installed with 'sudo setup.sh'. Measured as
+  # such a user, running what 'lca tune' and 'lca model' both call:
+  #
+  #   sed: couldn't open temporary file /home/user/local-code-agent/sedlOoIFn:
+  #        Permission denied
+  #   [FAIL] Could not write MODEL_NAME to .../.env (sed exited 4) — a full
+  #          disk is the usual cause, so check 'df -h' ... re-run once there is
+  #          room.
+  #
+  # There was room. There always was. Freeing disk space would change nothing,
+  # and 'sed exited 4' is not something a reader can act on.
+  #
+  # The DIRECTORY is checked as well as the file, and that is what the error
+  # actually names: 'sed -i' writes its temp file next to the target, so a
+  # writable .env inside an unwritable directory fails the same way.
+  # The file is only consulted when it EXISTS. '[[ -w ]]' is false for a path
+  # that is not there, which is not the same as "you may not write it" — and
+  # the gate below drives a real failure through an ENV_FILE whose parent is a
+  # regular file, so the target cannot exist. Testing it unconditionally
+  # classified that as a permission problem, which it is not.
+  local env_dir
+  env_dir="$(dirname "${ENV_FILE}")"
+  if ! writable_by_us "${env_dir}" \
+     || { [[ -e "${ENV_FILE}" ]] && ! writable_by_us "${ENV_FILE}"; }; then
+    die "Could not write ${1} to ${ENV_FILE}: '$(id -un)' cannot write there. A checkout installed with 'sudo setup.sh' is owned by root, so this needs the same. Nothing was changed — re-run the command with sudo.${3:+ $3}"
   fi
   die "Could not write ${1} to ${ENV_FILE} (sed exited ${rc}) — a full disk is the usual cause, so check 'df -h'. ${ENV_FILE} was left exactly as it was; re-run once there is room.${3:+ $3}"
 }

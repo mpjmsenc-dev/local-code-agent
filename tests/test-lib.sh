@@ -9133,6 +9133,73 @@ check "'sudo will need a password and there is no terminal' is its own answer" \
 have_terminal_knows_a_pipe_is_not_one() { ! have_terminal < /dev/null; }
 check "...and have_terminal says no when stdin is not a terminal" \
   have_terminal_knows_a_pipe_is_not_one
+
+# ...and a .env write that failed must say WHICH failure it was.
+#
+# "a full disk is the usual cause, so check 'df -h' ... re-run once there is
+# room" was the only explanation, and it is the wrong one for anybody using a
+# checkout they do not own — every ordinary user of a stack installed with
+# 'sudo setup.sh'. Measured as such a user, running what 'lca tune' and
+# 'lca model' both call:
+#
+#   sed: couldn't open temporary file .../sedlOoIFn: Permission denied
+#   [FAIL] Could not write MODEL_NAME to .../.env (sed exited 4) — a full disk
+#          is the usual cause ... re-run once there is room.
+#
+# There was room. sed had said "Permission denied" one line earlier.
+#
+# writable_by_us is stubbed rather than tested through a real directory,
+# because as root '[[ -w ]]' is true for every path — a test that depended on
+# who ran it could only ever reach one of these two branches.
+env_write_failure_says() {  # writable(yes|no) -> the message
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env >/dev/null 2>&1
+    case "$2" in
+      yes)     writable_by_us() { return 0; } ;;
+      no)      writable_by_us() { return 1; } ;;
+      # The .env itself writable, the DIRECTORY it lives in not. sed -i writes
+      # its temp file next to the target — that is the exact operation the
+      # measured error named — so only the directory check catches this, and
+      # without the case a mutation dropping that check passes.
+      dironly) writable_by_us() { [[ "$1" == *".env" ]]; } ;;
+    esac
+    # A write that fails for reasons this test does not care about; the point
+    # is which explanation comes back.
+    set_env_var() { return 4; }
+    write_env_or_die MODEL_NAME something 2>&1' \
+    _ "${SANDBOX}/scripts/lib.sh" "$1" 2>&1
+}
+env_write_failure_names_the_cause() {
+  local out bad=0
+  out="$(env_write_failure_says no)"
+  grep -q 'cannot write there' <<<"${out}" || {
+    printf 'an unwritable checkout is not reported as one: %s\n' "${out}" >&2; bad=1; }
+  grep -qi 'sudo' <<<"${out}" || {
+    printf 'it does not say to re-run with sudo: %s\n' "${out}" >&2; bad=1; }
+  grep -q 'full disk' <<<"${out}" && {
+    printf 'an unwritable checkout is still blamed on a full disk: %s\n' "${out}" >&2; bad=1; }
+  # An unwritable DIRECTORY with a writable .env inside it: sed still cannot
+  # write, and only the directory half of the check sees it.
+  out="$(env_write_failure_says dironly)"
+  grep -q 'cannot write there' <<<"${out}" || {
+    printf 'an unwritable directory holding a writable .env is blamed on the disk — sed writes its temp file there: %s\n' "${out}" >&2
+    bad=1; }
+  # ...and the disk explanation must survive where it IS the likely cause, or
+  # this has simply replaced one guess with another.
+  out="$(env_write_failure_says yes)"
+  grep -q 'full disk' <<<"${out}" || {
+    printf 'a writable checkout no longer gets the disk explanation: %s\n' "${out}" >&2; bad=1; }
+  grep -q 'cannot write there' <<<"${out}" && {
+    printf 'a writable checkout is reported as unwritable: %s\n' "${out}" >&2; bad=1; }
+  # Both must promise the file is untouched: that is the reason a reader can
+  # retry at all.
+  grep -qi 'nothing was changed\|left exactly as it was' <<<"${out}" || {
+    printf 'the disk message no longer says the file is unchanged: %s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "a .env write that failed says whether it was permission or disk" \
+  env_write_failure_names_the_cause
 apt_failure_checks_sudo_first() {
   local body
   body="$(sed -n '/if ! apt_get update -y; then/,/^  fi$/p' \
