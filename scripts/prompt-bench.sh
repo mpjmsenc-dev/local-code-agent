@@ -200,7 +200,9 @@ SYSTEM=""
 # this file must not shell out or read files the caller never asked for.
 load_system() {
   if [[ -n "${PROMPT_FILE}" ]]; then
-    [[ -r "${PROMPT_FILE}" ]] || die "Cannot read prompt file: ${PROMPT_FILE}"
+    # Was a bare '[[ -r ]]', which is true for a directory: 'prompt-bench.sh
+    # -f /etc' passed it and died as "cat: /etc: Is a directory".
+    input_file_ok "${PROMPT_FILE}" -f "Give the file that holds the prompt to bench."
     SYSTEM="$(cat "${PROMPT_FILE}")"
   else
     SYSTEM="$(lca_system_prompt)"

@@ -11945,6 +11945,45 @@ ask_refuses_a_bad_file_before_starting_anything() {
 }
 check "'lca ask -f' refuses a file it cannot use before starting a model" \
   ask_refuses_a_bad_file_before_starting_anything
+# ...and the same three states in prompt-bench.sh, which had the bare '[[ -r ]]'
+# that is true for a directory. Measured before:
+#
+#   $ scripts/prompt-bench.sh -f /etc -n 1
+#   cat: /etc: Is a directory
+#
+# — the reader's own words for a mistake the command could name. ask.sh had all
+# three and this had one, so input_file_ok lives in lib.sh now and both ask it.
+bench_says() {  # -f ARG -> stderr
+  timeout 30 bash "${REPO}/scripts/prompt-bench.sh" -f "$1" -n 1 </dev/null 2>&1 >/dev/null || true
+}
+bench_names_a_file_it_cannot_use() {
+  local out bad=0
+  out="$(bench_says "${SANDBOX}")"
+  grep -qF 'is a directory' <<<"${out}" || {
+    printf 'a directory given to -f was not named as one: %s\n' "${out}" >&2; bad=1; }
+  grep -qiF 'cat:' <<<"${out}" && {
+    printf 'the failure still comes back in the reader own words: %s\n' "${out}" >&2; bad=1; }
+  out="$(bench_says "${SANDBOX}/no-such-prompt.txt")"
+  grep -qF 'No such file' <<<"${out}" || {
+    printf 'a missing prompt file was not named as missing: %s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+# ...and the shared helper keeps each caller's own sentence, or hoisting it
+# would have made both messages worse than the one that was already right.
+input_file_ok_keeps_the_callers_words() {
+  local out
+  out="$(ask_touches_nothing_for "${SANDBOX}")"
+  grep -qF 'repeat -f for several' <<<"${out}" || {
+    printf "ask.sh lost its own advice when the check moved: %s\n" "${out}" >&2; return 1; }
+  out="$(bench_says "${SANDBOX}")"
+  grep -qF 'holds the prompt to bench' <<<"${out}" || {
+    printf 'prompt-bench.sh was given ask.sh advice instead of its own: %s\n' "${out}" >&2
+    return 1; }
+}
+check "'prompt-bench -f' names a file it cannot use, in this project's words" \
+  bench_names_a_file_it_cannot_use
+check "...and the shared check still says what each caller needs" \
+  input_file_ok_keeps_the_callers_words
 empty_answer_is_not_success() {
   local out
   out="$(ask_with_stubbed_curl _ '{"response":"","done":true}')"

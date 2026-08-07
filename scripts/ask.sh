@@ -31,26 +31,6 @@ Answers come from ${MODEL_NAME} running locally — nothing leaves this machine.
 EOF
 }
 
-# ask_file_ok PATH — die with the right sentence for a -f file that cannot be
-# used. Three states, not one. '[[ -r ]]' is true for a DIRECTORY, so pointing
-# -f at one — 'lca ask -f src/ "explain this"', which is the obvious thing to
-# try — passed a single guard and then failed inside head with its own words:
-#
-#   head: error reading '/home/you/src': Is a directory
-#
-# which reads as an I/O or permission fault and says nothing about what to do
-# instead.
-#
-# A function so main() can ask these questions BEFORE it starts anything; see
-# the call site for why that matters.
-ask_file_ok() {
-  local f="$1"
-  [[ -e "${f}" ]] || die "No such file: ${f}"
-  [[ ! -d "${f}" ]] || die "${f} is a directory, and -f takes a file. Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
-  readable_by_us "${f}" \
-    || die "Cannot read ${f} — it is owned by $(stat -c %U "${f}" 2>/dev/null || echo 'another account') and this account cannot open it. Re-run with sudo, or copy it somewhere you can read."
-}
-
 main() {
   local files=() question="" arg continue_last=false
   while [[ $# -gt 0 ]]; do
@@ -115,7 +95,8 @@ main() {
   # filtered on being readable regular files.
   local f
   for f in ${files[@]+"${files[@]}"}; do
-    ask_file_ok "${f}"
+    input_file_ok "${f}" -f \
+      "Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
   done
 
   require_cmd curl jq
@@ -172,7 +153,8 @@ main() {
     # because they were readable regular files. Re-asked anyway: this list is
     # the union of the two, it is three cheap stat calls, and a file that
     # vanished in between must not reach head to be explained in head's words.
-    ask_file_ok "${f}"
+    input_file_ok "${f}" -f \
+      "Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
     # Cap each file so one large file cannot blow the whole context window.
     context+="--- file: ${f} ---"$'\n'"$(head -c 12000 "${f}")"$'\n\n'
   done

@@ -1106,6 +1106,32 @@ model_present() {
   ollama show "$1" >/dev/null 2>&1
 }
 
+# input_file_ok PATH OPTION [EXTRA] — die with the right sentence for a file a
+# command was told to read, naming the option that took it.
+#
+# Three states, not one. '[[ -r ]]' is true for a DIRECTORY, so pointing an
+# option at one — 'lca ask -f src/ "explain this"', which is the obvious thing
+# to try — passed a single guard and then failed inside the reader with its own
+# words. Measured, in two different commands:
+#
+#   head: error reading '/home/you/src': Is a directory
+#   cat: /etc: Is a directory
+#
+# which reads as an I/O or permission fault and says nothing about what to do
+# instead. ask.sh had all three states and prompt-bench.sh had the bare -r, so
+# they lived here rather than in either.
+#
+# The -e arm is not redundant with the third: without it a name that does not
+# exist comes back as "owned by another account and this account cannot open
+# it", which is a confident answer to a question nobody asked.
+input_file_ok() {
+  local f="$1" opt="$2" extra="${3:-}"
+  [[ -e "${f}" ]] || die "No such file: ${f}"
+  [[ ! -d "${f}" ]] || die "${f} is a directory, and ${opt} takes a file.${extra:+ ${extra}}"
+  readable_by_us "${f}" \
+    || die "Cannot read ${f} — it is owned by $(stat -c %U "${f}" 2>/dev/null || echo 'another account') and this account cannot open it. Re-run with sudo, or copy it somewhere you can read."
+}
+
 # pull_model MODEL — download MODEL with progress, with a clear failure.
 # pull_model MODEL — download MODEL, retrying a transient registry failure.
 #
