@@ -5074,6 +5074,114 @@ check "8 GiB does NOT hold 16b"         too_big_for    deepseek-coder-v2:16b 8
 # has always had, and the reason this can warn on a guess without blocking.
 check "a tag with no size is never refused"   model_fits_ram mymodel:latest 4
 check "...nor is a bare name"                 model_fits_ram mymodel 4
+# ...and the number a message quotes must be the number the guard used.
+# update-model.sh recited the rule in prose — "roughly 0.6 GB per billion
+# parameters, plus about 1 GB" — leaving the reader to do arithmetic the guard
+# had already done, from a second copy free to drift from the first.
+check "the sizing helper answers in GB"       test "$(model_ram_gb qwen2.5-coder:7b)"  = 5.2
+check "...for a fractional size too"          test "$(model_ram_gb qwen2.5-coder:1.5b)" = 1.9
+check "...and refuses a tag it cannot read"   test -z "$(model_ram_gb mymodel:latest 2>/dev/null)"
+# The guard and the helper have to agree at the boundary in BOTH directions,
+# or one of them is a separate rule wearing the other's name.
+guard_agrees_with_the_number() {
+  local m need bad=0
+  for m in 1.5b 3b 7b 8b 13b 14b 16b 24b 32b 70b; do
+    need="$(model_ram_gb "q:${m}")" || { printf 'no size read for %s\n' "${m}" >&2; bad=1; continue; }
+    # Exactly enough must fit; a hair less must not.
+    model_fits_ram "q:${m}" "${need}" || {
+      printf '%s needs %s GB but is refused at exactly %s\n' "${m}" "${need}" "${need}" >&2; bad=1; }
+    ! model_fits_ram "q:${m}" "$(awk -v n="${need}" 'BEGIN{ printf "%.10g", n - 0.1 }')" || {
+      printf '%s needs %s GB but is accepted below it\n' "${m}" "${need}" >&2; bad=1; }
+  done
+  return "${bad}"
+}
+check "the guard and the number it quotes are one rule" guard_agrees_with_the_number
+# ...and no script may carry the formula a third time, in prose.
+no_script_recites_the_formula() {
+  local bad=0 f body
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ "${f}" == */lib.sh ]] && continue      # where the formula lives
+    [[ "${f}" == */speed.sh ]] && continue    # reports memory traffic, not sizing
+    body="$(sed 's/#.*//' "${f}")"
+    grep -qE '0\.6 GB per billion' <<<"${body}" || continue
+    printf '%s tells the user the formula instead of the answer\n' "${f##*/}" >&2
+    bad=1
+  done
+  return "${bad}"
+}
+check "no script recites the sizing formula instead of applying it" \
+  no_script_recites_the_formula
+
+echo "# a fallback that changes nothing must not be announced as a fallback"
+# choose_for_ram falls back to qwen2.5-coder when MODEL_FAMILY has no size that
+# fits. qwen2.5-coder IS the fallback, so on a box too small for its smallest
+# size the default family produced, measured with choose_for_ram 2:
+#
+#   [warn] MODEL_FAMILY=qwen2.5-coder has no size that fits 2 GiB
+#          (smallest is 3b) — falling back to qwen2.5-coder.
+#
+# It announced a change to the thing it already was, and then selected 3b — the
+# model the same line had just ruled out. The check exists to stop "silently
+# pulling ~10 GB and then OOMing on first use", its own words; it detected that
+# case and walked into it anyway.
+ladder_warning() {  # FAMILY RAM -> what it said on stderr
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    source "$2" >/dev/null 2>&1
+    MODEL_FAMILY="$3"
+    choose_for_ram "$4" 2>&1 >/dev/null' _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "$1" "$2"
+}
+ladder_pick() {  # FAMILY RAM -> the model chosen
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    source "$2" >/dev/null 2>&1
+    MODEL_FAMILY="$3"
+    choose_for_ram "$4" 2>/dev/null
+    printf "%s" "${TUNE_MODEL}"' _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "$1" "$2"
+}
+no_phantom_fallback() {
+  local out
+  out="$(ladder_warning qwen2.5-coder 2)"
+  grep -q 'falling back to qwen2.5-coder' <<<"${out}" && {
+    printf 'the default family is told it is falling back to itself: %s\n' "${out}" >&2
+    return 1; }
+  # ...and silence is not the fix either: nothing fits, and that is worth
+  # saying, because the model it picks anyway is going to be killed.
+  grep -qi 'nothing in this project' <<<"${out}" || {
+    printf 'a box too small for every model is told nothing at all: %s\n' "${out}" >&2
+    return 1; }
+  grep -qF '2.8' <<<"${out}" || {
+    printf 'the warning does not say how much the smallest model needs: %s\n' "${out}" >&2
+    return 1; }
+}
+check "the default family is never told it is falling back to itself" \
+  no_phantom_fallback
+# The real fallback must still happen, and still be announced — this is the
+# case the branch was written for.
+real_fallback_still_happens() {
+  local out
+  out="$(ladder_warning deepseek-coder-v2 8)"
+  grep -q 'falling back to qwen2.5-coder' <<<"${out}" || {
+    printf 'a family that genuinely does not fit is not moved off: %s\n' "${out}" >&2
+    return 1; }
+  [[ "$(ladder_pick deepseek-coder-v2 8)" == qwen2.5-coder:* ]] || {
+    printf 'the fallback was announced but not taken: %s\n' "$(ladder_pick deepseek-coder-v2 8)" >&2
+    return 1; }
+}
+check "a family that really has no size that fits is still moved off" \
+  real_fallback_still_happens
+# ...and a fallback whose target does not fit either says BOTH things.
+fallback_that_also_fails_says_so() {
+  local out
+  out="$(ladder_warning deepseek-coder-v2 2)"
+  grep -q 'falling back to qwen2.5-coder' <<<"${out}" || {
+    echo 'the fallback is not announced' >&2; return 1; }
+  grep -qi 'nothing in this project' <<<"${out}" || {
+    printf 'the fallback lands somewhere that does not fit either, silently: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and a fallback that lands somewhere too small says that too" \
+  fallback_that_also_fails_says_so
 pin_is_sized_before_the_pull() {
   local body line n=0 n_fit=0 n_pull=0
   # Scoped to main(): list_recommended calls model_fits_ram too, and a

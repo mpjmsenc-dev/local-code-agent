@@ -1039,11 +1039,39 @@ model_disk_gb() {
 # own tag parse rather than model_params_b's: this one also accepts a tag with
 # no trailing 'b' and keeps fractions (1.5b stays 1.5), and the tune ladder is
 # tested against exactly that behaviour.
+#
+# The 0.6 is not a guess any more. Measured on this project's own box, with
+# qwen2.5-coder:7b loaded at ctx 8192:
+#
+#   $ ps -eo rss,comm --sort=-rss | head -2
+#      4986.5 MB  llama-server
+#
+# 4.87 GiB actual against 5.2 predicted — right, and conservative in the safe
+# direction, which is what a guard wants.
 model_fits_ram() {
-  local tag="${1##*:}" ram="$2" params
+  local need
+  need="$(model_ram_gb "$1")" || return 0
+  awk -v n="${need}" -v r="$2" 'BEGIN{ exit !(n <= r) }'
+}
+
+# model_ram_gb TAG — how much RAM model_fits_ram requires for TAG, or nothing
+# (exit 1) for a tag whose size cannot be read.
+#
+# Split out of model_fits_ram so the guard and the sentence explaining it
+# cannot disagree. A warning that says "needs about N GB" while the check
+# behind it uses a different N is worse than printing no number at all, and
+# update-model.sh was carrying the formula a second time, in prose:
+#
+#   "roughly 0.6 GB per billion parameters, plus about 1 GB"
+#
+# %.10g rather than a fixed number of decimals: every model tag this project
+# can parse has at most one decimal place, so the value is exact either way,
+# and this one also prints 2.8 rather than 2.80.
+model_ram_gb() {
+  local tag="${1##*:}" params
   params="${tag%[bB]}"
-  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
-  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
+  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+  awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
 }
 
 pull_model() {

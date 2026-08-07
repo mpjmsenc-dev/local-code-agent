@@ -91,9 +91,29 @@ choose_for_ram() {
   # first use is the worst outcome; fall back to a family that does fit and say
   # so, rather than honouring MODEL_FAMILY into a wall.
   if ! model_fits_ram "${fam}:${small}" "${ram}"; then
-    warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with 'lca model <name>' if you have the RAM."
-    fam="qwen2.5-coder"
-    read -r small mid big <<<"$(family_sizes "${fam}")"
+    # Only announce a fallback that can actually happen. qwen2.5-coder IS the
+    # fallback, so on a box too small for its smallest size this said:
+    #
+    #   [warn] MODEL_FAMILY=qwen2.5-coder has no size that fits 2 GiB
+    #          (smallest is 3b) — falling back to qwen2.5-coder.
+    #
+    # Measured with choose_for_ram 2 and the default family: it announced a
+    # change to the thing it already was, and then selected 3b anyway — the
+    # exact model the line above had just ruled out. The check existed to stop
+    # "silently pulling and then OOMing on first use", its own words, and it
+    # detected that case and walked into it.
+    if [[ "${fam}" != "qwen2.5-coder" ]]; then
+      warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with 'lca model <name>' if you have the RAM."
+      fam="qwen2.5-coder"
+      read -r small mid big <<<"$(family_sizes "${fam}")"
+    fi
+    # Either we were already on the fallback family or we have just moved to it
+    # and it does not fit either. Both mean there is nothing left to fall back
+    # to, and saying so is the only honest option — the ladder still has to
+    # name a model, because there is no smaller one to name.
+    if ! model_fits_ram "${fam}:${small}" "${ram}"; then
+      warn "Nothing in this project's ladder fits ${ram} GiB: the smallest model it knows is ${fam}:${small}, which needs about $(model_ram_gb "${small}") GB. It is being selected anyway because there is nothing smaller, so expect it to fail to load or be killed for memory on first use — this machine needs more RAM. 'lca model <name>' pins a different one if you know of one that fits."
+    fi
   fi
   if (( ram < 9 )); then
     TUNE_MODEL="${fam}:${small}"

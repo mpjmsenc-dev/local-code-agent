@@ -135,7 +135,15 @@ main() {
   local ram
   ram="$(detect_ram_gib)"
   if ! model_fits_ram "${new_model}" "${ram}"; then
-    warn "'${new_model}' looks too big for ${ram} GiB of RAM (roughly 0.6 GB per billion parameters, plus about 1 GB). It will most likely fail to load, or thrash. 'lca model --list-recommended' shows what fits."
+    # The number, not the formula. This used to recite "roughly 0.6 GB per
+    # billion parameters, plus about 1 GB" and leave the reader to do the
+    # arithmetic the guard had just done — a second copy of the rule, in prose,
+    # free to drift from the one that decides.
+    #
+    # "or thrash" is gone with it: this project's own VPS reports SwapTotal 0
+    # kB, which is the norm for a cloud image. With no swap there is nothing to
+    # thrash into — the kernel kills the process.
+    warn "'${new_model}' needs about $(model_ram_gb "${new_model}") GB of RAM and this machine has ${ram} GiB. It will most likely fail to load, or be killed for memory on first use. 'lca model --list-recommended' shows what fits."
     confirm "Continue anyway?" \
       || die "Cancelled — nothing was downloaded and MODEL_NAME is unchanged (still ${old_model})."
   fi
