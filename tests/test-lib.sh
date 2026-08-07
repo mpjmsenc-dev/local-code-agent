@@ -11234,6 +11234,71 @@ no_test_called_a_missing_command() {
 }
 check "no test called a command that does not exist" \
   no_test_called_a_missing_command
+# ...and the same thing again, for the one place that guard cannot see.
+#
+# command_not_found_handle is a property of THIS shell. A gate written as
+# 'bash -c' runs in a fresh one, which has never sourced lib.sh, so a call to
+# any lib function there is command-not-found — and the handler above never
+# hears about it. Three of the gates I wrote this session failed loudly that
+# way, which is fine. The fourth did not:
+#
+#   check "...and never reads as newest-zero" \
+#     bash -c '! grep -qE "newest 0" <<<"$(BACKUP_KEEP=0 retention_desc)"'
+#
+# retention_desc does not exist in that shell, so the substitution is empty,
+# grep finds nothing, and the leading '!' turns that into a pass. The gate
+# reported ok hardest at the exact moment the function it exists to watch was
+# missing. I wrote that shape twice in one session, in two different files,
+# which is what makes it worth a gate rather than more care.
+#
+# Whole-word, not command-position: my first attempt matched only names at the
+# start of a command and found nothing at all — including both of the real
+# bugs, one preceded by '!' and the other by an environment assignment inside
+# a substitution. It reported zero findings and was itself the vacuous thing it
+# was written to catch. The broad rule flags both and is clean on this tree.
+no_unsourced_subshell_calls_lib() {
+  # Assembled, so this gate does not match its own source while scanning it.
+  local marker="bash -c "\'
+  local -a fns lines
+  mapfile -t fns < <(grep -oE '^[a-z_][a-z0-9_]*\(\)' "${REPO}/scripts/lib.sh" | tr -d '()' | sort -u)
+  (( ${#fns[@]} >= 50 )) || {
+    printf 'only %s function names read out of lib.sh — this gate stopped watching\n' "${#fns[@]}" >&2
+    return 1
+  }
+  local pat hit body
+  pat="\\b($(IFS='|'; printf '%s' "${fns[*]}"))\\b"
+  local bad=0 seen=0 i j n
+  mapfile -t lines < "${TESTS_DIR}/test-lib.sh"
+  n=${#lines[@]}
+  for (( i = 0; i < n; i++ )); do
+    [[ "${lines[i]}" == *"${marker}"* ]] || continue
+    # A commented-out example is documentation, not a gate — and the comment
+    # above quotes the exact broken line this watches for, so without this the
+    # gate's first act is to report itself.
+    [[ "${lines[i]}" =~ ^[[:space:]]*# ]] && continue
+    seen=$((seen+1))
+    body="${lines[i]#*"${marker}"}"
+    j="${i}"
+    # A single-quoted script ends at the next quote; keep reading until one.
+    while [[ "${body}" != *\'* ]] && (( j + 1 < n )); do
+      j=$((j+1))
+      body+=$'\n'"${lines[j]}"
+    done
+    [[ "${body}" == *"source "* ]] && continue
+    hit="$(grep -oE "${pat}" <<<"${body}" | sort -u | tr '\n' ' ')"
+    [[ -n "${hit}" ]] || continue
+    printf 'tests/test-lib.sh line %s: a subshell that never sources lib.sh calls %s— in a fresh shell that is command-not-found, and a negated assertion turns it into a pass\n' \
+      "$((i + 1))" "${hit}" >&2
+    bad=1
+  done
+  (( seen > 0 )) || {
+    echo 'this gate found no subshell gates at all — the idiom it recognises has moved' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no subshell gate calls a lib function it never sourced" \
+  no_unsourced_subshell_calls_lib
 # ...and the counterpart for stubs that escalation walks straight past. Every
 # directory this suite puts in front of PATH must come from make_stub_dir, so
 # the fake is reached whether the script calls the command directly or through
