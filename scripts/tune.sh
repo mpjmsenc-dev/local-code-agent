@@ -57,6 +57,39 @@ model_family() {
   printf '%s\n' "${fam}"
 }
 
+# unknown_family_note — the sentence for a MODEL_FAMILY nothing here answers
+# for, or nothing (and non-zero) when the family is known.
+#
+# The fallback above is deliberate and .env.example documents it: "An unknown
+# value falls back to the default rather than failing a pull." What neither
+# said is that it happens without a word. Measured with
+# MODEL_FAMILY=nonsense-model:
+#
+#   lca tune --dry-run   -> qwen2.5-coder:14b, nothing on stderr
+#   lca check            -> "RAM ladder: 16 GiB detected → recommended model
+#                            qwen2.5-coder:14b", and no mention of the setting
+#
+# So 'MODEL_FAMILY=llama3' — a typo for llama3.1, which IS supported — leaves
+# a line in .env that does nothing at all, on every run, for ever, and the one
+# command people run to find out why reports a healthy stack. That is the
+# same shape as the rest of this branch: the setting was ignored and success
+# was reported.
+#
+# choose_for_ram twelve lines down already warns when it drops a family for
+# not fitting the RAM. This project already believed a fallback deserves a
+# word; it was only saying it for one of the two reasons a fallback happens.
+#
+# A note rather than a warn() of its own, so the two callers can each report it
+# in their own register — 'lca tune' warns, 'lca check' counts it — without a
+# second copy of the sentence, and without the helper printing twice because
+# choose_for_ram happens to call model_family more than once.
+unknown_family_note() {
+  local fam="${MODEL_FAMILY:-qwen2.5-coder}"
+  family_sizes "${fam}" >/dev/null 2>&1 && return 1
+  printf "MODEL_FAMILY='%s' is not a family this project knows, so auto-tune ignored it and used qwen2.5-coder instead — that line in .env is doing nothing. The supported names are listed beside MODEL_FAMILY in %s/.env.example." \
+    "${fam}" "${REPO_ROOT}"
+}
+
 # family_sizes FAMILY — echo "SMALL MID BIG": the tags this family publishes for
 # the three RAM rungs. Adding a family here is all it takes to support it.
 # Sizes are the Ollama tags; each must exist for that family.
@@ -183,6 +216,11 @@ main() {
   esac
 
   load_env
+
+  # Said before anything is decided, because everything below is decided with
+  # a family the reader did not choose.
+  local fam_note
+  fam_note="$(unknown_family_note)" && warn "${fam_note}"
 
   local ram
   ram="$(detect_ram_gib)"

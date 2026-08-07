@@ -303,6 +303,10 @@ unset CHECK_DIR
 # the recommendation and told the reader to run the very script that had just
 # chosen correctly. Which is precisely the bug the comment above says was
 # fixed by sourcing. It was only half fixed; this is the other half.
+# Asked before the ladder line below, which reports a model chosen from a
+# family the reader may not have asked for. family_sizes is tune.sh's own, so
+# this cannot drift from what auto-tune actually accepts.
+FAM_NOTE="$(unknown_family_note)" && p_warn "${FAM_NOTE}"
 choose_for_ram "${RAM_GIB}"
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"
 if [[ "${AUTO_TUNE}" != "true" ]]; then

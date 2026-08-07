@@ -10646,6 +10646,84 @@ readme_family_table_matches_the_code() {
   (( $(grep -c . <<<"${tbl}") >= 4 )) || {
     echo 'the MODEL_FAMILY table could not be found in README.md' >&2; return 1; }
 }
+echo "# a MODEL_FAMILY nothing answers for must not be ignored in silence"
+# The fallback is deliberate and .env.example documents it — "An unknown value
+# falls back to the default rather than failing a pull." What neither said is
+# that it happens without a word. Measured end to end, with MODEL_FAMILY=llama3
+# (a typo for llama3.1, which IS supported) written into a real .env:
+#
+#   lca tune --dry-run   -> qwen2.5-coder:14b, nothing on stderr
+#   lca check            -> "recommended model qwen2.5-coder:14b", and no
+#                           mention of the setting anywhere
+#
+# So that line in .env does nothing, on every run, for ever, and the command
+# people run to find out why reports a healthy stack. choose_for_ram already
+# warns when it drops a family for not FITTING; the project believed a
+# fallback deserves a word, and was saying it for only one of the two reasons
+# a fallback happens.
+family_note_for() {  # FAMILY -> the note, or empty when the family is known
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    source "$2" >/dev/null 2>&1
+    MODEL_FAMILY="$3"
+    unknown_family_note || true' _ "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "$2" 2>/dev/null
+}
+every_supported_family_is_accepted() {
+  local f bad=0 seen=0
+  # Read out of family_sizes, so adding a family cannot leave this behind.
+  while read -r f; do
+    [[ -n "${f}" ]] || continue
+    seen=$((seen+1))
+    [[ -z "$(family_note_for _ "${f}")" ]] || {
+      printf 'the supported family %s is reported as unknown\n' "${f}" >&2; bad=1; }
+  done < <(sed -n '/^family_sizes() {$/,/^}$/p' "${REPO}/scripts/tune.sh" \
+           | sed -n 's/^[[:space:]]*\([a-z0-9.-]\{3,\}\))[[:space:]]*printf.*/\1/p')
+  (( seen >= 5 )) || {
+    printf 'only %s families read out of family_sizes — this gate stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every family family_sizes answers for is accepted in silence" \
+  every_supported_family_is_accepted
+unknown_family_is_named_out_loud() {
+  local note
+  note="$(family_note_for _ llama3)"          # the real typo: llama3.1 is supported
+  [[ -n "${note}" ]] || { echo 'a family nothing answers for produces no note' >&2; return 1; }
+  grep -qF "llama3" <<<"${note}" || {
+    printf 'the note does not quote the value that was ignored: %s\n' "${note}" >&2; return 1; }
+  grep -qi 'ignored' <<<"${note}" || {
+    printf 'the note does not say the setting was ignored: %s\n' "${note}" >&2; return 1; }
+  grep -qF '.env.example' <<<"${note}" || {
+    printf 'the note does not say where the supported names are: %s\n' "${note}" >&2; return 1; }
+}
+check "an unknown family is quoted, and called ignored" \
+  unknown_family_is_named_out_loud
+# ...and both surfaces have to say it. 'lca tune' is where the choice is made;
+# 'lca check' is where somebody goes when a setting appears to do nothing.
+both_surfaces_report_an_unknown_family() {
+  local bad=0
+  # Scoped to main(), because unknown_family_note is DEFINED in this file: a
+  # whole-file grep is satisfied by the definition alone with the call gone.
+  # Mutation said so — deleting the call from main() passed the first version
+  # of this gate.
+  awk '/^main\(\) \{/ { inb = 1 }
+       inb && /unknown_family_note/ { found = 1 }
+       inb && /^\}/ { exit }
+       END { exit !found }' "${REPO}/scripts/tune.sh" || {
+    echo 'tune.sh defines the note but main() never asks for it' >&2; bad=1; }
+  grep -q 'unknown_family_note' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh does not report an unknown MODEL_FAMILY' >&2; bad=1; }
+  # check-system counts its warnings; a bare warn() there would print without
+  # being tallied, and the summary would disagree with the screen.
+  grep -qE 'p_warn "\$\{FAM_NOTE\}"' "${REPO}/check-system.sh" || {
+    echo 'check-system.sh reports it without counting it' >&2; bad=1; }
+  return "${bad}"
+}
+check "both 'lca tune' and 'lca check' report an unknown family" \
+  both_surfaces_report_an_unknown_family
+
 check "the README's MODEL_FAMILY rungs match family_sizes" \
   readme_family_table_matches_the_code
 
