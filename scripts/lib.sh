@@ -1749,19 +1749,82 @@ webui_responds() {
   curl -fsS --max-time 3 "$(webui_url)/health" >/dev/null 2>&1
 }
 
+# WEBUI_START_TIMEOUT — how long a chat-app start is allowed to take before we
+# stop calling it a start.
+#
+# It was 120s for 'webui.sh start' and 'restart' and 180s for the installer,
+# and all three numbers were guesses. Measured instead, from the container's
+# own log on this box — every real boot it has had, container start to "Started
+# server process":
+#
+#   2026-08-06 02:09:52 -> 02:10:21     29s
+#   2026-08-06 10:13:20 -> 10:17:50   4m30s
+#   2026-08-06 14:48:54 -> 14:50:51   1m57s
+#   2026-08-06 16:22:52 -> 16:23:08     16s
+#   2026-08-07 02:15:48 -> 02:22:43   6m55s
+#
+# Three of five were at or past 120s, and two were past 180s. Open WebUI loads
+# a SentenceTransformer embedding model before it serves, and on a CPU-only
+# box sharing its cores with Ollama that is minutes, not seconds. So on this
+# hardware the common case — the VPS reboots, both services come up together,
+# the owner logs in and follows the banner's advice — ended in:
+#
+#   [FAIL] Container started but no HTTP answer after 120s
+#
+# about a container that was working perfectly and answered four minutes
+# later. The installer's "first start can take ~1 minute" was wrong by 7x.
+#
+# 600s is the measured worst case with headroom. That is only safe because the
+# wait below now watches the container as well as the port: a start that has
+# actually failed is reported in seconds, not at the end of the clock.
+WEBUI_START_TIMEOUT="${WEBUI_START_TIMEOUT:-600}"
+
 # wait_for_webui [TIMEOUT_SECONDS] — poll Open WebUI's /health until it
 # answers. A cold container start takes noticeably longer than 'docker
 # start' returning, so start/restart/install all wait through this.
+#
+#   0  it answered
+#   1  the deadline passed and the container is STILL RUNNING — slow or stuck
+#   2  the container is no longer running, so waiting cannot help
+#
+# The two failures are different problems with different fixes, and a caller
+# that cannot tell them apart has to hedge. Checked every 30s rather than
+# every poll: 'docker inspect' is far more expensive than a loopback curl, and
+# a container that dies is not in a hurry.
+#
+# The progress line matters as much as the timeout. A silent wait through
+# seven minutes is indistinguishable from a hang, and the honest reading of
+# that silence — "this is broken, Ctrl-C it" — is exactly wrong.
 wait_for_webui() {
-  local timeout="${1:-120}" waited=0
+  local timeout="${1:-${WEBUI_START_TIMEOUT}}" waited=0
   while ! webui_responds; do
     if (( waited >= timeout )); then
       return 1
     fi
     sleep 3
     waited=$((waited+3))
+    (( waited % 30 == 0 )) || continue
+    webui_container_running || return 2
+    if (( waited == 30 )); then
+      info "Still starting. Open WebUI loads an embedding model before it answers anything; on a CPU-only box that has taken up to 7 minutes here." >&2
+    else
+      info "  ...still starting (${waited}s, up to ${timeout}s)." >&2
+    fi
   done
   return 0
+}
+
+# webui_wait_or_die TIMEOUT LOGS_HINT — wait for the chat app, or die naming
+# the reason the wait actually had. Shared by every caller so the distinction
+# wait_for_webui draws is never flattened back into one message.
+webui_wait_or_die() {
+  local timeout="$1" logs="$2" rc=0
+  wait_for_webui "${timeout}" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    2) die "The container stopped while we waited for it, so this is not a slow start — something inside it failed. Its log says what: ${logs}" ;;
+    *) die "Open WebUI still was not answering after ${timeout}s, and its container is still running. That is either a start slower than anything measured here or one that is stuck; the log tells them apart: ${logs}" ;;
+  esac
 }
 
 # --- applied state -----------------------------------------------------------

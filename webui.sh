@@ -199,7 +199,7 @@ main() {
         why="$(port_mismatch_reason || true)"
         [[ -z "${why}" ]] || die "The container is started, but ${why}"
         info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-        wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
+        webui_wait_or_die "${WEBUI_START_TIMEOUT}" "${SCRIPT_DIR}/webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
         drift_note
       else
@@ -219,7 +219,7 @@ main() {
       restart_why="$(port_mismatch_reason || true)"
       [[ -z "${restart_why}" ]] || die "The container is restarted, but ${restart_why}"
       info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-      wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ${SCRIPT_DIR}/webui.sh logs"
+      webui_wait_or_die "${WEBUI_START_TIMEOUT}" "${SCRIPT_DIR}/webui.sh logs"
       ok "Open WebUI restarted."
       drift_note
       ;;

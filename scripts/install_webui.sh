@@ -135,9 +135,11 @@ main() {
   running="$(as_root docker inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null || echo false)"
   [[ "${running}" == "true" ]] || die "Container '${WEBUI_CONTAINER}' is not running. Logs: sudo docker logs ${WEBUI_CONTAINER}"
 
-  info "Waiting for Open WebUI to answer on http://127.0.0.1:${WEBUI_PORT} (first start can take ~1 minute)..."
-  wait_for_webui 180 \
-    || die "Open WebUI did not answer after 180s. Logs: sudo docker logs ${WEBUI_CONTAINER}"
+  # No "~1 minute" here any more: measured on this project's own CPU-only box,
+  # the five real boots of this container took 16s, 29s, 1m57s, 4m30s and
+  # 6m55s. See WEBUI_START_TIMEOUT in scripts/lib.sh.
+  info "Waiting for Open WebUI to answer on http://127.0.0.1:${WEBUI_PORT}. It loads an embedding model first, which on a CPU-only box can take several minutes..."
+  webui_wait_or_die "${WEBUI_START_TIMEOUT}" "sudo docker logs ${WEBUI_CONTAINER}"
   ok "Open WebUI is up on port ${WEBUI_PORT}."
 
   if [[ "${volume_existed}" == "true" && ${#params_env[@]} -gt 0 ]]; then

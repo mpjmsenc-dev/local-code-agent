@@ -6222,16 +6222,139 @@ check "...and points at the one command that fixes it" \
   mismatch_says "lca apply" 8080
 check "an unreadable container is not a mismatch" no_mismatch __unreadable__
 # ...and every wait must consult it, not just the one that always did.
+#
+# 'waits' is counted and required non-zero. This gate previously matched
+# 'wait_for_webui', which webui.sh stopped calling directly the day the wait
+# grew a second failure mode and moved behind webui_wait_or_die — at which
+# point awk matched nothing, set nothing, and reported ok about zero waits.
+# Caught while making that change; the counter is so the next rename cannot
+# do it quietly.
 every_health_wait_checks_the_port() {
   awk '/^[[:space:]]*#/ { next }
        /port_mismatch_reason/ { seen = NR }
-       /wait_for_webui/ {
+       /wait_for_webui|webui_wait_or_die/ {
+         waits++
          if (seen == 0 || NR - seen > 6) { print "unguarded wait at line " NR; bad = 1 }
        }
-       END { exit bad }' "${REPO}/webui.sh"
+       END {
+         if (waits == 0) {
+           print "this gate found no health wait in webui.sh at all — it has been renamed and the gate now checks nothing"
+           bad = 1
+         }
+         exit bad
+       }' "${REPO}/webui.sh"
 }
 check "every health wait explains a port mismatch instead of timing out" \
   every_health_wait_checks_the_port
+
+echo "# a chat app that is slow to start is not one that failed to start"
+# The deadline was 120s for start/restart and 180s for the installer. Measured
+# from the container's own log on this project's CPU-only box, every real boot
+# it has had — container start to "Started server process":
+#
+#   29s, 4m30s, 1m57s, 16s, 6m55s
+#
+# Three of five were at or past 120s and two past 180s: Open WebUI loads an
+# embedding model before it serves, and that competes with Ollama for the same
+# cores. So the ordinary case — the box reboots, both come up, the owner reads
+# the banner and runs the command it gives — ended in "[FAIL] Container
+# started but no HTTP answer after 120s" about a container that answered four
+# minutes later.
+#
+# Raising the number alone would mean a genuinely dead container holds the
+# terminal for ten minutes, so the wait now watches the container too and the
+# two outcomes must stay distinguishable. Driven with a /health that never
+# answers and no real sleeping, so this costs nothing to run.
+wait_outcome() {  # container-alive(yes|no) timeout -> rc
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    sleep() { :; }
+    webui_responds() { return 1; }
+    if [[ "$2" == yes ]]; then webui_container_running() { return 0; }
+    else webui_container_running() { return 1; }; fi
+    rc=0; wait_for_webui "$3" >/dev/null 2>&1 || rc=$?
+    printf "%s" "${rc}"' _ "${REPO}/scripts/lib.sh" "$1" "$2"
+}
+check "a container that is up but not answering times out as 'slow'" \
+  test "$(wait_outcome yes 90)" = 1
+check "a container that has stopped is a different answer, not the same one" \
+  test "$(wait_outcome no 90)" = 2
+# ...and the stopped case must be reported PROMPTLY. Returning 2 only at the
+# deadline would be the same ten-minute stall the long timeout was supposed to
+# be safe from: the check runs every 30s, so a stopped container is named then
+# even when the caller allowed 600.
+check "...and it says so at the first check, not at the deadline" \
+  test "$(wait_outcome no 600)" = 2
+# A silent wait through seven minutes is indistinguishable from a hang, and
+# the honest reading of that silence is "this is broken, kill it".
+wait_is_not_silent() {
+  local out
+  out="$(bash -c '
+    source "$1" >/dev/null 2>&1
+    sleep() { :; }
+    webui_responds() { return 1; }
+    webui_container_running() { return 0; }
+    wait_for_webui 90 2>&1 || true' _ "${REPO}/scripts/lib.sh")"
+  [[ -n "${out}" ]] || { echo 'a multi-minute wait prints nothing at all' >&2; return 1; }
+  grep -qi 'still starting' <<<"${out}" || {
+    printf 'the wait never says it is still working: %s\n' "${out}" >&2; return 1; }
+}
+check "a long wait keeps saying it is still working" wait_is_not_silent
+# ...and the distinction must survive the trip to the user. One message for
+# both outcomes is the hedge this whole change exists to remove.
+wait_die_msg() {  # yes|no -> the message
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    sleep() { :; }
+    webui_responds() { return 1; }
+    if [[ "$2" == yes ]]; then webui_container_running() { return 0; }
+    else webui_container_running() { return 1; }; fi
+    webui_wait_or_die 60 "SEE-THE-LOG"' _ "${REPO}/scripts/lib.sh" "$1" 2>&1 || true
+}
+wait_messages_are_different() {
+  local alive dead
+  alive="$(wait_die_msg yes)"; dead="$(wait_die_msg no)"
+  [[ "${alive}" != "${dead}" ]] || {
+    printf 'a stopped container and a slow one are given the same message: %s\n' "${alive}" >&2
+    return 1; }
+  grep -qi 'still running' <<<"${alive}" || {
+    printf 'the slow case does not say the container is still up: %s\n' "${alive}" >&2; return 1; }
+  grep -qi 'stopped' <<<"${dead}" || {
+    printf 'the stopped case does not say the container stopped: %s\n' "${dead}" >&2; return 1; }
+  grep -qi 'slow' <<<"${dead}" || {
+    printf 'the stopped case does not rule out "it is just slow", which is what the reader will assume: %s\n' "${dead}" >&2
+    return 1; }
+  local m
+  for m in "${alive}" "${dead}"; do
+    grep -qF 'SEE-THE-LOG' <<<"${m}" || {
+      printf 'a failure message does not name the log that would explain it: %s\n' "${m}" >&2
+      return 1; }
+  done
+}
+check "a stopped container and a slow one are told apart, in words" \
+  wait_messages_are_different
+# ...and no script may take the raw wait and collapse it again.
+every_caller_uses_the_deciding_wrapper() {
+  local bad=0 seen=0 f
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ "${f}" == */lib.sh ]] && continue    # where both functions live
+    grep -q 'wait_for_webui' "${f}" || continue
+    seen=$((seen+1))
+    printf '%s calls wait_for_webui directly instead of webui_wait_or_die, so it cannot tell a stopped container from a slow one\n' \
+      "${f##*/}" >&2
+    bad=1
+  done
+  # Nothing to find is the CORRECT state here, so 'seen' is not required to be
+  # non-zero — but the wrapper must exist, or this passes over a repo that
+  # deleted the distinction entirely.
+  grep -q '^webui_wait_or_die()' "${REPO}/scripts/lib.sh" || {
+    echo 'webui_wait_or_die is gone, so nothing is drawing the distinction any more' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no script flattens the two ways a start can fail" \
+  every_caller_uses_the_deciding_wrapper
 
 echo "# a restart is not an apply, and must stop implying that it is"
 # 'docker restart' is stop-then-start of the SAME container, and a container's
