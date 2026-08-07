@@ -172,10 +172,15 @@ main() {
   # without the user retyping the context. Written through a temp file and
   # moved into place, so an interrupted answer cannot leave a half-written
   # exchange that the next -c would treat as complete.
-  local answer_tmp
+  local answer_tmp raw_tmp
   answer_tmp="$(mktemp)"
+  # The RAW body as well as the extracted answer. jq keeps only '.response',
+  # which is exactly nothing when Ollama replies with an error object — and
+  # that object is the only thing that says what went wrong. See the empty-
+  # answer check below the stream.
+  raw_tmp="$(mktemp)"
   # shellcheck disable=SC2064
-  trap "rm -f '${answer_tmp}'" EXIT
+  trap "rm -f '${answer_tmp}' '${raw_tmp}'" EXIT
 
   # Streaming solves the SECOND half of the wait — tokens appearing as they are
   # generated, per the comment above. It cannot touch the first half: a model
@@ -205,6 +210,7 @@ main() {
   local stream_rc=0
   curl -sS --no-buffer --max-time 600 -X POST "$(ollama_url)/api/generate" \
     -H 'Content-Type: application/json' -d "${payload}" \
+    | tee "${raw_tmp}" \
     | jq -rj --unbuffered '.response // empty' \
     | tee "${answer_tmp}" || stream_rc=$?
   printf '\n'
@@ -239,6 +245,34 @@ main() {
       rm -f "${ASK_LAST}.tmp" 2>/dev/null || true
       warn "Could not save this exchange to ${ASK_LAST}, so 'lca ask -c' will have nothing to continue from. Check who owns it: ls -ld ${ASK_STATE_DIR}"
     fi
+  fi
+
+  # An empty answer that exited cleanly is not success.
+  #
+  # 'curl -sS' has no '-f', so an HTTP error arrives as a body with a zero exit
+  # status. Measured against a model that is not installed:
+  #
+  #   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
+  #   {"error":"model 'no-such-model:1b' not found"}   (curl rc=0)
+  #   ...piped through jq '.response // empty' -> nothing, pipeline rc=0
+  #
+  # so 'lca ask' printed nothing, warned about nothing and exited 0, throwing
+  # away the one sentence that named the problem. Observed live too: a cold
+  # 'lca ask -c' produced the "continuing from your last question" line, no
+  # answer, and status 0.
+  #
+  # '-f' is not the fix — it would make curl fail, but it discards the body,
+  # which is the part worth reading. Keeping the raw stream costs one tee and
+  # leaves the streaming behaviour above untouched.
+  if [[ ! -s "${answer_tmp}" ]] && (( stream_rc == 0 )); then
+    local ollama_err
+    ollama_err="$(jq -rj '.error // empty' <"${raw_tmp}" 2>/dev/null || true)"
+    if [[ -n "${ollama_err}" ]]; then
+      err "Ollama refused the request and sent no answer: ${ollama_err}"
+      return 1
+    fi
+    err "${MODEL_NAME} returned an empty answer — the request succeeded but produced no text at all. That usually means the prompt was rejected for length; try a shorter question, or fewer -f files. Check the engine with: lca check"
+    return 1
   fi
 
   if (( stream_rc != 0 )); then

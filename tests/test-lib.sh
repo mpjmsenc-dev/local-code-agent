@@ -11271,6 +11271,78 @@ restore_distinguishes_the_stages() {
 check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
   restore_distinguishes_the_stages
 
+echo "# an answer that never arrived is not an answer"
+# 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
+# body with a zero exit status. Measured against a model that is not installed:
+#
+#   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
+#   {"error":"model 'no-such-model:1b' not found"}      (curl rc=0)
+#
+# piped through jq '.response // empty' that yields nothing, the pipeline
+# exits 0, and the only check afterwards was on the pipeline's status. So the
+# command printed nothing, warned about nothing and exited 0, throwing away the
+# one sentence that named the problem. Seen live as well: a cold 'lca ask -c'
+# printed "continuing from your last question", no answer, status 0.
+#
+# Driven end to end against ask.sh with curl stubbed, because the shape that
+# matters is the whole pipeline — capture, extraction and the check after it.
+# One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
+# it are the generated script's, not this one's — and the body it answers with
+# comes through the environment rather than being interpolated in.
+write_curl_stub() {  # DIR
+  make_stub_dir "$1"
+  cat > "$1/curl" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit 0 ;;
+  esac
+done
+printf '%s' '{"version":"0.32.5"}'
+STUB
+  chmod +x "$1/curl"
+}
+ask_with_stubbed_curl() {  # generate-body -> "rc=N" then stderr
+  local sb="${SANDBOX}/askstub" rc=0 out
+  rm -rf "${sb}"; write_curl_stub "${sb}"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE="$2" \
+         timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>&1 >/dev/null </dev/null)" || rc=$?
+  printf 'rc=%s\n%s\n' "${rc}" "${out}"
+}
+ollama_error_is_not_silence() {
+  local out
+  out="$(ask_with_stubbed_curl _ '{"error":"llama runner process has terminated"}')"
+  grep -q '^rc=0$' <<<"${out}" && {
+    printf 'an Ollama error exits 0, so a script calling this cannot tell: %s\n' "${out}" >&2
+    return 1; }
+  grep -qF 'llama runner process has terminated' <<<"${out}" || {
+    printf "Ollama's own reason is thrown away: %s\\n" "${out}" >&2
+    return 1; }
+}
+check "an error from Ollama is reported, with its own words" \
+  ollama_error_is_not_silence
+empty_answer_is_not_success() {
+  local out
+  out="$(ask_with_stubbed_curl _ '{"response":"","done":true}')"
+  grep -q '^rc=0$' <<<"${out}" && {
+    printf 'an empty answer exits 0: %s\n' "${out}" >&2; return 1; }
+  grep -qi 'empty answer' <<<"${out}" || {
+    printf 'an empty answer is not named as one: %s\n' "${out}" >&2; return 1; }
+}
+check "...and so is an answer with no text in it at all" \
+  empty_answer_is_not_success
+a_real_answer_still_works() {
+  local sb="${SANDBOX}/askok" out rc=0
+  rm -rf "${sb}"; write_curl_stub "${sb}"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"ready","done":true}' \
+         timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>/dev/null </dev/null)" || rc=$?
+  (( rc == 0 )) || { printf 'a good answer now exits %s\n' "${rc}" >&2; return 1; }
+  grep -qF 'ready' <<<"${out}" || { printf 'the answer itself is gone: %s\n' "${out}" >&2; return 1; }
+}
+check "...while a real answer is untouched" a_real_answer_still_works
+
 echo "# a big piped input must not kill the command that exists to read it"
 # 'lca logs | lca ask "why did this fail?"' is the first thing
 # docs/TROUBLESHOOTING.md tells you to run. It died outright — exit 141, no
