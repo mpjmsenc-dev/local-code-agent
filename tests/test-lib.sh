@@ -11777,6 +11777,46 @@ restore_distinguishes_the_stages() {
 check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
   restore_distinguishes_the_stages
 
+# ...and an option it does not take must be refused as one, not read as a
+# filename. It fell through as one, and — after the step banner, so it looked
+# like the restore had already begun — came back as:
+#
+#   ==> Restoring from backup
+#   [FAIL] Backup file not found: --latest
+#
+# "your backup is missing" rather than "that is not a flag I take". This file
+# already argues the point for its readability guard: during a restore is the
+# one moment that conclusion is most expensive.
+#
+# Always with an argument. restore.sh with NO argument finds the newest backup
+# and restores it, and confirm() auto-answers yes off a terminal by design — so
+# a test that ran it bare would restore this machine.
+restore_says() {  # ARG -> "<stdout-bytes>|<stderr>"
+  local out err
+  out="$(timeout 20 bash "${REPO}/restore.sh" "$1" </dev/null 2>/dev/null || true)"
+  err="$(timeout 20 bash "${REPO}/restore.sh" "$1" </dev/null 2>&1 >/dev/null || true)"
+  printf '%s|%s' "${#out}" "${err}"
+}
+restore_refuses_an_option_as_an_option() {
+  local r; r="$(restore_says --latest)"
+  grep -qF 'Unknown option: --latest' <<<"${r}" || {
+    printf 'an option was read as a filename: %s\n' "${r}" >&2; return 1; }
+  # ...and it did not start first: the step banner goes to stdout.
+  [[ "${r}" == "0|"* ]] || {
+    printf 'restore.sh announced the restore before refusing the argument: %s\n' "${r}" >&2
+    return 1; }
+}
+restore_still_reports_a_missing_file() {
+  # The complement, so the refusal cannot have swallowed the real message.
+  local r; r="$(restore_says "${SANDBOX}/no-such-backup.tar.gz")"
+  grep -qF 'Backup file not found' <<<"${r}" || {
+    printf 'a genuinely missing backup was not reported as one: %s\n' "${r}" >&2; return 1; }
+}
+check "restore.sh refuses an option instead of hunting for it" \
+  restore_refuses_an_option_as_an_option
+check "...and still reports a backup that really is missing" \
+  restore_still_reports_a_missing_file
+
 echo "# an answer that never arrived is not an answer"
 # 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
 # body with a zero exit status. Measured against a model that is not installed:

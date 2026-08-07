@@ -205,6 +205,19 @@ main() {
   # --help" — which is a true sentence and a useless one.
   case "${1:-}" in
     -h|--help) usage; exit 0 ;;
+    # An option-looking argument is not a filename. Without this it fell
+    # through as one, and came back — after the step banner, so it looked like
+    # the restore had started — as:
+    #
+    #   [FAIL] Backup file not found: --latest
+    #
+    # which reads as "your backup is missing" rather than "that is not a flag I
+    # take". This file already argues the point for the readability guard
+    # below: during a restore is the one moment that conclusion is most
+    # expensive. restore.sh takes no options but --help.
+    --) shift ;;
+    -?*) usage >&2
+         die "Unknown option: ${1} — restore.sh takes a backup file, or nothing to use the newest. If that really is the name of a file, give it as ./${1} or after --." ;;
   esac
   step "Restoring from backup"
   local tarball="${1:-}"
