@@ -641,13 +641,11 @@ case "$(gpu_state_for_placement "${GPU_PROC}")" in
   *)
     # none | no-driver | unknown. Which of the first two applies was already
     # said by the card/driver lines above; repeating it here would be noise.
-    if [[ -z "${GPU_PROC}" ]]; then
-      info "model '${MODEL_NAME}' is not loaded right now — run a query, then re-check to see CPU/GPU placement"
-    elif [[ "${GPU_PROC}" == *"/"* ]]; then
-      info "model '${MODEL_NAME}' placement reads '${GPU_PROC}', but there is no usable NVIDIA GPU here — this is CPU inference. Ollama reports a split for memory it manages itself; there is no card on this machine to size a model against."
-    else
-      info "model '${MODEL_NAME}' is running on the CPU (${GPU_PROC}) — expected without a GPU"
-    fi
+    # All three sentences moved to placement_summary, because 'lca test' was
+    # printing the raw placement as fact — "Running on: 20%/80% CPU/GPU" on a
+    # box this same command calls CPU-only — and this file was the only one of
+    # the three reporters that had worked out what the string means.
+    info "model '${MODEL_NAME}' $(placement_summary "${GPU_PROC}")"
     ;;
 esac
 

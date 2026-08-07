@@ -2211,6 +2211,104 @@ speed_classifies_the_placement() {
 }
 check "'lca speed' classifies placement instead of matching the string" \
   speed_classifies_the_placement
+# ...and there were THREE reporters, not two. selftest.sh read ollama_processor
+# and printed the string raw, so on this project's own CPU-only box:
+#
+#   $ lca test    ->  [info] Running on: 20%/80% CPU/GPU
+#   $ lca check   ->  [info] no NVIDIA GPU — CPU inference (a reading pace)
+#
+# minutes apart, 'lca test' telling the reader four fifths of their model was
+# on a card the machine does not have. The gates above named check-system.sh
+# and speed.sh by hand, which is why the third one was never asked.
+#
+# placement_summary is the sentence, in lib.sh, so the reporters cannot drift
+# again. Driven through fake lspci/nvidia-smi, the same way gpu_probe does, so
+# every state is reachable on a machine with no GPU.
+placement_says() {  # CARD(yes|no) DRIVER(yes|no) PLACEMENT -> the clause
+  local sb="${SANDBOX}/placement"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
+  if [[ "$1" == yes ]]; then
+    printf '#!/bin/sh\nprintf "%%s\\n" "01:00.0 VGA compatible controller: NVIDIA Corporation GA102"\n' \
+      > "${sb}/stub/lspci"
+    chmod +x "${sb}/stub/lspci"
+  fi
+  if [[ "$2" == yes ]]; then
+    printf '#!/bin/sh\nprintf "%%s\\n" "GPU 0: NVIDIA GeForce RTX 3090"\n' > "${sb}/stub/nvidia-smi"
+    chmod +x "${sb}/stub/nvidia-smi"
+  fi
+  # PATH narrowed INSIDE the child, after sourcing: setting it on the bash
+  # invocation would remove bash itself. Same shape as gpu_probe.
+  LCA_TEST_PATH="$(stub_path "${sb}/stub" "/usr/bin:/bin")" bash -c '
+    set -euo pipefail
+    source "$1" >/dev/null 2>&1
+    PATH="${LCA_TEST_PATH}"
+    placement_summary "$2"' _ "${REPO}/scripts/lib.sh" "$3"
+}
+placement_does_not_invent_a_gpu() {
+  # The measured case: no card, no driver, and Ollama printing a split.
+  local out; out="$(placement_says no no "20%/80% CPU/GPU")"
+  grep -qF 'no usable NVIDIA GPU here' <<<"${out}" || {
+    printf 'a split was reported as fact on a machine with no GPU: %s\n' "${out}" >&2
+    return 1; }
+  grep -qF '20%/80% CPU/GPU' <<<"${out}" || {
+    printf 'the string Ollama actually printed is not quoted: %s\n' "${out}" >&2; return 1; }
+}
+placement_still_reports_a_real_gpu() {
+  # The complement, three ways, so the sentence above cannot be a constant.
+  local bad=0 out
+  out="$(placement_says yes yes "100% GPU")"
+  grep -qF 'is running on the GPU' <<<"${out}" || {
+    printf 'a fully offloaded model was not reported as on the GPU: %s\n' "${out}" >&2; bad=1; }
+  out="$(placement_says yes yes "38%/62% CPU/GPU")"
+  grep -qF 'only partly on the GPU' <<<"${out}" || {
+    printf 'a real split was not reported as one: %s\n' "${out}" >&2; bad=1; }
+  out="$(placement_says yes yes "100% CPU")"
+  grep -qF 'even though a GPU driver is present' <<<"${out}" || {
+    printf 'a driver sitting idle was not reported: %s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+placement_says_nothing_about_a_model_not_loaded() {
+  local out; out="$(placement_says no no "")"
+  grep -qF 'is not loaded right now' <<<"${out}" || {
+    printf 'an unloaded model was described as running somewhere: %s\n' "${out}" >&2; return 1; }
+}
+# ...and the general rule, so a FOURTH reporter cannot repeat this. Reading the
+# placement without classifying it is the bug; the two gates above could only
+# ever catch the two files they name.
+every_reporter_classifies_the_placement() {
+  local f body bad=0 seen=0 subst
+  # Assembled, or shellcheck reads the literal as an expansion that failed to
+  # expand — the same reason lca_subcommands matches on '^case '.
+  subst='$'"(ollama_processor"
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ -f "${f}" ]] || continue
+    body="$(grep -v '^[[:space:]]*#' "${f}")"
+    # Only where the VALUE is used. ask.sh calls ollama_processor as a
+    # presence test — "is the model resident, or warn about the load pause?" —
+    # and sends its output to /dev/null, so it has no placement to classify.
+    # A command substitution is the tell: that is a caller reading the string.
+    grep -qF "${subst}" <<<"${body}" || continue
+    seen=$((seen+1))
+    grep -qE 'gpu_state_for_placement|placement_summary|gpu_state ' <<<"${body}" || {
+      printf '%s reads the placement out of ollama ps and never classifies it — on a CPU-only box Ollama prints a CPU/GPU split for memory it manages itself\n' \
+        "${f##*/}" >&2
+      bad=1
+    }
+  done
+  (( seen >= 3 )) || {
+    printf 'only %s scripts read the placement — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a placement with no GPU behind it is not reported as one" \
+  placement_does_not_invent_a_gpu
+check "...and a real GPU still is, in all three states" \
+  placement_still_reports_a_real_gpu
+check "...and a model that is not loaded is not placed anywhere" \
+  placement_says_nothing_about_a_model_not_loaded
+check "every reporter that reads the placement classifies it" \
+  every_reporter_classifies_the_placement
 
 echo "# vram_mib_from_smi() — picks the LARGEST card, not the first"
 smi_gives() { test "$(printf '%s\n' "$2" | vram_mib_from_smi)" = "$1"; }
@@ -8591,6 +8689,96 @@ check "a connection that failed outright is not a timeout either" \
   test "$(probe_outcome dead)" = refused
 check "a real answer is recorded as ok" \
   test "$(probe_outcome ok)" = ok
+# ...and when Ollama says WHY, that has to reach the reader instead of being
+# reasoned about. model_responds used 'curl -fsS', and -f treats any non-2xx as
+# a failure: curl exits 22 and throws the body away, which is exactly where
+# Ollama puts its reason. Measured against a running server:
+#
+#   curl -sS  ... -d '{"model":"no-such-model:1b",...}'
+#     -> {"error":"model 'no-such-model:1b' not found"}
+#   curl -fsS ... (the same request)
+#     -> rc=22, body empty
+#
+# The consequence was worse than a missing detail. Ollama gives up loading a
+# model after about five minutes and answers 500; MODEL_PROBE_TIMEOUT is 600,
+# deliberately longer. So on a slow cold load Ollama always replies before curl
+# times out, rc is never 28, and the outcome is "refused" — and the refused
+# message asserted "the server answered rather than running out of time, so
+# this is not a slow load". Measured on this box, 'lca test' printing that
+# sentence while its own log read:
+#
+#   Load failed ... error="timed out waiting for llama-server to start - "
+#   [GIN] 500 | 5m1s | POST "/api/generate"
+#
+# The one cause this project is most often actually hit by, ruled out in
+# writing by the message meant to explain it.
+#
+# Through a real probe, not by setting MODEL_PROBE_ERROR by hand: the point is
+# that model_responds records what Ollama said.
+probe_reason() {  # response-body -> the sentence model_silence_reason produces
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    BODY="$2"
+    # Captured first: inside the function, $2 is curl own argument, not ours.
+    curl() { printf "%s" "${BODY}"; }
+    model_responds fake-model 5 >/dev/null 2>&1 || true
+    model_silence_reason' _ "${REPO}/scripts/lib.sh" "$1"
+}
+ollama_reason_survives_the_probe() {
+  local out
+  out="$(probe_reason '{"error":"timed out waiting for llama-server to start - "}')"
+  grep -qF 'timed out waiting for llama-server to start' <<<"${out}" || {
+    printf "Ollama's own reason was thrown away: %s\n" "${out}" >&2; return 1; }
+  # ...and the sentence that ruled that cause out must not be there.
+  ! grep -qF 'not a slow load' <<<"${out}" || {
+    printf 'the message still rules out a slow load while quoting one: %s\n' "${out}" >&2
+    return 1; }
+}
+silence_claims_no_reason_it_does_not_have() {
+  # A server that answered with neither an answer nor an error. There is
+  # nothing to quote, so it must say that rather than invent a cause.
+  local out; out="$(probe_reason '{}')"
+  [[ -n "${out}" ]] || { echo 'no explanation at all for an empty answer' >&2; return 1; }
+  ! grep -qF "Ollama's own answer was" <<<"${out}" || {
+    printf 'quoted a reason Ollama never gave: %s\n' "${out}" >&2; return 1; }
+}
+# ...and the same thing again through a curl that honours -f, because the
+# function stub above sits ABOVE curl's arguments and hands back the body
+# whichever flags it was given — so it cannot catch the flag that caused this.
+# This fake behaves the way the real one was measured to: with -f an HTTP error
+# is exit 22 and no body at all, without it the body comes back.
+reason_through_a_curl_that_honours_f() {
+  local sb="${SANDBOX}/curlflag"
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
+  cat > "${sb}/stub/curl" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    -f*|--fail) exit 22 ;;
+  esac
+done
+printf '%s' '{"error":"timed out waiting for llama-server to start - "}'
+STUB
+  chmod +x "${sb}/stub/curl"
+  PATH="$(stub_path "${sb}/stub")" bash -c '
+    source "$1" >/dev/null 2>&1
+    model_responds fake-model 5 >/dev/null 2>&1 || true
+    model_silence_reason' _ "${REPO}/scripts/lib.sh"
+}
+the_probe_does_not_ask_curl_to_discard_the_body() {
+  local out; out="$(reason_through_a_curl_that_honours_f)"
+  grep -qF 'timed out waiting for llama-server to start' <<<"${out}" || {
+    printf "the probe asked curl to throw away Ollama's reason: %s\n" "${out}" >&2
+    return 1; }
+}
+check "an error body from Ollama reaches the reader" \
+  ollama_reason_survives_the_probe
+check "...and is not thrown away by asking curl to fail on it" \
+  the_probe_does_not_ask_curl_to_discard_the_body
+check "...and no reason is invented when Ollama gave none" \
+  silence_claims_no_reason_it_does_not_have
+check "an error body is still recorded as a refusal, not a timeout" \
+  test "$(probe_outcome empty)" = refused
 # ...and the distinction has to reach the reader, in the right order. RAM does
 # cause this, so it stays — after the cause the measurements actually produced,
 # not instead of it.
@@ -8615,8 +8803,27 @@ silence_reason_leads_with_the_measured_cause() {
     printf 'the timeout message drops RAM entirely, which is a real cause: %s\n' "${slow}" >&2; return 1; }
   (( load_at > 0 && load_at < ram_at )) || {
     printf 'the timeout message reaches RAM before it explains the load: %s\n' "${slow}" >&2; return 1; }
-  grep -qi 'not a slow load' <<<"${refused}" || {
-    printf 'the refusal message does not rule out "it is just still loading": %s\n' "${refused}" >&2
+  # This assertion used to REQUIRE "not a slow load" in the refusal message,
+  # and that is why the claim survived as long as it did. It is false. Ollama
+  # gives up loading a model after about five minutes and answers 500;
+  # MODEL_PROBE_TIMEOUT is 600, deliberately longer. So on a slow cold load
+  # Ollama replies first, curl never reaches its own timeout, the outcome is
+  # "refused" — and the message ruled out precisely what had happened.
+  # Measured on this box, 'lca test' printing that sentence while its own log
+  # read:
+  #
+  #   Load failed ... error="timed out waiting for llama-server to start - "
+  #   [GIN] 500 | 5m1s | POST "/api/generate"
+  #
+  # Inverted, not deleted. The refusal branch reached here has no error body to
+  # quote (model_silence_reason quotes Ollama when there is one, which the two
+  # checks above cover), so what it must do is describe what it saw and NOT
+  # rule out a cause it cannot see.
+  ! grep -qi 'not a slow load' <<<"${refused}" || {
+    printf 'the refusal message rules out a slow load, which is exactly what a 500 after a five-minute load is: %s\n' "${refused}" >&2
+    return 1; }
+  grep -qi 'returned nothing' <<<"${refused}" || {
+    printf 'the refusal message does not say what it actually saw: %s\n' "${refused}" >&2
     return 1; }
 }
 check "a slow load and a refusal are explained differently, load first" \

@@ -93,7 +93,10 @@ else
     # placement is visible — the honest answer to "why is this fast/slow?".
     gpu_proc="$(ollama_processor "${MODEL_NAME}" 2>/dev/null || true)"
     if [[ -n "${gpu_proc}" ]]; then
-      info "Running on: ${gpu_proc}"
+      # Through placement_summary, not the raw string: Ollama prints a
+      # "20%/80% CPU/GPU" split on a CPU-only box, and this reported it as
+      # fact while 'lca check' said "no NVIDIA GPU" on the same machine.
+      info "${MODEL_NAME} $(placement_summary "${gpu_proc}")"
     fi
   else
     p_fail "model '${MODEL_NAME}' did not respond — $(model_silence_reason)"

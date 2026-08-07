@@ -1301,6 +1301,8 @@ MODEL_PROBE_TIMEOUT="${MODEL_PROBE_TIMEOUT:-600}"
 # ok | timeout | refused, and the deadline that applied.
 MODEL_PROBE_OUTCOME=""
 MODEL_PROBE_SECONDS=""
+# Ollama's own words for the last failed probe, when it gave any.
+MODEL_PROBE_ERROR=""
 
 # model_responds MODEL [TIMEOUT] — prove MODEL can actually generate text by
 # asking the running Ollama server for a tiny real completion.
@@ -1309,13 +1311,38 @@ model_responds() {
   local url payload raw rc=0 response
   MODEL_PROBE_OUTCOME="refused"
   MODEL_PROBE_SECONDS="${timeout}"
+  MODEL_PROBE_ERROR=""
   url="$(ollama_url)"
   payload="$(jq -n --arg model "${model}" \
     '{model: $model, prompt: "Reply with the single word: ready", stream: false, options: {num_predict: 16}}')"
   # Not piped into jq: a pipeline's exit status is the LAST command's, and
   # curl's is the whole point here — 28 is its documented "operation timed
   # out", which is the difference between "still loading" and "said no".
-  raw="$(curl -fsS --max-time "${timeout}" -X POST "${url}/api/generate" \
+  #
+  # No -f, and that is the fix. With it, curl treats any non-2xx as a failure,
+  # exits 22 and THROWS THE BODY AWAY — and the body is where Ollama puts its
+  # reason. Measured against a running server:
+  #
+  #   curl -sS  ... -d '{"model":"no-such-model:1b",...}'
+  #     -> {"error":"model 'no-such-model:1b' not found"}
+  #   curl -fsS ... (the same request)
+  #     -> rc=22, body empty
+  #
+  # It mattered most in the case this project is actually on a box for. Ollama
+  # gives up loading a model after about five minutes and answers 500;
+  # MODEL_PROBE_TIMEOUT is 600, deliberately longer. So on a slow cold load
+  # Ollama ALWAYS replies before curl times out, rc is never 28, and the
+  # outcome is "refused" — which made model_silence_reason say "the server
+  # answered rather than running out of time, so this is not a slow load"
+  # about a load that had run out of time. Measured on this box, from its own
+  # log:
+  #
+  #   Load failed ... error="timed out waiting for llama-server to start - "
+  #   [GIN] 500 | 5m1s | POST "/api/generate"
+  #
+  # Same fix ask.sh already carries for the streaming path, which tees the raw
+  # body so Ollama's error survives.
+  raw="$(curl -sS --max-time "${timeout}" -X POST "${url}/api/generate" \
     -H 'Content-Type: application/json' -d "${payload}" 2>/dev/null)" || rc=$?
   if (( rc == 28 )); then
     MODEL_PROBE_OUTCOME="timeout"
@@ -1323,8 +1350,15 @@ model_responds() {
   fi
   (( rc == 0 )) || return 1
   response="$(jq -r '.response // empty' <<<"${raw}" 2>/dev/null || true)"
-  [[ -n "${response}" ]] || return 1
-  MODEL_PROBE_OUTCOME="ok"
+  if [[ -n "${response}" ]]; then
+    MODEL_PROBE_OUTCOME="ok"
+    return 0
+  fi
+  # Kept for the caller to quote. Empty when the answer was not JSON or had no
+  # error in it, which is a different thing from Ollama being silent and must
+  # not be presented as a reason.
+  MODEL_PROBE_ERROR="$(jq -r '.error // empty' <<<"${raw}" 2>/dev/null || true)"
+  return 1
 }
 
 # model_silence_reason — why the last model_responds did not answer.
@@ -1349,8 +1383,15 @@ model_silence_reason() {
   if [[ "${MODEL_PROBE_OUTCOME}" == "timeout" ]]; then
     printf 'it was still not answering after %ss. The first request after a restart has to load the whole model into RAM before it can generate anything, and on this kind of CPU-only box that has been measured at anywhere from 26s to 5 minutes depending on what else is using the cores — so this may be a load that simply had not finished. %s shows "loading model" while it is working and "loaded runners" when it is done. If it never gets there, then check RAM: free -h.' \
       "${MODEL_PROBE_SECONDS}" "$(ollama_log_hint)"
+  elif [[ -n "${MODEL_PROBE_ERROR}" ]]; then
+    # Ollama said why. Quote it instead of reasoning about it: the sentence
+    # below used to be printed here too, and it ruled out the commonest cause
+    # on this kind of box ("this is not a slow load") in exactly the case where
+    # that cause was what Ollama had just reported.
+    printf "Ollama's own answer was: %s. %s has the full log." \
+      "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
   else
-    printf 'the server answered rather than running out of time, so this is not a slow load — it refused or returned nothing. Its own reason is in the log: %s' \
+    printf 'the server answered, without an answer and without saying why — it returned nothing at all. Its own reason may be in the log: %s' \
       "$(ollama_log_hint)"
   fi
 }
@@ -1488,6 +1529,44 @@ gpu_state_for_placement() {
   gpu_hardware_present && card=true
   have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && driver=true
   classify_gpu "${card}" "${driver}" "${1:-}"
+}
+
+# placement_summary PLACEMENT — one honest clause about where the model ran,
+# for a reporter that wants to state it rather than grade it.
+#
+# gpu_state_for_placement's comment says "both reporters used to read that
+# string themselves". There were three. selftest.sh printed it raw:
+#
+#   $ lca test
+#   [info] Running on: 20%/80% CPU/GPU
+#   $ lca check
+#   [info] no NVIDIA GPU — CPU inference (a reading pace)
+#
+# on the same box, minutes apart — 'lca test' telling the reader four fifths of
+# their model was on a card this machine does not have. Ollama 0.32.5 prints
+# that split on a CPU-only host for memory it manages itself, which is why
+# reading the string's shape can never answer the question.
+#
+# The sentence lives here so the reporters cannot drift again: check-system.sh
+# had worked it out and was the only one who had.
+placement_summary() {
+  local placement="${1:-}"
+  [[ -n "${placement}" ]] \
+    || { printf 'is not loaded right now — run a query, then re-check to see CPU/GPU placement'; return 0; }
+  case "$(gpu_state_for_placement "${placement}")" in
+    active) printf 'is running on the GPU (%s)' "${placement}" ;;
+    split)  printf 'is only partly on the GPU (%s) — a split runs at close to CPU speed' "${placement}" ;;
+    idle)   printf 'is running on the CPU (%s) even though a GPU driver is present' "${placement}" ;;
+    *)
+      # none | no-driver | unknown. A slash here is Ollama's own bookkeeping,
+      # not a device: say so rather than quote it as a fact about hardware.
+      if [[ "${placement}" == */* ]]; then
+        printf "placement reads '%s', but there is no usable NVIDIA GPU here — this is CPU inference. Ollama reports a split for memory it manages itself; there is no card on this machine to size a model against." "${placement}"
+      else
+        printf 'is running on the CPU (%s)' "${placement}"
+      fi
+      ;;
+  esac
 }
 
 # gpu_state — the same, reading the placement for MODEL itself.
