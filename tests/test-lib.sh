@@ -11393,6 +11393,60 @@ ask_keeps_its_answer_stream_clean() {
 check "'lca ask' puts nothing but the answer on stdout" \
   ask_keeps_its_answer_stream_clean
 
+echo "# 'every command explains itself' is a promise lca help makes in writing"
+# The line is in 'lca help' verbatim: "Every command explains itself, and only
+# explains itself:  lca <command> --help". bin/lca already carries a comment
+# invoking it — 'lca chat --help' used to print the phone address instead of
+# explaining anything, and was fixed by forwarding "$@" to webui.sh. What
+# arrived there was webui.sh's usage: a page about 'lca webui' that did not
+# contain the word chat anywhere except "chat history is kept in the docker
+# volume". Measured across all seventeen subcommands, it was the only one whose
+# help never named it.
+#
+# The subcommand list is read out of bin/lca, so a new one cannot slip past
+# this, and every --help is actually RUN rather than grepped for.
+lca_subcommands() {
+  # '^case ' rather than the full 'case "${cmd}" in': the literal would put a
+  # ${...} inside a single-quoted sed script, which reads as an expansion that
+  # failed to expand. There is only one top-level case in this file.
+  sed -n '/^case /,/^esac$/p' "${REPO}/bin/lca" \
+    | sed -n 's/^  \([a-z][a-z0-9|]*\)).*/\1/p' | tr '|' '\n' | sort -u
+}
+every_command_explains_itself() {
+  local c out bad=0 seen=0
+  while read -r c; do
+    [[ -n "${c}" && "${c}" != "help" ]] || continue
+    seen=$((seen+1))
+    out="$(timeout 30 "${REPO}/bin/lca" "${c}" --help </dev/null 2>&1)" || {
+      printf "'lca %s --help' exited non-zero\n" "${c}" >&2
+      bad=1
+      continue
+    }
+    # Named as a COMMAND, not merely present as a string. A plain substring
+    # match passed the unfixed 'lca chat --help' on the words "chat history is
+    # kept in the docker volume" — the mutation said so, and a gate satisfied
+    # by an unrelated sentence is worse than none. The three forms every help
+    # page here actually uses: "lca X", the script "X.sh", or X inside a
+    # <a|b|c> alternation.
+    grep -qE "(lca ${c}\b|${c}\.sh|[<|]${c}[|>])" <<<"${out}" || {
+      printf "'lca %s --help' never names %s as a command, so it explains some other one\n" "${c}" "${c}" >&2
+      bad=1
+    }
+  done < <(lca_subcommands)
+  (( seen >= 15 )) || {
+    printf 'only %s subcommands read out of bin/lca - this gate stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  # ...and the promise itself must still be there to be kept.
+  grep -qF 'Every command explains itself' "${REPO}/bin/lca" || {
+    echo "bin/lca no longer promises that every command explains itself" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every 'lca <command> --help' explains that command" \
+  every_command_explains_itself
+
 echo "# a big piped input must not kill the command that exists to read it"
 # 'lca logs | lca ask "why did this fail?"' is the first thing
 # docs/TROUBLESHOOTING.md tells you to run. It died outright — exit 141, no

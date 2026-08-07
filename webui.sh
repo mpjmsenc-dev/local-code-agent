@@ -7,6 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
+# Also the help text for 'lca chat', which bin/lca dispatches straight to
+# 'webui.sh url'. That mattered: 'lca chat --help' used to print the address
+# instead of explaining anything, bin/lca fixed it by forwarding "$@" here, and
+# what arrived was a page about 'lca webui' that never contained the word chat
+# — one line after 'lca help' promises that every command explains itself. So
+# 'url' names the alias, and says what it really prints, which is more than an
+# address.
 usage() {
   cat <<EOF
 Usage: lca webui <command>       (or webui.sh directly)
@@ -16,7 +23,8 @@ Commands:
   stop      Stop it (chat history is kept in the docker volume)
   restart   Restart it
   status    Container state + HTTP health on port ${WEBUI_PORT}
-  url       Print the address to open on your phone
+  url       Phone setup: the chat URL and the SSH address, both as QR codes.
+            'lca chat' is a shortcut for exactly this.
   logs      Follow the container logs (Ctrl-C to stop)
 
 To (re)create the container after editing .env, run: sudo lca apply
