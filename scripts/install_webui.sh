@@ -25,7 +25,7 @@ main() {
   # docker info" — pre-empting the message on the very next line, which is the
   # one that tells the reader what to actually do.
   docker_daemon_reachable \
-    || die "The Docker daemon is not reachable. Start it with: $(docker_start_hint) (or re-run this as root if you cannot sudo)."
+    || die "The Docker daemon is not reachable. $(docker_unreachable_advice)."
 
   if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
     net_guard "Pulling the Open WebUI image"

@@ -7230,10 +7230,27 @@ docker_advice_is_conditional() {
     fi
     # if/fi rather than 'A && B': CONTRIBUTING trap #2, and errexit reads an
     # AND-list's tail differently from a plain command.
-    if [[ "${f}" != */lib.sh ]] && grep -q 'docker_start_hint' <<<"${body}"; then
+    #
+    # Either helper counts. docker_unreachable_advice wraps this one to add the
+    # "what works for THIS USER" half, so a message that routes through it is
+    # still asking the host how — but only as long as that wrapper really does
+    # call it, which is asserted below rather than assumed. Without that, moving
+    # messages behind the wrapper would be a way to lose the question quietly.
+    if [[ "${f}" != */lib.sh ]] \
+       && grep -qE 'docker_start_hint|docker_unreachable_advice' <<<"${body}"; then
       callers=$((callers + 1))
     fi
   done
+  local wrapper
+  wrapper="$(sed -n '/^docker_unreachable_advice() {$/,/^}$/p' "${REPO}/scripts/lib.sh")"
+  [[ -n "${wrapper}" ]] || {
+    echo 'docker_unreachable_advice is gone, and messages were routed through it' >&2
+    bad=1
+  }
+  if [[ -n "${wrapper}" ]] && ! grep -q 'docker_start_hint' <<<"${wrapper}"; then
+    echo 'docker_unreachable_advice no longer asks docker_start_hint, so every message behind it stopped asking the host how' >&2
+    bad=1
+  fi
   # webui.sh, restore.sh, scripts/apply.sh, scripts/install_webui.sh and
   # check-system.sh. Counted, so silently dropping the hint from a message is a
   # failure rather than one fewer literal to find.
@@ -7246,6 +7263,79 @@ docker_advice_is_conditional() {
 }
 check "every 'start Docker' message asks the host how, instead of assuming systemd" \
   docker_advice_is_conditional
+
+echo "# ...and none may offer root a remedy that only works for somebody else"
+# docker_start_hint answers "what works on this host". The second half of the
+# same question is "what works for this user", and three messages answered it
+# with a fixed list. Measured on this box with the daemon genuinely down and
+# the command run as root:
+#
+#   [FAIL] Cannot reach the Docker daemon as 'root'. Start it (...), or add
+#          yourself to the docker group (sudo .../install_docker.sh) and log
+#          out/in, or re-run this as root.
+#
+# Group membership is not consulted for uid 0 and root cannot re-run anything
+# as root, so two of the three remedies are for a different reader — and the
+# one that can work is between them. check-system.sh has always known the rule
+# ("running as root — docker group membership not needed"); these three never
+# asked. Both arms driven through am_root, so neither depends on who is running
+# the suite.
+advice_as() {  # root | notroot -> the sentence
+  bash -c '
+    set -uo pipefail
+    source "$1"
+    AMROOT="$2"
+    am_root() { [[ "${AMROOT}" == root ]]; }
+    docker_unreachable_advice' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
+}
+advice_fits_the_reader() {
+  local as_root_says as_user_says
+  as_root_says="$(advice_as _ root)"
+  as_user_says="$(advice_as _ notroot)"
+  [[ -n "${as_root_says}" && -n "${as_user_says}" ]] || {
+    echo 'docker_unreachable_advice printed nothing' >&2; return 1; }
+  grep -qi 'docker group' <<<"${as_root_says}" && {
+    printf 'root is told to join the docker group: %s\n' "${as_root_says}" >&2; return 1; }
+  grep -qi 're-run this as root' <<<"${as_root_says}" && {
+    printf 'root is told to re-run as root: %s\n' "${as_root_says}" >&2; return 1; }
+  # ...and the remedy that DOES work must survive the trimming.
+  grep -qi 'start it' <<<"${as_root_says}" || {
+    printf 'root is left with no remedy at all: %s\n' "${as_root_says}" >&2; return 1; }
+  # The non-root reader keeps all three: for them every one is reachable.
+  local want
+  for want in 'docker group' 're-run this as root' 'start it'; do
+    grep -qi -- "${want}" <<<"${as_user_says}" || {
+      printf 'an ordinary user loses a remedy that works for them (%s): %s\n' "${want}" "${as_user_says}" >&2
+      return 1; }
+  done
+}
+check "root is not told to join a group it is not consulted for" \
+  advice_fits_the_reader
+# ...and no script may write that list out by hand again.
+no_script_hardcodes_docker_remedies() {
+  local bad=0 seen=0 f body
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    [[ "${f}" == */lib.sh ]] && continue                 # where the helper lives
+    [[ "${f}" == */install_docker.sh ]] && continue      # it does the adding
+    [[ "${f}" == */check-system.sh ]] && continue        # reports membership, and already branches on root
+    body="$(sed 's/^[[:space:]]*#.*//' "${f}")"
+    grep -qiE 'add yourself to the docker group|re-run (this )?as root if you cannot sudo' <<<"${body}" || continue
+    printf '%s hands out docker remedies without asking who is reading\n' "${f##*/}" >&2
+    bad=1
+  done
+  # The helper must still be used somewhere, or this passes over a repo that
+  # deleted the distinction rather than one that keeps it.
+  for f in "${REPO}"/webui.sh "${REPO}"/scripts/install_webui.sh "${REPO}"/scripts/logs.sh; do
+    grep -q 'docker_unreachable_advice' "${f}" && seen=$((seen+1))
+  done
+  (( seen == 3 )) || {
+    printf 'only %s of the 3 daemon-unreachable messages ask who is reading\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no script writes the docker remedies out by hand" \
+  no_script_hardcodes_docker_remedies
 
 echo "# ...and neither may the model engine's own diagnostics"
 # The same fault, in the messages that fire when inference fails — which is the

@@ -94,7 +94,7 @@ logs_webui() {
   # account, the reader does the same two things. check-system.sh splits them
   # because telling them apart IS its job; here it would be noise.
   if ! docker_daemon_reachable; then
-    info "The Docker daemon could not be reached from this account, so the chat app's logs were not read — which says nothing about whether it is running. Start the daemon ($(docker_start_hint)), or re-run as root, then try again."
+    info "The Docker daemon could not be reached from this account, so the chat app's logs were not read — which says nothing about whether it is running. $(docker_unreachable_advice), then try again."
     return 0
   fi
   local -a cmd=(docker logs --tail "${lines}" "${WEBUI_CONTAINER}")

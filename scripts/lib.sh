@@ -283,6 +283,37 @@ docker_start_hint() {
   fi
 }
 
+# docker_unreachable_advice — what to DO about a daemon this account cannot
+# reach, given who this account is.
+#
+# docker_start_hint above asks "what works on this host". This asks the second
+# half of the same question, "what works for this user", and three messages
+# answered it with a fixed list. Measured on this box with the daemon genuinely
+# down, running as root:
+#
+#   [FAIL] Cannot reach the Docker daemon as 'root'. Start it (...), or add
+#          yourself to the docker group (sudo .../install_docker.sh) and log
+#          out/in, or re-run this as root.
+#
+# Two of those three remedies belong to somebody else. root is not missing from
+# the docker group — group membership is not consulted for uid 0 — and root
+# cannot re-run anything as root. So the only remedy that can work is the first
+# one, offered in the middle of two that cannot, to a reader whose daemon is
+# down and who is reading this precisely because they do not know what to do.
+#
+# check-system.sh has always known the rule: "running as root — docker group
+# membership not needed". Three messages never asked. Same rule as
+# docker_start_hint, chat_address() and the 'lca' rows in the banner: do not
+# hand the reader a command that cannot work where they are standing.
+docker_unreachable_advice() {
+  if am_root; then
+    printf 'Start it: %s' "$(docker_start_hint)"
+  else
+    printf 'Start it (%s), or add yourself to the docker group (sudo %s/scripts/install_docker.sh) and log out/in, or re-run this as root' \
+      "$(docker_start_hint)" "${REPO_ROOT}"
+  fi
+}
+
 # ollama_log_hint — where to read the model engine's own output ON THIS HOST.
 #
 # Three messages sent people to 'journalctl -u ollama' unconditionally:
