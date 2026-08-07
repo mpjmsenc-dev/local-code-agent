@@ -231,6 +231,24 @@ main() {
     info "Using newest backup: ${tarball}"
   fi
   [[ -f "${tarball}" ]] || die "Backup file not found: ${tarball}"
+  # ...and "it is there" is not "I can open it".
+  #
+  # Every archive backup.sh writes is 0600 — it holds the chat app's
+  # session-signing key — and until the commit before this one 'sudo lca
+  # backup' left it owned by root inside a directory owned by the human. So on
+  # any box that took a backup before that, this is the ordinary state, not a
+  # corner. tar's own reason is thrown away by the '2>&1' below, and what the
+  # reader got instead was, measured:
+  #
+  #   [FAIL] '...tar.gz' is not a readable gzip archive — it is corrupt or
+  #          truncated. Nothing was changed. Try an older backup in ...
+  #
+  # about an archive that was perfectly good. And every older backup is owned
+  # the same way, so following that advice produces the same verdict for all of
+  # them, and the reader concludes they have no usable backups at all — during
+  # a restore, which is the one moment that conclusion is most expensive.
+  readable_by_us "${tarball}" \
+    || die "'${tarball}' cannot be read by '$(id -un)': it is owned by $(stat -c %U "${tarball}" 2>/dev/null || echo 'another account') and archives are deliberately owner-only, because one contains the chat app's session-signing key. That says nothing about whether the archive is good — re-run this with sudo, and do not go looking for an older backup, which will be owned the same way."
 
   # workdir stays global: the EXIT trap runs after main() returns, where a
   # local would already be out of scope (unbound under set -u).

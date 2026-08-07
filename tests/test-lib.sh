@@ -1490,15 +1490,55 @@ check "a readable directory reads as readable" readable_by_us "${SANDBOX}"
 # for.
 missing_path_is_not_readable() { ! readable_by_us "${SANDBOX}/no-such-dir-here"; }
 check "...and a path that does not exist does not" missing_path_is_not_readable
-# Both bits: a directory with r and no x lists names but cannot stat them, and
-# a glob over it comes back empty — the same silence this whole check exists to
-# stop being mistaken for an answer.
-readable_needs_both_bits() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/scripts/lib.sh")"
-  grep -qE 'readable_by_us\(\).*-r .*&&.*-x ' <<<"${body}"
+# Both bits for a DIRECTORY: r lists the names, x stats what is in them, and a
+# glob over a directory with only one of the two comes back empty — the same
+# silence this whole check exists to stop being mistaken for an answer. But a
+# regular file needs r alone.
+#
+# The FILE arm is behavioural and deterministic on any account. Measured:
+#
+#   mode 600 regular file   [[ -x ]]  false as root AND as an ordinary user
+#   mode 600 directory      [[ -x ]]  TRUE as root, false as an ordinary user
+#
+# because root may traverse any directory but still needs a real execute bit on
+# a file. So the file case can be asserted here and the directory case cannot —
+# claiming otherwise would be exactly the environment-dependent gate this suite
+# keeps removing, and I wrote that claim first and the measurement corrected it.
+#
+# The file case is also the one that catches the real regression: the first
+# version of this helper required x of everything, and every backup archive is
+# 0600, so it called them unreadable for root as well.
+readability_is_about_the_right_bits() {
+  local d="${SANDBOX}/readbits" rc=0
+  rm -rf "${d}"; mkdir -p "${d}/dir"
+  : > "${d}/file"
+  chmod 600 "${d}/file"          # what backup.sh writes: readable, never executable
+  readable_by_us "${d}/file" || {
+    echo 'a 0600 file reads as unreadable — that is every backup archive this project makes' >&2
+    rc=1
+  }
+  readable_by_us "${d}/dir" || {
+    echo 'an ordinary directory reads as unreadable' >&2
+    rc=1
+  }
+  return "${rc}"
 }
-check "readability means both list and stat" readable_needs_both_bits
+check "a 0600 file is readable, and so is an ordinary directory" \
+  readability_is_about_the_right_bits
+# ...and the directory half, which no account here can exercise, asserted on
+# the code: it must still special-case a directory and still want x of one.
+readability_still_wants_x_of_a_directory() {
+  local body
+  body="$(sed -n '/^readable_by_us() {$/,/^}$/p' "${REPO}/scripts/lib.sh")"
+  [[ -n "${body}" ]] || { echo 'readable_by_us is gone' >&2; return 1; }
+  grep -q -- '-d ' <<<"${body}" || {
+    echo 'readable_by_us no longer treats a directory differently from a file' >&2; return 1; }
+  grep -q -- '-x ' <<<"${body}" || {
+    echo 'readable_by_us no longer wants the execute bit on a directory, so a glob over one comes back silently empty' >&2
+    return 1; }
+}
+check "...and a directory is still required to be traversable" \
+  readability_still_wants_x_of_a_directory
 # ...and the two readers must ask before they conclude. Ordering, not mere
 # presence: a readability check AFTER the search is a check about a result that
 # already means nothing.
@@ -1533,6 +1573,49 @@ unreadable_is_not_reported_as_empty() {
 }
 check "an unreadable backups directory is reported as unknown, not as empty" \
   unreadable_is_not_reported_as_empty
+# ...and the same distinction one step further in. 'tar tzf' is run with its
+# stderr discarded, so an archive this account cannot open and one that is
+# genuinely damaged both arrived at:
+#
+#   [FAIL] '...tar.gz' is not a readable gzip archive — it is corrupt or
+#          truncated. Nothing was changed. Try an older backup in ...
+#
+# Measured against a perfectly good archive, as the human who owned the
+# directory it was sitting in. Every archive is 0600 because one holds the chat
+# app's session-signing key, and until recently 'sudo lca backup' left them
+# owned by root — so this was the ordinary state of any box that had ever taken
+# a backup, and every OLDER backup is owned the same way. Following that advice
+# gives the same verdict for all of them, during a restore.
+restore_tells_unreadable_from_corrupt() {
+  local body first second
+  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/restore.sh")"
+  # Asked BEFORE the archive is opened, or the message is about a result that
+  # already means nothing.
+  # Both anchored on the tarball itself. A bare 'tar tzf' also appears inside
+  # the container script restore_webui_volume feeds to docker, far above this,
+  # and matching that one made the gate report the check as coming too late.
+  first="$(grep -n "readable_by_us \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
+  second="$(grep -n "tar tzf \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${first}" && -n "${second}" ]] || {
+    echo 'restore.sh no longer checks the tarball for readability before opening it' >&2
+    return 1; }
+  (( first < second )) || {
+    echo 'restore.sh opens the tarball before asking whether it can read it' >&2
+    return 1; }
+  # ...and the two must not say the same thing.
+  grep -q 'cannot be read by' <<<"${body}" || {
+    echo 'restore.sh does not name a permission problem as one' >&2; return 1; }
+  # The corrupt message sends people to an older backup; the permission one
+  # must not, because every older backup is owned the same way.
+  # A flag, not 'exit 1' inside the rule: awk runs END even after exit, so an
+  # 'END { exit 0 }' there overrides it and the gate passes. Written that way
+  # first, and the mutation said so.
+  awk '/cannot be read by/ && /Try an older backup/ { bad = 1 } END { exit bad }' <<<"${body}" || {
+    echo 'the permission message sends the reader to an older backup, which is owned the same way' >&2
+    return 1; }
+}
+check "an archive it cannot open is not called corrupt" \
+  restore_tells_unreadable_from_corrupt
 # ...and it must NOT escalate when there is nobody to escalate to: a needless
 # 'sudo -u me' on a box without passwordless sudo is a health check that stops
 # for a password.

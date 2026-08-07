@@ -211,13 +211,20 @@ apt_get() {
 # as anybody else can never reach the other.
 writable_by_us() { [[ -w "$1" ]]; }
 
-# readable_by_us DIR — true when this process could actually list DIR.
+# readable_by_us PATH — true when this process could actually read PATH.
 #
-# Both bits, because a directory needs r to list the names and x to stat what
-# is in them, and a glob over a directory with only one of the two comes back
-# empty rather than failing. Same seam, same reason: root reads everything, so
-# the arm that matters is unreachable on a suite running as root.
-readable_by_us() { [[ -r "$1" && -x "$1" ]]; }
+# For a directory that means both bits: r lists the names, x stats what is in
+# them, and a glob over a directory with only one of the two comes back empty
+# rather than failing. For a regular file r is the whole question — requiring x
+# as well would call every backup archive unreadable, since they are 0600.
+#
+# Same seam, same reason as writable_by_us above: root reads everything, so the
+# arm that matters is unreachable on a suite running as root.
+readable_by_us() {
+  [[ -r "$1" ]] || return 1
+  [[ -d "$1" ]] || return 0
+  [[ -x "$1" ]]
+}
 
 # sudo_would_block — true when becoming root is possible in principle but not
 # in THIS run: sudo is installed, it will ask for a password, and there is no
