@@ -8715,6 +8715,74 @@ setup_refusal_precedes_every_side_effect() {
 check "setup.sh refuses an option before it installs anything" \
   setup_refusal_precedes_every_side_effect
 
+echo "# every entry point either refuses an argument it does not know, or forwards it"
+# Six files needed this fixed, one at a time, and each carried a comment saying
+# the previous one had taught the lesson: webui.sh diagnosed a typo as a Docker
+# outage, netmode.sh printed its usage to stdout and named nothing, restore.sh
+# read '--latest' as a filename and answered "Backup file not found", and
+# install.sh, setup.sh and deploy/do-user-data.sh each performed a full install
+# when handed a flag they did not recognise. In every one of them --help had
+# already been fixed for exactly that reason, and the rest of the option space
+# left open.
+#
+# The rule is not "must have a catch-all arm". It is: either refuse what you do
+# not understand, or pass it on to something that does. run-agent.sh is exempt
+# on its own evidence — it execs aider with "$@", which is what makes
+# 'lca --no-auto-commits' work — not because it is named here.
+#
+# The list is bin/lca's own exec targets plus the installers, so a subcommand
+# added tomorrow is covered the day it ships.
+#
+# What this gate does NOT do, stated plainly: it asks whether a file has a
+# refusing catch-all somewhere, not whether the ARGUMENT-parsing one refuses.
+# Measured — webui.sh has three catch-all arms, and replacing the argument
+# guard with ':' still satisfied it because the dispatch fallback below carries
+# a die of its own. Deleting the only refusal in a file IS caught (verified
+# against restore.sh), which is the regression this shape actually suffers.
+# The specific arms are covered behaviourally, per file, by the checks that
+# drive webui.sh, netmode.sh, restore.sh, install.sh, ask.sh, logs.sh and
+# do-user-data.sh with an argument they do not take.
+entry_points() {
+  local t strip
+  # Assembled: a literal ${REPO} inside a single-quoted sed script reads to
+  # ShellCheck as an expansion that failed to expand.
+  local strip; strip='s|exec "$'"{REPO}/||; s|\"$||"
+  grep -oE 'exec "\$\{REPO\}/[^"]+"' "${REPO}/bin/lca" | sed "${strip}" | sort -u
+  for t in install.sh setup.sh uninstall.sh deploy/do-user-data.sh bin/lca; do
+    printf '%s\n' "${t}"
+  done
+}
+every_entry_point_refuses_or_forwards() {
+  local t body arm bad=0 seen=0
+  while read -r t; do
+    [[ -n "${t}" && -f "${REPO}/${t}" ]] || continue
+    seen=$((seen+1))
+    # Comments stripped first: every one of these arms carries a paragraph
+    # explaining the bug it fixes, and a five-line window that counts comments
+    # sees nothing but prose. Measured — this gate reported setup.sh and
+    # do-user-data.sh unguarded hours after they were fixed.
+    body="$(grep -v '^[[:space:]]*#' "${REPO}/${t}")"
+    # Forwarding everything is the other legitimate answer.
+    grep -qE 'exec .*"\$@"' <<<"${body}" && continue
+    arm="$(awk '/^[[:space:]]*(\*\)|-\?\*\)|-\*\))/ { c = 5 } c-- > 0' <<<"${body}")"
+    # 'return 1' and a bare 'echo ... >&2' count too: do-user-data.sh refuses
+    # that way, because it runs under a tee and must not exit the pipeline
+    # itself. A gate that only recognised die/err/exit reported it unguarded.
+    grep -qE '(die |die"|fail |err |exit 1|return 1|>&2)' <<<"${arm}" || {
+      printf '%s neither refuses an argument it does not know nor forwards it — a mistyped flag is silently ignored and it runs anyway\n' \
+        "${t}" >&2
+      bad=1
+    }
+  done < <(entry_points)
+  (( seen >= 15 )) || {
+    printf 'only %s entry points found — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every entry point refuses an unknown argument, or forwards it" \
+  every_entry_point_refuses_or_forwards
+
 # ...on EVERY failing exit, not only the orderly one at the end of main.
 #
 # Three things read setup.sh's output rather than its status: do-user-data.sh
