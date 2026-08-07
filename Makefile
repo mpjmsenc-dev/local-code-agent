@@ -26,7 +26,7 @@ SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*
 .PHONY: gates lint syntax test coverage dry-run check smoke bench hooks help
 .DEFAULT_GOAL := help
 
-gates: syntax lint test ## Everything CI gates on, locally
+gates: syntax lint test ## The CI gates that can run locally (2 of CI's 6 jobs)
 	@echo "== gates passed =="
 
 lint: ## ShellCheck, same invocation as CI

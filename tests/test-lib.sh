@@ -10773,6 +10773,46 @@ check "the tune advice quotes the number pull_model uses" \
   tune_note_quotes_the_number_pull_model_uses
 check "the FAQ does not promise more than the ruleset delivers" \
   faq_does_not_overclaim_offline
+# ...and neither may the pre-push hook. It said it runs "the exact gates CI
+# runs, so a push never opens a red PR", and that is false twice over, both
+# measured on this project:
+#
+#   CI has five jobs and 'make gates' runs two. The other three need a fresh
+#   machine — the nft/systemd artifact job, the minimal-base install, and the
+#   Open WebUI end-to-end container and backup/restore.
+#
+#   And the two it does run answer differently there. CI's runner is a non-root
+#   passwordless sudoer with a real Docker daemon; a developer box is usually
+#   root, where nothing escalates. Two pushes on this branch went green here and
+#   red there for exactly that: a PATH stub sudo walked past, and a DOCKER_HOST
+#   sudo stripped.
+#
+# A promise a tool cannot keep is worse than no promise: it is the reason
+# nobody watches the run.
+hook_does_not_promise_more_than_it_runs() {
+  local hook="${REPO}/.githooks/pre-push" body jobs ran
+  [[ -r "${hook}" ]] || { echo 'the pre-push hook is missing' >&2; return 1; }
+  body="$(cat "${hook}")"
+  grep -qiE 'never opens a red PR|exact gates CI runs|everything CI gates on' <<<"${body}" && {
+    echo 'the pre-push hook promises a green CI it cannot deliver — it runs a subset of the jobs, on a different account' >&2
+    return 1; }
+  # ...and it has to say how many it is a subset OF, so adding a CI job that
+  # cannot run locally is visible rather than silently widening the gap.
+  jobs="$(grep -cE '^    name: ' "${REPO}/.github/workflows/ci.yml" || true)"
+  (( jobs > 0 )) || { echo 'could not count the CI jobs' >&2; return 1; }
+  grep -qE "CI has ${jobs} jobs" <<<"${body}" || {
+    printf 'the hook does not say how many CI jobs there are (%s now) — a new one widens the gap silently\n' \
+      "${jobs}" >&2
+    return 1; }
+  # The Makefile target's own help line made the same claim.
+  ran="$(grep -E '^gates:' "${REPO}/Makefile")"
+  grep -qiE 'everything|all of' <<<"${ran}" && {
+    printf "'make gates' still claims to be everything CI gates on: %s\n" "${ran}" >&2
+    return 1; }
+  return 0
+}
+check "the pre-push hook does not promise a green CI it cannot deliver" \
+  hook_does_not_promise_more_than_it_runs
 
 echo "# five failure paths that reported the wrong thing, or nothing"
 # Each of these was verified by running the mechanism, not by reading it.
