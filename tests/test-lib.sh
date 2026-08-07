@@ -11289,7 +11289,17 @@ echo "# an answer that never arrived is not an answer"
 # One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
 # it are the generated script's, not this one's — and the body it answers with
 # comes through the environment rather than being interpolated in.
-write_curl_stub() {  # DIR
+#
+# 'ollama' is stubbed as well as curl, and that is not belt-and-braces: ask.sh
+# checks model_present (which runs 'ollama show') before it generates anything,
+# and CI's unit job has neither the binary nor the model. Without this the
+# three gates below passed here and failed there with
+#
+#   [FAIL] Model 'qwen2.5-coder:7b' is not downloaded.
+#
+# which is ask.sh being right and the test being environment-dependent — the
+# exact class this file carries systemic guards for, introduced by me.
+write_ask_stubs() {  # DIR
   make_stub_dir "$1"
   cat > "$1/curl" <<'STUB'
 #!/bin/sh
@@ -11300,11 +11310,19 @@ for a in "$@"; do
 done
 printf '%s' '{"version":"0.32.5"}'
 STUB
-  chmod +x "$1/curl"
+  cat > "$1/ollama" <<'STUB'
+#!/bin/sh
+# Only what ask.sh asks: 'ollama show MODEL' decides model_present.
+case "${1:-}" in
+  show) exit 0 ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$1/curl" "$1/ollama"
 }
 ask_with_stubbed_curl() {  # generate-body -> "rc=N" then stderr
   local sb="${SANDBOX}/askstub" rc=0 out
-  rm -rf "${sb}"; write_curl_stub "${sb}"
+  rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
   out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE="$2" \
          timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>&1 >/dev/null </dev/null)" || rc=$?
@@ -11334,7 +11352,7 @@ check "...and so is an answer with no text in it at all" \
   empty_answer_is_not_success
 a_real_answer_still_works() {
   local sb="${SANDBOX}/askok" out rc=0
-  rm -rf "${sb}"; write_curl_stub "${sb}"
+  rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
   out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"ready","done":true}' \
          timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>/dev/null </dev/null)" || rc=$?
