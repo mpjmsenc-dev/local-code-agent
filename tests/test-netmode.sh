@@ -228,6 +228,68 @@ if grep -qE 'dport \{[^}]*\b8080\b' <<<"${QG}"; then t_ok "quoted WEBUI_PORT 808
 if grep -qE 'dport \{[^}]*\b11500\b' <<<"${QG}"; then t_ok "quoted OLLAMA_HOST port 11500 is guarded"; else t_fail "quoted OLLAMA_HOST port 11500 NOT guarded"; fi
 if grep -qE 'dport \{[^}]*\b3000\b' <<<"${QG}"; then t_fail "stale default 3000 guarded despite WEBUI_PORT=8080"; else t_ok "no stale default port when WEBUI_PORT is set"; fi
 
+echo "# ...and a .env with CRLF line endings, which is why the reader strips them"
+# The extractor sources .env through 'tr -d \r' for exactly this. Without it a
+# file saved on Windows — or pasted through an editor that adds them — yields
+# WEBUI_PORT=$'8080\r', which fails the ^[0-9]+$ test and falls back to the
+# DEFAULT. Measured against a sandbox copy with the tr removed:
+#
+#   with    tcp dport { 8080, 11500 }
+#   without tcp dport { 3000, 11500 }
+#
+# So the guard drops traffic to a port nothing is listening on while the real
+# public port stays open. That is the failure the comment above the extractor
+# describes, and nothing exercised it: this file contained no \r at all.
+CRLF_G="$(render_with_env "$(printf 'WEBUI_PORT=8080\r\nOLLAMA_HOST="127.0.0.1:11500"\r')")"
+if grep -qE 'dport \{[^}]*\b8080\b' <<<"${CRLF_G}"; then t_ok "a CRLF .env still guards WEBUI_PORT 8080"; else t_fail "CRLF .env did NOT guard 8080 — the real port is exposed ($(grep -o 'tcp dport [^}]*}' <<<"${CRLF_G}"))"; fi
+if grep -qE 'dport \{[^}]*\b11500\b' <<<"${CRLF_G}"; then t_ok "...and the Ollama port from a CRLF line"; else t_fail "CRLF .env did NOT guard the Ollama port 11500"; fi
+if grep -qE 'dport \{[^}]*\b3000\b' <<<"${CRLF_G}"; then t_fail "CRLF .env fell back to the default 3000, leaving 8080 open"; else t_ok "...and no fallback to 3000"; fi
+
+echo "# a port that is not a port must not reach the ruleset at all"
+# check-system.sh reports WEBUI_PORT=abc as the real fault. netmode must still
+# produce a VALID ruleset meanwhile: an unparseable value that reached the nft
+# set would make the whole guard fail to load, so the machine would go from
+# "one port guarded wrongly" to "no guard at all".
+#
+# Black-box on purpose, and it asserts the OUTCOME rather than either check
+# that produces it: the extractor refuses a non-numeric port, and
+# render_inbound_rules refuses one again before building the set. Mutating
+# either one alone leaves these passing, which is defence in depth doing its
+# job — the claim here is about the ruleset, not about which line kept it
+# clean.
+BAD_G="$(render_with_env 'WEBUI_PORT=abc
+OLLAMA_HOST="127.0.0.1:11500"')"
+# Read the drop set out FIRST and require it to exist. A bare 'grep -q abc'
+# is a negative assertion, and a negative assertion passes on an empty render —
+# measured: with both validations removed the render dies inside (( p == 22 ))
+# with "abc: unbound variable" and emits nothing at all, at which point "abc
+# never reached the ruleset" is true and useless. This is the trap
+# render_with_env's own comment names, in a test written after it.
+# '|| true': this suite runs under 'set -euo pipefail', and a grep that
+# legitimately finds nothing exits 1 — which aborted the whole run at this
+# line instead of failing the assertion below. Measured with both validations
+# removed: the suite stopped at the heading and printed no verdict at all.
+BAD_PORTS="$(grep -oE 'tcp dport \{[^}]*\}' <<<"${BAD_G}" | head -1 || true)"
+if [[ -z "${BAD_PORTS}" ]]; then
+  t_fail "no drop rule was rendered at all for WEBUI_PORT=abc — the guard would not load, so nothing is protected"
+elif grep -q 'abc' <<<"${BAD_PORTS}"; then
+  t_fail "the unparseable WEBUI_PORT reached the nft ruleset, which would fail to load"
+else
+  t_ok "an unparseable WEBUI_PORT never reaches the ruleset"
+fi
+if grep -qE 'dport \{[^}]*\b11500\b' <<<"${BAD_G}"; then t_ok "...and the port that IS valid is still guarded"; else t_fail "a bad WEBUI_PORT took the valid Ollama port down with it"; fi
+
+echo "# OLLAMA_HOST is normalised the same way clients resolve it"
+# The guarded port must be the one clients actually connect to, or the guard
+# protects an address nothing uses. ollama_url does scheme/slash/0.0.0.0 and
+# the default port; the extractor reuses it rather than parsing again.
+URL_G="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="http://0.0.0.0:11999/"')"
+if grep -qE 'dport \{[^}]*\b11999\b' <<<"${URL_G}"; then t_ok "a scheme-and-slash OLLAMA_HOST resolves to its port"; else t_fail "OLLAMA_HOST with a scheme was not resolved ($(grep -o 'tcp dport [^}]*}' <<<"${URL_G}"))"; fi
+NOPORT_G="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1"')"
+if grep -qE 'dport \{[^}]*\b11434\b' <<<"${NOPORT_G}"; then t_ok "a port-less OLLAMA_HOST guards Ollama's default 11434"; else t_fail "a port-less OLLAMA_HOST did not fall back to 11434 ($(grep -o 'tcp dport [^}]*}' <<<"${NOPORT_G}"))"; fi
+
 echo "# SSH invariant: port 22 must NEVER reach the inbound drop set"
 # The guard's whole promise is that it cannot lock you out. A WEBUI_PORT (or
 # OLLAMA_HOST port) of 22 — a typo, or a service deliberately fronted on the
