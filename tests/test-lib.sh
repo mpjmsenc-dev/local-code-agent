@@ -10228,10 +10228,115 @@ faq_does_not_overclaim_offline() {
   # the README's own Honest limitations both contradict.
   ! grep -qi 'physically cannot reach the internet' "${REPO}/docs/FAQ.md"
 }
+
+# recommend_with FREE_KB PRESENT... — run the real 'update-model.sh
+# --list-recommended' with a stubbed df and ollama, and print what it said.
+#
+# A subprocess rather than a sourced function because update-model.sh ends in a
+# bare `main "$@"` with no BASH_SOURCE guard, so sourcing it runs it.
+#
+# df is stubbed because free_gb shells out to it, which makes the one number
+# this is about controllable on any machine — the alternative was a real
+# filesystem with a known amount free, which CI does not have. ollama is
+# stubbed because model_present is `ollama show`, and whether the host running
+# the suite happens to have a model downloaded must not decide the answer.
+recommend_with() {
+  local free_kb="$1"; shift
+  local sb="${SANDBOX}/recstub" tag
+  rm -rf "${sb}"; make_stub_dir "${sb}/stub"
+  # -P is the portable column layout free_gb asks for: $4 is Available.
+  cat > "${sb}/stub/df" <<STUB
+#!/bin/sh
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+echo "/dev/stub 999999999 1 ${free_kb} 99% /"
+STUB
+  # 'show TAG' exits 0 only for a tag named in PRESENT; every other subcommand
+  # succeeds silently so nothing else in the path dies on it. Quoted heredocs
+  # for the fixed parts, so the fake's own $1/$2 need no disable directive.
+  {
+    cat <<'HEAD'
+#!/bin/sh
+case "$1" in
+  show)
+    case "$2" in
+HEAD
+    for tag in "$@"; do printf '      %s) exit 0 ;;\n' "${tag}"; done
+    cat <<'TAIL'
+      *) exit 1 ;;
+    esac ;;
+esac
+exit 0
+TAIL
+  } > "${sb}/stub/ollama"
+  chmod +x "${sb}/stub/df" "${sb}/stub/ollama"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  PATH="${sb}/stub:${PATH}" "${REPO}/update-model.sh" --list-recommended 2>&1
+}
+
+# The qwen2.5-coder line, whatever rung this machine's RAM picks. That family is
+# the ladder's own fallback, so it is the one rung that fits every RAM tier —
+# which keeps these assertions independent of the host the suite runs on.
+qwen_line() { grep '^  qwen2.5-coder ' <<<"$1" || true; }
+
+listing_warns_when_the_disk_cannot_take_it() {
+  # Measured, not read: with the model store on a filesystem with nothing left,
+  #
+  #   $ lca model --list-recommended
+  #     qwen2.5-coder          -> qwen2.5-coder:14b        <- no caveat at all
+  #   $ lca model qwen2.5-coder:14b
+  #     [FAIL] 'qwen2.5-coder:14b' needs about 9 GB and only 0 GB is free
+  #
+  # Five recommendations, every one refused by the next command. The RAM half
+  # of this contradiction was already fixed once, in this same function.
+  local out; out="$(recommend_with 0)"
+  local line; line="$(qwen_line "${out}")"
+  [[ -n "${line}" ]] || { echo 'no qwen2.5-coder line at all' >&2; return 1; }
+  grep -q 'needs about .* GB to download' <<<"${line}" || {
+    echo "recommended with a full disk and said nothing: ${line}" >&2; return 1; }
+  # And the number has to be the one pull_model would refuse on, not a fresh
+  # estimate: same tag through model_disk_gb.
+  local tag need
+  tag="$(sed 's/.*-> //; s/ .*//' <<<"${line}")"
+  need="$(model_disk_gb "${tag}")"
+  grep -q "needs about ${need} GB" <<<"${line}" || {
+    echo "listing and model_disk_gb disagree about ${tag}: ${line} vs ${need}" >&2
+    return 1; }
+}
+
+listing_is_quiet_when_the_disk_is_ample() {
+  # The complement, so the warning cannot be a constant. 4 TB free.
+  local out; out="$(recommend_with 4294967296)"
+  ! grep -q 'needs about' <<<"${out}" || {
+    echo "warned about disk with 4 TB free: ${out}" >&2; return 1; }
+}
+
+listing_does_not_demand_disk_for_a_model_already_here() {
+  # Ordering. A model already on disk is not going to be downloaded, so the
+  # space needed to download it is not a fact about it — the already-downloaded
+  # arm has to win. Every rung is stubbed present, so whichever one this
+  # machine's RAM picks is covered without the test knowing which.
+  local out
+  out="$(recommend_with 0 \
+    qwen2.5-coder:7b qwen2.5-coder:14b qwen2.5-coder:32b \
+    qwen3:8b qwen3:14b qwen3:32b \
+    deepseek-coder-v2:16b llama3.1:8b llama3.1:70b codellama:7b codellama:13b codellama:34b)"
+  local line; line="$(qwen_line "${out}")"
+  grep -q 'already downloaded' <<<"${line}" || {
+    echo "a model already on disk was not reported as such: ${line}" >&2; return 1; }
+  ! grep -q 'needs about' <<<"${line}" || {
+    echo "asked for download space for a model already downloaded: ${line}" >&2
+    return 1; }
+}
 check "the guard success line names only the ports it guarded" \
   guard_message_names_only_guarded_ports
 check "the model listing flags rungs that do not fit this RAM" \
   listing_flags_models_that_do_not_fit
+check "the model listing flags a rung the disk cannot take" \
+  listing_warns_when_the_disk_cannot_take_it
+check "the model listing says nothing about disk when there is room" \
+  listing_is_quiet_when_the_disk_is_ample
+check "the model listing asks no disk for a model already downloaded" \
+  listing_does_not_demand_disk_for_a_model_already_here
 check "the FAQ does not promise more than the ruleset delivers" \
   faq_does_not_overclaim_offline
 

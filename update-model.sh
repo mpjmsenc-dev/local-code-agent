@@ -32,9 +32,21 @@ EOF
 # marking what is already downloaded. Uses tune.sh's ladder so this can never
 # disagree with what auto-tune would actually choose.
 list_recommended() {
-  local ram fam small mid big pick note
+  local ram fam small mid big pick note need store free_disk store_where
   ram="$(detect_ram_gib)"
   step "What each family gives you on this machine (${ram} GiB RAM detected)"
+  # Measured once, outside the loop: five df calls to answer one question could
+  # disagree with each other, and the number they produce is the one pull_model
+  # is about to refuse on.
+  store="$(ollama_models_dir)"
+  free_disk="$(free_gb "${store}")"
+  # Name the directory only when it is really there — ollama_models_dir falls
+  # back to a path the first pull would create, and check-system.sh already
+  # took out the "confidently wrong" shape of presenting that as where the
+  # models are. The number is right either way; free_gb walks up to the
+  # filesystem.
+  store_where=""
+  [[ -d "${store}" ]] && store_where=" on ${store}"
   # Sourcing tune.sh recomputes SCRIPT_DIR from its own location, repointing
   # ours at scripts/. Harmless today because this function exits straight
   # after, but restoring it keeps the next edit from inheriting a landmine.
@@ -53,11 +65,35 @@ list_recommended() {
     # Listing them under a heading that said "Models that fit this machine" was
     # a straight contradiction of the code one function away: auto-tune would
     # refuse them and fall back to qwen2.5-coder.
+    #
+    # The same contradiction existed a second time, for DISK, and this function
+    # was the one making it. pull_model refuses a download whose model_disk_gb
+    # exceeds free_gb — before a byte crosses the wire, deliberately. Measured
+    # here with the store on a filesystem with nothing left:
+    #
+    #   $ lca model --list-recommended
+    #     qwen2.5-coder          -> qwen2.5-coder:14b        <- no caveat
+    #   $ lca model qwen2.5-coder:14b
+    #     [FAIL] needs about 9 GB and only 0 GB is free
+    #
+    # Five recommendations, every one of them refused by the next command.
+    # Derived from model_disk_gb and free_gb rather than re-deriving the size,
+    # for the reason model_disk_gb's own comment gives: a fourth estimate of
+    # one number is how the advice and the guard drift apart.
+    #
+    # Ordered after the already-downloaded arm on purpose: a model that is
+    # already on disk is not going to be downloaded, so the space needed to
+    # download it is not a fact about it. And skipped silently when either
+    # number is unknown — an unparseable tag must not become a warning any
+    # more than it may become a refusal.
     note=""
     if ! model_fits_ram "${pick}" "${ram}"; then
       note="  (too big for ${ram} GiB — auto-tune would fall back to qwen2.5-coder)"
     elif have ollama && model_present "${pick}"; then
       note="  (already downloaded)"
+    elif [[ -n "${free_disk}" ]] && need="$(model_disk_gb "${pick}")" \
+         && (( free_disk < need )); then
+      note="  (needs about ${need} GB to download — only ${free_disk} GB free${store_where})"
     fi
     printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
   done
