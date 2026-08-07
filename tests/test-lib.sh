@@ -146,6 +146,48 @@ STUB
   chmod +x "${dir}/sudo"
 }
 
+# stub_path DIR [TAIL] — the PATH to run a subprocess with so it reaches DIR's
+# fakes, having first established that it actually can.
+#
+# The rule above ("every front-loaded directory comes from make_stub_dir") was
+# enforced by a gate that recognised such a directory by it being called
+# 'stub'. That is a convention, not a property, and the gate could not tell the
+# difference: measured on this suite, six distinct PATH front-load idioms
+# existed and it inspected two.
+#
+# One of the four it could not see was a live instance of the very bug it was
+# written to prevent — a directory called 'fakebin', holding a fake docker,
+# with no sudo beside it, in a test of backup.sh, which reaches docker through
+# 'as_root docker volume inspect':
+#
+#   direct:        .../fakebin/docker
+#   through sudo:  /usr/bin/docker
+#
+# On CI — a non-root passwordless sudoer, on an ubuntu-latest runner with a
+# real docker daemon — that test asked the daemon rather than its fixture, and
+# stayed green only because the runner happens to have no 'open-webui' volume
+# either. A test that passes for a reason it did not choose.
+#
+# Routing every front-load through here replaces the convention with a check at
+# the point of use: it runs for every use, on whatever the directory is called,
+# including idioms nobody has written yet. A heuristic was tried first — treat
+# any sandbox directory holding an executable that shadows a real command as a
+# stub directory — and it is in the history because it does not work: the
+# symlink fixture has a file called 'ok' and the volume fixture has a 'tar',
+# and neither is ever put on PATH.
+#
+# The violation is recorded in a file rather than a variable because nearly
+# every caller runs this inside $( ), where a variable would not survive.
+STUB_VIOLATIONS="${SANDBOX}/.stub-violations"
+STUB_PATH_USES="${SANDBOX}/.stub-path-uses"
+: > "${STUB_VIOLATIONS}"; : > "${STUB_PATH_USES}"
+stub_path() {
+  local dir="$1" tail="${2:-${PATH}}"
+  printf '%s\n' "${dir}" >> "${STUB_PATH_USES}"
+  [[ -x "${dir}/sudo" ]] || printf '%s\n' "${dir}" >> "${STUB_VIOLATIONS}"
+  printf '%s:%s' "${dir}" "${tail}"
+}
+
 echo "# load_env creates .env from .env.example and applies defaults"
 load_env
 check ".env auto-created" test -f "${SANDBOX}/.env"
@@ -1159,21 +1201,31 @@ echo "# a backup that missed the chat data must not prune the ones that have it"
 # afterwards", and no amount of reading the source proves that.
 backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran>"
   local b="${SANDBOX}/retention-$1"
-  rm -rf "${b}"; mkdir -p "${b}/scripts" "${b}/backups" "${b}/fakebin"
+  # make_stub_dir, not mkdir: backup.sh reaches docker through 'as_root docker
+  # volume inspect', and a plain directory of fakes is invisible to sudo, which
+  # replaces PATH with sudoers' secure_path. Measured on this box:
+  #
+  #   direct:        .../fakebin/docker
+  #   through sudo:  /usr/bin/docker
+  #
+  # So on CI — a non-root passwordless sudoer, with a real docker daemon on
+  # ubuntu-latest — this test asked that daemon, not its fixture, and passed
+  # only because the runner happens to have no 'open-webui' volume either.
+  rm -rf "${b}"; mkdir -p "${b}/scripts" "${b}/backups"; make_stub_dir "${b}/stub"
   cp "${REPO}/backup.sh" "${b}/"; cp "${REPO}/scripts/lib.sh" "${b}/scripts/"
   cp "${REPO}/.env.example" "${b}/.env"
   sed -i "s/^BACKUP_KEEP=.*/BACKUP_KEEP=1/; s/^ENABLE_WEBUI=.*/ENABLE_WEBUI=$1/" "${b}/.env"
   # docker present and its daemon fine; the volume is what is missing.
   # shellcheck disable=SC2016  # $1/$2 belong to the fake docker, not to us
   printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit 0; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
-    > "${b}/fakebin/docker"
-  chmod +x "${b}/fakebin/docker"
+    > "${b}/stub/docker"
+  chmod +x "${b}/stub/docker"
   local d
   for d in 20260101-000000 20260102-000000; do
     echo old > "${b}/backups/local-code-agent-backup-${d}.tar.gz"
   done
   local out old
-  out="$(PATH="${b}/fakebin:${PATH}" bash "${b}/backup.sh" 2>&1 || true)"
+  out="$(PATH="$(stub_path "${b}/stub")" bash "${b}/backup.sh" 2>&1 || true)"
   old="$(find "${b}/backups" -name 'local-code-agent-backup-2026010*.tar.gz' | wc -l)"
   if grep -q 'skipping retention' <<<"${out}"; then printf '%s skipped\n' "${old}"
   else printf '%s ran\n' "${old}"; fi
@@ -3937,8 +3989,8 @@ echo "# ...and a fetch that failed must name the reason it actually had"
 # branch name, net_guard — and --check is passed as well, so a future reorder
 # that reaches it cannot start a backup out of a unit test.
 update_fetch_says() {  # LS_REMOTE_RC -> what 'lca update' prints and dies with
-  local stub="${SANDBOX}/gitstub"
-  mkdir -p "${stub}" "${SANDBOX}/.git"
+  local stub="${SANDBOX}/gitstub/stub"
+  make_stub_dir "${stub}"; mkdir -p "${SANDBOX}/.git"
   cp "${REPO}/update.sh" "${SANDBOX}/update.sh"
   # The stub answers only what update.sh asks before it dies. 'ls-remote
   # --exit-code' is the classifier under test: git returns 2 for "connected,
@@ -3955,7 +4007,7 @@ exit 0
 STUB
   chmod +x "${stub}/git"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  LS_RC="$1" PATH="${stub}:${PATH}" bash "${SANDBOX}/update.sh" --check 2>&1 || true
+  LS_RC="$1" PATH="$(stub_path "${stub}")" bash "${SANDBOX}/update.sh" --check 2>&1 || true
 }
 update_fetch_failure_is_diagnosed() {
   local out bad=0
@@ -4008,8 +4060,8 @@ check "...and 'branch not on the remote' is not reported as a network fault" \
 # On a branch the whole time, and the suggested command fails the same way.
 # git had already printed the fix and this threw it away.
 update_branch_says() {  # REVPARSE_RC -> what 'lca update --check' dies with
-  local stub="${SANDBOX}/gitstub2"
-  mkdir -p "${stub}" "${SANDBOX}/.git"
+  local stub="${SANDBOX}/gitstub2/stub"
+  make_stub_dir "${stub}"; mkdir -p "${SANDBOX}/.git"
   cp "${REPO}/update.sh" "${SANDBOX}/update.sh"
   cat > "${stub}/git" <<'STUB'
 #!/usr/bin/env bash
@@ -4028,7 +4080,7 @@ exit 0
 STUB
   chmod +x "${stub}/git"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  RP_RC="$1" RP_OUT="${2:-a-branch}" PATH="${stub}:${PATH}" \
+  RP_RC="$1" RP_OUT="${2:-a-branch}" PATH="$(stub_path "${stub}")" \
     timeout 30 bash "${SANDBOX}/update.sh" --check 2>&1 || true
 }
 update_reads_the_branch_honestly() {
@@ -6595,14 +6647,14 @@ echo "# reading the container's settings must never wait for ever on a wedged do
 # Behavioural, not a grep: a docker that sleeps, and a clock.
 webui_env_is_bounded() {
   local dir="${SANDBOX}/wedged" start elapsed
-  rm -rf "${dir}"; mkdir -p "${dir}"
-  printf '#!/bin/sh\nsleep 30\n' >"${dir}/docker"
   # sudo stubbed too, and not for convenience: without it the root fallback
   # either prompts for a password (hanging the test on a developer box) or
   # finds the REAL docker through sudo's secure_path, so the run would prove
-  # nothing about the stub. 'exec "$@"' keeps the fallback on the sleeper.
-  printf '#!/bin/sh\nexec "$@"\n' >"${dir}/sudo"
-  chmod +x "${dir}/docker" "${dir}/sudo"
+  # nothing about the stub. make_stub_dir's pass-through keeps the fallback on
+  # the sleeper, which is what this measures.
+  rm -rf "${dir}"; make_stub_dir "${dir}"
+  printf '#!/bin/sh\nsleep 30\n' >"${dir}/docker"
+  chmod +x "${dir}/docker"
   # A file rather than 'bash -c': shellcheck stops recognising the -c argument
   # as a script once a 'timeout' wrapper stands in front of it, and reads the
   # positional parameters inside as an unexpanded string (SC2016). The repo
@@ -6610,7 +6662,9 @@ webui_env_is_bounded() {
   # is exactly the sort of thing that later hides a real one.
   cat >"${dir}/probe.sh" <<'PROBE'
 #!/usr/bin/env bash
-export PATH="$2:${PATH}"
+# The whole PATH, already built and checked by stub_path — the front-load is
+# not rebuilt here, so no directory reaches PATH without passing that check.
+export PATH="$2"
 export LCA_INSPECT_TIMEOUT=1
 source "$1" >/dev/null 2>&1
 load_env_readonly
@@ -6619,7 +6673,8 @@ PROBE
   start="$(date +%s)"
   # Wrapped, so a regression FAILS this check instead of stalling the suite
   # for a minute — the unbounded form takes 30s per attempt, twice.
-  timeout 25 bash "${dir}/probe.sh" "${REPO}/scripts/lib.sh" "${dir}" >/dev/null 2>&1 || true
+  timeout 25 bash "${dir}/probe.sh" "${REPO}/scripts/lib.sh" "$(stub_path "${dir}")" \
+    >/dev/null 2>&1 || true
   elapsed=$(( $(date +%s) - start ))
   if (( elapsed >= 10 )); then
     printf 'webui_container_env took %ss against a hung docker — it is unbounded\n' "${elapsed}" >&2
@@ -7722,7 +7777,7 @@ logs_webui_with_a_dead_daemon() {
   printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/docker"
   chmod +x "${sb}/stub/docker"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${sb}/stub:${PATH}" timeout 60 bash "${REPO}/scripts/logs.sh" webui 2>&1 || true)"
+  out="$(PATH="$(stub_path "${sb}/stub")" timeout 60 bash "${REPO}/scripts/logs.sh" webui 2>&1 || true)"
   rm -rf "${sb}"
   printf '%s' "${out}"
 }
@@ -8231,7 +8286,7 @@ dud_run() {  # REPO_DIR -> the log contents, then "rc=N"
   local rc=0 out
   rm -rf "${DUD_SB}/target" "${DUD_SB}/log"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${DUD_SB}/stub:${PATH}" LCA_REPO_URL="$1" LCA_DIR="${DUD_SB}/target" \
+  out="$(PATH="$(stub_path "${DUD_SB}/stub")" LCA_REPO_URL="$1" LCA_DIR="${DUD_SB}/target" \
          LCA_LOG="${DUD_SB}/log" LCA_RUN_SETUP=false \
          timeout 120 bash "${REPO}/deploy/do-user-data.sh" 2>&1)" || rc=$?
   printf '%s\nrc=%s\n' "${out}" "${rc}"
@@ -9696,7 +9751,7 @@ first_boot_help_touches_nothing() {
   printf '#!/bin/sh\necho "(apt-get ran)"\nexit 0\n' > "${sb}/stub/apt-get"
   chmod +x "${sb}/stub/apt-get"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${sb}/stub:${PATH}" LCA_REPO_URL="${sb}/nonexistent.git" \
+  out="$(PATH="$(stub_path "${sb}/stub")" LCA_REPO_URL="${sb}/nonexistent.git" \
          LCA_DIR="${sb}/target" LCA_LOG="${sb}/log" \
          timeout 60 bash "${REPO}/deploy/do-user-data.sh" --help 2>&1)" || rc=$?
   (( rc == 0 )) || {
@@ -10270,7 +10325,7 @@ TAIL
   } > "${sb}/stub/ollama"
   chmod +x "${sb}/stub/df" "${sb}/stub/ollama"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  PATH="${sb}/stub:${PATH}" "${REPO}/update-model.sh" --list-recommended 2>&1
+  PATH="$(stub_path "${sb}/stub")" "${REPO}/update-model.sh" --list-recommended 2>&1
 }
 
 # The qwen2.5-coder line, whatever rung this machine's RAM picks. That family is
@@ -11485,7 +11540,7 @@ ask_with_stubbed_curl() {  # generate-body -> "rc=N" then stderr
   local sb="${SANDBOX}/askstub" rc=0 out
   rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE="$2" \
+  out="$(PATH="$(stub_path "${sb}")" LCA_FAKE_GENERATE="$2" \
          timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>&1 >/dev/null </dev/null)" || rc=$?
   printf 'rc=%s\n%s\n' "${rc}" "${out}"
 }
@@ -11515,7 +11570,7 @@ a_real_answer_still_works() {
   local sb="${SANDBOX}/askok" out rc=0
   rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"ready","done":true}' \
+  out="$(PATH="$(stub_path "${sb}")" LCA_FAKE_GENERATE='{"response":"ready","done":true}' \
          timeout 60 bash "${REPO}/scripts/ask.sh" "hi" 2>/dev/null </dev/null)" || rc=$?
   (( rc == 0 )) || { printf 'a good answer now exits %s\n' "${rc}" >&2; return 1; }
   grep -qF 'ready' <<<"${out}" || { printf 'the answer itself is gone: %s\n' "${out}" >&2; return 1; }
@@ -11537,7 +11592,7 @@ ask_prompt_for() {  # ARGS... -> the prompt that reached the model
   local sb="${SANDBOX}/askargs"
   rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  PATH="${sb}:${PATH}" LCA_CAPTURE="${sb}/body.json" \
+  PATH="$(stub_path "${sb}")" LCA_CAPTURE="${sb}/body.json" \
     LCA_FAKE_GENERATE='{"response":"x","done":true}' \
     timeout 60 bash "${REPO}/scripts/ask.sh" "$@" </dev/null >/dev/null 2>&1 || true
   jq -r '.prompt // empty' <"${sb}/body.json" 2>/dev/null || true
@@ -11546,7 +11601,7 @@ ask_rc_for() {  # ARGS... -> "rc=N" and stderr
   local sb="${SANDBOX}/askargs2" rc=0 out
   rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  out="$(PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+  out="$(PATH="$(stub_path "${sb}")" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
          timeout 60 bash "${REPO}/scripts/ask.sh" "$@" </dev/null 2>&1 >/dev/null)" || rc=$?
   printf 'rc=%s\n%s\n' "${rc}" "${out}"
 }
@@ -11589,7 +11644,7 @@ ask_file_error_for() {  # PATH -> stderr
   local sb="${SANDBOX}/askfile"
   rm -rf "${sb}"; write_ask_stubs "${sb}"
   # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
-  PATH="${sb}:${PATH}" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+  PATH="$(stub_path "${sb}")" LCA_FAKE_GENERATE='{"response":"x","done":true}' \
     timeout 60 bash "${REPO}/scripts/ask.sh" -f "$2" "q" </dev/null 2>&1 >/dev/null || true
 }
 attaching_a_directory_says_so() {
@@ -12253,31 +12308,43 @@ motd_install_is_honest() {
 check "a banner that cannot run is not reported as installed" \
   motd_install_is_honest
 # ...and the counterpart for stubs that escalation walks straight past. Every
-# directory this suite puts in front of PATH must come from make_stub_dir, so
-# the fake is reached whether the script calls the command directly or through
-# as_root. A plain 'mkdir -p .../stub' compiles, runs, and passes for whoever
-# is root — and only for them; see make_stub_dir for the CI run that cost.
+# directory this suite puts in front of PATH must be reachable through sudo as
+# well as directly, so a fake is the fake whether the script calls the command
+# itself or through as_root.
+#
+# This replaces a gate that enforced the same rule by NAME — it recognised a
+# stub directory by it being called 'stub'. That version inspected two of the
+# six PATH front-load idioms this suite actually used, and one of the four it
+# could not see was a live instance of the bug it existed to prevent: a
+# 'fakebin' holding a fake docker with no sudo beside it, in a test of
+# backup.sh, which reaches docker through 'as_root docker volume inspect'. On
+# CI that test asked the real daemon. See stub_path for the measurement.
+#
+# The property is now checked where it is used, by stub_path, for every use.
+# What is left to assert here is that the checking happened and that nothing
+# went around it.
 every_path_stub_survives_sudo() {
-  local bad=0 seen=0 use dir_expr
-  # Deliberately built from pieces: this gate greps the file it lives in, and
-  # a contiguous literal here would match itself.
-  local pat='PATH="[^"]*'"/stub:"
-  while IFS= read -r use; do
-    seen=$((seen+1))
-    dir_expr="${use#PATH=\"}"        # -> ${sb}  or  ${DUD_SB}
-    dir_expr="${dir_expr%/stub:}"
-    grep -qF "make_stub_dir \"${dir_expr}/stub\"" "${TESTS_DIR}"/*.sh || {
-      printf 'a stub directory is put on PATH without make_stub_dir, so sudo will not see it: %s/stub\n' \
-        "${dir_expr}" >&2
-      bad=1
-    }
-  done < <(grep -oh "${pat}" "${TESTS_DIR}"/*.sh | sort -u)
-  # A gate that matched nothing passes, and this one recognises stub
-  # directories by a naming convention it does not enforce. If the convention
-  # moves, say so rather than reporting ok about zero directories — the exact
-  # shape of the vacuous gate two checks above exists to catch.
-  (( seen > 0 )) || {
-    echo 'this gate found no PATH stub directories at all — the idiom it recognises has moved, and it is now checking nothing' >&2
+  local bad=0 hand
+  # 1. Nothing stub_path saw was unreachable through sudo.
+  if [[ -s "${STUB_VIOLATIONS}" ]]; then
+    printf 'a directory of fakes was put on PATH with no sudo beside it, so as_root walks straight past it:\n' >&2
+    sort -u "${STUB_VIOLATIONS}" | sed 's/^/  /' >&2
+    bad=1
+  fi
+  # 2. ...and it saw something. A gate that checked nothing passes, which is
+  # exactly how the previous one stayed green over a real defect.
+  [[ -s "${STUB_PATH_USES}" ]] || {
+    echo 'no test built a stub PATH through stub_path — this gate is now checking nothing' >&2
+    bad=1
+  }
+  # 3. ...and nothing built a front-load by hand, which would bypass 1 and 2
+  # entirely. Assembled from pieces because this gate greps the file it lives
+  # in, and a contiguous literal here would match itself.
+  local pat='PATH="[^"]*'":\${PATH}\""
+  hand="$(grep -nH "${pat}" "${TESTS_DIR}"/*.sh || true)"
+  [[ -z "${hand}" ]] || {
+    printf 'a PATH front-load was built by hand instead of through stub_path, so its sudo pass-through is never checked:\n%s\n' \
+      "${hand}" >&2
     bad=1
   }
   return "${bad}"
