@@ -75,7 +75,7 @@ main() {
       --no-backup) do_backup=false ;;
       --yes|-y)    assume_yes=true ;;
       -h|--help)   usage; exit 0 ;;
-      *)           usage; die "Unknown option: ${arg}" ;;
+      *)           usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 

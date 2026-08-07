@@ -117,7 +117,9 @@ drift_note() {
 
 main() {
   local cmd="${1:-}"
-  [[ -n "${cmd}" ]] || { usage; exit 1; }
+  # >&2 and named, like every other error path here — see netmode.sh's "No mode
+  # given." for the same case in the same shape.
+  [[ -n "${cmd}" ]] || { usage >&2; die "No command given."; }
   # Answered here, above everything else, for the same reason 'url' is special
   # below: the dispatch further down runs select_docker first, so 'lca webui
   # --help' died with "Cannot reach the Docker daemon" — needing a running

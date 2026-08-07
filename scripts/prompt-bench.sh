@@ -84,7 +84,7 @@ parse_args() {
       -f) [[ -n "${2:-}" ]] || die "-f needs a path to a prompt file"
           PROMPT_FILE="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
-      *) usage; die "Unknown option: $1" ;;
+      *) usage >&2; die "Unknown option: $1" ;;
     esac
   done
   [[ "${SAMPLES}" =~ ^[0-9]+$ && "${SAMPLES}" -gt 0 ]] || die "-n needs a positive number"

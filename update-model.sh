@@ -127,14 +127,14 @@ main() {
         ;;
       --remove-old) remove_old=true ;;
       -h|--help) usage; exit 0 ;;
-      -*) usage; die "Unknown option: ${arg}" ;;
+      -*) usage >&2; die "Unknown option: ${arg}" ;;
       *)
-        [[ -z "${new_model}" ]] || { usage; die "Only one model may be given."; }
+        [[ -z "${new_model}" ]] || { usage >&2; die "Only one model may be given."; }
         new_model="${arg}"
         ;;
     esac
   done
-  [[ -n "${new_model}" ]] || { usage; exit 1; }
+  [[ -n "${new_model}" ]] || { usage >&2; exit 1; }
 
   require_cmd ollama curl jq
   step "Switching default model to '${new_model}'"

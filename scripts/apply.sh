@@ -302,7 +302,7 @@ main() {
     case "${arg}" in
       --dry-run|-n) DRY_RUN=true ;;
       -h|--help)    usage; exit 0 ;;
-      *)            usage; die "Unknown option: ${arg}" ;;
+      *)            usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 

@@ -12612,6 +12612,58 @@ no_test_breaks_docker_through_the_environment() {
 }
 check "no test makes docker unreachable through the environment" \
   no_test_breaks_docker_through_the_environment
+# A command that is about to fail must not write its usage page to stdout.
+#
+# The repo was split: four scripts sent usage to stderr on an error path, nine
+# sent it to stdout. ask.sh disagreed with ITSELF thirty lines apart, and its
+# own comment states the rule it was breaking — "in 'lca ask' the model's
+# answer is stdout, and progress must not end up inside a piped or redirected
+# answer". Measured:
+#
+#   $ answer="$(lca ask 2>/dev/null)"      # empty question
+#   366 bytes — the usage page, captured as the answer
+#   $ answer="$(lca ask --bogus 2>/dev/null)"
+#   0 bytes                                # the arm thirty lines above
+#
+# So a caller reading the answer got a page of help text as the model's reply,
+# and 'cmd --typo > out' wrote help into the output file. --help itself is
+# unaffected and must stay on stdout: it is an answer, not a diagnostic.
+usage_on_an_error_path_goes_to_stderr() {
+  local f body hits bad=0 seen=0
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh; do
+    [[ -f "${f}" ]] || continue
+    body="$(grep -vn '^[[:space:]]*#' "${f}")"
+    seen=$((seen+1))
+    # 'usage' immediately followed by a failing exit, on one line. The stderr
+    # form carries '>&2' between them, so it cannot match. 'exit 0' is a
+    # success path and is deliberately not matched.
+    hits="$(grep -nE 'usage; *(die|exit 1|fail )' <<<"${body}" || true)"
+    [[ -z "${hits}" ]] || {
+      printf '%s prints its usage to stdout on a path that fails:\n%s\n' "${f##*/}" "${hits}" >&2
+      bad=1
+    }
+  done
+  # ...and the multi-line spelling of the same thing: a bare 'usage' line whose
+  # next non-blank line gives up. This is the form webui.sh's dispatch used.
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh; do
+    [[ -f "${f}" ]] || continue
+    awk -v name="${f##*/}" '
+      /^[[:space:]]*#/ { next }
+      prev && $0 ~ /^[[:space:]]*(exit 1|die |fail )/ {
+        printf "%s prints its usage to stdout, then fails on the next line (%s)\n", name, NR > "/dev/stderr"
+        bad = 1
+      }
+      { prev = ($0 ~ /^[[:space:]]*usage[[:space:]]*$/) }
+      END { exit bad ? 1 : 0 }' "${f}" || bad=1
+  done
+  (( seen > 5 )) || {
+    printf 'this gate read only %s scripts — it has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no script prints its usage to stdout on a path that fails" \
+  usage_on_an_error_path_goes_to_stderr
 
 echo
 if (( FAILED > 0 )); then

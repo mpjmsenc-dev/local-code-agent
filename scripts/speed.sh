@@ -63,7 +63,7 @@ main() {
       # overwrites from .env — see the same note in ask.sh.
       -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
-      *) arg="$1"; usage; die "Unknown option: ${arg}" ;;
+      *) arg="$1"; usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 

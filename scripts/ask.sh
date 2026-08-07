@@ -97,7 +97,7 @@ main() {
   if [[ ! -t 0 ]]; then
     piped="$(cat)"
   fi
-  [[ -n "${question}" ]] || { usage; die "No question given."; }
+  [[ -n "${question}" ]] || { usage >&2; die "No question given."; }
 
   # Every -f file answered HERE, before a thing is started. These are argument
   # errors — a name that does not exist, a directory, a file this account

@@ -536,7 +536,7 @@ main() {
     --install-timer)    install_timer ;;
     --uninstall-timer)  uninstall_timer ;;
     -h|--help)          usage; exit 0 ;;
-    *)                  usage; die "Unknown option: ${1}" ;;
+    *)                  usage >&2; die "Unknown option: ${1}" ;;
   esac
 }
 

@@ -148,7 +148,7 @@ main() {
       -f|--follow) follow=true; shift ;;
       -h|--help) usage; exit 0 ;;
       ollama|webui|setup|all) source="$1"; shift ;;
-      *) arg="$1"; usage; die "Unknown argument: ${arg}" ;;
+      *) arg="$1"; usage >&2; die "Unknown argument: ${arg}" ;;
     esac
   done
 

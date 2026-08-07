@@ -137,7 +137,7 @@ main() {
       --yes) force=true ;;
       --keep-data) keep_data=true ;;
       -h|--help) usage; exit 0 ;;
-      *) usage; die "Unknown option: ${arg}" ;;
+      *) usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 
