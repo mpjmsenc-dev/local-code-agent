@@ -561,11 +561,45 @@ load_env_readonly() {
   LCA_ENV_READONLY=true load_env
 }
 
+# am_root — are we actually running as root?
+#
+# Its own function so the branch below can be reached from a test. as_root,
+# can_root and can_root_now keep testing EUID inline on purpose: those decide
+# an ACTION, where being root is a fact the process cannot be wrong about. This
+# one decides what to PRINT about somebody else's account, and a reporter's
+# branch that only one kind of machine can reach is a branch that gets tested
+# on one kind of machine — the same reason writable_by_us and have_terminal
+# exist a few hundred lines up.
+am_root() { [[ "${EUID}" -eq 0 ]]; }
+
 # git_identity_user — whose git config actually matters here.
 #
 # Under sudo that is the human, not root: aider runs as them, and root's empty
 # identity would be the wrong answer to report.
-git_identity_user() { printf '%s\n' "${SUDO_USER:-$(id -un)}"; }
+#
+# But SUDO_USER names whoever INVOKED sudo, which is not the account this
+# process is running as when sudo dropped privileges rather than raised them.
+# Measured, running check-system.sh under 'sudo -u ubuntu' — SUDO_USER=root,
+# process running as ubuntu:
+#
+#   [warn] no global git identity for 'root' — ... Fix once:
+#          git config --global user.name 'Ada Lovelace' && ...
+#
+# It named an account that was neither the one it read (ubuntu's config, via
+# git_identity's else-branch) nor the one the reader was using, and offered a
+# fix that would set a third party's identity — after which the warning comes
+# back unchanged, for ever.
+#
+# So SUDO_USER only counts while we are actually root. That is the same
+# condition git_identity uses to decide whose config to read, which is the
+# point: the label and the value must be the same account.
+git_identity_user() {
+  if am_root && [[ -n "${SUDO_USER:-}" ]] && have sudo; then
+    printf '%s\n' "${SUDO_USER}"
+  else
+    id -un
+  fi
+}
 
 # git_identity — "Name <email>" from that user's GLOBAL git config, or nothing
 # (and non-zero) when either half is unset.
@@ -586,7 +620,12 @@ git_identity() {
   local who name email
   have git || return 1
   who="$(git_identity_user)"
-  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]] && have sudo; then
+  # Escalate exactly when the account that matters is not the one we already
+  # are. This used to be a second copy of git_identity_user's condition, and
+  # the two disagreed: 'sudo -u ubuntu' put SUDO_USER=root in the label while
+  # this branch, seeing EUID != 0, read ubuntu's config. Derived from 'who'
+  # now, so a name and a value from different accounts is not expressible.
+  if [[ "${who}" != "$(id -un)" ]]; then
     name="$(sudo -u "${who}" git config --global user.name 2>/dev/null || true)"
     email="$(sudo -u "${who}" git config --global user.email 2>/dev/null || true)"
   else

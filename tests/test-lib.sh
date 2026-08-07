@@ -1352,18 +1352,92 @@ echo "# git_identity_user() — WHOSE git config the two reporters read"
 # answer must be the human rather than root — root's global config is not where
 # anyone put their identity, so getting this wrong reports a missing identity to
 # someone who has one.
-identity_user_with() {   # SUDO_USER value ("" = unset)
+#
+# Both arms are driven here, by stubbing am_root. Without that seam the "we are
+# root" arm is reachable only on a machine running the suite as root and the
+# other only on one that is not — so each environment would test half of this
+# and report ok about the other half, which is how the defect below survived.
+identity_user_with() {   # SUDO_USER value ("" = unset), am_root answer
   bash -c '
     set -uo pipefail
     source "$1"
+    # Captured out here: inside the function, $3 would be its own argument.
+    AMROOT="$3"
+    am_root() { [[ "${AMROOT}" == root ]]; }
     if [[ -n "$2" ]]; then export SUDO_USER="$2"; else unset SUDO_USER; fi
     git_identity_user
-  ' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
+  ' _ "${REPO}/scripts/lib.sh" "$2" "$3" 2>/dev/null
 }
 check "under sudo it asks about the human, not root" \
-  test "$(identity_user_with _ someone)" = "someone"
+  test "$(identity_user_with _ someone root)" = "someone"
 check "without sudo it asks about the current user" \
-  test "$(identity_user_with _ '')" = "$(id -un)"
+  test "$(identity_user_with _ '' root)" = "$(id -un)"
+# ...and SUDO_USER is only about who invoked sudo, which is not who we ARE when
+# sudo dropped privileges instead of raising them. Measured, running
+# check-system.sh as 'sudo -u ubuntu' — SUDO_USER=root, process running as
+# ubuntu, and 'lca check' said:
+#
+#   [warn] no global git identity for 'root' — ... Fix once: git config --global ...
+#
+# naming an account that was neither the one whose config it read nor the one
+# the reader was using, and offering a fix that would set a third party's
+# identity — after which the warning returns unchanged, for ever.
+#
+# The stale value is a name no account has, not "root". Written as 'root' first
+# — faithful to the measured case — it compared equal to $(id -un) on a suite
+# running as root and passed against the unfixed function, which is the whole
+# family of bug this file keeps closing.
+check "a stale SUDO_USER is ignored when we are not root" \
+  test "$(identity_user_with _ nobody-by-this-name notroot)" = "$(id -un)"
+check "...and the current user is still right with no SUDO_USER at all" \
+  test "$(identity_user_with _ '' notroot)" = "$(id -un)"
+# The invariant underneath all four: the account NAMED is the account READ.
+# These were two separate conditions and they disagreed. Driven with a stubbed
+# git and sudo so it needs no second account on the machine.
+identity_label_matches_value() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    git_identity_user() { printf "%s\n" "the-human"; }
+    id() { [[ "${1:-}" == -un ]] && printf "somebody-else\n" || command id "$@"; }
+    # Whoever is asked, answers with their own name, so the output says which
+    # account was actually read.
+    sudo() {
+      [[ "$1" == -u ]] || { printf "BADSUDO\n"; return 1; }
+      printf "%s\n" "$2"
+    }
+    git() { printf "%s\n" "somebody-else"; }
+    git_identity
+  ' _ "${REPO}/scripts/lib.sh" 2>/dev/null)"
+  grep -q 'the-human' <<<"${out}" || {
+    printf 'the label says the-human but the config came from elsewhere: %s\n' "${out}" >&2
+    return 1; }
+  ! grep -q 'somebody-else' <<<"${out}" || {
+    printf 'it read the current account while reporting a different one: %s\n' "${out}" >&2
+    return 1; }
+}
+check "the account named is the account whose config was read" \
+  identity_label_matches_value
+# ...and it must NOT escalate when there is nobody to escalate to: a needless
+# 'sudo -u me' on a box without passwordless sudo is a health check that stops
+# for a password.
+identity_does_not_escalate_to_itself() {
+  local out
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    git_identity_user() { printf "%s\n" "me"; }
+    id() { [[ "${1:-}" == -un ]] && printf "me\n" || command id "$@"; }
+    sudo() { printf "ESCALATED\n"; }
+    git() { printf "direct\n"; }
+    git_identity
+  ' _ "${REPO}/scripts/lib.sh" 2>/dev/null)"
+  ! grep -q 'ESCALATED' <<<"${out}" || {
+    printf 'it ran sudo to read its own config: %s\n' "${out}" >&2; return 1; }
+}
+check "...and it never sudos to the account it already is" \
+  identity_does_not_escalate_to_itself
 
 echo "# .env keys must not collide with aider's own env vars (load_env exports them)"
 # load_env sources .env under 'set -a', so every key becomes an environment
