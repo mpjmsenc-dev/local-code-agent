@@ -673,12 +673,7 @@ if systemd_available && systemctl is-enabled --quiet local-code-agent-backup.tim
   # Report the REAL schedule the timer runs on (BACKUP_SCHEDULE is configurable),
   # and describe retention honestly — BACKUP_KEEP=0 means "keep everything",
   # not "keep newest 0".
-  KEEP_DESC="keeping newest ${BACKUP_KEEP}"
-  if ! [[ "${BACKUP_KEEP}" =~ ^[0-9]+$ ]]; then
-    KEEP_DESC="retention disabled (BACKUP_KEEP='${BACKUP_KEEP}' is not a number)"
-  elif [[ "${BACKUP_KEEP}" == "0" ]]; then
-    KEEP_DESC="retention disabled (keeping all)"
-  fi
+  KEEP_DESC="$(retention_desc)"
   TIMER_SCHED="$(installed_backup_schedule || true)"
   [[ -n "${TIMER_SCHED}" ]] || TIMER_SCHED="${BACKUP_SCHEDULE}"
   p_pass "scheduled backup timer enabled (${TIMER_SCHED}; ${KEEP_DESC})"

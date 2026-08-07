@@ -1217,6 +1217,54 @@ check "keep == count -> delete none" test -z "$(prune_sel 3 "${B1}" "${B2}" "${B
 check "keep > count -> delete none"  test -z "$(prune_sel 7 "${B1}" "${B2}" "${B3}")"
 check "keep 0 -> retention off, delete none" test -z "$(prune_sel 0 "${B1}" "${B2}")"
 check "non-numeric keep -> delete none"      test -z "$(prune_sel abc "${B1}" "${B2}")"
+# ...and the sentence describing those two early returns has to mean what they
+# do. Printed raw, BACKUP_KEEP=0 became "keeping the newest 0" — not merely
+# unclear but backwards and alarming, since it reads as "every backup will be
+# deleted" at the moment somebody is switching scheduled backups ON, when in
+# fact none of them ever will be. BACKUP_KEEP=abc became "keeping the newest
+# abc", which is not a sentence. Both were what 'backup.sh --install-timer'
+# said; check-system.sh had worked it out and carried a comment saying exactly
+# this, and the other caller never asked.
+#
+# In-process throughout. Written with 'bash -c' first, these ran in a shell
+# that had never sourced lib.sh: three failed as command-not-found, and the
+# NEGATIVE one — "never reads as newest-zero" — passed, because its leading '!'
+# inverted the missing command into a success. A gate that passes hardest when
+# the function does not exist is the shape this file keeps finding.
+keep_desc_for() { BACKUP_KEEP="$1" retention_desc; }
+check "a normal count is described as a count" \
+  test "$(keep_desc_for 7)" = "keeping newest 7"
+zero_says_keep_everything() { grep -qi 'keeping all' <<<"$(keep_desc_for 0)"; }
+check "0 is 'keep everything', not 'keep none'" zero_says_keep_everything
+zero_never_reads_as_none() { ! grep -qE 'newest 0' <<<"$(keep_desc_for 0)"; }
+check "...and never reads as newest-zero" zero_never_reads_as_none
+junk_says_disabled_and_quotes_it() {
+  local out; out="$(keep_desc_for abc)"
+  grep -qi 'disabled' <<<"${out}" && grep -qF 'abc' <<<"${out}"
+}
+check "a value that is not a number says retention is off, and quotes it" \
+  junk_says_disabled_and_quotes_it
+unset_falls_back_to_the_default() {
+  local out; out="$(BACKUP_KEEP="" retention_desc)"
+  [[ "${out}" == "keeping newest 7" ]]
+}
+check "an unset value falls back to the documented default" \
+  unset_falls_back_to_the_default
+# ...and both readers must go through it, or they will disagree again.
+retention_is_described_once() {
+  local bad=0 f body
+  for f in "${REPO}/backup.sh" "${REPO}/check-system.sh"; do
+    body="$(sed 's/^[[:space:]]*#.*//' "${f}")"
+    grep -q 'retention_desc' <<<"${body}" || {
+      printf '%s does not use retention_desc\n' "${f##*/}" >&2; bad=1; continue; }
+    # The raw value, in a sentence about keeping things, is the bug itself.
+    grep -qE 'keeping the newest \$\{BACKUP_KEEP' <<<"${body}" && {
+      printf '%s prints BACKUP_KEEP raw in a retention sentence again\n' "${f##*/}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "both retention messages come from one rule" retention_is_described_once
 
 echo "# two backups at once shared a filename and both called it a success"
 # Nothing serialised backup.sh, and there are three ways to have two running:

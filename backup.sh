@@ -465,7 +465,7 @@ install_timer() {
   as_root systemctl daemon-reload
   as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"
-  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
+  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, $(retention_desc) (systemctl list-timers local-code-agent-backup.timer)."
 }
 
 # uninstall_timer — remove the timer + service (used by uninstall.sh too).

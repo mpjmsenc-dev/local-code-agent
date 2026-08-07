@@ -971,6 +971,36 @@ backups_to_prune() {
   sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
 }
 
+# retention_desc — how to describe BACKUP_KEEP to a human.
+#
+# The two early returns above are the whole reason this exists. BACKUP_KEEP=0
+# means "keep everything" and a non-number means "retention never runs", so
+# printing the raw value produces:
+#
+#   BACKUP_KEEP=0     keeping the newest 0
+#   BACKUP_KEEP=abc   keeping the newest abc
+#
+# The first is not merely unclear, it is backwards and alarming: it reads as
+# "every backup will be deleted" at the exact moment somebody is switching
+# scheduled backups ON, when the truth is that none of them ever will be. The
+# second is not a sentence.
+#
+# check-system.sh worked this out and carries a comment saying precisely that
+# — "BACKUP_KEEP=0 means 'keep everything', not 'keep newest 0'". backup.sh's
+# own --install-timer line, which is the one printed while setting retention
+# up, never asked. Same shape as docker_start_hint and pull_advice: the rule
+# existed, in one place, and the other caller did not know about it.
+retention_desc() {
+  local keep="${BACKUP_KEEP:-7}"
+  if ! [[ "${keep}" =~ ^[0-9]+$ ]]; then
+    printf "retention disabled (BACKUP_KEEP='%s' is not a number)" "${keep}"
+  elif [[ "${keep}" == "0" ]]; then
+    printf 'retention disabled (keeping all)'
+  else
+    printf 'keeping newest %s' "${keep}"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Ollama helpers
 # ---------------------------------------------------------------------------
