@@ -1226,16 +1226,55 @@ backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran
   done
   local out old
   out="$(PATH="$(stub_path "${b}/stub")" bash "${b}/backup.sh" 2>&1 || true)"
+  # Kept for the verdict check below, so this runs once rather than twice.
+  printf '%s' "${out}" > "${SANDBOX}/backup-out-$1.txt"
   old="$(find "${b}/backups" -name 'local-code-agent-backup-2026010*.tar.gz' | wc -l)"
-  if grep -q 'skipping retention' <<<"${out}"; then printf '%s skipped\n' "${old}"
-  else printf '%s ran\n' "${old}"; fi
+  # The VERDICT, not the retention sentence. It used to match "skipping
+  # retention", which is the same fact stated a second time and moved the
+  # moment that message was reworded — so the harness now reads the line the
+  # reader actually acts on, and the surviving count proves retention itself.
+  if grep -q 'WITHOUT the WebUI data' <<<"${out}"; then printf '%s partial\n' "${old}"
+  else printf '%s complete\n' "${old}"; fi
 }
 check "with the chat app configured, an incomplete backup keeps the older ones" \
-  test "$(backup_retention_case true)" = "2 skipped"
+  test "$(backup_retention_case true)" = "2 partial"
 # ...and the other half: with no chat app there is genuinely nothing to miss,
 # so retention must still run or backups accumulate forever.
 check "...and with ENABLE_WEBUI=false it still prunes" \
-  test "$(backup_retention_case false)" = "0 ran"
+  test "$(backup_retention_case false)" = "0 complete"
+# ...and the verdict must say so. The 'ok' was unconditional and printed ABOVE
+# the warning. Measured on this box with docker down:
+#
+#   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+#   [warn] WebUI data was NOT captured in this backup — skipping retention
+#
+# A green line reading "your backup is fine", about a 4 KB archive with no
+# accounts and no chat history in it. backup.sh's own comment already quoted
+# that pairing as evidence — it fixed the retention half and left the verdict.
+# The reader who skims sees the tick, and finds out during a restore.
+partial_backup_is_not_reported_as_a_good_one() {
+  local out; out="$(cat "${SANDBOX}/backup-out-true.txt")"
+  [[ -n "${out}" ]] || { echo 'no recorded backup run to check' >&2; return 1; }
+  grep -q '^.*\[ ok \].*Backup written and verified' <<<"${out}" && {
+    printf 'an incomplete backup was reported as a good one: %s\n' \
+      "$(grep 'Backup written' <<<"${out}")" >&2
+    return 1; }
+  grep -qF 'WITHOUT the WebUI data' <<<"${out}" || {
+    printf 'an incomplete backup did not say what it was missing: %s\n' "${out}" >&2
+    return 1; }
+}
+complete_backup_still_reports_success() {
+  # The complement, or the fix could be "never say ok".
+  local out; out="$(cat "${SANDBOX}/backup-out-false.txt")"
+  grep -q 'Backup written and verified' <<<"${out}" || {
+    printf 'a complete backup was not reported as one: %s\n' "${out}" >&2; return 1; }
+  ! grep -qF 'WITHOUT the WebUI data' <<<"${out}" || {
+    printf 'a complete backup was called incomplete: %s\n' "${out}" >&2; return 1; }
+}
+check "an incomplete backup is not reported as a good one" \
+  partial_backup_is_not_reported_as_a_good_one
+check "...and a complete one still is" \
+  complete_backup_still_reports_success
 
 check "the retention decision never reads ENABLE_WEBUI" \
   retention_ignores_enable_webui

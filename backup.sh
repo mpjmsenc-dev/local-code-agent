@@ -327,15 +327,34 @@ do_backup() {
     rm -f "${tarball}"
     die "The backup archive failed verification and was deleted (older backups were kept untouched). Check free space with 'df -h' and re-run ${SCRIPT_DIR}/backup.sh."
   fi
-  ok "Backup written and verified: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+  local size; size="$(du -h "${tarball}" | cut -f1)"
 
-  # Only prune when this backup is as complete as it was supposed to be.
-  # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
-  # nights, silently delete every backup that still had the WebUI accounts and
-  # chat history — the exact data this feature exists to protect.
+  # The verdict branches on the same state retention does, because it is the
+  # same question. The 'ok' was unconditional and printed ABOVE the warning
+  # that this archive is missing the very data the feature exists to protect.
+  # Measured, with docker down:
+  #
+  #   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+  #   [warn] WebUI data was NOT captured in this backup — skipping retention
+  #
+  # A green line reading "your backup is fine", about a 4 KB archive holding no
+  # accounts and no chat history, with the caveat underneath it. This project
+  # takes that shape out elsewhere and says why — "the pass line counts only
+  # what passed" — and this file's own comment already quotes the warn-then-ok
+  # pairing as evidence, having fixed the retention half and left this one.
+  #
+  # 'none' still passes: with no WebUI data on the machine, or ENABLE_WEBUI
+  # false, a backup without it is complete. Only 'missed' means something that
+  # should have been in here is not.
   if [[ "${webui_state}" == "missed" ]]; then
-    warn "WebUI data was NOT captured in this backup — skipping retention so older, complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
+    warn "Backup written and verified, but WITHOUT the WebUI data (accounts and chat history): ${tarball} (${size})."
+    # Only prune when this backup is as complete as it was supposed to be.
+    # Otherwise an unattended timer run with docker down would, over
+    # BACKUP_KEEP nights, silently delete every backup that still had the
+    # WebUI accounts and chat history.
+    warn "Retention skipped, so older and complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
   else
+    ok "Backup written and verified: ${tarball} (${size})"
     prune_old_backups
   fi
 
