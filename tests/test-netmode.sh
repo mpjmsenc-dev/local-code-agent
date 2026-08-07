@@ -492,6 +492,55 @@ else
   t_fail "a failed render did not report the file was left alone: ${FAILED_RENDER_OUT}"
 fi
 
+# A mode this script does not have must be reported as that, on stderr.
+#
+# It printed the whole usage page to STDOUT and exited 1, with nothing on the
+# error stream at all. Measured before the fix:
+#
+#   $ netmode.sh nosuchmode 2>/dev/null   -> the whole usage page
+#   $ netmode.sh nosuchmode >/dev/null    -> nothing whatsoever
+#
+# So a typo was indistinguishable from --help except by exit code, and anything
+# that captures stderr to report why a command failed had an empty message to
+# report. Six lines above, this same function already named a bad EXTRA
+# argument on stderr — the guard that exists because 'lca harden --help' once
+# applied the firewall — so the file disagreed with itself.
+#
+# Running a mode that does not exist is safe, and is the point: the dispatch is
+# the first thing main() does, so nothing is rendered, written or applied.
+netmode_says() {  # ARG -> "<stdout-bytes> <stderr>"; empty ARG means none given
+  local out err rc=0
+  out="$("${REPO}/netmode.sh" ${1:+"$1"} 2>/dev/null)" || rc=$?
+  err="$("${REPO}/netmode.sh" ${1:+"$1"} 2>&1 >/dev/null)" || true
+  printf '%s|%s|%s' "${#out}" "${rc}" "${err}"
+}
+BAD_MODE="$(netmode_says nosuchmode)"
+if [[ "${BAD_MODE}" == *"Unknown mode: nosuchmode"* ]]; then
+  t_ok "an unknown mode is named"
+else
+  t_fail "an unknown mode was not named: ${BAD_MODE}"
+fi
+if [[ "${BAD_MODE}" == 0\|1\|* ]]; then
+  t_ok "...on stderr, with nothing on stdout, exiting 1"
+else
+  t_fail "an unknown mode wrote to stdout or exited wrong: ${BAD_MODE}"
+fi
+NO_MODE="$(netmode_says "")"
+if [[ "${NO_MODE}" == *"No mode given"* ]]; then
+  t_ok "no mode at all is reported as that, not as an unknown one"
+else
+  t_fail "a missing mode was not reported: ${NO_MODE}"
+fi
+# ...and --help is still an answer, not an error: the whole reason usage has
+# one copy is that asking a firewall command what it does came back as a
+# failure once already.
+HELP_OUT="$(netmode_says --help)"
+if [[ "${HELP_OUT}" == *"|0|"* && "${HELP_OUT}" != 0\|* ]]; then
+  t_ok "--help still answers on stdout and exits 0"
+else
+  t_fail "--help no longer answers cleanly: ${HELP_OUT}"
+fi
+
 # The counterpart to command_not_found_handle above: if anything reached it,
 # some check called a function that did not exist and compared nothing while
 # reporting ok.

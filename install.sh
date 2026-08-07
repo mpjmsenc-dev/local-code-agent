@@ -95,7 +95,23 @@ main() {
   # into ${INSTALL_DIR} — measured, not theorised: './install.sh --help' had to
   # be killed by a timeout, and left a checkout behind.
   case "${1:-}" in
+    "") ;;
     -h|--help) usage; exit 0 ;;
+    # Everything else, refused here — above every side effect, for the same
+    # reason --help is answered here. This script takes NO arguments: every
+    # knob is an environment variable, and there is no $1 anywhere below. So
+    # 'install.sh --dry-run', 'install.sh --branch main' and 'install.sh -n'
+    # each fell straight through this case and performed a full system
+    # install — apt-get, a clone into ${INSTALL_DIR}, and setup.sh — while
+    # appearing to have been told not to. The comment above records --help
+    # being fixed for exactly that; the rest of the option space was left.
+    #
+    # The env-var names are in the message because wanting a different branch
+    # or directory is the likeliest reason to have typed an argument at all.
+    *)
+      usage >&2
+      fail "This installer takes no arguments, so '${1}' would have been ignored and the install would have gone ahead anyway. Use the environment overrides instead: LCA_BRANCH, LCA_REPO_URL, LCA_DIR, LCA_RUN_SETUP."
+      ;;
   esac
   if [[ "${EUID}" -eq 0 ]]; then
     SUDO=()

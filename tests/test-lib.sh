@@ -9590,6 +9590,41 @@ check "the login banner explains itself on --help" \
   answers_help "${REPO}/scripts/motd.sh"
 # ...and nothing was cloned or installed while proving it.
 check "install.sh --help touched nothing" test ! -e "${HELP_SB}/target"
+# ...and neither does an argument that is not --help. This script takes NO
+# positional arguments — every knob is an environment variable, and there is no
+# $1 anywhere below the case — so the case had one arm for --help and no
+# fallback, and everything else fell straight through into a full install:
+# apt-get, a clone into ${INSTALL_DIR}, then setup.sh. 'install.sh --dry-run'
+# installed. The --help hole two checks above is on record as having been fixed
+# for exactly this reason; the rest of the option space was left open.
+#
+# Run for real, bounded the same way, and the assertion is that nothing
+# happened rather than that a message was printed.
+install_refuses() {  # ARG -> stderr, having pointed nowhere real
+  LCA_DIR="${HELP_SB}/argtarget" LCA_REPO_URL="${HELP_SB}/nonexistent.git" \
+    timeout 20 "${HELP_SB}/install.sh" "$1" 2>&1 >/dev/null </dev/null || true
+}
+install_refuses_an_argument_it_cannot_honour() {
+  # The ERROR line, not the whole of stderr. usage goes to stderr too, and its
+  # header already documents LCA_BRANCH — so asserting against everything
+  # printed passed with the message stripped out entirely. The mutation said
+  # so; a gate satisfied by the text it sits next to is worse than none.
+  local out line
+  out="$(install_refuses --dry-run)"
+  line="$(grep 'FAIL]' <<<"${out}" || true)"
+  [[ -n "${line}" ]] || {
+    printf 'an unrecognised argument was not refused at all: %s\n' "${out}" >&2; return 1; }
+  grep -q -- '--dry-run' <<<"${line}" || {
+    printf 'an unrecognised argument was not named: %s\n' "${line}" >&2; return 1; }
+  # Named, and pointed at the thing that WOULD have worked.
+  grep -q 'LCA_BRANCH' <<<"${line}" || {
+    printf 'refused without naming the environment overrides: %s\n' "${line}" >&2
+    return 1; }
+}
+check "install.sh refuses an argument it would have ignored" \
+  install_refuses_an_argument_it_cannot_honour
+check "...and installed nothing while refusing it" \
+  test ! -e "${HELP_SB}/argtarget"
 # ...and it has to explain itself through the PIPE it is advertised with, which
 # is not the same invocation. 'curl -fsSL <url>/install.sh | bash' streams the
 # script into bash, and inside a function BASH_SOURCE[0] is then the literal

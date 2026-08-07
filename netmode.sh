@@ -446,9 +446,10 @@ show_status() {
   fi
 }
 
-# usage — printed for --help (exit 0) and for anything unrecognised (exit 1).
-# One copy, because the two used to be the same branch: asking a command that
-# edits the firewall what it does came back as an error.
+# usage — printed for --help on stdout (exit 0), and to stderr beside a named
+# error for anything unrecognised (exit 1). One copy, because the two used to
+# be the same branch: asking a command that edits the firewall what it does
+# came back as an error.
 usage() {
   cat <<EOF
 Usage: sudo lca <offline|online|status|harden>       (or netmode.sh directly)
@@ -487,7 +488,17 @@ main() {
     render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
     --install-service) require_service ;;
     -h|--help)       usage; exit 0 ;;
-    *)               usage; exit 1 ;;
+    # Named, and on stderr — the same shape as the extra-argument guard six
+    # lines above, which this did not match. Measured before:
+    #
+    #   $ netmode.sh nosuchmode 2>/dev/null   -> the whole usage page
+    #   $ netmode.sh nosuchmode >/dev/null    -> nothing at all
+    #
+    # A typo produced a usage page indistinguishable from --help except by exit
+    # code, with an empty error stream — so anything capturing stderr to report
+    # why this failed had nothing to report.
+    "")              usage >&2; die "No mode given." ;;
+    *)               usage >&2; die "Unknown mode: ${1}" ;;
   esac
 }
 
