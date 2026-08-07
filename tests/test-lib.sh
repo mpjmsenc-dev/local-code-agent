@@ -7323,13 +7323,27 @@ no_script_hardcodes_docker_remedies() {
     printf '%s hands out docker remedies without asking who is reading\n' "${f##*/}" >&2
     bad=1
   done
-  # The helper must still be used somewhere, or this passes over a repo that
-  # deleted the distinction rather than one that keeps it.
-  for f in "${REPO}"/webui.sh "${REPO}"/scripts/install_webui.sh "${REPO}"/scripts/logs.sh; do
-    grep -q 'docker_unreachable_advice' "${f}" && seen=$((seen+1))
+  # Every message about a daemon this account could not reach, counted. Three
+  # said "Start it" and nothing else — restore.sh, apply.sh and uninstall.sh —
+  # which is right only once you know the daemon is genuinely down. They reach
+  # that line through docker_daemon_reachable, which is false for a user who
+  # cannot talk to a perfectly healthy daemon, so "start it" was advice to
+  # restart a service that was already running.
+  #
+  # check-system.sh is deliberately NOT in this list, and is the reason the
+  # rule was findable at all: it says "docker daemon not responding
+  # ($(docker_start_hint))" only in the branch where can_root_now was true and
+  # root still got nothing, which really does mean the daemon is down. It
+  # reports group membership separately, with its own root arm. It is the one
+  # that got this right.
+  local f2
+  for f2 in "${REPO}"/webui.sh "${REPO}"/scripts/install_webui.sh \
+            "${REPO}"/scripts/logs.sh "${REPO}"/restore.sh \
+            "${REPO}"/scripts/apply.sh "${REPO}"/uninstall.sh; do
+    grep -q 'docker_unreachable_advice' "${f2}" && seen=$((seen+1))
   done
-  (( seen == 3 )) || {
-    printf 'only %s of the 3 daemon-unreachable messages ask who is reading\n' "${seen}" >&2
+  (( seen == 6 )) || {
+    printf 'only %s of the 6 daemon-unreachable messages ask who is reading\n' "${seen}" >&2
     bad=1
   }
   return "${bad}"

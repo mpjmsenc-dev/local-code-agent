@@ -173,7 +173,7 @@ apply_webui() {
   # that cannot work either, while a perfectly good container may be sitting
   # there with drifted settings.
   if ! docker_daemon_reachable; then
-    warn "Chat app: cannot reach the Docker daemon, so its settings were neither checked nor applied. Start it ($(docker_start_hint)), then re-run."
+    warn "Chat app: cannot reach the Docker daemon, so its settings were neither checked nor applied. $(docker_unreachable_advice). Then re-run."
     UNCHECKED=$((UNCHECKED+1))
     return 0
   fi

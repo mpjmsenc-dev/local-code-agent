@@ -80,7 +80,7 @@ remove_webui() {
   # nothing being left behind. Silence is honest here.
   have docker || return 0
   if ! docker_daemon_reachable; then
-    warn "The Docker daemon is not responding, so the chat app was NOT removed — its container and the 'open-webui' volume (every account and chat) are still on this machine. Start it ($(docker_start_hint)), then re-run this script to finish."
+    warn "The Docker daemon is not responding, so the chat app was NOT removed — its container and the 'open-webui' volume (every account and chat) are still on this machine. $(docker_unreachable_advice). Then re-run this script to finish."
     return 1
   fi
   if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
