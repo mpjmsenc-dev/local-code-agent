@@ -92,7 +92,7 @@ apply_ollama() {
     live_ctx="$(ollama_bg_env OLLAMA_CONTEXT_LENGTH || true)"
     live_keep="$(ollama_bg_env OLLAMA_KEEP_ALIVE || true)"
     if [[ -z "${live_ctx}" && -z "${live_keep}" ]]; then
-      warn "Ollama:   no systemd here, so the running server keeps whatever it was started with — .env's context (${OLLAMA_CONTEXT_LENGTH}) and keep-alive (${OLLAMA_KEEP_ALIVE}) reach it only when it next starts, and its launch settings could not be read. To be sure: stop it (pkill -f 'ollama serve') and re-run any lca command, which starts it again."
+      warn "Ollama:   no systemd here, so the running server keeps whatever it was started with — .env's context (${OLLAMA_CONTEXT_LENGTH}) and keep-alive (${OLLAMA_KEEP_ALIVE}) reach it only when it next starts, and its launch settings could not be read. To be sure: stop it (pkill -x ollama) and re-run any lca command, which starts it again."
       UNCHECKED=$((UNCHECKED+1))
       return 0
     fi
@@ -104,7 +104,7 @@ apply_ollama() {
     # model server out from under whatever is using it is a bigger step than
     # reconciling settings, and there is no service manager here to do it
     # gracefully. Counted, so the summary cannot call the run complete.
-    warn "Ollama:   the running server was started with context ${live_ctx:-unknown} and keep-alive ${live_keep:-unknown}, not .env's ${OLLAMA_CONTEXT_LENGTH} / ${OLLAMA_KEEP_ALIVE} — and there is no systemd here to restart it. Apply them by stopping it (pkill -f 'ollama serve') and re-running any lca command, which starts it again."
+    warn "Ollama:   the running server was started with context ${live_ctx:-unknown} and keep-alive ${live_keep:-unknown}, not .env's ${OLLAMA_CONTEXT_LENGTH} / ${OLLAMA_KEEP_ALIVE} — and there is no systemd here to restart it. Apply them by stopping it (pkill -x ollama) and re-running any lca command, which starts it again."
     UNCHECKED=$((UNCHECKED+1))
     return 0
   fi

@@ -1943,7 +1943,19 @@ ensure_ollama_up() {
 ollama_bg_env() {
   local key="$1" pids pid environ val
   have pgrep || return 1
-  pids="$(pgrep -f 'ollama serve' 2>/dev/null || true)"
+  # -x on the process NAME, not -f on the whole command line. '-f ollama serve'
+  # matches any process whose arguments contain that phrase, which includes the
+  # shell that is asking — measured here with the server stopped, it returned
+  # two PIDs and both were bash. This function then takes the first and reads
+  # /proc/PID/environ off it, so it was reading an unrelated process: either
+  # finding nothing (and apply.sh reporting "its launch settings could not be
+  # read" about a server that was fine) or, for a process started from an lca
+  # script, finding .env's own exported values and reporting no drift without
+  # ever having consulted the server.
+  #
+  # 'ollama serve' runs with comm=ollama, so -x finds it and cannot match a
+  # shell. speed.sh already did it this way; this was the copy that drifted.
+  pids="$(pgrep -x ollama 2>/dev/null || true)"
   [[ -n "${pids}" ]] || return 1
   read -r pid <<<"${pids}"
   [[ -n "${pid}" && -r "/proc/${pid}/environ" ]] || return 1

@@ -38,7 +38,7 @@ sudo ss -tlnp | grep 11434
 ```
 
 Usually it's a manually-started `ollama serve` fighting the systemd service —
-kill the manual one (`sudo pkill -f "ollama serve"`) and
+kill the manual one (`sudo pkill -x ollama`) and
 `sudo systemctl restart ollama`. Alternatively change `OLLAMA_HOST` in `.env`
 to another port and run `sudo lca apply` — which re-renders the drop-in AND
 re-creates the chat app container, so the phone follows Ollama to the new port

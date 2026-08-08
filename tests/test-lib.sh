@@ -11668,6 +11668,47 @@ apply_does_not_read_ollama_ps() {
 }
 check "...from the launch environment, never from 'ollama ps'" \
   apply_does_not_read_ollama_ps
+# ...and it must find that process by NAME, not by matching the command line.
+#
+# 'pgrep -f "ollama serve"' matches anything whose arguments contain the phrase,
+# which includes the shell asking the question and any shell the user typed the
+# advice into. Measured here with the server stopped, it returned two PIDs and
+# both were bash; ollama_bg_env takes the first and reads /proc/PID/environ off
+# it, so it was reading an unrelated process — reporting "launch settings could
+# not be read" about a healthy server, or, for a process started from an lca
+# script, handing back .env's own exported values as though the server had been
+# consulted.
+#
+# The same phrase was in the advice two apply.sh warnings and TROUBLESHOOTING
+# give the user: 'pkill -f "ollama serve"'. With the server already stopped
+# that pattern matches ONLY their shell, so the fix for a stuck server was a
+# command that killed the session and nothing else.
+#
+# 'ollama serve' runs with comm=ollama, so -x finds exactly it and can never
+# match a shell. speed.sh always did it that way; the others had drifted.
+#
+# Comments are stripped from every file before matching, this one included: the
+# paragraph above names the very pattern it bans, and a whole-file grep would
+# find its own explanation and fail forever.
+no_ollama_lookup_matches_a_shell() {
+  local f body hits="" safe
+  while IFS= read -r f; do
+    body="$(sed 's/#.*//' "${f}")"
+    if grep -qE 'p(grep|kill) -f .ollama serve' <<<"${body}"; then
+      hits+="${f}"$'\n'
+    fi
+  done < <(find "${REPO}" -type f \( -name '*.sh' -o -name '*.md' \) -not -path '*/.git/*')
+  [[ -z "${hits}" ]] || {
+    printf 'a command-line match for the ollama process can select the calling shell:\n%s' "${hits}" >&2
+    return 1; }
+  # Non-vacuous: the safe form has to actually be what the code uses, or this
+  # would keep passing after the lookup was deleted entirely.
+  safe="$(sed -n '/^ollama_bg_env() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  grep -q 'pgrep -x ollama' <<<"${safe}" || {
+    echo 'ollama_bg_env does not look the server up by process name' >&2; return 1; }
+}
+check "...and finds it by process name, so it cannot match the calling shell" \
+  no_ollama_lookup_matches_a_shell
 check "an unattended update refuses to continue past a failed backup" \
   update_refuses_unattended_after_a_failed_backup
 check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list
