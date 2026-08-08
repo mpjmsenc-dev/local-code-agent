@@ -2240,6 +2240,39 @@ ollama_outwaits_the_probe() {
 }
 check "...and Ollama is given longer to load than the probe waits" \
   ollama_outwaits_the_probe
+# ...and only one command may start the server. The guard at the top of
+# start_ollama_bg is a check and the nohup below it is an act, so two lca
+# commands on a box whose server is down — the state this self-heal path exists
+# for — both pass and both spawn. The loser cannot bind, but it opened the log
+# with '>' first, and O_TRUNC does not care that it is about to fail.
+#
+# Two writers, one file, independent offsets, measured:
+#
+#   ERROR: bind: address already in use
+#   <NUL x19>GIN 200 /api/generate
+#
+# The startup lines are gone, the file opens with an error from the process
+# that died, and a text log has NUL bytes in it — and that file is what
+# 'lca logs ollama' prints.
+start_bg_serialises_against_itself() {
+  local body
+  body="$(sed -n '/^start_ollama_bg() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || { echo 'could not find start_ollama_bg' >&2; return 1; }
+  grep -q 'flock' <<<"${body}" || {
+    echo 'start_ollama_bg does not serialise, so two lca commands can both start a server and truncate each other'"'"'s log' >&2
+    return 1; }
+  # The lock is worthless without a re-check inside it: the winner has usually
+  # finished starting by the time the loser is admitted, and starting a second
+  # server then is the very thing being prevented.
+  awk '/flock -w/                { locked = 1 }
+       locked && /wait_for_ollama/ { rechecked = 1 }
+       /nohup/                   { if (!spawned) { spawned = 1; ok = rechecked } }
+       END { exit (spawned && ok) ? 0 : 1 }' <<<"${body}" || {
+    echo 'start_ollama_bg takes the lock but never re-checks inside it, so the loser still starts a second server' >&2
+    return 1; }
+}
+check "...and only one command at a time starts the server" \
+  start_bg_serialises_against_itself
 
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer

@@ -1936,6 +1936,40 @@ start_ollama_bg() {
   wait_for_ollama 2 && return 0
   have ollama || return 1
   local logf="${OLLAMA_BG_LOG}"
+  # Serialised, because the line above is a CHECK and the one below is an ACT.
+  # Two lca commands on a box whose server is down — the normal state after a
+  # reboot, and the state this self-heal path exists for — both pass the check
+  # and both spawn a server. The loser cannot bind, but it has already opened
+  # this log with '>' , and O_TRUNC does not care that it is about to fail.
+  #
+  # Measured, two writers on one file with independent offsets:
+  #
+  #   ERROR: bind: address already in use
+  #   <NUL x19>GIN 200 /api/generate
+  #
+  # The real server's startup lines are gone, the file opens with an error from
+  # the process that failed, and there are NUL bytes in the middle of a text
+  # log. That is the file 'lca logs ollama' prints and the docs tell people to
+  # pipe into 'lca ask "why did this fail?"'.
+  #
+  # Re-checked under the lock: by the time the loser gets in, the winner has
+  # usually finished starting, so it returns success instead of starting a
+  # second one. Same flock-on-a-descriptor pattern as backup.sh, released by
+  # the kernel on exit, so a killed lca cannot wedge the next one.
+  local lock_fd=""
+  if have flock; then
+    if exec {lock_fd}>"${logf}.lock" 2>/dev/null; then
+      flock -w 60 "${lock_fd}" 2>/dev/null || true
+      if wait_for_ollama 2; then
+        exec {lock_fd}>&-
+        return 0
+      fi
+    else
+      lock_fd=""
+    fi
+  else
+    warn "flock is not installed, so two commands starting Ollama at once cannot be prevented — install util-linux."
+  fi
   warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
   # config/ollama.env through the same reader the drop-in uses, rather than a
   # hand-picked copy of some of it — see ollama_extra_env for what that cost.
@@ -1949,7 +1983,13 @@ start_ollama_bg() {
     OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
     ${extra[@]+"${extra[@]}"} \
     ollama serve >"${logf}" 2>&1 &
-  wait_for_ollama 30
+  # Held until the server answers, so a second command waits for THIS start
+  # rather than racing it, and released explicitly rather than left to exit —
+  # this function returns into a shell that keeps running.
+  local rc=0
+  wait_for_ollama 30 || rc=$?
+  [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-
+  return "${rc}"
 }
 
 # ensure_ollama_up [TIMEOUT] — guarantee the API is reachable: return 0 if
