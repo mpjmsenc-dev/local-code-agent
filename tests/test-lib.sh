@@ -11185,6 +11185,80 @@ doc_section_references_resolve() {
 }
 check "every message pointing at a doc section points at a real one" \
   doc_section_references_resolve
+
+echo "# ...and no gate may be satisfied by the comment explaining the thing it forbids"
+# Five times in one working day, a check that greps a whole file matched its own
+# explanation. Each time the file was correct and the gate failed, or worse, the
+# gate passed because a comment carried the very string it was hunting for:
+#
+#   the model listing, matching the old heading quoted in the fix's comment
+#   the pre-push hook, matching the promise it had just stopped making
+#   setup.sh, matching the verdict line it now avoids printing
+#   this suite's own DOCKER_HOST rule, matching its own error message
+#   the performance page, matching the figure it forbids
+#
+# The established fix each time was to strip comments from the target first.
+# This makes that permanent: a fixed-string search of a repo file that would
+# STOP matching once comments are removed is either checking prose on purpose,
+# in which case say so with a 'prose-check' marker on the line above, or it is
+# reading an explanation as evidence.
+#
+# The pre-existing suite came out clean when this was first run — 59 whole-file
+# literal searches, one deliberate prose check. It starts green and stays that
+# way.
+no_gate_is_satisfied_by_a_comment() {
+  local line lit path code bad=0 seen=0
+  while IFS= read -r line; do
+    lit="${line%%$'\t'*}"; path="${line#*$'\t'}"
+    [[ -n "${lit}" && -n "${path}" && -f "${REPO}/${path}" ]] || continue
+    seen=$((seen+1))
+    grep -qF -- "${lit}" "${REPO}/${path}" || continue          # not there at all
+    # Captured, not piped: 'grep -q' leaves on its first match, the reader takes
+    # SIGPIPE, and under pipefail 141 reads as "not found". The suite has its
+    # own gate against that, and it caught this line when it was written as a
+    # pipe — which is the second time today.
+    code="$(grep -v '^[[:space:]]*#' "${REPO}/${path}")"
+    grep -qF -- "${lit}" <<<"${code}" && continue
+    printf 'a gate searches %s for "%s", which appears there only in a comment — it is reading an explanation as evidence (mark it "prose-check" above the line if that is deliberate)\n' \
+      "${path}" "${lit}" >&2
+    bad=1
+  done < <(awk -v sq="'" -v dq='"' '
+    # The marker applies to the NEXT search, not the next LINE: it is written
+    # above the explanation of why the search is deliberate, and that
+    # explanation is usually more than one line long.
+    /prose-check/ { pending = 1; next }
+    {
+      # Both quote styles. Matching only double quotes found exactly one search
+      # in the whole suite, and skipping that one deliberate prose check left
+      # the gate with nothing to inspect — which its own emptiness guard
+      # reported rather than passing.
+      for (q = 1; q <= 2; q++) {
+        quote = (q == 1) ? dq : sq
+        line = $0
+        pat = "grep -q[a-zA-Z]*[[:space:]]+(-- )?" quote "[^" quote "$]+" quote "[[:space:]]+" dq "\\$\\{REPO\\}/[A-Za-z0-9_./-]+" dq
+        while (match(line, pat)) {
+          seg = substr(line, RSTART, RLENGTH)
+          line = substr(line, RSTART + RLENGTH)
+          lit = seg
+          sub("^.*grep -q[a-zA-Z]*[[:space:]]+(-- )?" quote, "", lit)
+          sub(quote "[[:space:]]+" dq "\\$\\{REPO\\}.*$", "", lit)
+          pth = seg
+          sub("^.*" dq "\\$\\{REPO\\}/", "", pth)
+          sub(dq "$", "", pth)
+          if (lit != "" && pth != "") {
+            if (pending) { pending = 0 } else { printf "%s\t%s\n", lit, pth }
+          }
+        }
+      }
+    }' "${TESTS_DIR}/test-lib.sh")
+  (( seen > 0 )) || {
+    echo 'this gate found no whole-file literal searches at all — the idiom it recognises has moved' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no gate is satisfied by the comment explaining what it forbids" \
+  no_gate_is_satisfied_by_a_comment
 # ...and neither may the pre-push hook. It said it runs "the exact gates CI
 # runs, so a push never opens a red PR", and that is false twice over, both
 # measured on this project:
@@ -12867,6 +12941,8 @@ ask_keeps_its_answer_stream_clean() {
     bad=1
   done <<<"${body}"
   # ...and the rule must still be stated where the other callers can find it.
+  # prose-check: a comment IS the evidence here — this asserts lib.sh documents
+  # the rule for the other callers, not that any code implements it.
   grep -q "in 'lca ask' the model's answer is stdout" "${REPO}/scripts/lib.sh" || {
     echo 'lib.sh no longer records why these notices go to stderr' >&2
     bad=1
