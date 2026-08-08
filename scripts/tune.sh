@@ -57,6 +57,39 @@ model_family() {
   printf '%s\n' "${fam}"
 }
 
+# unknown_family_note — the sentence for a MODEL_FAMILY nothing here answers
+# for, or nothing (and non-zero) when the family is known.
+#
+# The fallback above is deliberate and .env.example documents it: "An unknown
+# value falls back to the default rather than failing a pull." What neither
+# said is that it happens without a word. Measured with
+# MODEL_FAMILY=nonsense-model:
+#
+#   lca tune --dry-run   -> qwen2.5-coder:14b, nothing on stderr
+#   lca check            -> "RAM ladder: 16 GiB detected → recommended model
+#                            qwen2.5-coder:14b", and no mention of the setting
+#
+# So 'MODEL_FAMILY=llama3' — a typo for llama3.1, which IS supported — leaves
+# a line in .env that does nothing at all, on every run, for ever, and the one
+# command people run to find out why reports a healthy stack. That is the
+# same shape as the rest of this branch: the setting was ignored and success
+# was reported.
+#
+# choose_for_ram twelve lines down already warns when it drops a family for
+# not fitting the RAM. This project already believed a fallback deserves a
+# word; it was only saying it for one of the two reasons a fallback happens.
+#
+# A note rather than a warn() of its own, so the two callers can each report it
+# in their own register — 'lca tune' warns, 'lca check' counts it — without a
+# second copy of the sentence, and without the helper printing twice because
+# choose_for_ram happens to call model_family more than once.
+unknown_family_note() {
+  local fam="${MODEL_FAMILY:-qwen2.5-coder}"
+  family_sizes "${fam}" >/dev/null 2>&1 && return 1
+  printf "MODEL_FAMILY='%s' is not a family this project knows, so auto-tune ignored it and used qwen2.5-coder instead — that line in .env is doing nothing. The supported names are listed beside MODEL_FAMILY in %s/.env.example." \
+    "${fam}" "${REPO_ROOT}"
+}
+
 # family_sizes FAMILY — echo "SMALL MID BIG": the tags this family publishes for
 # the three RAM rungs. Adding a family here is all it takes to support it.
 # Sizes are the Ollama tags; each must exist for that family.
@@ -77,16 +110,10 @@ family_sizes() {
   esac
 }
 
-# model_fits_ram TAG RAM_GIB — rough q4 sizing: ~0.6 GB per billion parameters
-# plus ~1 GB for context and overhead. Deliberately approximate; its only job is
-# to stop the ladder selecting something that cannot possibly load. An
-# unparseable tag returns true, so an unusual naming scheme is never blocked.
-model_fits_ram() {
-  local tag="${1##*:}" ram="$2" params
-  params="${tag%[bB]}"
-  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
-  awk -v p="${params}" -v r="${ram}" 'BEGIN{ exit !(p * 0.6 + 1 <= r) }'
-}
+# model_fits_ram lives in lib.sh now, beside model_disk_gb — they are the same
+# ~0.6 GB per billion parameters, and the manual-pin path in update-model.sh
+# needed it without sourcing this file (which would redefine main() over its
+# caller's). Unchanged otherwise; this file gets it from lib.sh above.
 
 choose_for_ram() {
   local ram="$1" fam small mid big
@@ -97,9 +124,29 @@ choose_for_ram() {
   # first use is the worst outcome; fall back to a family that does fit and say
   # so, rather than honouring MODEL_FAMILY into a wall.
   if ! model_fits_ram "${fam}:${small}" "${ram}"; then
-    warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with update-model.sh if you have the RAM."
-    fam="qwen2.5-coder"
-    read -r small mid big <<<"$(family_sizes "${fam}")"
+    # Only announce a fallback that can actually happen. qwen2.5-coder IS the
+    # fallback, so on a box too small for its smallest size this said:
+    #
+    #   [warn] MODEL_FAMILY=qwen2.5-coder has no size that fits 2 GiB
+    #          (smallest is 3b) — falling back to qwen2.5-coder.
+    #
+    # Measured with choose_for_ram 2 and the default family: it announced a
+    # change to the thing it already was, and then selected 3b anyway — the
+    # exact model the line above had just ruled out. The check existed to stop
+    # "silently pulling and then OOMing on first use", its own words, and it
+    # detected that case and walked into it.
+    if [[ "${fam}" != "qwen2.5-coder" ]]; then
+      warn "MODEL_FAMILY=${fam} has no size that fits ${ram} GiB (smallest is ${small}) — falling back to qwen2.5-coder. Pin it manually with 'lca model <name>' if you have the RAM."
+      fam="qwen2.5-coder"
+      read -r small mid big <<<"$(family_sizes "${fam}")"
+    fi
+    # Either we were already on the fallback family or we have just moved to it
+    # and it does not fit either. Both mean there is nothing left to fall back
+    # to, and saying so is the only honest option — the ladder still has to
+    # name a model, because there is no smaller one to name.
+    if ! model_fits_ram "${fam}:${small}" "${ram}"; then
+      warn "Nothing in this project's ladder fits ${ram} GiB: the smallest model it knows is ${fam}:${small}, which needs about $(model_ram_gb "${small}") GB. It is being selected anyway because there is nothing smaller, so expect it to fail to load or be killed for memory on first use — this machine needs more RAM. 'lca model <name>' pins a different one if you know of one that fits."
+    fi
   fi
   if (( ram < 9 )); then
     TUNE_MODEL="${fam}:${small}"
@@ -118,7 +165,7 @@ choose_for_ram() {
 
 install_service() {
   if ! systemd_available; then
-    warn "systemd is not available here — skipping the on-boot auto-tune service. Run tune.sh manually after spec changes."
+    warn "systemd is not available here — skipping the on-boot auto-tune service. Run 'lca tune' manually after spec changes."
     return 0
   fi
   info "Installing on-boot auto-tune service (${TUNE_SERVICE})..."
@@ -126,7 +173,14 @@ install_service() {
     echo "[Unit]"
     echo "Description=local-code-agent auto-tune (adapt model to current RAM)"
     echo "Wants=network-online.target"
-    echo "After=network-online.target ollama.service"
+    # docker.service too, now that a model change reconciles the chat app
+    # container: ordered after network and Ollama alone, this ran while the
+    # Docker daemon was still starting, apply.sh correctly reported it could
+    # not look, and the container kept the old model until someone noticed.
+    # 'After=' on a unit that does not exist is a no-op, so a SKIP_DOCKER box
+    # is unaffected — and it is deliberately not Wants=, because this must not
+    # pull Docker onto a machine that chose not to have it.
+    echo "After=network-online.target ollama.service docker.service"
     echo ""
     echo "[Service]"
     echo "Type=oneshot"
@@ -134,7 +188,8 @@ install_service() {
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
-  } | as_root tee "${TUNE_SERVICE}" >/dev/null
+  } | write_root_file "${TUNE_SERVICE}" \
+    || die "Could not write ${TUNE_SERVICE} (disk full? check 'df -h'). Auto-tune's boot service is unchanged."
   as_root systemctl daemon-reload
   as_root systemctl enable local-code-agent-tune.service >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-tune.service — check: systemctl status local-code-agent-tune"
@@ -150,12 +205,22 @@ main() {
       install_service
       exit 0
       ;;
+    -h|--help)
+      # The header block above is the help text.
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
     *)
-      die "Usage: tune.sh [--dry-run|--install-service]"
+      die "Unknown option: ${1} — usage: lca tune [--dry-run]  (see: lca tune --help)"
       ;;
   esac
 
   load_env
+
+  # Said before anything is decided, because everything below is decided with
+  # a family the reader did not choose.
+  local fam_note
+  fam_note="$(unknown_family_note)" && warn "${fam_note}"
 
   local ram
   ram="$(detect_ram_gib)"
@@ -168,7 +233,7 @@ main() {
 
   if [[ "${dry_run}" == "true" ]]; then
     if [[ "${AUTO_TUNE}" != "true" ]]; then
-      info "AUTO_TUNE=false — a real run would keep the manual pin and change nothing."
+      info "AUTO_TUNE is '${AUTO_TUNE}', not 'true' — a real run would keep the manual pin and change nothing."
     elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
       info "Already tuned — a real run would change nothing."
     else
@@ -188,13 +253,33 @@ main() {
     # who pinned a model is in.
     if resync_dropin_if_drifted; then
       ok "Applied your pinned settings: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE})."
-      exit 0
+    else
+      ok "AUTO_TUNE=false — keeping your manual pin: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
     fi
-    ok "AUTO_TUNE=false — keeping your manual pin: ${MODEL_NAME} (ctx ${OLLAMA_CONTEXT_LENGTH}). Nothing to do."
+    # Warmed on the way out of THIS branch too, not only on the auto-tune path
+    # at the end of main. Both exits here used to return first, so the boot
+    # oneshot loaded nothing and the first message after every reboot paid the
+    # full cold load — measured at 60-90s for a 3B on a 4-vCPU box with no GPU,
+    # and warm_model's own comment records 228s for a 7B on a cold page cache.
+    #
+    # This is not the unusual branch. 'lca model' sets AUTO_TUNE=false for you,
+    # so it is where everyone who picked their own model ends up, and a
+    # CPU-only host is where that wait is the difference between "thinking" and
+    # "broken". After resync_dropin_if_drifted, because that restarts Ollama
+    # when it re-syncs and a restart drops whatever was loaded.
+    warm_model "${MODEL_NAME}"
     exit 0
   fi
 
-  if [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+  # "Already tuned" has to mean the model is ON DISK, not merely named in .env.
+  # Two exits above write .env before anything is pulled — when Ollama is not
+  # installed yet, and when its API cannot be reached on a host without systemd
+  # — and both tell the reader to re-run tune. Trusting .env alone made that
+  # re-run answer "Already tuned ... Nothing to do" and fetch nothing, so the
+  # advice this script gives about itself could never work: .env names a model
+  # that is not there, and 'lca ask' and 'lca speed' then fail on it.
+  if [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]] \
+     && { ! have ollama || model_present "${MODEL_NAME}"; }; then
     # .env already matches the ladder — but an earlier run may have written
     # .env and then been interrupted before re-rendering the drop-in, leaving
     # the running service on stale settings that the .env-only check can't
@@ -210,8 +295,9 @@ main() {
   if ! have ollama; then
     # Called before Ollama exists (or on a stripped-down box): record the
     # decision so setup.sh's model-pull step uses it, and stop there.
-    set_env_var MODEL_NAME "${TUNE_MODEL}"
-    set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+    write_env_or_die MODEL_NAME "${TUNE_MODEL}"
+    write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+      "MODEL_NAME was written but the context length was not, so .env is half-tuned; set OLLAMA_CONTEXT_LENGTH=${TUNE_CTX} by hand or re-run 'lca tune' once there is room."
     warn "Ollama is not installed yet — wrote the tuned values to .env; setup.sh will pull ${TUNE_MODEL}."
     exit 0
   fi
@@ -226,12 +312,13 @@ main() {
       # No service manager and we couldn't bring the API up — record the
       # decision so it applies once Ollama is running, and degrade gracefully
       # instead of dying with a systemctl hint that cannot work here.
-      set_env_var MODEL_NAME "${TUNE_MODEL}"
-      set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
-      warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run tune.sh to apply."
+      write_env_or_die MODEL_NAME "${TUNE_MODEL}"
+      write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+        "MODEL_NAME was written but the context length was not, so .env is half-tuned; set OLLAMA_CONTEXT_LENGTH=${TUNE_CTX} by hand or re-run 'lca tune' once there is room."
+      warn "Ollama API is not reachable and there is no systemd here — wrote tuned values to .env. Start it ('OLLAMA_HOST=${OLLAMA_HOST} ollama serve') and re-run 'lca tune' to apply."
       exit 0
     fi
-    die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then re-run tune.sh."
+    die "Ollama API is not reachable at $(ollama_url). Try: sudo systemctl restart ollama — then re-run 'lca tune'."
   fi
 
   # Nothing is persisted to .env or applied to the service until AFTER the
@@ -239,8 +326,15 @@ main() {
   # the drop-in and the running service consistent — never a phantom context.
   local old_model="${MODEL_NAME}" old_ctx="${OLLAMA_CONTEXT_LENGTH}"
   local chosen_model="${TUNE_MODEL}" validate=false
-  if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
-    info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
+  # Not just "the name changed": a model that is already named in .env but
+  # missing from disk has to be fetched too, or the fast path above would be
+  # the only thing that could have pulled it — and it cannot.
+  if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]] || ! model_present "${TUNE_MODEL}"; then
+    if [[ "${TUNE_MODEL}" != "${MODEL_NAME}" ]]; then
+      info "Model change: ${MODEL_NAME} -> ${TUNE_MODEL}"
+    else
+      info "'${TUNE_MODEL}' is the right model for this machine but is not downloaded — fetching it."
+    fi
     if model_present "${TUNE_MODEL}"; then
       validate=true
     elif [[ "$(netmode_state)" == "offline" ]]; then
@@ -251,7 +345,7 @@ main() {
         warn "netmode is OFFLINE — cannot pull ${TUNE_MODEL}; using already-downloaded ${chosen_model} for this RAM tier."
       else
         chosen_model="${MODEL_NAME}"
-        warn "netmode is OFFLINE and no fitting model is downloaded — will lower context to ${TUNE_CTX} but keep ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then tune.sh to finish."
+        warn "netmode is OFFLINE and no fitting model is downloaded — will lower context to ${TUNE_CTX} but keep ${MODEL_NAME}. Run 'sudo ${SCRIPT_DIR%/scripts}/netmode.sh online' then 'lca tune' to finish."
       fi
     else
       # Online: try for the ideal model. A persistent failure falls back to
@@ -267,9 +361,9 @@ main() {
   fi
 
   if [[ "${validate}" == "true" ]]; then
-    info "Validating ${chosen_model} with a real generation (first load can take a minute)..."
+    info "Validating ${chosen_model} with a real generation. It is loaded first, which on a CPU-only box has been measured at up to 5 minutes..."
     if ! model_responds "${chosen_model}"; then
-      die "${chosen_model} did not produce a response — nothing changed (still ${old_model}, ctx ${old_ctx}). Check RAM headroom with: free -h"
+      die "${chosen_model} did not produce a response — nothing changed (still ${old_model}, ctx ${old_ctx}). $(model_silence_reason)"
     fi
     ok "${chosen_model} validated."
   fi
@@ -282,13 +376,36 @@ main() {
   MODEL_NAME="${chosen_model}"
   OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
   if [[ "${chosen_model}" != "${old_model}" || "${old_ctx}" != "${TUNE_CTX}" ]] || ! ollama_dropin_matches; then
-    set_env_var MODEL_NAME "${chosen_model}"
-    set_env_var OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}"
+    # Before render_ollama_dropin on purpose: if .env cannot be written, the
+    # drop-in must not be either, or Ollama would run settings .env does not
+    # name and every drift check would disagree with itself from then on.
+    write_env_or_die MODEL_NAME "${chosen_model}"
+    write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
+      "MODEL_NAME was written but the context length was not; Ollama has NOT been restarted, so nothing is running settings .env does not name. Re-run 'lca tune' once there is room."
     render_ollama_dropin
     restart_ollama
     if [[ "${old_model}" != "${chosen_model}" ]]; then
       info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
+      # "Auto-tune applied" was applied to Ollama and to nothing else. The chat
+      # app is created with '-e DEFAULT_MODELS=', and a container's environment
+      # is fixed for its lifetime, so after a droplet resize — the headline
+      # reason this runs on every boot — the phone went on offering the OLD
+      # model while .env, the drop-in and this very line all said the new one.
+      # Only 'lca check' knew, and only if someone ran it.
+      #
+      # Reconciled rather than reported, because nobody is watching a boot
+      # oneshot. apply.sh is drift-driven, so the drop-in this function just
+      # rendered costs nothing there, and it degrades on its own when docker is
+      # down or root is unavailable instead of failing a boot.
+      # The 'ok' goes FIRST and the reconciliation after it, so the last thing
+      # printed is whichever is true. Ordered the other way, a failed
+      # reconciliation warned and was then immediately followed by "Auto-tune
+      # applied" — which is true of the tune and reads as the final word on the
+      # whole thing.
       ok "Auto-tune applied: ${chosen_model} with a ${TUNE_CTX}-token context."
+      if ! "${SCRIPT_DIR}/apply.sh"; then
+        warn "…but the rest of the system could not be reconciled with it — the chat app may still offer '${old_model}'. Fix it with: sudo ${REPO_ROOT}/bin/lca apply"
+      fi
     else
       ok "Auto-tune applied: context ${TUNE_CTX}; model unchanged (${chosen_model})."
     fi

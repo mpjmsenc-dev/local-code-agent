@@ -28,14 +28,39 @@ main() {
   else
     net_guard "Installing Tailscale"
     info "Running the official Tailscale installer..."
-    curl -fsSL https://tailscale.com/install.sh | as_root sh
+    # Retried, for the reason install_ollama.sh records beside its own copy of
+    # this: a transient reset while a remote installer is being streamed into a
+    # shell fails the whole pipeline, and this one was bare — 'curl | sh' under
+    # 'set -o pipefail', so a blip exited the script with no message at all.
+    # The official installer is idempotent, so repeating a partial attempt is
+    # safe.
+    local attempt ts_ok=false
+    for attempt in 1 2 3; do
+      if curl -fsSL https://tailscale.com/install.sh | as_root sh; then
+        ts_ok=true
+        break
+      fi
+      if (( attempt < 3 )); then
+        warn "Tailscale download/install attempt ${attempt}/3 failed (transient network?) — retrying in $((attempt * 5))s..."
+        sleep "$((attempt * 5))"
+      fi
+    done
+    [[ "${ts_ok}" == "true" ]] \
+      || die "The Tailscale installer failed 3 times — check connectivity (curl -I https://tailscale.com) and whether netmode is offline: ${REPO_ROOT}/netmode.sh status"
     require_cmd tailscale
     ok "Tailscale installed."
   fi
 
   if systemd_available; then
-    as_root systemctl enable --now tailscaled
-    ok "tailscaled service enabled and running."
+    # Not bare: an enable that fails leaves the binary installed and perfectly
+    # usable by hand, so it is a warning about phone access, not a reason to
+    # stop an install that has already put the whole terminal stack in place.
+    if as_root systemctl enable --now tailscaled; then
+      ok "tailscaled service enabled and running."
+    else
+      warn "Tailscale is installed but its service would not start — phone access will not work until it does. Look at: sudo systemctl status tailscaled"
+      return 0
+    fi
   else
     warn "systemd not available — start tailscaled yourself before running 'tailscale up'."
   fi

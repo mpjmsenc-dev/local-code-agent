@@ -10,18 +10,24 @@ need to match the droplet's size.
 
 ```bash
 cd /opt/local-code-agent
-./backup.sh
+lca backup
 ```
 
 This writes `backups/local-code-agent-backup-<timestamp>.tar.gz` containing the
 Open WebUI data volume (your account + all chats), your `.env`, and the list of
 installed models (names only — model blobs re-download on the new machine).
 
-Copy it to your computer (run this **on your computer**, not the droplet):
+`backup.sh` prints the exact path it wrote. Copy **that one** to your computer
+(run this on your computer, not the droplet):
 
 ```bash
-scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.tar.gz .
+scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-20260101-120000.tar.gz .
 ```
+
+Use the filename `backup.sh` printed rather than a `*` glob: retention keeps
+the newest `BACKUP_KEEP` (default 7), and each one contains the whole WebUI
+volume, so a glob quietly drags every old backup across the wire when you
+wanted the one you just took.
 
 ## On the new VM (target)
 
@@ -32,7 +38,7 @@ scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.ta
    ```bash
    git clone https://github.com/mpjmsenc-dev/local-code-agent.git /opt/local-code-agent
    cd /opt/local-code-agent
-   chmod +x *.sh scripts/*.sh
+   chmod +x *.sh scripts/*.sh bin/*
    ./setup.sh
    ```
 
@@ -46,13 +52,25 @@ scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.ta
 
    ```bash
    cd /opt/local-code-agent
-   ./restore.sh
+   lca restore
    ```
 
-   This restores `.env` and the WebUI volume, recreates the container, and
-   re-pulls your models. Note: auto-tune on the next boot may pick a different
-   model than the droplet had — that's the feature, not a bug: it matches the
-   new VM's RAM.
+   This restores `.env` and the WebUI volume, recreates the container, re-pulls
+   your models, and finishes by running `lca apply` so the restored settings are
+   actually in effect rather than merely on disk.
+
+   Then re-pick the model for *this* machine:
+
+   ```bash
+   sudo lca tune
+   ```
+
+   The backup carries the **droplet's** model and context length, which is the
+   whole point of this document being about moving to different hardware.
+   Auto-tune would fix it on the next boot anyway — this just means you are not
+   running the small droplet's model on a big new VM until then. Picking a
+   different model than the droplet had is the feature, not a bug: it matches
+   the new VM's RAM.
 
 5. Join the new machine to your Tailscale network:
 
@@ -63,7 +81,7 @@ scp root@<droplet-ip>:/opt/local-code-agent/backups/local-code-agent-backup-*.ta
    Your phone setup doesn't change — only the Tailscale IP is new
    (`tailscale ip -4`). Update the home-screen bookmark, done.
 
-6. Verify: `./check-system.sh`, then send a chat message from the phone.
+6. Verify: `lca check`, then send a chat message from the phone.
 
 ## Afterwards
 

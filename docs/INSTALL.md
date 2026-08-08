@@ -22,7 +22,7 @@ hypervisor VM (VMware / Proxmox / KVM), or a spare machine.
 ```bash
 git clone https://github.com/mpjmsenc-dev/local-code-agent.git
 cd local-code-agent
-chmod +x *.sh scripts/*.sh
+chmod +x *.sh scripts/*.sh bin/*
 ./setup.sh
 ```
 
@@ -47,11 +47,16 @@ shells auto-confirm every prompt, so `./setup.sh </dev/null` is fully unattended
 9. `scripts/install_tailscale.sh` — Tailscale installed; login deferred to you.
 10. Boot services: `local-code-agent-tune.service` (re-tune every boot) and
     `local-code-agent-netmode.service` (netmode persistence).
-11. `./check-system.sh --quick` + a next-steps summary. `--quick` because step 7
-    already made the model generate for real and aborted the install if it
-    could not — repeating that probe here cost up to a minute and proved
-    nothing new. If step 7 was skipped (Ollama unreachable), the full check
-    runs instead, so inference is never assumed to work untested.
+11. `./check-system.sh --quick` + a next-steps summary. `--quick` only when step
+    7 actually made the model generate for real — repeating that probe here
+    cost up to a minute and proved nothing new. If step 7 did not prove it
+    (Ollama unreachable, the download failed, or the model did not answer) the
+    FULL check runs instead, so inference is never assumed to work untested.
+
+    None of those stops the install. Nothing from step 8 onwards needs a
+    model — including the inbound guard that keeps these ports off the public
+    internet — so a failure here is recorded, everything else is finished, and
+    the closing verdict line says the install did not fully succeed.
 
 Re-running `./setup.sh` at any time is safe — it reuses/repairs instead of
 duplicating, and resumes cleanly after an interrupted install.
@@ -63,8 +68,8 @@ sudo tailscale up          # log in via the printed URL
 tailscale ip -4            # your private address
 ```
 
-Phone setup: [PHONE.md](PHONE.md). Daily usage: `run-agent.sh` in any project
-directory. Health: `./check-system.sh` — most of its runtime is one probe that
+Phone setup: [PHONE.md](PHONE.md). Daily usage: `lca` in any project
+directory. Health: `lca check` — most of its runtime is one probe that
 asks the model to generate, so add `--quick` when you only want the fast checks
 (services, ports, disk, config drift) and already know inference works.
 

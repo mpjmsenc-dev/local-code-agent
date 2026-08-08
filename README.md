@@ -44,15 +44,39 @@ chmod +x *.sh scripts/*.sh bin/*
 ./setup.sh
 ```
 
-Then verify with `./check-system.sh`. For a zero-terminal DigitalOcean install,
+Then verify with `lca check`. For a zero-terminal DigitalOcean install,
 paste `deploy/do-user-data.sh` when creating the droplet — see
 [docs/DO.md](docs/DO.md) and the step-by-step [docs/YOUR-TURN.md](docs/YOUR-TURN.md).
+
+## Quick start (code) — the part that writes files
+
+Nothing more to install; `setup.sh` already did it. In a terminal on the server:
+
+```bash
+mkdir -p ~/my-project && cd ~/my-project && git init   # or cd into a repo you have
+lca                                                    # aider, on your model, here
+```
+
+The `git init` is not ceremony: aider commits every edit, which is what makes
+the next command work and what makes a bad edit one `git revert` away.
+
+Ask for a change in plain English; it edits the real files and commits each one.
+Then read what it actually did, because a small local model sometimes changes
+code you never mentioned:
+
+```bash
+git diff HEAD~1
+```
+
+This comes before the phone section for a reason — it needs no further setup,
+and it is the half of this stack the chat cannot do. Full section:
+[Daily usage: aider](#daily-usage-aider-the-coding-agent).
 
 ## Quick start (phone)
 
 1. `sudo tailscale up` on the server, log in via the printed URL.
 2. Install the Tailscale app on your phone, log in to the same account.
-3. Open `http://<tailscale-ip>:3000` — or run `./webui.sh url` on the server to
+3. Open `http://<tailscale-ip>:3000` — or run `lca chat` on the server to
    print the exact address. Create the **first** account (it becomes admin).
    Your model is already selected, so you can just start typing.
 4. Lock signups: set `WEBUI_ENABLE_SIGNUP=false` in `.env`, then `sudo lca apply`.
@@ -63,7 +87,9 @@ Full walkthrough: [docs/PHONE.md](docs/PHONE.md).
 
 `scripts/tune.sh` runs during setup **and on every boot**. It detects the VM's
 RAM and picks the best model + context length, pulls and validates the new model,
-reconfigures Ollama, and keeps the old model on disk as a rollback. Resize your
+reconfigures Ollama, brings the chat app onto the new model too (its model is
+fixed when the container is created, so that means re-creating it), and keeps
+the old model on disk as a rollback. Resize your
 droplet (or change your hypervisor VM's specs) and reboot — that's the whole
 upgrade procedure. More vCPUs need no configuration at all: Ollama automatically
 uses every core.
@@ -83,22 +109,22 @@ everywhere, and a resize still re-tunes it:
 |---|---|
 | `qwen2.5-coder` *(default)* | 3b / 7b / 14b |
 | `qwen3` | 4b / 8b / 14b |
-| `deepseek-coder-v2` | 16b |
-| `llama3.1` | 8b / 8b / 70b |
-| `codellama` | 7b / 13b / 34b |
+| `deepseek-coder-v2` | 16b / 16b / 16b |
+| `llama3.1` | 8b / 8b / 8b — 70b and 405b stay a manual choice |
+| `codellama` | 7b / 13b / 13b — 34b stays a manual choice |
 
 An unrecognised value falls back to the default instead of failing a pull.
 
 `qwen2.5-coder:32b` is deliberately a manual choice for big machines (≥ 32 GB):
-`./update-model.sh qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
-reboot won't override you. Preview what tune would do: `scripts/tune.sh --dry-run`.
+`lca model qwen2.5-coder:32b`. Manual pins set `AUTO_TUNE=false` so a
+reboot won't override you. Preview what tune would do: `lca tune --dry-run`.
 
 ## Headline feature 2: NET SWITCH — the internet kill switch
 
 ```bash
-sudo ./netmode.sh offline   # AI stack loses ALL internet; phone access keeps working
-sudo ./netmode.sh status    # shows mode + proves it with a live probe
-sudo ./netmode.sh online    # back to normal
+sudo lca offline             # AI stack loses ALL internet; phone access keeps working
+sudo lca status               # shows mode + proves it with a live probe
+sudo lca online               # back to normal
 ```
 
 Offline mode drops every **new** outbound connection (locally-generated and
@@ -110,19 +136,20 @@ caveat: the encrypted Tailscale tunnel still uses the network as transport;
 Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
 every boot) keeps the WebUI and Ollama ports reachable only over loopback and
 Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
-with `sudo ./netmode.sh harden` / `status`.
+with `sudo lca harden` / `sudo lca status`; `harden` also (re)installs the boot
+service, so one command closes the ports for good rather than until the next
+reboot.
 
 ## Updating
 
 ```bash
-cd /opt/local-code-agent
-./update.sh --check     # what would change? (touches nothing)
-./update.sh             # back up → pull → re-run setup → self-test
+lca update --check      # what would change? (touches nothing)
+lca update              # back up → pull → re-run setup → self-test
 ```
 
 The backup happens **first**, on purpose: the update refreshes OS packages,
 aider, Ollama and possibly the model, so the restore point has to predate all of
-it. If the self-test fails afterwards, `./restore.sh` puts you back. Your `.env`
+it. If the self-test fails afterwards, `lca restore` puts you back. Your `.env`
 is untracked, so your settings survive updates untouched.
 
 ## Security model
@@ -142,8 +169,13 @@ What "private" means here, precisely — and what it doesn't.
   (re)created.
 - **Phone access** rides Tailscale — an encrypted, private WireGuard network.
   Nothing is port-forwarded; you reach WebUI at `http://<tailscale-ip>:3000`.
-- **No telemetry**: aider has analytics/update checks off; Open WebUI runs with
-  `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS`, `ANONYMIZED_TELEMETRY` set.
+- **No telemetry, and no other outbound chatter**: aider has analytics/update
+  checks off; Open WebUI runs with `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS` and
+  `ANONYMIZED_TELEMETRY` set, plus `ENABLE_OPENAI_API=false` and
+  `ENABLE_VERSION_UPDATE_CHECK=false` so it neither probes `api.openai.com`
+  nor asks GitHub whether it is out of date; and Ollama runs with
+  `OLLAMA_NO_CLOUD=1`, which turns off its remote inference and web search —
+  both of which are ON by default and talk to `ollama.com`.
 
 **The kill switch** (`netmode.sh offline`) adds an egress lockdown: new
 outbound connections — locally-generated *and* docker-forwarded — are dropped
@@ -159,7 +191,13 @@ offline because the models are local.
   non-private interfaces), not a full default-drop firewall; it assumes you do
   not expose other services.
 - **Offline mode still permits DNS (UDP/TCP port 53) and STUN (UDP 3478) to any
-  host, plus the WireGuard port 41641.** Tailscale needs them: without DNS,
+  host, the WireGuard port 41641, and — link-local only — DHCP (UDP 67/68/547)
+  and ICMPv6 neighbour discovery, so the VM can keep its lease and its IPv6
+  neighbours.** It also accepts any packet carrying tailscaled's own fwmark
+  (0x80000), whatever the destination — that is how tailscaled's control and
+  data packets bypass its own routing. Setting that mark needs root, so this
+  belongs to the last point below rather than being a separate way out.
+  Tailscale needs them: without DNS,
   `tailscaled` cannot re-resolve its coordination server after a reboot, and
   you would lose the private access that this mode exists to preserve. So
   "offline" means *the AI stack cannot reach the web* (HTTP/HTTPS and
@@ -168,14 +206,28 @@ offline because the models are local.
   exceptions are deliberate; they are not scoped further precisely because a
   narrower rule risks cutting Tailscale and stranding you on a remote VM.
 - Trust is single-VM: anyone with a shell (or root) on the box has full access.
+- **The install trusts four upstreams, as root.** `install.sh` is fetched with
+  `curl | bash` (its header offers a download-and-read path instead), and setup
+  then runs the vendors' own installers the way each vendor documents:
+  `curl -fsSL https://ollama.com/install.sh | sh` and the same shape for
+  Tailscale, plus Docker's apt key and repository. Nothing here is pinned by
+  hash. That is the normal way these three are installed and this project does
+  not improve on it — but "private" describes where your *data* goes, not who
+  you are trusting to put the software there.
+- **Two components float rather than pin.** The chat app runs the
+  `ghcr.io/open-webui/open-webui:main` tag, and `AIDER_VERSION` is empty by
+  default, meaning the latest aider from PyPI. So `lca update` — which
+  re-creates the container and re-runs pip — can bring in whatever upstream
+  published since. Pin aider with `AIDER_VERSION=` in `.env` if you would
+  rather choose your moment; the WebUI tag is not currently configurable.
 
 **Your responsibilities** (see [docs/YOUR-TURN.md](docs/YOUR-TURN.md))
 - Create the **first** WebUI account promptly, then set
   `WEBUI_ENABLE_SIGNUP=false` and run `sudo lca apply`.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
   internet, and keep `OLLAMA_HOST` on loopback.
-- Verify the posture any time with `./check-system.sh` and
-  `sudo ./netmode.sh status`. On DigitalOcean, the **Recovery Console** is the
+- Verify the posture any time with `lca check` and
+  `sudo lca status`. On DigitalOcean, the **Recovery Console** is the
   unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
 
 ## Daily usage: aider (the coding agent)
@@ -191,17 +243,22 @@ lca                 # starts aider on the local model, right here
 |---|---|
 | `lca` | start the coding agent in the current directory |
 | `lca ask "…"` | one-shot answer in the terminal — no session, no browser |
-| `lca chat` | print the address for the chat app on your phone |
+| `lca chat` | phone setup: the chat app's address **and** the `ssh://` address, both as QR codes |
 | `lca check` / `lca test` | health check / live end-to-end self-test (`lca check --quick` skips the ~1-minute model probe) |
 | `lca apply` | make the running system match your `.env` edits (`--dry-run` previews) |
 | `lca logs` | recent logs from Ollama, the chat app and the installer |
-| `lca speed` | measure tokens/second and explain what limits it |
+| `lca speed` | measure generation *and* reading speed, say what one code edit costs, and explain what limits it |
 | `lca update` | back up, update, re-run setup, verify |
 | `lca offline` / `lca online` / `lca status` | internet kill switch, and what it is doing (needs sudo) |
-| `lca model <name>` | switch models |
+| `lca harden` | re-close ports 3000/11434 — now, and again on every boot (needs sudo) |
+| `lca model <name>` | switch models (`--list` what's installed, `--list-recommended` what fits this machine's RAM) |
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
+
+`lca <command> --help` explains any of them — and only explains it. That is
+tested: `lca test --help` used to run the whole acceptance suite, and
+`lca harden --help` used to apply the firewall.
 
 Quick answers without leaving what you are doing:
 
@@ -254,6 +311,8 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `uninstall.sh` | Remove the stack (`--yes`, `--keep-data`); keeps Docker/Tailscale/repo |
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
+| `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
+| `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 
 ## `.env` reference
 
@@ -269,6 +328,7 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
 | `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
+| `AIDER_NO_AUTO_COMMIT` | `false` | Stop aider committing each edit. You then review a dirty tree yourself — and lose the one-commit-per-change trail that makes `git revert <sha>` precise |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |
 | `PYTHON_BIN` | `python3` | Interpreter for the venv |
@@ -294,7 +354,8 @@ local-code-agent/
 ├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
-│   ├── lib.sh · tune.sh · selftest.sh
+│   ├── lib.sh · tune.sh · selftest.sh · apply.sh · ask.sh
+│   ├── logs.sh · speed.sh · motd.sh · prompt-bench.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
 │   └── install_tailscale.sh
@@ -328,7 +389,7 @@ that fits its VRAM, and proving it is really being used.
 
 Note: CI exercises the CPU path on standard runners (there are no GPU runners),
 so the GPU path is documented and detected but not automatically E2E-tested —
-verify it on your GPU host with `./check-system.sh` after setup.
+verify it on your GPU host with `lca check` after setup.
 
 ## Honest expectations vs Claude
 
@@ -339,6 +400,59 @@ to the 3b model, with 7b from ~12 GB and 14b from 16 GB). What you get in
 exchange: total privacy, zero per-token cost, no quotas, and offline operation.
 The stack scales with hardware — resize to more RAM and auto-tune upgrades the
 model automatically; 32 GB+ unlocks `qwen2.5-coder:32b` as a manual choice.
+
+### What "builds an app" actually looks like on 3b
+
+Measured, five identical runs on the base droplet's rung — *"create budget.py
+with `add_expense(amount, category)` and `total_by_category()`, and
+test_budget.py with unittest tests for both"*:
+
+| | Result |
+|---|---|
+| Both files written and applied | **5 / 5** |
+| Malformed edits aider had to reject | **0 / 5** |
+| Time per run | ~1 minute |
+| The tests it wrote passed first time | **0 / 5** |
+
+The last row is the honest one, and the failure is worth seeing: `add_expense`
+accumulated a running total per category while `total_by_category` called
+`sum()` on it, so one of the two tests it wrote caught its own bug. A one-line
+fix, and the test that finds it comes free in the same run.
+
+So: it reliably produces a working shape and rarely one-shots correct logic.
+Keep the tests it writes and run them — on 3b they are the deliverable that
+shows you the one line to change.
+
+Asking 3b to fix it does not work: handed the exact traceback, four runs out
+of four re-emitted the same file unchanged. The same follow-up on **7b** fixed
+it in **3 of 4**. That is the concrete thing more RAM buys here — and it is the
+opposite of the chat's handover behaviour, where a bigger model measures
+[identical](docs/PHONE.md). Full numbers, including why `--auto-test` is not
+the shortcut it looks like, are in
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+If you expect to type one sentence and get a finished app, no local model on an
+8 GB droplet will do that.
+
+### Review every edit — local models can make unrequested changes
+
+A small model does not only get logic wrong; it sometimes edits code you never
+mentioned. Measured on `qwen2.5-coder:7b`: asked to make `divide()` raise on
+zero **and** add a `subtract()` function, it did both correctly and **deleted
+`add()`**, which was never part of the request.
+
+The net is already there — aider commits every edit — so use it:
+
+```bash
+git diff HEAD~1     # exactly what the last change touched
+git revert <sha>    # undo one change cleanly
+```
+
+**After any session, read `git diff HEAD~N` before trusting the result**,
+especially on a file with several functions. `AIDER_NO_AUTO_COMMIT=true` in
+`.env` stops the auto-commit if you would rather review a dirty tree first, at
+the cost of the per-change trail. Full example and reasoning in
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Docs
 

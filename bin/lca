@@ -28,7 +28,7 @@ Usage: lca [command] [args...]
   lca ask -f FILE "q"     ask about a file (pipe also works: cmd | lca ask "q")
   lca ask -c "follow up"  continue from your last question
   lca ask -m MODEL "q"    answer with another model just this once
-  lca chat                show the chat app's address as a QR code to scan
+  lca chat                phone setup: chat URL + SSH address, both as QR codes
   lca apply               make the running system match your .env edits
   lca check [--quick]     full health check (--quick skips the slow model probe)
   lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
@@ -37,12 +37,16 @@ Usage: lca [command] [args...]
   lca update [--check]    back up, update, re-run setup, verify
   lca backup              take a backup now
   lca restore [file]      restore from a backup
-  lca model <name>        switch the model (or 'lca model --list')
+  lca model <name>        switch the model ('--list' installed, '--list-recommended' fits your RAM)
   lca tune                re-pick the model for this machine's RAM (auto-tune)
   lca offline|online      internet kill switch  (needs sudo)
   lca status              kill-switch + guard status (needs sudo)
+  lca harden              re-close ports 3000/11434 now and on every boot (sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs
   lca help                this text
+
+Every command explains itself, and only explains itself:
+  lca <command> --help
 
 Anything after the command is passed straight through, e.g.
   lca --no-auto-commits          (arguments for aider)
@@ -61,7 +65,12 @@ fi
 case "${cmd}" in
   ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
   ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
-  chat)            exec "${REPO}/webui.sh" url ;;
+  # "$@" forwarded like every other branch, even though 'url' takes no
+  # arguments: dropping it swallowed 'lca chat --help', which then printed the
+  # address instead of explaining the command — one line after 'lca help'
+  # promises that every command explains itself. webui.sh rejects the extra
+  # argument itself; that is its job, not this dispatcher's.
+  chat)            exec "${REPO}/webui.sh" url "$@" ;;
   apply)           exec "${REPO}/scripts/apply.sh" "$@" ;;
   check)           exec "${REPO}/check-system.sh" "$@" ;;
   speed)           exec "${REPO}/scripts/speed.sh" "$@" ;;
@@ -76,8 +85,26 @@ case "${cmd}" in
   webui)           exec "${REPO}/webui.sh" "$@" ;;
   tune)            exec "${REPO}/scripts/tune.sh" "$@" ;;
   help|-h|--help)  usage ;;
+  # 'lca help' has advertised "lca --no-auto-commits (arguments for aider)"
+  # since the help text was written, and it did not work: a leading dash
+  # matched no branch and fell through to "Unknown command". Bare 'lca' starts
+  # aider, so passing aider's own flags straight after it is the obvious
+  # reading, and it is what the example promises.
+  #
+  # "${cmd}" is re-prepended because the shift above already consumed it.
+  # Placed after the help branch so -h and --help keep their meaning.
+  -*)              exec "${REPO}/run-agent.sh" "${cmd}" "$@" ;;
   *)
-    usage
+    # >&2, like every other failing path in this project. It was on stdout: a
+    # mistyped command wrote 1747 bytes of help into whatever the caller was
+    # capturing, and left the error stream holding 31 bytes on its own. This is
+    # the entry point every other command is reached through, and it was the
+    # last one still doing it.
+    #
+    # No [FAIL] prefix, deliberately: that lives in lib.sh's err(), and this
+    # file forwards rather than sources — a second copy of the colour codes
+    # here is exactly the drift the rest of this work has been removing.
+    usage >&2
     printf '\nUnknown command: %s\n' "${cmd}" >&2
     exit 1
     ;;

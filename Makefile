@@ -7,19 +7,26 @@
 #   make lint     ShellCheck (zero findings required), same flags as CI
 #   make syntax   bash -n on every script
 #   make test     both unit suites (lib + netmode ruleset)
+#   make coverage which lib.sh functions no test touches (a report, not a gate)
 #   make dry-run  scripts/tune.sh --dry-run (detection only, changes nothing)
 #   make check    ./check-system.sh (full health check; degrades gracefully)
 #   make smoke    scripts/selftest.sh (live end-to-end round-trip on this box)
+#   make bench    measure the assistant's system prompt against the real model
 #   make hooks    install the pre-push git hook (runs `make gates` before push)
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
-SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*)
+# .githooks/* included. The pre-push hook is a bash script like any other, and
+# it was the ONLY one in the repo that neither ShellCheck nor 'bash -n' ever
+# saw — the gate that guards every push, ungated. It fails badly in both
+# directions: a syntax error blocks every push, and a swallowed status lets red
+# gates through, which is the one thing it exists to prevent.
+SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
 
-.PHONY: gates lint syntax test dry-run check smoke hooks help
+.PHONY: gates lint syntax test coverage dry-run check smoke bench hooks help
 .DEFAULT_GOAL := help
 
-gates: syntax lint test ## Everything CI gates on, locally
+gates: syntax lint test ## The CI gates that can run locally (2 of CI's 6 jobs)
 	@echo "== gates passed =="
 
 lint: ## ShellCheck, same invocation as CI
@@ -35,6 +42,9 @@ test: ## Unit suites (library helpers + netmode ruleset)
 	bash tests/test-lib.sh
 	bash tests/test-netmode.sh
 
+coverage: ## Report which lib.sh functions no test touches (a report, not a gate)
+	bash tests/coverage.sh
+
 dry-run: ## Preview the auto-tune decision without changing anything
 	bash scripts/tune.sh --dry-run
 
@@ -43,6 +53,9 @@ check: ## Full system health check
 
 smoke: ## Live end-to-end acceptance test on this machine (Ollama + model + aider + WebUI)
 	./scripts/selftest.sh
+
+bench: ## Measure the assistant's system prompt against the real model (minutes, not seconds)
+	./scripts/prompt-bench.sh
 
 hooks: ## Install the pre-push gate hook (git runs `make gates` before every push)
 	git config core.hooksPath .githooks

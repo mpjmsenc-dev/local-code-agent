@@ -17,11 +17,46 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. Without it the shared docker
+# probes take the strict default, and 'lca backup' run without sudo by an
+# ordinary sudoer skipped the chat history and called a healthy daemon "not
+# usable". A backup that quietly omits your accounts is found out at restore.
+LCA_MAY_PROMPT=true
 load_env
 
 BACKUP_DIR="${REPO_ROOT}/backups"
 BACKUP_SERVICE=/etc/systemd/system/local-code-agent-backup.service
 BACKUP_TIMER=/etc/systemd/system/local-code-agent-backup.timer
+
+# acquire_backup_lock — hold an exclusive lock for the rest of this process.
+#
+# flock releases on exit, including a kill -9, so a crashed run cannot wedge
+# the nightly timer the way a stale lockfile would. Where flock is missing we
+# warn and continue: a backup that refuses to run is worse than one that might
+# overlap, and unique_backup_path still keeps the two from sharing a name.
+acquire_backup_lock() {
+  have flock || {
+    warn "flock is not installed, so two backups running at once cannot be prevented — install util-linux for a safer nightly backup."
+    return 0
+  }
+  local wait_s="${BACKUP_LOCK_WAIT:-900}"
+  # No '2>/dev/null' on this line, ever. 'exec' with redirections and NO command
+  # applies them to the SHELL, so that silences stderr for the whole rest of the
+  # backup — which is exactly what it did: on a full disk, the tar failure's
+  # die() message ("disk full? check: df -h") and every warning after it went to
+  # /dev/null, and the run ended at exit 1 with a completely blank stderr. A
+  # nightly timer failing with nothing to read is the worst version of this.
+  # A failing exec redirect returns non-zero and prints its own diagnostic
+  # rather than killing the shell, so the handler below is all that is needed.
+  exec {BACKUP_LOCK_FD}>"${BACKUP_DIR}/.backup.lock" || {
+    warn "Could not open the backup lock in ${BACKUP_DIR} — continuing without it."
+    return 0
+  }
+  flock -n "${BACKUP_LOCK_FD}" && return 0
+  info "Another backup is already running — waiting up to ${wait_s}s for it to finish."
+  flock -w "${wait_s}" "${BACKUP_LOCK_FD}" \
+    || die "Another backup has held the lock for over ${wait_s}s. It may be stuck: check with 'ps aux | grep backup.sh', then retry."
+}
 
 do_backup() {
   step "Creating backup"
@@ -30,13 +65,39 @@ do_backup() {
   # workdir stays global: the EXIT trap runs after main() returns, where a
   # local would already be out of scope (unbound under set -u).
   workdir="$(mktemp -d)"
-  trap 'rm -rf "${workdir:-}"' EXIT
+  trap backup_cleanup EXIT
   mkdir -p "${BACKUP_DIR}" 2>/dev/null || true
+  # Owner-only. Every archive in here holds the Open WebUI database — account
+  # password hashes and the JWT signing key that mints valid sessions — plus a
+  # copy of .env. It was 755, holding 644 files, so any other login on the box
+  # could read all of it. Applied to an existing directory too, since the ones
+  # already out there were created wide open.
+  chmod 700 "${BACKUP_DIR}" 2>/dev/null || true
+  # ...and the archives inside it, which the directory mode alone was covering.
+  local tightened
+  tightened="$(tighten_backup_modes "${BACKUP_DIR}")"
+  [[ -z "${tightened}" ]] \
+    || info "Made ${tightened} older backup(s) owner-only (they hold password hashes, the session key and your .env)."
   # The timer runs backup.sh as root. If root created backups/ first, a later
   # non-root run would fail with a bare 'tar: Cannot open: Permission denied'
   # and set -e would abort with no explanation — say what's wrong instead.
   [[ -w "${BACKUP_DIR}" ]] || die "Cannot write to ${BACKUP_DIR} (owned by $(stat -c %U "${BACKUP_DIR}" 2>/dev/null || echo 'another user')). Re-run with sudo, or: sudo chown -R $(id -un) ${BACKUP_DIR}"
-  tarball="${BACKUP_DIR}/local-code-agent-backup-${stamp}.tar.gz"
+  # One backup at a time. Nothing here was serialised, and there are three ways
+  # to have two at once: the nightly timer, a manual 'lca backup', and the one
+  # 'lca update' takes before it changes anything. Run together they interleave
+  # on the ONE thing the pause below exists to make consistent — the first run
+  # pauses the container, the second sees it already paused, adopts it, and
+  # unpauses while the first is still reading the volume. A torn snapshot of a
+  # WAL-mode SQLite database, reported as a success.
+  #
+  # Bounded wait rather than refusal, because update.sh relies on the backup
+  # actually being taken; and announced, because a silent 15-minute wait is
+  # indistinguishable from a hang.
+  acquire_backup_lock
+  # Even serialised, two runs can finish in the same second — see
+  # unique_backup_path. This is the second half of that fix; the lock alone
+  # would still have let them share a name.
+  tarball="$(unique_backup_path "${BACKUP_DIR}" "${stamp}")"
 
   # Retention below must never evict an older COMPLETE backup because this run
   # captured less than it should have. Three distinct states — conflating the
@@ -46,33 +107,81 @@ do_backup() {
   #   missed    the volume exists (or docker is down so we cannot tell) and we
   #             did NOT archive it                    -> keep older backups
   local webui_state="none"
+  # lib.sh's probe rather than a fourth hand-written copy of it: this one was
+  # correct, and being correct in four places is how the fifth is not.
   local docker_ok=false
-  if have docker && { docker info >/dev/null 2>&1 \
-      || { can_root && as_root docker info >/dev/null 2>&1; }; }; then
+  if docker_daemon_reachable; then
     docker_ok=true
   fi
 
   # 1. Open WebUI docker volume (accounts + chat history).
+  local docker_installed=false volume_present=false data_state
+  have docker && docker_installed=true
   if [[ "${docker_ok}" == "true" ]] && as_root docker volume inspect open-webui >/dev/null 2>&1; then
+    volume_present=true
+  fi
+  data_state="$(webui_data_state "${docker_ok}" "${docker_installed}" "${volume_present}")"
+
+  if [[ "${data_state}" == "present" ]]; then
     webui_state="missed"   # promoted to "captured" only if the archive succeeds
     info "Archiving the 'open-webui' docker volume..."
+    # The helper image, checked BEFORE the pause below. The archive step runs
+    # 'docker run ${WEBUI_IMAGE}' purely to get a tar binary next to the
+    # volume, and docker pulls a missing image silently — several gigabytes,
+    # with the chat app FROZEN, during what the user asked for as a quick
+    # backup. It is normally cached (it is what the container runs), so this
+    # bites exactly where it hurts: after an image prune, or on a machine
+    # rebuilt from a backup. restore.sh has guarded the identical call since it
+    # was written; this one did not.
+    #
+    # net_blocked, not net_guard, for the same reason restore.sh uses it: the
+    # guard die()s, and dying HERE threw the whole backup away — no tarball at
+    # all, so .env and the model list were lost along with the volume that
+    # could not be fetched, and the "missed" bookkeeping below that exists to
+    # protect older backups never ran either. Offline is a state this project
+    # tells people to be in; meeting it should cost the WebUI data, not the
+    # backup.
+    if ! as_root docker image inspect "${WEBUI_IMAGE}" >/dev/null 2>&1; then
+      if net_blocked; then
+        warn "The ${WEBUI_IMAGE} image is not on this machine and netmode is OFFLINE — the volume is archived using the tar inside that image, so the WebUI data cannot be captured this time. .env and the model list are still being saved, and older backups will be KEPT rather than pruned. For a complete one: sudo ${SCRIPT_DIR}/netmode.sh online, then re-run."
+      else
+        warn "The ${WEBUI_IMAGE} image is not cached, and the volume is archived with the tar inside it — pulling it now (this is a download, not a hang)."
+        as_root docker pull "${WEBUI_IMAGE}" \
+          || warn "Could not pull it — the archive step below will fail and this backup will keep older ones rather than prune them."
+      fi
+    fi
     # Open WebUI stores its data in a WAL-mode SQLite database. Archiving it
     # while the container is writing yields a torn, possibly-corrupt snapshot
     # that only surfaces at restore time. Pause the container (freezes its
     # processes) around the tar so the on-disk files are consistent, and
     # guarantee it is unpaused again even if the tar fails.
     local paused=false
-    if as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
+    # Paused is checked FIRST, and it is not the same question as Running.
+    #
+    # A container left paused — by a run killed with a signal the EXIT trap
+    # cannot catch — still reports State.Running=true, and 'docker pause' then
+    # fails on it with "already paused". That failure used to land in the
+    # "could not pause" branch below, which leaves 'paused' false, installs no
+    # trap, and skips the unpause at the end. So every later backup archived
+    # happily and left the chat app frozen, unreachable from the phone, while
+    # the warning claimed it was "archiving live". Adopting the unpause here is
+    # what ends that: whoever finds it paused is responsible for resuming it.
+    if as_root docker container inspect -f '{{.State.Paused}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
+      warn "'${WEBUI_CONTAINER}' was already paused — an earlier backup was probably killed before it could unpause. Archiving it as it is, then unpausing."
+      paused=true
+      # shellcheck disable=SC2064
+      trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; backup_cleanup" EXIT
+    elif as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null | grep -q true; then
       if as_root docker pause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
         paused=true
         # shellcheck disable=SC2064
-        trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; rm -rf \"${workdir:-}\"" EXIT
+        trap "as_root docker unpause ${WEBUI_CONTAINER} >/dev/null 2>&1 || true; backup_cleanup" EXIT
       else
         warn "Could not pause '${WEBUI_CONTAINER}' — archiving live (snapshot may be inconsistent)."
       fi
     fi
     if as_root docker run --rm --entrypoint tar -v open-webui:/from:ro -v "${workdir}":/to \
-        ghcr.io/open-webui/open-webui:main \
+        "${WEBUI_IMAGE}" \
         czf /to/open-webui-volume.tar.gz -C /from .; then
       ok "WebUI data archived."
       webui_state="captured"
@@ -85,18 +194,37 @@ do_backup() {
       # the unpause on exit) and warn, so the container can never be left
       # paused and unreachable from the phone.
       if as_root docker unpause "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
-        trap 'rm -rf "${workdir:-}"' EXIT
+        trap backup_cleanup EXIT
       else
         warn "Could not unpause '${WEBUI_CONTAINER}' now — the exit trap will retry. If it stays paused, run: sudo docker unpause ${WEBUI_CONTAINER}"
       fi
     fi
-  elif [[ "${docker_ok}" != "true" && "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
-    # Docker is unusable, so we cannot tell whether a WebUI volume with real
-    # data exists. Assume it might: keep older backups rather than risk them.
+  elif [[ "${data_state}" == "unknown" ]]; then
     webui_state="missed"
-    warn "Docker is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
+    warn "Docker is installed but its daemon is not usable — cannot check for WebUI data; assuming it exists and protecting older backups."
   else
-    warn "No 'open-webui' docker volume found — skipping WebUI data."
+    warn "No 'open-webui' docker volume on this machine — skipping WebUI data."
+    # ENABLE_WEBUI=true says the chat app is meant to exist here, so a missing
+    # volume is a fault — deleted by hand, or docker removed — not a
+    # configuration. An older backup may hold the only surviving copy of that
+    # data, and this is exactly the moment it matters.
+    #
+    # Without this the 'none' state pruned. Measured with docker installed, its
+    # daemon reachable, and the volume simply absent:
+    #
+    #   [warn] No 'open-webui' docker volume on this machine — skipping WebUI data.
+    #   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+    #   [info] Retention: keeping the newest 1; removing 2 older backup(s).
+    #
+    # A 4 KB backup with no chat history deleted two complete ones — the exact
+    # loss the note above prune_old_backups says it exists to prevent. It
+    # covered the daemon-down case ('unknown') and not this one.
+    #
+    # With ENABLE_WEBUI=false there is genuinely nothing to capture, so
+    # retention still runs and backups cannot pile up forever.
+    if [[ "${ENABLE_WEBUI}" == "true" ]]; then
+      webui_state="missed"
+    fi
   fi
 
   # 2. .env
@@ -112,10 +240,34 @@ do_backup() {
     if ollama list > "${workdir}/models.txt" 2>/dev/null; then
       ok "Model list captured: $(tail -n +2 "${workdir}/models.txt" | { grep -c . || true; }) model(s)."
     else
+      # '>' created the file before ollama failed, so a zero-byte models.txt
+      # would ship in the archive — and restore.sh reads a models.txt that
+      # exists as an authoritative "no models", re-pulling nothing on a machine
+      # that had a dozen. An absent file is the honest record of not knowing.
+      rm -f "${workdir}/models.txt"
       warn "Could not list models (is Ollama running?) — skipping the model list."
     fi
   else
     warn "Ollama not installed — skipping the model list."
+  fi
+
+  # 4. Provenance. A backup carries the SOURCE machine's model and context
+  #    length, and the commonest reason to restore one is moving to different
+  #    hardware — docs/MIGRATE.md is about nothing else. Without this, restore
+  #    cannot say whether the settings it just put back suit the machine it put
+  #    them on, so it can only offer advice that is right half the time.
+  #
+  #    Never fatal: this is metadata about the backup, not part of it.
+  if {
+       printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+       printf 'host=%s\n'    "$(hostname 2>/dev/null || echo unknown)"
+       printf 'ram_gib=%s\n' "$(detect_ram_gib 2>/dev/null || echo 0)"
+       printf 'model=%s\n'   "${MODEL_NAME}"
+       printf 'context=%s\n' "${OLLAMA_CONTEXT_LENGTH}"
+     } > "${workdir}/meta" 2>/dev/null; then
+    ok "Source machine recorded ($(detect_ram_gib 2>/dev/null || echo '?') GiB, ${MODEL_NAME})."
+  else
+    warn "Could not record the source machine — the backup itself is unaffected."
   fi
 
   # A failed tar (classically: the disk filled up) still leaves a PARTIAL file
@@ -123,16 +275,49 @@ do_backup() {
   # file then becomes the newest tarball in backups/ — which is precisely what
   # restore.sh picks by default. Remove it so a broken archive can never be
   # restored over good data.
+  # umask, not a chmod after the fact: tar creates the file the moment it
+  # starts, so a chmod afterwards leaves the whole write world-readable and
+  # only closes it once the secrets are already on disk.
+  local prev_umask; prev_umask="$(umask)"
+  umask 077
+  # Armed before the write and cleared only once the archive is complete, so an
+  # interrupt anywhere inside tar takes the partial file with it.
+  PARTIAL_TARBALL="${tarball}"
   if ! tar czf "${tarball}" -C "${workdir}" .; then
+    umask "${prev_umask}"
     rm -f "${tarball}"
     die "Could not write ${tarball} (disk full? check: df -h). The partial archive was deleted so it cannot be restored by mistake."
   fi
+  umask "${prev_umask}"
+  PARTIAL_TARBALL=""
   # Only needed when root created the file (the timer runs as root). Guard with
   # can_root: for an unprivileged user without sudo the file is already theirs,
   # and an unguarded as_root would die() here — aborting a backup that had
   # already been written and verified.
+  #
+  # invoking_user, not 'id -un'. The documented way to run this is 'sudo lca
+  # backup' — it drives docker through as_root from end to end — and under sudo
+  # 'id -un' is root, so this chowned the archive to the account that already
+  # owned it and the line did nothing at all. Meanwhile install_timer chowns
+  # backups/ itself to the human, deliberately, so the directory belonged to
+  # them and the archives inside it did not. Reproduced exactly:
+  #
+  #   drwx------ 2 ubuntu root   backups/
+  #   -rw------- 1 root   root   local-code-agent-backup-TEST.tar.gz
+  #   $ sudo -u ubuntu cat .../local-code-agent-backup-TEST.tar.gz
+  #   NO — permission denied
+  #
+  # umask 077 above makes the archive 0600 because it holds the chat app's
+  # session-signing key, so root-owned means unreadable rather than merely
+  # not-theirs — and the line printed a few seconds later says "Copy it off the
+  # machine (e.g. scp)". A backup you cannot copy is the same problem as one
+  # you cannot restore.
+  #
+  # The timer, which has no human to attribute anything to, still gets root:
+  # invoking_user falls back to 'id -un' with no SUDO_USER set, so that path is
+  # unchanged.
   if can_root; then
-    as_root chown "$(id -un)" "${tarball}" 2>/dev/null || true
+    as_root chown "$(invoking_user)" "${tarball}" 2>/dev/null || true
   fi
 
   # A backup you cannot restore is not a backup. Read the archive back and
@@ -142,19 +327,96 @@ do_backup() {
     rm -f "${tarball}"
     die "The backup archive failed verification and was deleted (older backups were kept untouched). Check free space with 'df -h' and re-run ${SCRIPT_DIR}/backup.sh."
   fi
-  ok "Backup written and verified: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+  local size; size="$(du -h "${tarball}" | cut -f1)"
 
-  # Only prune when this backup is as complete as it was supposed to be.
-  # Otherwise an unattended timer run with docker down would, over BACKUP_KEEP
-  # nights, silently delete every backup that still had the WebUI accounts and
-  # chat history — the exact data this feature exists to protect.
+  # The verdict branches on the same state retention does, because it is the
+  # same question. The 'ok' was unconditional and printed ABOVE the warning
+  # that this archive is missing the very data the feature exists to protect.
+  # Measured, with docker down:
+  #
+  #   [ ok ] Backup written and verified: ...tar.gz (4.0K)
+  #   [warn] WebUI data was NOT captured in this backup — skipping retention
+  #
+  # A green line reading "your backup is fine", about a 4 KB archive holding no
+  # accounts and no chat history, with the caveat underneath it. This project
+  # takes that shape out elsewhere and says why — "the pass line counts only
+  # what passed" — and this file's own comment already quotes the warn-then-ok
+  # pairing as evidence, having fixed the retention half and left this one.
+  #
+  # 'none' still passes: with no WebUI data on the machine, or ENABLE_WEBUI
+  # false, a backup without it is complete. Only 'missed' means something that
+  # should have been in here is not.
   if [[ "${webui_state}" == "missed" ]]; then
-    warn "WebUI data was NOT captured in this backup — skipping retention so older, complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
+    warn "Backup written and verified, but WITHOUT the WebUI data (accounts and chat history): ${tarball} (${size})."
+    # Only prune when this backup is as complete as it was supposed to be.
+    # Otherwise an unattended timer run with docker down would, over
+    # BACKUP_KEEP nights, silently delete every backup that still had the
+    # WebUI accounts and chat history.
+    warn "Retention skipped, so older and complete backups are kept. Fix Docker, then re-run ${SCRIPT_DIR}/backup.sh."
   else
+    ok "Backup written and verified: ${tarball} (${size})"
     prune_old_backups
   fi
 
-  info "Copy it off the machine (e.g. scp) — restore with: ./restore.sh ${tarball}"
+  info "Copy it off the machine (e.g. scp) — restore with: ${SCRIPT_DIR}/restore.sh ${tarball}"
+}
+
+# tighten_backup_modes DIR — make every archive in DIR owner-only, and say how
+# many needed it. Prints nothing when there was nothing to do.
+#
+# The umask around tar makes NEW archives 0600. Older ones, written before that
+# existed, are still 0644 — and this run is the moment we are looking at the
+# directory anyway. The directory being 0700 is what protects them today, and
+# "safe because of the directory it happens to be in" stops being true the
+# moment one is copied, moved, or the directory's mode drifts. Each of these
+# holds the Open WebUI database — account password hashes and the JWT signing
+# key that mints valid sessions — plus a verbatim copy of .env.
+#
+# Its own function so it can be exercised on a scratch directory, the same
+# reason verify_backup and webui_data_state are.
+tighten_backup_modes() {
+  local dir="${1:-}" f mode tightened=0
+  [[ -d "${dir}" ]] || return 0
+  for f in "${dir}"/local-code-agent-backup-*.tar.gz; do
+    [[ -f "${f}" ]] || continue
+    mode="$(stat -c %a "${f}" 2>/dev/null || echo 600)"
+    [[ "${mode}" == "600" ]] && continue
+    if chmod 600 "${f}" 2>/dev/null; then
+      tightened=$((tightened+1))
+    fi
+  done
+  (( tightened == 0 )) || printf '%s\n' "${tightened}"
+}
+
+# webui_data_state DOCKER_USABLE DOCKER_INSTALLED VOLUME_PRESENT — which of the
+# three retention states this machine is in, decided before anything is
+# archived. Its own function so all of it can be exercised without a docker
+# daemon, the same reason verify_backup below is one.
+#
+#   present   the volume is there and readable -> archive it, then prune
+#   unknown   docker is here but its daemon is not answering, so nothing has
+#             LOOKED -> keep older backups
+#   none      no docker at all, or docker answered and there is no volume ->
+#             nothing to lose, prune
+#
+# ENABLE_WEBUI is deliberately not a parameter, and used to be part of this
+# decision. The volume outlives the setting: switch the chat app off in .env
+# and every account and chat is still sitting in 'open-webui' — which is why
+# the caller archives it whether or not .env says the chat is enabled. But with
+# the daemon down AND ENABLE_WEBUI=false, the old condition fell through to "no
+# volume found", a claim nothing had checked, and pruned on the strength of it.
+# BACKUP_KEEP nights of that deletes every backup that still had the data —
+# the precise failure the three states were introduced to prevent, reachable
+# through the one input that has nothing to do with whether the data exists.
+webui_data_state() {
+  local usable="$1" installed="$2" volume="$3"
+  if [[ "${usable}" == "true" && "${volume}" == "true" ]]; then
+    printf 'present\n'
+  elif [[ "${usable}" != "true" && "${installed}" == "true" ]]; then
+    printf 'unknown\n'
+  else
+    printf 'none\n'
+  fi
 }
 
 # verify_backup TARBALL STAGING_DIR — true when the archive reads back cleanly
@@ -217,7 +479,8 @@ install_timer() {
   # created it first it would be root-owned, and every later non-root
   # './backup.sh' would fail on tar with a permission error.
   as_root mkdir -p "${BACKUP_DIR}"
-  as_root chown "${SUDO_USER:-$(id -un)}" "${BACKUP_DIR}" 2>/dev/null || true
+  as_root chmod 700 "${BACKUP_DIR}"
+  as_root chown "$(invoking_user)" "${BACKUP_DIR}" 2>/dev/null || true
   {
     echo "[Unit]"
     echo "Description=local-code-agent backup (WebUI data + .env + model list)"
@@ -226,7 +489,8 @@ install_timer() {
     echo "[Service]"
     echo "Type=oneshot"
     echo "ExecStart=\"${SCRIPT_DIR}/backup.sh\""
-  } | as_root tee "${BACKUP_SERVICE}" >/dev/null
+  } | write_root_file "${BACKUP_SERVICE}" \
+    || die "Could not write ${BACKUP_SERVICE} (disk full? check 'df -h'). The existing backup service is unchanged."
   {
     echo "[Unit]"
     echo "Description=Run the local-code-agent backup on a schedule"
@@ -237,11 +501,12 @@ install_timer() {
     echo ""
     echo "[Install]"
     echo "WantedBy=timers.target"
-  } | as_root tee "${BACKUP_TIMER}" >/dev/null
+  } | write_root_file "${BACKUP_TIMER}" \
+    || die "Could not write ${BACKUP_TIMER} (disk full? check 'df -h'). The existing backup timer is unchanged."
   as_root systemctl daemon-reload
   as_root systemctl enable --now local-code-agent-backup.timer >/dev/null 2>&1 \
     || die "Could not enable local-code-agent-backup.timer — check: systemctl status local-code-agent-backup.timer"
-  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, keeping the newest ${BACKUP_KEEP:-7} (systemctl list-timers local-code-agent-backup.timer)."
+  ok "Scheduled backups on: ${BACKUP_SCHEDULE}, $(retention_desc) (systemctl list-timers local-code-agent-backup.timer)."
 }
 
 # uninstall_timer — remove the timer + service (used by uninstall.sh too).
@@ -263,13 +528,34 @@ usage() {
   sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+# backup_cleanup — what every EXIT trap in here runs.
+#
+# PARTIAL_TARBALL is the half of this that a signal needs. 'if ! tar ...; then
+# rm -f "${tarball}"; fi' covers tar FAILING; it does not cover tar being
+# INTERRUPTED, because bash exits on SIGINT without taking the else branch.
+# Measured directly:
+#
+#   $ bash -c 'if ! tar czf /tmp/probe.tar.gz -C /tmp/bigsrc .; then
+#              echo CLEANUP RAN; rm -f /tmp/probe.tar.gz; fi'   # then Ctrl-C
+#   (no output at all)
+#   -rw-r--r-- 1 root root 153616384 /tmp/probe.tar.gz
+#
+# So a Ctrl-C during a backup left a truncated .tar.gz in backups/. restore.sh
+# refuses it — it runs 'tar tzf' first — so it can never be restored by
+# mistake, but it still looks like a backup in 'ls' and still counts toward
+# BACKUP_KEEP, so over enough interrupted runs it evicts real ones.
+backup_cleanup() {
+  [[ -z "${PARTIAL_TARBALL:-}" ]] || rm -f "${PARTIAL_TARBALL}"
+  rm -rf "${workdir:-}"
+}
+
 main() {
   case "${1:-}" in
     "")                 do_backup ;;
     --install-timer)    install_timer ;;
     --uninstall-timer)  uninstall_timer ;;
     -h|--help)          usage; exit 0 ;;
-    *)                  usage; die "Unknown option: ${1}" ;;
+    *)                  usage >&2; die "Unknown option: ${1}" ;;
   esac
 }
 

@@ -21,6 +21,52 @@ load_env
 
 usage() { sed -n '/^# Usage:/,/^set /{ /^set /!p; }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
+# fetch_failed BRANCH — never returns; dies naming the reason the fetch had.
+#
+# The one line this replaces blamed the network for everything:
+#
+#   die "Could not reach the remote. Check connectivity, and whether the kill
+#        switch is on: netmode.sh status"
+#
+# A branch that is not on the remote fails the same fetch. Measured, on a
+# checkout whose branch had no upstream:
+#
+#   $ git fetch --quiet origin no-such-branch-xyz
+#   fatal: couldn't find remote ref no-such-branch-xyz
+#   exit=128
+#
+# ...and the reader is then sent to check their connection and toggle a kill
+# switch, neither of which has anything to do with it. Worse, net_guard three
+# lines above has ALREADY died if netmode is offline, so the kill switch is the
+# one cause this message can be sure it is not.
+#
+# The classification is git's own exit status, not its English: 'ls-remote
+# --exit-code' returns 2 for "connected, no matching ref" and 128 for "could
+# not connect", both documented and both locale-independent. Measured here: 0
+# for a branch that exists, 2 for one that does not, 128 against an unreachable
+# host. Grepping "couldn't find remote ref" would work until someone's box is
+# not in English.
+#
+# Only ever runs on the failure path, so the extra round trip costs nothing in
+# the normal case.
+fetch_failed() {
+  local branch="$1" rc=0
+  git -C "${SCRIPT_DIR}" ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1 || rc=$?
+  case "${rc}" in
+    2)
+      die "The branch this checkout is on ('${branch}') does not exist on the remote, so there is nothing to update from. The remote itself answered fine. Switch to the branch you track — git -C ${SCRIPT_DIR} checkout main — and re-run, or push '${branch}' first if it is yours."
+      ;;
+    0)
+      # The remote answered AND has the branch, so neither the network nor the
+      # branch is the problem. Usually a full disk or an unwritable .git.
+      die "The remote is reachable and '${branch}' is on it, but the fetch still failed — git's own message is above. Check free space (df -h ${SCRIPT_DIR}) and that .git is writable."
+      ;;
+    *)
+      die "Could not reach the remote. Check connectivity, and whether the kill switch is on: ${SCRIPT_DIR}/netmode.sh status"
+      ;;
+  esac
+}
+
 main() {
   local check_only=false do_backup=true assume_yes=false arg
   for arg in "$@"; do
@@ -29,23 +75,51 @@ main() {
       --no-backup) do_backup=false ;;
       --yes|-y)    assume_yes=true ;;
       -h|--help)   usage; exit 0 ;;
-      *)           usage; die "Unknown option: ${arg}" ;;
+      *)           usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 
   have git || die "git is not installed — cannot update."
   [[ -d "${SCRIPT_DIR}/.git" ]] \
-    || die "${SCRIPT_DIR} is not a git checkout, so there is nothing to update from. Re-install with install.sh if you unpacked a tarball."
+    || die "${SCRIPT_DIR} is not a git checkout, so there is nothing to update from. If you unpacked a tarball, re-install over it with the one-liner from the README: curl -fsSL https://raw.githubusercontent.com/mpjmsenc-dev/local-code-agent/main/install.sh | bash"
 
   step "Checking for updates"
-  local branch
-  branch="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  # '|| echo HEAD' turned every way git can refuse into "detached HEAD state",
+  # and a real detached HEAD is not one of them: that case SUCCEEDS and prints
+  # the word HEAD. A non-zero exit means git would not answer at all.
+  #
+  # Measured as an ordinary user against a checkout owned by root — which is
+  # what 'sudo setup.sh' and the install one-liner both leave behind, on the
+  # documented path where you install as root and then use 'lca' as yourself:
+  #
+  #   $ git -C /home/user/local-code-agent rev-parse --abbrev-ref HEAD
+  #   fatal: detected dubious ownership in repository at '...'
+  #   To add an exception for this directory, call:
+  #       git config --global --add safe.directory /home/user/local-code-agent
+  #
+  #   $ lca update --check
+  #   [FAIL] The checkout is in a detached HEAD state. Pick a branch first:
+  #          git -C /home/user/local-code-agent checkout main
+  #
+  # The checkout was on a branch the whole time, and the suggested command
+  # fails exactly the same way. git had already printed the fix; this threw it
+  # away and invented a different problem.
+  #
+  # git's own text is passed through rather than summarised: it names the
+  # directory and the exact 'safe.directory' line to run, which is more than
+  # this could reconstruct.
+  local branch rc=0
+  branch="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD 2>&1)" || rc=$?
+  if (( rc != 0 )); then
+    die "Could not read the current branch of ${SCRIPT_DIR}, so there is nothing to update from yet. git said: ${branch}"
+  fi
   [[ "${branch}" != "HEAD" ]] \
     || die "The checkout is in a detached HEAD state. Pick a branch first: git -C ${SCRIPT_DIR} checkout main"
 
   net_guard "Fetching updates"
-  git -C "${SCRIPT_DIR}" fetch --quiet origin "${branch}" \
-    || die "Could not reach the remote. Check connectivity, and whether the kill switch is on: ${SCRIPT_DIR}/netmode.sh status"
+  if ! git -C "${SCRIPT_DIR}" fetch --quiet origin "${branch}"; then
+    fetch_failed "${branch}"   # always dies, naming the cause it actually found
+  fi
 
   local behind
   behind="$(git -C "${SCRIPT_DIR}" rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo 0)"
@@ -86,10 +160,15 @@ main() {
       ok "Backup complete — restore with ${SCRIPT_DIR}/restore.sh if this update goes wrong."
     else
       warn "Backup FAILED. Continuing would leave you without a restore point."
-      if [[ "${assume_yes}" != "true" ]]; then
+      # '-t 0' as well as --yes: confirm() auto-answers YES when stdin is not a
+      # terminal, which is right for an install prompt and exactly wrong here.
+      # A cron'd or piped update without --yes therefore sailed past a FAILED
+      # backup and updated with no restore point — the precise case the --yes
+      # branch refuses. Unattended is unattended, however it got that way.
+      if [[ "${assume_yes}" != "true" && -t 0 ]]; then
         confirm "Continue updating anyway?" || die "Update cancelled — nothing was changed."
       else
-        die "Backup failed and --yes was given; refusing to update unattended without a restore point. Fix the backup, or re-run with --no-backup if you accept the risk."
+        die "Backup failed and this is not an interactive session; refusing to update unattended without a restore point. Fix the backup, or re-run with --no-backup if you accept the risk."
       fi
     fi
   else
@@ -134,4 +213,15 @@ main() {
   fi
 }
 
-main "$@"
+# 'exit $?' on the SAME line as the call, not the next one.
+#
+# The merge above can replace THIS file — an update that changes update.sh
+# does exactly that — and bash reads a script incrementally from an open fd.
+# When main returns, bash reads whatever now sits at its old byte offset in
+# the new file. Measured: with a longer replacement it executed a fragment of
+# a comment line and exited 127, immediately after printing "Update complete
+# and verified". A cron'd update would have reported failure for a success.
+#
+# A separate 'exit' line would be read at that same stale offset and never
+# run. Both commands have to come out of one parse, so there is no next read.
+main "$@"; exit $?

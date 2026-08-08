@@ -38,13 +38,13 @@ sudo ss -tlnp | grep 11434
 ```
 
 Usually it's a manually-started `ollama serve` fighting the systemd service —
-kill the manual one (`sudo pkill -f "ollama serve"`) and
+kill the manual one (`sudo pkill -x ollama`) and
 `sudo systemctl restart ollama`. Alternatively change `OLLAMA_HOST` in `.env`
 to another port and run `sudo lca apply` — which re-renders the drop-in AND
 re-creates the chat app container, so the phone follows Ollama to the new port
 instead of talking to one nothing listens on.
 
-## Port 3000 (WebUI) already in use
+## The WebUI port is already in use (3000 by default)
 
 `scripts/install_webui.sh` now refuses to start if another process already
 holds `WEBUI_PORT` — it would otherwise crash-loop while the squatter answered
@@ -55,20 +55,52 @@ sudo ss -tlnp | grep :3000
 ```
 
 Then either stop that service, or pick a free port: set `WEBUI_PORT` in `.env`
-to something else and run `sudo lca apply`. If `./webui.sh status`
+to something else and run `sudo lca apply`. If `lca webui status`
 or `check-system.sh` reports the container "CRASH-LOOPING (restarting)", this
 port conflict (or a bad `.env` value) is the usual cause — check
-`./webui.sh logs`.
+`lca webui logs`.
 
 ## Out of memory / model gets killed / responses never finish
 
 The model + context don't fit in RAM. In order:
 
-1. `scripts/tune.sh` — if RAM shrank (resize down), this downgrades the model
+1. `lca tune` — if RAM shrank (resize down), this downgrades the model
    to the right rung of the ladder.
 2. Still tight? Lower `OLLAMA_CONTEXT_LENGTH` in `.env` (e.g. 8192 → 4096) and
    run `sudo lca apply` to re-render + restart.
 3. Check nothing else eats RAM: `free -h`, `docker stats`.
+
+## "timed out waiting for llama-server to start" on the very first request
+
+```
+[FAIL] qwen2.5-coder:7b produced no answer. Ollama's own reason:
+       timed out waiting for llama-server to start -
+```
+
+**Run the same command again.** This is almost never a broken install, and it
+is not the out-of-memory case above — that one names memory, and `ollama ps`
+after it shows nothing because the load was *abandoned*, not killed.
+
+What happened is that the first load of a model reads several GB of weights off
+disk, and Ollama stops waiting after `OLLAMA_LOAD_TIMEOUT`. The attempt is not
+wasted: it leaves those weights in the operating system's page cache, so the
+next load reads them from memory. Measured on a cold CPU box, the same command
+twice with nothing else changed:
+
+| Attempt | Result |
+|---|---|
+| first, cold | failed after 304s, nothing resident |
+| second | answered in 32s |
+
+This project ships `OLLAMA_LOAD_TIMEOUT=15m` in `config/ollama.env` — three
+times Ollama's own 5m default, which is a budget sized for a GPU — so a cold
+load on a slow box has room to finish rather than being cut off mid-way. If you
+are hitting the timeout even so, the load is slower than 15 minutes and that is
+worth investigating as its own problem: check `free -h` for a model too big for
+the machine, and `lca logs ollama` for what it was doing.
+
+To avoid meeting it at all, warm the model before you start work — `lca ask
+"say ok"` — and it then stays resident for `OLLAMA_KEEP_ALIVE` (30m default).
 
 ## "It's so slow"
 
@@ -100,7 +132,7 @@ silently drop it. If replies start losing the thread or getting cut off:
 aider reaches Ollama via litellm, which needs two things `run-agent.sh` sets for
 you: the `ollama_chat/` model prefix and `OLLAMA_API_BASE`. So: always start
 aider through `run-agent.sh`, not bare `aider`. If it still fails:
-`./check-system.sh` (is the API up? is the model pulled?), and make sure `.env`'s
+`lca check` (is the API up? is the model pulled?), and make sure `.env`'s
 `MODEL_NAME` appears in `ollama list`.
 
 ## docker: "permission denied ... /var/run/docker.sock"
@@ -109,21 +141,42 @@ Your user was added to the `docker` group during setup, but group membership onl
 applies to **new** logins. Log out and back in (or `newgrp docker`). Still broken:
 `sudo usermod -aG docker $USER`, then re-login.
 
+## A check says "could not look" instead of an answer
+
+You are running it from an account that is neither root nor a passwordless
+sudoer, so `lca check`, `lca status` and the login banner will not guess. They
+report the firewall, the Docker daemon and the chat container as **UNKNOWN**
+rather than claiming a state they could not read. Re-run as root for the full
+picture:
+
+```bash
+sudo lca check
+sudo lca status
+```
+
+This is deliberate. The earlier behaviour was worse in both directions: it
+either asserted "inbound guard NOT loaded" and "container does not exist" on a
+machine where both were fine, or it stopped dead on a `[sudo] password for …`
+prompt in the middle of a login banner nobody had asked to run.
+
+Commands that *change* something — `lca apply`, `lca webui start`, `lca logs` —
+still escalate normally, and will say so before sudo asks.
+
 ## WebUI unreachable from the phone
 
 Check in this order:
 
-1. Container: `./webui.sh status` (and `./webui.sh logs` for errors).
+1. Container: `lca webui status` (and `lca webui logs` for errors).
 2. Tailscale: phone app toggle ON? `tailscale status` on the server logged in?
    Using the right IP (`tailscale ip -4`) and port (3000)?
-3. Netmode: `sudo ./netmode.sh status` — offline mode does NOT block Tailscale,
-   but a half-applied experiment might; `sudo ./netmode.sh online` to reset.
-4. Inbound guard: `sudo ./netmode.sh status` also shows the always-on inbound
+3. Netmode: `sudo lca status` — offline mode does NOT block Tailscale,
+   but a half-applied experiment might; `sudo lca online` to reset.
+4. Inbound guard: `sudo lca status` also shows the always-on inbound
    guard. **By design it allows the WebUI port only over loopback and
    `tailscale0`** — so reaching WebUI by the server's public or LAN IP
    (without Tailscale) is *supposed* to fail. Always go through the Tailscale
    IP. If `status` reports the guard is NOT loaded, re-apply it with
-   `sudo ./netmode.sh harden`.
+   `sudo lca harden`.
 
 ### I actually want direct LAN access (advanced, reduces privacy)
 
@@ -139,8 +192,8 @@ on the next boot/`harden` unless you also stop running `harden`).
 **First check the kill switch** — this is expected behavior when offline mode is on:
 
 ```bash
-sudo ./netmode.sh status
-sudo ./netmode.sh online     # if you want internet back
+sudo lca status
+sudo lca online              # if you want internet back
 ```
 
 Only if mode is `online` and the probe still fails is it a real network problem
@@ -188,6 +241,126 @@ sudo lca apply     # re-creates the container; chats and accounts survive
 The container keeps a copy of the prompt from the moment it was created, so
 pulling a better one is not enough on its own — see the table below.
 
+**How to tell which of the three it is**, quickest first:
+
+1. `lca check` names `chat app config drift: SYSTEM_PROMPT` → the container is
+   older than the prompt. `sudo lca apply` and you are done.
+2. It happens in a **long** chat but not a brand-new one → far less likely
+   than it used to be. Re-measured on Ollama 0.32.5, an overflowing chat drops
+   the old TURNS and keeps the system prompt — 4/4 still answered correctly
+   with the history trimmed from ~5,400 tokens to 559. See "Why does it forget
+   earlier messages" in [FAQ.md](FAQ.md) for the numbers. Worth ruling out by
+   starting a new chat, but do 1 first.
+3. It happens in a brand-new chat on a current container → something is
+   advertising tools to the model. Check the model's **Function Calling**
+   setting and any enabled Tools in Open WebUI's workspace; a tool schema in
+   the request beats an instruction in the prompt.
+
+Measured on `qwen2.5-coder:3b` — the rung an 8 GB box runs, and the one the
+report came from — with the current prompt and no tools attached: eight
+samples of "build me an income and expense tracker", four in a fresh chat and
+four behind ~6,000 tokens of history. **Zero produced a tool call**, six of
+eight opened with the handover, two wrote a tutorial. So the prompt does its
+job when it reaches the model tool-free; a tool call means either it did not
+reach the model (1 and 2 above) or something else was in the request (3).
+
+`scripts/prompt-bench.sh` counts tool calls now, so a prompt change can be
+judged against this failure rather than only against the tutorial.
+
+## Review every edit — local models can make unrequested changes
+
+**This is the one habit worth building.** A small local model does not only get
+logic wrong; it sometimes edits code you never mentioned.
+
+Measured on `qwen2.5-coder:7b`, one run, against a two-function file. The
+request was *"make `divide()` raise `ValueError('division by zero')` when b is
+0, and add a `subtract(a, b)` function"*. Both requested changes were made
+correctly — and `add()`, which was never mentioned, was deleted:
+
+```diff
+-def add(a, b):
+-    return a + b
++def subtract(a, b):
++    "subtract two numbers"
+ 
++    return a - b
+ 
+ def divide(a, b):
+-    return a / b
++    "divide two numbers"
++
++    if b == 0:
++        raise ValueError('division by zero')
++    else:
++        return a / b
+```
+
+It replaced `add` with `subtract` instead of adding one beside the other. On a
+file with twenty functions you would not notice until something broke.
+
+This is the model's ceiling, not a fault in the harness — and there is a net
+under it. **aider commits every edit it makes**, so:
+
+```bash
+git diff HEAD~1          # exactly what the last change touched
+git revert <sha>         # undo one change cleanly, keeping the rest
+```
+
+The habit: **after any aider session, run `git diff HEAD~N`** — N being the
+number of commits it made — **and actually read it** before trusting the
+result. Especially on a file with several functions in it. Reading a short
+diff costs seconds; finding a silently deleted function a week later does not.
+
+If you would rather nothing be committed until you have looked, set this in
+`.env`:
+
+```bash
+AIDER_NO_AUTO_COMMIT=true
+```
+
+That passes `--no-auto-commits` to aider: edits land in the working tree and
+you commit them yourself. The tradeoff is real — you lose the
+one-commit-per-change audit trail, so several edits pile up together
+unstaged and `git revert` can no longer undo exactly one of them. Default is
+`false`, because on a small model the trail is usually worth more than the
+pause.
+
+## aider wrote the files, but the code does not work
+
+That is the expected shape of this stack on a small model, not a fault to
+diagnose. Measured on `qwen2.5-coder:3b`, five identical runs of a two-file
+request (a module plus unittest tests for it): **5/5** wrote and applied both
+files with no malformed edits, in about a minute each — and **0/5** produced
+tests that passed first time. In every run the tests it wrote caught its own
+bug, which is the useful part.
+
+Run the tests. On 3b they are the deliverable that shows you the one line to
+change:
+
+```bash
+python3 -m unittest            # or however your project runs its tests
+```
+
+**Handing the error back does not work on 3b.** Given the exact traceback and
+both files, four runs out of four re-emitted `budget.py` byte-identical — no
+fix, no error, "Applied edit to budget.py", 14-37 seconds each. The same
+follow-up on **7b** fixed it in **3 of 4** (100-287 seconds). Correctness is
+the one thing a bigger rung genuinely buys here, which is worth saying plainly
+because it is the opposite of the chat's handover behaviour, where 3b and 7b
+measure identical ([PHONE.md](PHONE.md)).
+
+**`--auto-test` is not the shortcut it looks like.** aider can run your tests
+itself and feed failures back — `lca --auto-test --test-cmd 'python3 -m
+unittest discover -q'`. Measured on the same task, three runs on 3b: all three
+ended with failing tests, all three exhausted aider's three-reflection limit,
+and each took **~6.3 minutes** against **~1 minute** for the plain run. On a
+CPU box every reflection is another full generation, and a small model tends to
+circle the same wrong fix.
+
+So on the base droplet's rung: ask for one file at a time, keep the tests, and
+expect to fix small logic yourself. From ~12 GB of RAM auto-tune moves you to
+7b and the follow-up loop starts working — at roughly three minutes a round.
+
 ## I changed a setting in .env and nothing happened
 
 Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,
@@ -207,12 +380,20 @@ The long answer, if you want to know what it is doing:
 | `OLLAMA_HOST`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE` | the ollama drop-in | `lca check` says `config drift`. Fixed by `lca apply`, `sudo scripts/tune.sh`, or a reboot |
 | `WEBUI_PORT`, `MODEL_NAME` (as preselected), `WEBUI_ENABLE_SIGNUP`, `OLLAMA_HOST`, `WEBUI_NAME` | the WebUI container | `lca check` says `chat app config drift`. Fixed by `lca apply` |
 | the assistant's system prompt and starter questions | the WebUI container | same — and these come from the **repo**, not `.env`, so a `git pull` that improves the prompt still needs `sudo lca apply` |
-| `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo ./backup.sh --install-timer` |
+| `BACKUP_SCHEDULE` | the systemd timer | Fixed by `lca apply` or `sudo lca backup --install-timer` |
+| `WEBUI_PORT`, `OLLAMA_HOST` (the port half) | the inbound guard's nftables ruleset | `lca check` says the guard `does NOT cover` a port. Fixed by `lca apply` or `sudo lca harden` |
 
 That second row was the longest-lived hole in this table: nothing compared the
 system prompt, so `lca apply` answered *"already matches .env"* after a repo
 update that changed it, and the chat kept its old behaviour with nothing
 anywhere saying so.
+
+The last row was the worst one, because the thing left behind was a firewall.
+The guard was only ever re-applied as a side effect of re-creating the chat app
+container — so with the chat app switched off, moving `OLLAMA_HOST` to a new
+port left the guard dropping the old one while the **unauthenticated** Ollama
+API answered on the new one, on every interface, and `lca apply` said
+*"Everything already matches .env"*.
 
 ## Ollama settings drifted / drop-in edited by hand
 
@@ -244,10 +425,25 @@ an interrupted install often leaves a perfectly working stack behind. So:
 | Banner | What it means |
 |---|---|
 | `still installing` | The install log was written to in the last 15 minutes and has not reached a verdict. |
-| `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run `setup.sh`. |
+| `the install stopped before it finished` | The log went quiet mid-install **and** nothing is serving. Re-run it: `cd /opt/local-code-agent && sudo ./setup.sh`. |
 | `the install did NOT finish` | The log reached an explicit failure verdict. Start with `lca logs setup`. |
 | `installed, but the model engine is not running` | Ollama is not answering. `lca check`, then `lca logs ollama`. |
-| `ready` | Ollama answered. This wins over anything the log says. |
+| `engine running, but model … is NOT downloaded` | Ollama answers, but the model in `.env` is not on disk — so nothing can reply yet. It is a download, not a fault: `sudo /opt/local-code-agent/setup.sh` finishes it. |
+| `ready · model …` | Ollama answered **and** the model is there. This wins over anything the log says. |
+
+One extra line can appear under `ready`, and it is the one worth reading:
+
+| Row | What it means |
+|---|---|
+| `Chat is OUT OF DATE  ·  it answers with an older assistant — sudo lca apply` | The chat app is healthy and reachable, but it is running the assistant instructions it was **created** with. Those are baked into the container, so `git pull` does not reach a running one and nothing restarts it. Run `sudo lca apply`. |
+
+That row is why `ready` is not the whole story. The assistant decides what the
+chat *does* — whether it hands a build request to `lca` or tries to walk you
+through it, whether it emits a tool call it cannot make — and every
+infrastructural check on the box passes either way. If you are seeing odd chat
+behaviour and this row is showing, apply it before debugging anything else.
+The row appears only on a positive answer: no `jq`, no container, or a docker
+that will not answer within two seconds all print nothing rather than guess.
 
 Not seeing a banner at all? `lca check` reports whether it is installed, and
 `sudo /opt/local-code-agent/scripts/motd.sh --install` puts it back. Systems

@@ -7,19 +7,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
+# Also the help text for 'lca chat', which bin/lca dispatches straight to
+# 'webui.sh url'. That mattered: 'lca chat --help' used to print the address
+# instead of explaining anything, bin/lca fixed it by forwarding "$@" here, and
+# what arrived was a page about 'lca webui' that never contained the word chat
+# — one line after 'lca help' promises that every command explains itself. So
+# 'url' names the alias, and says what it really prints, which is more than an
+# address.
 usage() {
   cat <<EOF
-Usage: webui.sh <command>
+Usage: lca webui <command>       (or webui.sh directly)
 
 Commands:
   start     Start the Open WebUI container
   stop      Stop it (chat history is kept in the docker volume)
   restart   Restart it
   status    Container state + HTTP health on port ${WEBUI_PORT}
-  url       Print the address to open on your phone
+  url       Phone setup: the chat URL and the SSH address, both as QR codes.
+            'lca chat' is a shortcut for exactly this.
   logs      Follow the container logs (Ctrl-C to stop)
 
-To (re)create the container after editing .env, run: scripts/install_webui.sh
+To (re)create the container after editing .env, run: sudo lca apply
 EOF
 }
 
@@ -28,25 +36,127 @@ EOF
 # normally works: using as_root unconditionally would trigger a needless sudo
 # password prompt (breaking non-interactive use), and with neither root nor sudo
 # as_root would die() mid-command instead of giving a usable message.
+#
+# Three rungs, in this order, and the order is the whole point:
+#   1. plain docker            — no escalation at all
+#   2. sudo -n                 — escalation that CANNOT stop and ask
+#   3. interactive sudo, after saying so
+#
+# Rung 3 stays because this script mostly ACTS: 'webui.sh start' that refused
+# where it used to work would be the worse trade. What it may not do is ask
+# silently, and it did — measured, 'lca webui status' printed nothing
+# whatsoever and then sat on "[sudo] password for ...". That reads as a hung
+# command rather than a question, on a subcommand 'lca help' does not mark as
+# needing root. The elif keeps it to ONE escalation attempt, so the sentence
+# about a password is printed only where a password can really be asked for:
+# root reaching rung 2 and failing has a broken daemon, not a missing password.
 DOCKER=(docker)
 select_docker() {
   if docker info >/dev/null 2>&1; then
     DOCKER=(docker)
-  elif can_root && as_root docker info >/dev/null 2>&1; then
-    DOCKER=(as_root docker)
-  else
-    return 1
+    return 0
   fi
-  return 0
+  if can_root_now; then
+    if as_root docker info >/dev/null 2>&1; then
+      DOCKER=(as_root docker)
+      return 0
+    fi
+  elif can_root; then
+    # warn, not info: 'lca webui logs' can be piped, and an announcement that
+    # lands in the middle of a captured log stream is its own small bug.
+    warn "Docker is not reachable as '$(id -un)' — retrying with sudo, which may ask for your password."
+    if as_root docker info >/dev/null 2>&1; then
+      DOCKER=(as_root docker)
+      return 0
+    fi
+  fi
+  return 1
 }
 
 container_exists() {
   "${DOCKER[@]}" container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
+# port_mismatch_reason — print why a health probe on WEBUI_PORT cannot succeed,
+# or return 1 when the ports agree and the probe is worth making.
+#
+# Every wait here polls .env's WEBUI_PORT, while the container listens on the
+# port it was CREATED with. When those differ — someone edited .env and has not
+# applied it yet — 'start' and 'restart' each spent 120 seconds probing a port
+# nothing was ever going to answer on, then said "check the logs", where a
+# perfectly healthy app is logging happily on another port. The mismatch is
+# readable off the container in a millisecond, and 'status' already read it;
+# one copy of the sentence, used by all three.
+port_mismatch_reason() {
+  local live
+  live="$(webui_container_env PORT || true)"
+  [[ -n "${live}" && "${live}" != "${WEBUI_PORT}" ]] || return 1
+  printf 'it listens on port %s, not the %s now in .env — it was created before that edit. Apply it with: sudo %s/bin/lca apply' \
+    "${live}" "${WEBUI_PORT}" "${REPO_ROOT}"
+}
+
+# drift_note — one line after a successful start/restart, when the container is
+# still running settings .env has since moved away from.
+#
+# 'restart' is stop-then-start of the SAME container, and a container's
+# environment is fixed when it is created: everything it was built with is
+# still in force afterwards. So "Open WebUI restarted." was the whole output on
+# a box whose assistant instructions, model or signup policy had changed —
+# and restarting is exactly what someone tries when they have edited .env and
+# want it to take effect. 'status' has said all of this for a while; the two
+# commands that people actually reach for said nothing.
+#
+# Deliberately not fatal and deliberately not per-key: the restart did work,
+# and the detail is one 'lca webui status' away.
+drift_note() {
+  local drifted
+  drifted="$(webui_drift || true)"
+  [[ -n "${drifted}" ]] || return 0
+  warn "Still NOT in effect: ${drifted//$'\n'/, } — a restart re-uses the settings the container was CREATED with. Apply them with: sudo ${REPO_ROOT}/bin/lca apply (details: lca webui status)"
+}
+
 main() {
   local cmd="${1:-}"
-  [[ -n "${cmd}" ]] || { usage; exit 1; }
+  # >&2 and named, like every other error path here — see netmode.sh's "No mode
+  # given." for the same case in the same shape.
+  [[ -n "${cmd}" ]] || { usage >&2; die "No command given."; }
+  # Answered here, above everything else, for the same reason 'url' is special
+  # below: the dispatch further down runs select_docker first, so 'lca webui
+  # --help' died with "Cannot reach the Docker daemon" — needing a running
+  # daemon to print a page of text, on precisely the machine where the daemon
+  # being down is what sent you looking for help.
+  case "${cmd}" in
+    -h|--help) usage; exit 0 ;;
+  esac
+  # No subcommand here takes an argument, so a second one is always a mistake —
+  # and the mistake that matters is '--help', which would otherwise be ignored
+  # and the subcommand run anyway. Same guard, and same reason, as netmode.sh.
+  case "${2:-}" in
+    "") ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "Unknown extra argument: ${2}" ;;
+  esac
+  # WHICH command it is, before anything that needs a working machine — the
+  # same argument that hoisted --help above, and it was left half applied.
+  # Measured with the daemon down:
+  #
+  #   $ lca webui nosuchcmd
+  #   [FAIL] Cannot reach the Docker daemon as 'root'. Start it: ...
+  #
+  # A typo diagnosed as a Docker outage, sending the reader to debug a daemon
+  # over a misspelling — and on a box where the daemon really is down they
+  # never learn the command was wrong at all. Nothing about spelling needs
+  # docker to be running, so it is answered here.
+  #
+  # 'usage >&2' and die, matching the extra-argument guard above rather than
+  # the dispatch's own bare 'usage; exit 1', which named nothing: 'lca logs'
+  # has said "Unknown argument: X" for a while and this said only "here is the
+  # usage", leaving the reader to spot the difference themselves.
+  case "${cmd}" in
+    start|stop|restart|status|url|logs) ;;
+    *) usage >&2; die "Unknown command: ${cmd}" ;;
+  esac
+
   # 'url' only reads .env and Tailscale — it must keep working when Docker is
   # down or the container was never created, since that is exactly when someone
   # is trying to work out where their chat app lives.
@@ -67,24 +177,62 @@ main() {
         qrencode -t ANSIUTF8 -m 2 "http://${ts_ip}:${WEBUI_PORT}" 2>/dev/null || true
       fi
       info "(the phone must be signed in to the same Tailscale account — docs/PHONE.md)"
+      # The chat's answer to "build me an app" is now, reliably, a command to
+      # run in a terminal. On a phone that means SSH — over this same Tailscale
+      # address, since the inbound guard leaves SSH open by design. Printing it
+      # here costs one line and saves the reader working out that half for
+      # themselves at the exact moment they have been told to go somewhere they
+      # do not yet know how to reach.
+      #
+      # SUDO_USER first: run under sudo, 'id -un' says root, and handing someone
+      # a root SSH line that their server most likely refuses is worse than
+      # printing nothing.
+      local ssh_user; ssh_user="$(invoking_user)"
+      echo
+      ok "For the coding agent (aider), SSH from the phone:  ssh ${ssh_user}@${ts_ip}"
+      if have qrencode; then
+        echo
+        qrencode -t ANSIUTF8 -m 2 "ssh://${ssh_user}@${ts_ip}" 2>/dev/null || true
+      fi
+      info "(then: mkdir -p ~/my-project && cd ~/my-project && lca — see docs/PHONE.md for SSH apps)"
     else
-      warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
-      info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      # Which of the three reasons matters, because 'sudo tailscale up' on a
+      # box without tailscale is a command that does not exist — the rule
+      # motd.sh's chat_address() already states in as many words and this
+      # branch did not, on the exact command docs/PHONE.md and YOUR-TURN.md
+      # both send people to for phone setup.
+      if have tailscale; then
+        warn "Tailscale has no IPv4 address yet — run: sudo tailscale up"
+        info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      elif [[ "${SKIP_TAILSCALE:-false}" == "true" ]]; then
+        # No "once connected" line here: Tailscale is deliberately not the
+        # route on this box, so a tailscale-ip URL is not what this reader is
+        # ever going to type.
+        warn "Tailscale is skipped (SKIP_TAILSCALE=true) — reach port ${WEBUI_PORT} over the private network you provide."
+      else
+        warn "Tailscale is not installed, so there is no private address yet."
+        info "Install it: sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh   (then: sudo tailscale up)"
+        info "Once connected: http://<tailscale-ip>:${WEBUI_PORT}"
+      fi
     fi
     info "On this machine:  http://127.0.0.1:${WEBUI_PORT}"
     exit 0
   fi
 
-  have docker || die "Docker is not installed. Run scripts/install_docker.sh first."
-  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. Start it (sudo systemctl start docker), or add yourself to the docker group (scripts/install_docker.sh) and log out/in, or re-run this as root."
+  have docker || die "Docker is not installed. Run sudo ${SCRIPT_DIR}/scripts/install_docker.sh first."
+  select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. $(docker_unreachable_advice)."
 
   case "${cmd}" in
     start)
       if container_exists; then
         "${DOCKER[@]}" start "${WEBUI_CONTAINER}" >/dev/null
+        local why
+        why="$(port_mismatch_reason || true)"
+        [[ -z "${why}" ]] || die "The container is started, but ${why}"
         info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-        wait_for_webui 120 || die "Container started but no HTTP answer after 120s — check: ./webui.sh logs"
+        webui_wait_or_die "${WEBUI_START_TIMEOUT}" "${SCRIPT_DIR}/webui.sh logs"
         ok "Open WebUI started — http://<tailscale-ip>:${WEBUI_PORT}"
+        drift_note
       else
         info "Container '${WEBUI_CONTAINER}' does not exist yet — creating it..."
         "${SCRIPT_DIR}/scripts/install_webui.sh"
@@ -96,15 +244,19 @@ main() {
       ok "Open WebUI stopped (data kept in the 'open-webui' volume)."
       ;;
     restart)
-      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh first."
+      container_exists || die "Container '${WEBUI_CONTAINER}' does not exist — run sudo ${SCRIPT_DIR}/scripts/install_webui.sh first."
       "${DOCKER[@]}" restart "${WEBUI_CONTAINER}" >/dev/null
+      local restart_why
+      restart_why="$(port_mismatch_reason || true)"
+      [[ -z "${restart_why}" ]] || die "The container is restarted, but ${restart_why}"
       info "Waiting for Open WebUI to answer on port ${WEBUI_PORT}..."
-      wait_for_webui 120 || die "Restarted but no HTTP answer after 120s — check: ./webui.sh logs"
+      webui_wait_or_die "${WEBUI_START_TIMEOUT}" "${SCRIPT_DIR}/webui.sh logs"
       ok "Open WebUI restarted."
+      drift_note
       ;;
     status)
       if ! container_exists; then
-        warn "Container '${WEBUI_CONTAINER}' does not exist — run scripts/install_webui.sh to create it."
+        warn "Container '${WEBUI_CONTAINER}' does not exist — run sudo ${SCRIPT_DIR}/scripts/install_webui.sh to create it."
         exit 1
       fi
       local state live_port key
@@ -139,10 +291,14 @@ main() {
       if webui_responds; then
         ok "Open WebUI /health answering on port ${WEBUI_PORT}."
       else
-        if [[ -n "${live_port}" && "${live_port}" != "${WEBUI_PORT}" ]]; then
-          die "No /health answer on port ${WEBUI_PORT} — because the running container is on ${live_port} (see the port drift above). Re-create it with: scripts/install_webui.sh"
-        fi
-        warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: webui.sh logs)"
+        # The same sentence the other two branches use, and it names 'lca
+        # apply'. This used to send the reader to install_webui.sh — a second
+        # answer to a problem the port-drift warning four lines above had
+        # already answered with 'lca apply', in the output of one command.
+        local status_why
+        status_why="$(port_mismatch_reason || true)"
+        [[ -z "${status_why}" ]] || die "No /health answer on port ${WEBUI_PORT}, because ${status_why}"
+        warn "No /health answer on port ${WEBUI_PORT} (still starting? crash-looping? check: lca webui logs)"
         exit 1
       fi
       ;;
@@ -150,11 +306,22 @@ main() {
       container_exists || die "Container '${WEBUI_CONTAINER}' does not exist."
       "${DOCKER[@]}" logs -f "${WEBUI_CONTAINER}"
       ;;
-    *)
+    -h|--help)
       usage
-      exit 1
+      exit 0
+      ;;
+    *)
+      # Unreachable: the guard at the top of main() accepts exactly the arms
+      # above. Kept, and loud, because without it a command added to that list
+      # and not to this case would match nothing, fall out of the case and exit
+      # 0 — succeeding silently while doing nothing at all.
+      die "internal error: '${cmd}' passed validation but has no implementation"
       ;;
   esac
 }
 
-main "$@"
+# Sourceable so port_mismatch_reason can be tested without a docker daemon —
+# same pattern as restore.sh, uninstall.sh and scripts/apply.sh.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

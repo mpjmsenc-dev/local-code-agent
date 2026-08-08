@@ -42,8 +42,42 @@ logs_ollama() {
   local lines="$1" follow="$2"
   heading "ollama (the model server)"
   if ! systemd_available; then
+    # On a host with no service manager, start_ollama_bg() is what runs Ollama
+    # — under 'nohup ... &', redirecting into OLLAMA_BG_LOG. So "check the
+    # terminal you started it in" was doubly wrong there: this project started
+    # it, and a nohup'd background process has no terminal to check. The log it
+    # wrote was next to us the whole time, and this is the command the login
+    # banner and TROUBLESHOOTING.md both send people to when Ollama misbehaves.
+    # '-e', not '-r'. Asking whether we can READ it collapsed "there is no log"
+    # into the same branch as "there is a log and this account cannot open it",
+    # and the branch below is written for the first. The log is created by
+    # 'nohup ollama serve >LOG' under whatever umask started it, so a root
+    # install from a shell with umask 077 leaves it 0600 root-owned — after
+    # which an ordinary 'lca logs ollama' was told, measured:
+    #
+    #   [info] Ollama's output goes wherever you started 'ollama serve' —
+    #          check that terminal.
+    #   [info] (If this project started it for you, the log would be at
+    #          /home/user/local-code-agent/.ollama-serve.log.)
+    #
+    # ...about a file that was sitting at exactly that path. The last line is
+    # the worst of the three: it names the log in the subjunctive while the log
+    # is there.
+    #
+    # run_reader, the same escalation the journal branch below uses, so a
+    # reader who can sudo simply gets their log instead of a lecture.
+    if [[ -e "${OLLAMA_BG_LOG}" ]]; then
+      info "No systemd here — reading the background 'ollama serve' log this project writes:"
+      info "  ${OLLAMA_BG_LOG}"
+      local -a tail_cmd=(tail -n "${lines}" "${OLLAMA_BG_LOG}")
+      [[ "${follow}" != "true" ]] || tail_cmd=(tail -n "${lines}" -f "${OLLAMA_BG_LOG}")
+      run_reader test -r "${OLLAMA_BG_LOG}" -- "${tail_cmd[@]}" \
+        || warn "That file is there, but '$(id -un)' cannot read it — it is owned by $(stat -c %U "${OLLAMA_BG_LOG}" 2>/dev/null || echo 'another account'), because whoever started Ollama did so under a umask that kept it private. Nothing is wrong with the log; re-run this with sudo."
+      return 0
+    fi
     info "No systemd on this machine, so there is no service journal."
     info "Ollama's output goes wherever you started 'ollama serve' — check that terminal."
+    info "(If this project started it for you, the log would be at ${OLLAMA_BG_LOG}.)"
     return 0
   fi
   local -a cmd=(journalctl -u ollama --no-pager -n "${lines}")
@@ -59,6 +93,27 @@ logs_webui() {
     info "Docker is not installed, so the chat app is not running here."
     return 0
   fi
+  # "Cannot ask" is not "was never created", and run_reader's probe collapses
+  # them: 'docker container inspect' returns non-zero for a missing container
+  # and for a daemon that is not answering alike. Measured with the daemon
+  # unreachable while the container was running and serving:
+  #
+  #   [warn] Could not read logs for container 'open-webui'
+  #          (is it created? try: lca webui status).
+  #
+  # It is created. It is running. And 'lca webui status' cannot answer either,
+  # because it needs the same daemon — so the one command people run when
+  # things are broken sent them in a circle. Same fault docker_daemon_reachable
+  # was written for, and the same one uninstall.sh had.
+  #
+  # ONE message for both causes on purpose. This is a log viewer, not a
+  # diagnostician: whether the daemon is down or simply unreachable from this
+  # account, the reader does the same two things. check-system.sh splits them
+  # because telling them apart IS its job; here it would be noise.
+  if ! docker_daemon_reachable; then
+    info "The Docker daemon could not be reached from this account, so the chat app's logs were not read — which says nothing about whether it is running. $(docker_unreachable_advice), then try again."
+    return 0
+  fi
   local -a cmd=(docker logs --tail "${lines}" "${WEBUI_CONTAINER}")
   [[ "${follow}" == "true" ]] && cmd+=( -f )
   run_reader docker container inspect "${WEBUI_CONTAINER}" -- "${cmd[@]}" \
@@ -68,15 +123,21 @@ logs_webui() {
 logs_setup() {
   local lines="$1" follow="$2"
   heading "install log"
-  if [[ ! -r "${SETUP_LOG}" ]]; then
+  # "Not readable" is not "not there", and the two need opposite advice. This
+  # tested -r and then called the absence normal — so on a box where the log is
+  # root-only (it is written by root, through tee, on a droplet) it announced
+  # that a file sitting right there did not exist, and the reader stopped
+  # looking. The other two sources here have always escalated through
+  # run_reader; this one was the odd one out.
+  if [[ ! -e "${SETUP_LOG}" ]]; then
     info "No install log at ${SETUP_LOG} — normal unless this machine was built from deploy/do-user-data.sh."
     return 0
   fi
-  if [[ "${follow}" == "true" ]]; then
-    tail -n "${lines}" -f "${SETUP_LOG}"
-  else
-    tail -n "${lines}" "${SETUP_LOG}"
-  fi
+  local -a cmd=(tail -n "${lines}")
+  [[ "${follow}" == "true" ]] && cmd+=( -f )
+  cmd+=( "${SETUP_LOG}" )
+  run_reader test -r "${SETUP_LOG}" -- "${cmd[@]}" \
+    || warn "${SETUP_LOG} exists but could not be read, even as root. Check it with: ls -l ${SETUP_LOG}"
 }
 
 main() {
@@ -87,7 +148,7 @@ main() {
       -f|--follow) follow=true; shift ;;
       -h|--help) usage; exit 0 ;;
       ollama|webui|setup|all) source="$1"; shift ;;
-      *) arg="$1"; usage; die "Unknown argument: ${arg}" ;;
+      *) arg="$1"; usage >&2; die "Unknown argument: ${arg}" ;;
     esac
   done
 

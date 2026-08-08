@@ -5,7 +5,7 @@ server and your phone, nothing to port-forward. The WebUI port is kept private b
 an always-on nftables inbound guard (installed by `setup.sh`) that blocks ports
 3000 and 11434 on every interface except loopback and Tailscale, while leaving SSH
 open. **Never add a firewall rule that exposes ports 3000 or 11434 publicly** —
-that would defeat the guard. (Verify with `sudo ./netmode.sh status`.)
+that would defeat the guard. (Verify with `sudo lca status`.)
 
 ## 1. Connect the server to Tailscale (once)
 
@@ -43,6 +43,11 @@ http://<tailscale-ip>:3000
 Or skip the typing: run `lca chat` on the server and it prints the address as a
 **QR code**. Point your phone's camera at it and tap the link. The address is
 printed above the code too, in case your scanner dislikes a terminal QR.
+
+`lca chat` prints a **second** QR below it: the `ssh://` address for the same
+machine. That is the other half of using this from a phone — the chat will
+eventually tell you to run something in a terminal, and this is how you get
+one. Both halves come from the same Tailscale IP, so one command sets up both.
 
 Tap **Sign up** and create the **FIRST** account — the first account automatically
 becomes the **admin**.
@@ -93,7 +98,7 @@ it is created, so editing the repo is not enough on its own — run `sudo lca
 apply` and it re-creates the container with the new prompt (your account and
 chats live in a docker volume and survive). If you forget, `lca check` now says
 so rather than staying silent: *"chat app config drift: SYSTEM_PROMPT — edited
-in .env or the repo but NOT in effect"*. (`./webui.sh status` spells out each
+in .env or the repo but NOT in effect"*. (`lca webui status` spells out each
 one at length; `lca check` is the one to reach for.)
 
 The one exception is a setting you have already changed **inside the WebUI**:
@@ -102,11 +107,55 @@ the environment. So if you edit the assistant's system prompt in **Admin Panel
 → Settings**, that is where it lives from then on, and `lca apply` will not
 overwrite it.
 
+## If a long chat starts sounding like a generic assistant
+
+Start a new chat. That is the whole fix, and it is not a workaround for a bug.
+
+Open WebUI sends the entire conversation back to the model on every message, so
+a long enough chat overflows the model's context window — and the overflow is
+discarded from the *front*, where the assistant's instructions sit. Measured on
+the 3b model a base droplet runs, four runs at each size: at about 3,000 tokens
+of history it answers *"which command writes files?"* with `lca` every time; at
+about 6,000, never. Same model, same question — it had simply stopped being
+told what it is.
+
+Nothing is broken and nothing needs re-applying. A fresh chat is short, so the
+instructions fit again. More RAM raises the rung and the window with it (see
+the ladder above).
+
 ## What the chat can and cannot do
 
 The chat is a **text box with no filesystem**. It cannot create files, run
 commands, or see your project — so "build me a whole app" is the one request it
 genuinely cannot fulfil, no matter which model you run.
+
+A **banner says so at the top of every chat**, and it does not depend on the
+model remembering to mention it:
+
+> **This chat cannot touch your files**
+> This chat cannot read, create or edit files — it is a chat box with no
+> filesystem. For real coding, SSH into the server and run: `lca [project-dir]`
+
+That exists because the handover below, good as it measures, is still an
+*instruction to a small model* — obeyed most of the time, not every time. The
+one time it is not, someone is handed a confident tutorial and concludes the
+product cannot code. A banner is served by Open WebUI itself and rendered
+whatever the model says.
+
+**How it is set.** `scripts/install_webui.sh` passes `WEBUI_BANNERS` to
+`docker run`, built by `lca_webui_banners()` in `scripts/lib.sh`. Open WebUI
+reads that env var as a JSON list and serves it from
+`/api/v1/configs/banners` — note *not* `ui.banners` in `/api/config`, which
+stays `null` even for a signed-in user and will mislead you if you check there.
+`tests/webui-config-gate.sh` asserts the running server really serves it.
+
+**How it reaches an existing install.** Open WebUI bakes every setting in at
+container creation and never updates one in place, so this only arrives when
+the container is recreated. `install_webui.sh` is idempotent by
+`docker rm -f` + `docker run` — re-running it recreates from current settings —
+and that is what `sudo lca apply` triggers once it sees the drift. `lca check`
+reports `WEBUI_BANNERS` as drifted on any container built before this existed,
+so an older install is told rather than left quietly without it.
 
 Ask it anyway and it hands the job over instead of bluffing. It opens with the
 command that *can* do it — bare **`lca`** (aider), in a terminal, inside your
@@ -171,10 +220,37 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
 - For scale: on a 16 GiB CPU-only x86_64 machine, 3b measured **12 tokens/second**
   and 7b **6**. Your droplet has a different CPU, so treat those as the shape of
   the difference (roughly 2× per halving of size) rather than a promise — run
-  `lca speed` for your own number, which takes about a minute.
+  `lca speed` for your own number, which takes a minute or two — and read its
+  `one code edit` line, which is the figure that actually matters for aider.
 - The small model still behaves like *your* assistant rather than a generic
   one — 3b was checked against the same system prompt and answers "how do I
   take a backup?" with `lca backup`, not a lecture about `tar`.
+- **A bigger rung does not buy better obedience.** `scripts/prompt-bench.sh`
+  run at `-n 6` against both rungs, same prompt, same questions:
+
+  | | 3b | 7b |
+  |---|---|---|
+  | "build me an app" hands over | 6/6 | 6/6 |
+  | the same with a feature list and a follow-up | 6/6 | 6/6 |
+  | wrote a doomed tutorial instead | 0/6 | 0/6 |
+  | invented a tool call | 0/6 | 0/6 |
+  | handover fired on "how do I take a backup?" | 0/6 | 0/6 |
+
+  Identical on every behaviour measured. What the bigger model buys is the
+  quality of the code it writes once aider is running, not whether it hands
+  over — so if the chat is misbehaving, more RAM is not the fix. Check
+  `lca check` for `chat app config drift: SYSTEM_PROMPT` first.
+
+  That first sentence is not hand-waving: handed a failing test and the exact
+  traceback, 3b re-emitted the file unchanged 4 times out of 4, while 7b fixed
+  it in 3 of 4. So the two halves of this stack answer the RAM question
+  differently — the chat's obedience does not improve, the agent's code does.
+  Numbers in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+  The 3b column has since been re-measured through `/api/chat` — the request
+  shape Open WebUI itself sends, with the prompt as a system *message* rather
+  than a template field — and every figure came back the same. The chat app's
+  own path is not a different animal from the bench's.
 - Resize the droplet to 16 GB and reboot → auto-tune upgrades to the 14b model
   automatically (smarter, slower per token). No reconfiguration needed.
 - The first message after a quiet period is slower — the model reloads into RAM.
@@ -202,6 +278,6 @@ sudo /opt/local-code-agent/netmode.sh offline    # or online / status
 
 ## If the page won't load
 
-In order: is the phone's Tailscale toggle on? → does `./check-system.sh` on the
-server pass the WebUI checks? → `./webui.sh status` → see
+In order: is the phone's Tailscale toggle on? → does `lca check` on the
+server pass the WebUI checks? → `lca webui status` → see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

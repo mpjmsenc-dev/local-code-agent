@@ -42,6 +42,58 @@ first_boot_failed() {
 }
 
 main() {
+  # First statement, above every side effect — the same rule setup.sh,
+  # install.sh, restore.sh and uninstall.sh each had to learn, and the fourth
+  # entry point never did. This one did not even RECEIVE its arguments: the
+  # last line called 'main' without "$@", so --help was dropped on the floor
+  # and the full unattended install ran instead. Measured, with apt stubbed and
+  # the clone pointed at a local mirror:
+  #
+  #   $ bash deploy/do-user-data.sh --help
+  #   === local-code-agent first-boot install started ===
+  #   --- Installing git ... ---
+  #   --- Cloning ... ---        (33 MB)
+  #   --- Installing the login banner ... ---
+  #
+  # ...on a droplet that would be apt-get, a clone and 20-30 minutes of setup.
+  # It also rewrote /etc/update-motd.d, which is how this was noticed: the
+  # probe repointed this machine's login banner at a throwaway directory.
+  #
+  # Inside main(), not above it, so the wrapper still holds: a paste that
+  # arrives truncated cannot run anything at all.
+  case "${1:-}" in
+    "") ;;
+    -h|--help)
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      return 0
+      ;;
+    # ...and everything else, refused. The comment above records four entry
+    # points learning to answer --help before doing anything; this one learned
+    # that half and left the rest of the option space open, exactly as
+    # install.sh did. It takes NO arguments — every setting is an environment
+    # variable, and there is no $1 anywhere below — so 'do-user-data.sh
+    # --dry-run' ran apt, cloned into ${INSTALL_DIR} and handed over to
+    # setup.sh, on the first boot of a fresh machine, while appearing to have
+    # been told not to. The header calls this safe to re-run by hand, which is
+    # where a typed flag actually comes from.
+    #
+    # NOT through first_boot_failed, which was the first thing tried here and
+    # was wrong. Everything this script prints is teed into
+    # /var/log/local-code-agent-setup.log, and motd.sh's install_state reads
+    # that log: a FIRST-BOOT INSTALL FAILED line makes the login banner report
+    # a failed install to every SSH session. On a real first boot cloud-init
+    # runs this bare and can never reach here, so the only way in is a person
+    # re-running it by hand — on a machine that is usually working. A typo
+    # would have flipped the banner.
+    #
+    # The three-line promise is about an install RUN, the same reason --help
+    # above prints no verdict either.
+    *)
+      echo "Unrecognised argument '${1}'. This installer takes none — every setting is an environment variable: LCA_REPO_URL, LCA_DIR, LCA_LOG, LCA_RUN_SETUP." >&2
+      echo "Nothing was installed." >&2
+      return 1
+      ;;
+  esac
   echo "=== local-code-agent first-boot install started: $(date) ==="
   export DEBIAN_FRONTEND=noninteractive
   # cloud-init runs this without a login environment, so $HOME is unset — and
@@ -68,6 +120,31 @@ main() {
       first_boot_failed "could not clone ${REPO_URL} — check the URL is right and the repository is public."
       return 1
     fi
+  fi
+
+  # A clone can succeed and still leave you without the project. install.sh
+  # learned this the hard way — "observed here by accident, cloning a stale
+  # local 'main' that held only a README" — and this file, whose header opens
+  # with an "EDIT ME if you forked the repository" block, never did.
+  #
+  # Measured against a repository holding one README, everything else stubbed:
+  #
+  #   .../target/scripts/motd.sh: No such file or directory
+  #   (could not install the login banner — continuing)
+  #   .../target/setup.sh: No such file or directory
+  #   === setup reported problems — its verdict line is above ===
+  #
+  # ...and NOT ONE of the three lines this file's header promises the log
+  # always ends with. It points at a verdict line that does not exist, because
+  # setup.sh never ran. docs/YOUR-TURN.md step 2 tells people to watch this log
+  # for a definitive answer; a wrong fork or a stale branch is exactly when
+  # they need one, and it is exactly when there was none.
+  #
+  # Checked before the chmod and the banner install below, so their "No such
+  # file" noise never happens either.
+  if [[ ! -f "${INSTALL_DIR}/setup.sh" ]]; then
+    first_boot_failed "cloned ${REPO_URL} but it contains no setup.sh — that is not a local-code-agent checkout. Check the repository URL and the branch it points at."
+    return 1
   fi
 
   # Git already records these as executable; re-applying is free and covers a
@@ -106,4 +183,14 @@ main() {
 # 'if main | tee', because using main as an 'if' condition disables 'set -e'
 # inside it, which let a failing clone sail on and report success. Here set -e
 # stays active in main and pipefail carries main's status, not tee's.
-main 2>&1 | tee -a "${LOG_FILE}"
+#
+# 'exit $?' on the SAME line, as in install.sh and update.sh. This script is
+# documented as safe to re-run from ${INSTALL_DIR}, and re-running it does
+# 'git pull --ff-only' on the checkout it is being read from — so an update
+# that touches this file replaces it mid-run, and bash then reads whatever now
+# sits at its old byte offset. Measured with a stand-in: "SETUP COMPLETE"
+# printed, then a fragment of a comment executed and the script exited 127.
+# For a file whose stated purpose is to "always end with exactly one of three
+# lines", a trailing "command not found" and a false failure status is the
+# precise opposite.
+main "$@" 2>&1 | tee -a "${LOG_FILE}"; exit $?

@@ -1,6 +1,6 @@
 # YOUR-TURN.md — the ONLY manual steps (phone-friendly, zero terminal experience needed)
 
-Everything else is automated. These six steps are the only things a human must do,
+Everything else is automated. These seven steps are the only things a human must do,
 in this order. Copy-paste blocks are exact; button names are exact.
 
 ---
@@ -38,9 +38,13 @@ in this order. Copy-paste blocks are exact; button names are exact.
    ```
     local-code-agent  ready   ·   model qwen2.5-coder:7b
       Chat on your phone   http://100.x.y.z:3000
+      Write code here      cd ~/my-project && lca   (edits real files)
       Ask right here       lca ask "why is this box slow?"
       All commands         lca help
    ```
+
+   That middle line is the product; the two around it cannot touch a file.
+   Step 6 below is where you use it.
 
    If it says **ready**, skip straight to Step 3. If it says **still
    installing**, log out and come back later, or watch it live as below. It
@@ -96,7 +100,10 @@ in this order. Copy-paste blocks are exact; button names are exact.
 1. On your phone's browser open: `http://100.x.y.z:3000` (your number from step 3).
 
    Easier: type `lca chat` in the droplet console. It prints a QR code — point
-   your phone's camera at the screen and tap the link, no typing.
+   your phone's camera at the screen and tap the link, no typing. It prints a
+   second QR too, the `ssh://` address: scan that one now as well, because the
+   chat will eventually hand you a command to run in a terminal and this is
+   how you get one from the phone.
 2. Tap **Sign up**, enter a name/email/password — this **first account becomes the
    admin**. You're now chatting with your private AI.
 3. Lock signups so nobody else can register. Back in the droplet console:
@@ -128,7 +135,54 @@ sudo lca online
 While offline: chat on your phone keeps working (the AI is local!), but the server
 can't reach the internet at all. `status` proves it with a live probe.
 
-## Step 6 — You are finished when…
+## Step 6 — Write your first code (this is the actual product)
+
+Everything up to here got you a **chat**. The chat cannot create, read or edit
+a single file — it is a text box, and a banner in it says so. If you stop at
+step 5 you will eventually ask it to build something, get a confident tutorial
+it cannot finish, and conclude the thing cannot code. That has happened to a
+real user, and it is why this step exists.
+
+The part that writes files is the bare word `lca` — that is aider, on the same
+private model. In the droplet console or over SSH:
+
+```bash
+mkdir -p ~/hello && cd ~/hello
+git init                       # aider commits each edit; this is what makes that possible
+printf 'def add(a, b):\n    return a + b\n' > calc.py
+git add -A && git commit -m "start"
+
+lca                            # the coding agent, in THIS directory
+```
+
+Then type a request and press Enter — for example:
+
+```
+add a subtract(a, b) function to calc.py
+```
+
+Watch it edit the real file. When it is done, `/quit`, and then **read what it
+actually did**:
+
+```bash
+git diff HEAD~1
+```
+
+That last command is not optional politeness. A small local model sometimes
+changes code you never mentioned — measured on `qwen2.5-coder:7b`, asked for
+two specific edits it made both correctly *and deleted an unrelated function*.
+Because aider commits every edit, `git diff HEAD~1` shows you exactly that, and
+`git revert <sha>` undoes it. Get in the habit now, on a two-line file, rather
+than later on something you care about. See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#review-every-edit--local-models-can-make-unrequested-changes).
+
+Expect it to be slower than a cloud assistant and to need a second try on
+anything complex — [README](../README.md#honest-expectations-vs-claude) is
+blunt about what a 3b–14b model does and does not do well. What you have is a
+coding assistant that is entirely yours, with no quota and no data leaving the
+box.
+
+## Step 7 — You are finished when…
 
 - [ ] `tail`ing the log showed `SETUP COMPLETE — local-code-agent is ready.`
 - [ ] Logging in again greets you with `local-code-agent  ready`.
@@ -136,6 +190,9 @@ can't reach the internet at all. `status` proves it with a live probe.
 - [ ] `http://100.x.y.z:3000` opens the chat and you can send a message and get a reply.
 - [ ] Signups are locked (step 4.3 ran without errors).
 - [ ] `sudo lca status` showed "Internet reachable — as expected in online mode."
+- [ ] **You ran `lca` in a project directory and it edited a real file** (step 6),
+      and you read `git diff HEAD~1` afterwards. This is the one that proves you
+      have a coding assistant rather than a chat window.
 - [ ] Bonus: in the console, run `lca check` — it ends green ("All hard checks
       passed" or better). `lca help` lists everything else.
 - [ ] Bonus: ask it something without leaving the terminal —

@@ -15,11 +15,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
         run: |
-          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*; do
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*; do
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)
-        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*
 
   test:
     name: Unit tests + tune dry-run
@@ -88,7 +88,25 @@ jobs:
           out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
           grep -q 'local modifications' <<<"${out}" \
             || { echo "FAIL: local edits were not reported"; printf '%s\n' "${out}"; exit 1; }
-          echo "update.sh --check: detection, no-op guarantee and dirty-tree warning all behave"
+
+          # A branch that exists only locally fails the SAME fetch a dead
+          # network does, and used to get the same message: "Could not reach
+          # the remote. Check connectivity, and whether the kill switch is on."
+          # Both are wrong here — net_guard has already ruled the kill switch
+          # out — and they send the reader to diagnose a network that is fine.
+          # Real git against a real bare origin, which is what this fixture is
+          # for; the unit suite covers the same three states through a stub.
+          git -C /tmp/upd-work checkout -q -b only-on-this-machine
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1 || true)"
+          printf '%s\n' "${out}"
+          if ! grep -q 'does not exist on the remote' <<<"${out}"; then
+            echo "FAIL: a branch missing from the remote was not diagnosed as one"; exit 1
+          fi
+          if grep -q 'kill switch' <<<"${out}"; then
+            echo "FAIL: a local-only branch is still blamed on connectivity"; exit 1
+          fi
+          git -C /tmp/upd-work checkout -q "${BR}"
+          echo "update.sh --check: detection, no-op guarantee, dirty-tree warning and fetch diagnosis all behave"
 
   system:
     name: System artifacts (nft ruleset + systemd units)
@@ -154,6 +172,52 @@ jobs:
             /etc/systemd/system/local-code-agent-backup.timer
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: A boot unit pointing at a moved checkout must be reported
+        # 'systemctl is-enabled' is an answer about a symlink. It keeps saying
+        # "enabled" after the checkout the unit runs from is moved, renamed or
+        # deleted, and the health check used to stop there — so a netmode unit
+        # that could not start still printed a green "will be re-applied on
+        # boot", and the WebUI/Ollama ports would go public at the next reboot.
+        #
+        # This is also the only place the ExecStart parse meets real systemd:
+        # the unit tests can only feed it a recorded rendering, and the raw
+        # line is echoed here so a future format change is visible in the log.
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNIT=local-code-agent-netmode.service
+          raw="$(systemctl show -p ExecStart --value "${UNIT}")"
+          echo "systemd renders ExecStart as: ${raw}"
+          parsed="$(bash -c 'source scripts/lib.sh; show_execstart_program' <<<"${raw}")"
+          [[ "${parsed}" == "${PWD}/netmode.sh" ]] \
+            || { echo "FAIL: parsed '${parsed}', expected ${PWD}/netmode.sh"; exit 1; }
+
+          moved_reported() {
+            grep -q 'can no longer execute' <<<"$(./check-system.sh --quick 2>&1 || true)"
+          }
+
+          # A healthy box must stay quiet — a false alarm here would be worse
+          # than the blind spot it replaces.
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: a healthy boot unit was reported as broken"; exit 1
+          fi
+
+          # Now point the unit where the checkout is not.
+          sudo sed -i 's|^ExecStart=.*|ExecStart="/gone/local-code-agent/netmode.sh" apply-saved|' \
+            "/etc/systemd/system/${UNIT}"
+          sudo systemctl daemon-reload
+          moved_reported || {
+            ./check-system.sh --quick 2>&1 | tail -30
+            echo "FAIL: a boot unit whose program is missing was not reported"; exit 1; }
+
+          # ...and the fix the warning names must actually repair it.
+          sudo ./netmode.sh harden
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: 'netmode.sh harden' did not repair the boot unit"; exit 1
+          fi
+          echo "boot unit: staleness reported, and 'netmode.sh harden' repairs it"
       - name: A backup schedule changed in .env must be reported until applied
         # The timer keeps the schedule it was installed with. Editing
         # BACKUP_SCHEDULE and forgetting '--install-timer' leaves backups on
@@ -270,6 +334,46 @@ jobs:
           grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
             || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
 
+          # A clone that SUCCEEDS and brings back the wrong tree is a third
+          # outcome, and it used to produce none of the three verdict lines:
+          # setup.sh simply was not there, so the log ended with "setup
+          # reported problems — its verdict line is above" pointing at a line
+          # that did not exist. install.sh has checked for this since it was
+          # caught cloning a stale 'main' holding only a README; the file whose
+          # header says "EDIT ME if you forked the repository" did not.
+          rm -rf /tmp/lca-notours /tmp/lca-notours.git /tmp/lca-dud-notours
+          mkdir -p /tmp/lca-notours
+          git -C /tmp/lca-notours init -q .
+          echo '# some other project' > /tmp/lca-notours/README.md
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            add -A
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            commit --quiet -m 'not local-code-agent'
+          git -C /tmp/lca-notours branch -f ci-notours HEAD
+          git clone --quiet --bare /tmp/lca-notours /tmp/lca-notours.git
+          git -C /tmp/lca-notours.git symbolic-ref HEAD refs/heads/ci-notours
+          set +e
+          LCA_REPO_URL=/tmp/lca-notours.git LCA_DIR=/tmp/lca-dud-notours \
+            LCA_LOG=/tmp/dud-notours.log LCA_RUN_SETUP=false \
+            bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a clone with no setup.sh reported success"; cat /tmp/dud-notours.log; exit 1; }
+          grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-notours.log \
+            || { echo "FAIL: no verdict for a clone that is not this project"; cat /tmp/dud-notours.log; exit 1; }
+          # ...and it must have stopped before installing a login banner out of
+          # a tree that is not this project. Asserted on the LOG, not on
+          # /etc/update-motd.d: the successful runs earlier in this same step
+          # install a banner of their own, so the file's existence proves
+          # nothing about this run.
+          if grep -q 'Installing the login banner' /tmp/dud-notours.log; then
+            echo "FAIL: a banner was installed from a foreign checkout"
+            cat /tmp/dud-notours.log
+            exit 1
+          fi
+          echo "do-user-data.sh: success, re-run, failed clone, wrong tree and failing setup all behave"
+
           # And the path that was dead code until now: setup itself failing.
           # Every run above uses LCA_RUN_SETUP=false, which is exactly why
           # nobody noticed that setup.sh printed "SETUP FINISHED WITH ERRORS"
@@ -332,6 +436,11 @@ jobs:
             LCA_RUN_SETUP=false bash install.sh
           test -x /tmp/lca-bootstrap/setup.sh
           test -x /tmp/lca-bootstrap/scripts/selftest.sh
+          # bin/ too. install.sh was the only one of the four re-chmod sites
+          # that left it out, and LCA_RUN_SETUP=false — this very path — is
+          # where nothing else re-applies the bit before the user runs setup by
+          # hand. 'lca' not being executable is the whole command gone.
+          test -x /tmp/lca-bootstrap/bin/lca
           echo "install.sh bootstrapped a working checkout on a bare image"
 
   e2e:
@@ -339,11 +448,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
+      - name: Pin the smallest model this project actually ships (3b)
+        # This pinned 0.5b, "because runners are small". It kept the job fast
+        # and it proved nothing about the one thing the product does: 0.5b
+        # answers with a bare fenced code block carrying no filename, so aider
+        # has nothing to apply and no file is ever written. The acceptance test
+        # only asked for a reply, so this stayed green anyway.
+        #
+        # Measured on a 4-vCPU 15 GiB box — the same class as this runner —
+        # asking for one file: 0.5b wrote it 0 times out of 10, 3b wrote it 10
+        # times out of 10 in about 25 seconds each. 3b is also the smallest
+        # rung scripts/tune.sh will ever auto-select, so this job now runs on
+        # the floor of what real deployments get, not below it.
         run: |
           cp .env.example .env
           sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
-          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:0.5b/' .env
+          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:3b/' .env
           sed -i 's/^ENABLE_WEBUI=.*/ENABLE_WEBUI=false/' .env
       - name: install_ollama.sh for real (installer, drop-in, service, API)
         run: sudo scripts/install_ollama.sh
@@ -400,11 +520,19 @@ jobs:
           pull_model "${MODEL_NAME}"
           model_responds "${MODEL_NAME}" 300
           echo "real generation OK from ${MODEL_NAME}"
-      - name: update-model.sh end-to-end (pull -> validate -> pin)
+      - name: update-model.sh end-to-end (pull -> validate -> pin, and back)
+        # Switching DOWN to the tiny model is the cheap way to exercise a real
+        # pull-validate-pin. Switching back is not tidying-up: update-model.sh
+        # rewrites .env, so every step after this one — aider, the acceptance
+        # test — runs on whatever this leaves behind, and on 0.5b the
+        # acceptance test cannot pass. The second switch costs nothing; 3b is
+        # already pulled.
         run: |
           ./update-model.sh qwen2.5-coder:0.5b
           grep -q '^MODEL_NAME=qwen2.5-coder:0.5b' .env
           grep -q '^AUTO_TUNE=false' .env
+          ./update-model.sh qwen2.5-coder:3b
+          grep -q '^MODEL_NAME=qwen2.5-coder:3b' .env
       - name: Idempotency — re-running the installer must be safe
         run: |
           sudo scripts/install_ollama.sh
@@ -561,6 +689,26 @@ jobs:
           grep -q 'Downloading the model' <<<"${inflight}" \
             || { echo "FAIL: banner does not report how far the install got"; exit 1; }
           echo "login banner: installed, listed by run-parts, and truthful in both states"
+      - name: The installed 'lca' must read as this checkout
+        # That check compares the installed symlink against check-system.sh's
+        # own path, and the two are spelled differently the moment anything
+        # above the checkout is itself a symlink — 'cd && pwd' keeps the
+        # symlinked spelling, readlink -f does not. Getting it wrong fails
+        # nothing: it prints a confident warning about a healthy machine, and
+        # nobody reads a health check that does that twice. So assert it here,
+        # in the job where setup.sh has actually created the symlink.
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(./check-system.sh --quick 2>&1 || true)"
+          if ! grep -q "'lca' on PATH runs this checkout" <<<"${out}"; then
+            grep -i "lca' on PATH" <<<"${out}" || echo "(no lca line at all)"
+            echo "FAIL: the installed lca symlink was not recognised as this checkout"; exit 1
+          fi
+          if grep -q 'DIFFERENT checkout' <<<"${out}"; then
+            echo "FAIL: a healthy install was reported as a foreign checkout"; exit 1
+          fi
+          echo "lca symlink: recognised as this checkout"
       - name: lca apply agrees with a freshly-installed stack
         # setup.sh has just run, so by definition nothing has drifted. If apply
         # reports work here it disagrees with the installer about what .env
@@ -630,9 +778,21 @@ jobs:
           env_json="$(sudo docker inspect -f '{{json .Config.Env}}' open-webui)"
           printf '%s' "${env_json}" | jq -e 'map(select(startswith("DEFAULT_MODEL_PARAMS="))) | length == 1' >/dev/null \
             || { echo "FAIL: DEFAULT_MODEL_PARAMS was never passed to the container"; printf '%s' "${env_json}" | jq -r '.[]' | cut -c1-80; exit 1; }
-          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
-            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -e '.system | test("local-code-agent")' >/dev/null \
-            || { echo "FAIL: DEFAULT_MODEL_PARAMS does not carry our system prompt"; exit 1; }
+          # Compared to THIS repo's prompt, byte for byte — not to a substring
+          # of it. The old assertion was `.system | test("local-code-agent")`,
+          # which every version of the prompt has ever satisfied, including the
+          # one that made a real user's chat invent a tool call. It proved the
+          # container had *a* prompt, never that it had the current one, which
+          # is the only failure that has actually happened here.
+          live_prompt="$(printf '%s' "${env_json}" \
+            | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
+            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -r '.system')"
+          want_prompt="$(bash -c 'source scripts/lib.sh >/dev/null 2>&1; lca_system_prompt')"
+          if [[ "${live_prompt}" != "${want_prompt}" ]]; then
+            echo "FAIL: the container's system prompt is not this repo's"
+            diff <(printf '%s\n' "${want_prompt}") <(printf '%s\n' "${live_prompt}") || true
+            exit 1
+          fi
           printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_PROMPT_SUGGESTIONS="))' \
             | sed 's/^DEFAULT_PROMPT_SUGGESTIONS=//' | jq -e 'length > 0' >/dev/null \
             || { echo "FAIL: DEFAULT_PROMPT_SUGGESTIONS is missing or empty"; exit 1; }

@@ -44,6 +44,29 @@ main() {
       # way that actually works.
       -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
+      # Everything after '--' is question text, whatever it starts with. The
+      # escape hatch has to exist before the refusal below can be safe: a
+      # question really can begin with a dash.
+      --)        shift
+                 while [[ $# -gt 0 ]]; do
+                   question="${question:+${question} }$1"; shift
+                 done ;;
+      # An unrecognised FLAG is refused; an unrecognised WORD is still question
+      # text, which is the whole point of the arm below.
+      #
+      # Fourteen scripts in this project refuse an unknown option. This one,
+      # which has the most flags of any of them and documents all three in 'lca
+      # help', swallowed them into the question instead. Measured, one letter
+      # off '--continue':
+      #
+      #   $ lca ask --contine "and why?"
+      #   prompt sent -> "--contine and why?"      exit 0
+      #
+      # against '--continue', whose prompt begins "--- the previous exchange,
+      # for context ---". So the feature silently did not happen, the typo was
+      # sent to the model as part of the question, and the status said success.
+      -?*)       usage >&2
+                 die "Unknown option: ${1} — 'lca ask' takes -f, -c, -m and -h. If it is part of your question, put the question after --:  lca ask -- ${1} ..." ;;
       *)         arg="$1"; question="${question:+${question} }${arg}"; shift ;;
     esac
   done
@@ -54,14 +77,34 @@ main() {
   if [[ ! -t 0 ]]; then
     piped="$(cat)"
   fi
-  [[ -n "${question}" ]] || { usage; die "No question given."; }
+  [[ -n "${question}" ]] || { usage >&2; die "No question given."; }
+
+  # Every -f file answered HERE, before a thing is started. These are argument
+  # errors — a name that does not exist, a directory, a file this account
+  # cannot open — and not one of them needs a model server running to
+  # diagnose. ensure_ollama_up_announced below waits up to 60 seconds for one,
+  # and the check that would have caught the typo sat 55 lines further down, so
+  # measured on this box:
+  #
+  #   $ lca ask -f /etc "what is this"
+  #   [info] Ollama is not answering — starting it (this can take up to 60s)...
+  #   [FAIL] /etc is a directory, and -f takes a file.
+  #
+  # A minute of booting a model in order to report a misspelling. Only the
+  # files given with -f: the ones picked up from the question below are already
+  # filtered on being readable regular files.
+  local f
+  for f in ${files[@]+"${files[@]}"}; do
+    input_file_ok "${f}" -f \
+      "Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
+  done
 
   require_cmd curl jq
   ensure_ollama_up_announced 60 || true
   wait_for_ollama 5 >/dev/null 2>&1 \
     || die "Ollama is not answering at $(ollama_url). Try: lca check"
   model_present "${MODEL_NAME}" \
-    || die "Model '${MODEL_NAME}' is not downloaded. Pull it with: ollama pull ${MODEL_NAME}"
+    || die "Model '${MODEL_NAME}' is not downloaded. $(pull_advice "${MODEL_NAME}")"
 
   # If the question names a file that exists right here, include it. "why is
   # setup.sh failing?" should just work — being made to repeat the filename with
@@ -83,32 +126,87 @@ main() {
     [[ "${dup}" == "true" ]] && continue
     files+=( "${w}" )
     auto=$(( auto + 1 ))
-    info "including ${w} from the current directory"
+    # >&2 like every other message here: this command's stdout IS the model's
+    # answer, and lib.sh states the rule while naming this command — "in 'lca
+    # ask' the model's answer is stdout, and progress must not end up inside a
+    # piped or redirected answer". Measured before the fix, the whole of stdout
+    # for a cold 'lca ask -c' was "[info] continuing from your last question".
+    info "including ${w} from the current directory" >&2
   done
 
   # Build the prompt: the previous exchange (with -c), then file context, then
   # piped context, then the question.
-  local context="" f
+  local context=""
   if [[ "${continue_last}" == "true" ]]; then
     if [[ -r "${ASK_LAST}" ]]; then
       # Capped: a long previous answer would otherwise crowd out the files and
       # the new question, and on CPU every extra token is time on the clock.
       context+="--- the previous exchange, for context ---"$'\n'"$(head -c 6000 "${ASK_LAST}")"$'\n\n'
-      info "continuing from your last question"
+      info "continuing from your last question" >&2
     else
       warn "No previous question to continue from — answering this one on its own."
     fi
   fi
   for f in ${files[@]+"${files[@]}"}; do
-    [[ -r "${f}" ]] || die "Cannot read ${f}"
+    # Checked at the top of main(), before anything was started — except for
+    # the files picked up from the question, which were only added at all
+    # because they were readable regular files. Re-asked anyway: this list is
+    # the union of the two, it is three cheap stat calls, and a file that
+    # vanished in between must not reach head to be explained in head's words.
+    input_file_ok "${f}" -f \
+      "Name one, or repeat -f for several:  lca ask -f a.py -f b.py \"your question\""
     # Cap each file so one large file cannot blow the whole context window.
     context+="--- file: ${f} ---"$'\n'"$(head -c 12000 "${f}")"$'\n\n'
   done
-  [[ -z "${piped}" ]] || context+="--- piped input ---"$'\n'"$(printf '%s' "${piped}" | head -c 12000)"$'\n\n'
+  # Sliced with parameter expansion, NOT 'printf ... | head -c'. That pipeline
+  # killed this command outright on exactly the inputs it exists for: head
+  # exits after 12000 bytes, printf still has the rest to write, takes SIGPIPE,
+  # and under 'set -o pipefail' the substitution returns 141 — which errexit
+  # then turns into an immediate exit with no answer, no warning and no error.
+  #
+  # Size-dependent, so it looked like nothing was wrong: anything that fits the
+  # 64 KiB pipe buffer completes before head leaves. Measured — 60000 chars
+  # exit 0, 70000 exit 141. 'lca logs | lca ask "why did this fail?"' is the
+  # first thing docs/TROUBLESHOOTING.md tells you to run, and a log big enough
+  # to be worth asking about is a log big enough to trigger this.
+  [[ -z "${piped}" ]] || context+="--- piped input ---"$'\n'"${piped:0:12000}"$'\n\n'
 
   # Same system prompt as the phone chat — one assistant, two doors.
   local system prompt
   system="$(lca_system_prompt)"
+
+  # Each piece above is capped so that no single one "can blow the whole
+  # context window". Nothing capped the TOTAL, and the caps sum to ~54,000
+  # characters — roughly 13,500 tokens — against the 4,096-token window the 3b
+  # rung runs with on a base droplet. Ollama truncates an over-long prompt from
+  # the FRONT, which is where the system prompt sits, so the failure mode is
+  # the assistant silently losing its own instructions and answering like a
+  # stock model. On 'lca logs | lca ask "why did this fail?"' — recommended by
+  # both the README and TROUBLESHOOTING.md — piped input alone already reached
+  # the edge of that window before anything else was added.
+  #
+  # Budget: the window, less the reply, less the system prompt, less a margin
+  # for the question and the chat scaffolding. ~4 characters per token, the
+  # same rough figure the prompt-size gate uses. The tail is kept because the
+  # sections are appended oldest-first, so piped input — the thing the user
+  # just produced — is last and survives.
+  local ctx_tokens reply_tokens budget_chars
+  ctx_tokens="${OLLAMA_CONTEXT_LENGTH:-8192}"
+  [[ "${ctx_tokens}" =~ ^[0-9]+$ ]] || ctx_tokens=8192
+  reply_tokens="${LCA_ASK_TOKENS:-512}"
+  [[ "${reply_tokens}" =~ ^[0-9]+$ ]] || reply_tokens=512
+  budget_chars=$(( (ctx_tokens - reply_tokens) * 4 - ${#system} - 400 ))
+  (( budget_chars > 2000 )) || budget_chars=2000
+  if (( ${#context} > budget_chars )); then
+    # Names what is lost, not just how much is kept. Sections are appended
+    # oldest-first, so trimming to the tail drops whole files and the previous
+    # exchange before it touches piped input — "keeping the last N characters"
+    # is true but does not tell someone who passed three files that two of them
+    # are simply gone.
+    warn "Context (${#context} chars) is bigger than ${MODEL_NAME}'s ${ctx_tokens}-token window. Keeping the most recent ${budget_chars} and dropping what came before — earlier -f files and the previous exchange go first, piped input last. Pass fewer files, pipe less, or raise OLLAMA_CONTEXT_LENGTH in .env and run: sudo lca apply."
+    context="${context: -budget_chars}"
+  fi
+
   prompt="${context}${question}"
 
   local payload
@@ -128,28 +226,139 @@ main() {
   # without the user retyping the context. Written through a temp file and
   # moved into place, so an interrupted answer cannot leave a half-written
   # exchange that the next -c would treat as complete.
-  local answer_tmp
+  local answer_tmp raw_tmp
   answer_tmp="$(mktemp)"
+  # The RAW body as well as the extracted answer. jq keeps only '.response',
+  # which is exactly nothing when Ollama replies with an error object — and
+  # that object is the only thing that says what went wrong. See the empty-
+  # answer check below the stream.
+  raw_tmp="$(mktemp)"
   # shellcheck disable=SC2064
-  trap "rm -f '${answer_tmp}'" EXIT
+  trap "rm -f '${answer_tmp}' '${raw_tmp}'" EXIT
+
+  # Streaming solves the SECOND half of the wait — tokens appearing as they are
+  # generated, per the comment above. It cannot touch the first half: a model
+  # that is not resident has to be loaded before it produces a single token,
+  # and that is silent by nature. Measured on this 4-vCPU host with no GPU:
+  # 88s to load a 3B, 64s for a 0.5B, and warm_model records 228s for a 7B on a
+  # cold page cache. A minute of nothing after pressing Enter is exactly the
+  # "is it hung?" that the streaming was added to prevent, arriving before the
+  # stream can start.
+  #
+  # Only when it will actually be slow. If the model is already resident the
+  # first token is immediate and this would be noise on every question.
+  #
+  # stderr, not stdout: README documents 'lca logs | lca ask "why did this
+  # fail?"', and people redirect answers to files. The answer must stay the
+  # only thing on stdout.
+  if ! ollama_processor "${MODEL_NAME}" >/dev/null 2>&1; then
+    printf 'Loading %s into memory first — this pause happens once, then the answer streams.\n' \
+      "${MODEL_NAME}" >&2
+  fi
+  # Status captured, not swallowed. Bare under 'set -o pipefail' this pipeline
+  # was the last statement of main, so a curl that died mid-answer — the 600s
+  # cap, or Ollama being OOM-killed by the very model it just loaded — exited
+  # the whole command silently. The user was left with half an answer, no
+  # error, and a non-zero status nothing explained. speed.sh has always said so
+  # on the same failure.
+  local stream_rc=0
   curl -sS --no-buffer --max-time 600 -X POST "$(ollama_url)/api/generate" \
     -H 'Content-Type: application/json' -d "${payload}" \
+    | tee "${raw_tmp}" \
     | jq -rj --unbuffered '.response // empty' \
-    | tee "${answer_tmp}"
+    | tee "${answer_tmp}" || stream_rc=$?
   printf '\n'
 
   if [[ -s "${answer_tmp}" ]]; then
-    mkdir -p "${ASK_STATE_DIR}"
+    # Not bare either: ~/.cache/local-code-agent ends up root-owned the moment
+    # anything here is run once under sudo, and then this whole block failed
+    # under 'set -e' — after a perfect answer had already been printed. Losing
+    # the follow-up history is a papercut; exiting non-zero with no message,
+    # having apparently just worked, is not.
+    local save_ok=true
+    mkdir -p "${ASK_STATE_DIR}" 2>/dev/null || save_ok=false
     # Owner-only: this file holds the last question and answer verbatim, which
     # routinely includes the contents of whatever file was attached. A
     # world-readable copy of that under ~/.cache is not something to leave
     # behind by default.
     chmod 700 "${ASK_STATE_DIR}" 2>/dev/null || true
-    {
-      printf 'Question: %s\n\nAnswer: ' "${question}"
-      cat "${answer_tmp}"
-      printf '\n'
-    } > "${ASK_LAST}.tmp" && chmod 600 "${ASK_LAST}.tmp" && mv "${ASK_LAST}.tmp" "${ASK_LAST}"
+    # The redirect is inside a subshell so that a failure to OPEN the file is
+    # the subshell's error to swallow. Grouped instead, bash reports it before
+    # the group runs and the '2>/dev/null' on the group never sees it — a raw
+    # "Not a directory" above the warning that explains it.
+    ( {
+        printf 'Question: %s\n\nAnswer: ' "${question}"
+        cat "${answer_tmp}"
+        printf '\n'
+      } > "${ASK_LAST}.tmp" ) 2>/dev/null || save_ok=false
+    if [[ "${save_ok}" == "true" ]]; then
+      chmod 600 "${ASK_LAST}.tmp" 2>/dev/null || save_ok=false
+      mv "${ASK_LAST}.tmp" "${ASK_LAST}" 2>/dev/null || save_ok=false
+    fi
+    if [[ "${save_ok}" != "true" ]]; then
+      rm -f "${ASK_LAST}.tmp" 2>/dev/null || true
+      warn "Could not save this exchange to ${ASK_LAST}, so 'lca ask -c' will have nothing to continue from. Check who owns it: ls -ld ${ASK_STATE_DIR}"
+    fi
+  fi
+
+  # An empty answer that exited cleanly is not success.
+  #
+  # 'curl -sS' has no '-f', so an HTTP error arrives as a body with a zero exit
+  # status. Measured against a model that is not installed:
+  #
+  #   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
+  #   {"error":"model 'no-such-model:1b' not found"}   (curl rc=0)
+  #   ...piped through jq '.response // empty' -> nothing, pipeline rc=0
+  #
+  # so 'lca ask' printed nothing, warned about nothing and exited 0, throwing
+  # away the one sentence that named the problem. Observed live too: a cold
+  # 'lca ask -c' produced the "continuing from your last question" line, no
+  # answer, and status 0.
+  #
+  # '-f' is not the fix — it would make curl fail, but it discards the body,
+  # which is the part worth reading. Keeping the raw stream costs one tee and
+  # leaves the streaming behaviour above untouched.
+  if [[ ! -s "${answer_tmp}" ]] && (( stream_rc == 0 )); then
+    local ollama_err
+    ollama_err="$(jq -rj '.error // empty' <"${raw_tmp}" 2>/dev/null || true)"
+    if [[ -n "${ollama_err}" ]]; then
+      # Quoted, not characterised. This said "Ollama refused the request", and
+      # the commonest thing it says on a CPU-only box is the opposite of a
+      # refusal. Measured, running the pipeline the README documents:
+      #
+      #   $ lca logs | lca ask "what is this log about?"
+      #   [FAIL] Ollama refused the request and sent no answer:
+      #          timed out waiting for llama-server to start -
+      #
+      # Nothing was refused: it tried for five minutes to load the model and
+      # ran out of time. Same overclaim model_silence_reason carried — "the
+      # server answered rather than running out of time, so this is not a slow
+      # load" — about the same cause, and taken out for the same reason. The
+      # reader is told what Ollama said and where the rest of it is.
+      err "${MODEL_NAME} produced no answer. Ollama's own reason: ${ollama_err}"
+      # ...and, where it is the load running out of time, the one thing that
+      # fixes it. Measured cold on this box, the same command twice in a row:
+      # the first gave up after 304s with nothing resident, the second answered
+      # in 32s. The failed attempt is not wasted — it leaves the model file in
+      # the page cache, so the second load reads it from memory rather than
+      # from disk. Quoting Ollama and stopping there reads as a broken install
+      # to a reader who is one keystroke from a working answer.
+      #
+      # Through the shared predicate, so the narrowness travels with it: a
+      # runner killed for memory must not collect this advice.
+      if ollama_error_is_slow_load "${ollama_err}"; then
+        info "That is the load giving up before it finished, not a broken install — run the same command again: the first attempt leaves the model in the page cache, and the second load reads it from memory (measured cold here: 304s to fail, then 32s to answer)." >&2
+      fi
+      info "The full log is at: $(ollama_log_hint)" >&2
+      return 1
+    fi
+    err "${MODEL_NAME} returned an empty answer — the request succeeded but produced no text at all. That usually means the prompt was rejected for length; try a shorter question, or fewer -f files. Check the engine with: lca check"
+    return 1
+  fi
+
+  if (( stream_rc != 0 )); then
+    warn "The answer above is incomplete — the request to Ollama ended early (a 10-minute cap, a restart, or the model being killed for memory). Try a shorter question, or check: lca check"
+    return 1
   fi
 }
 
