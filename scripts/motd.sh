@@ -37,9 +37,19 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # quick CMD... — run a probe under a hard time limit, discarding failures.
 # Two seconds is far longer than any of these take when healthy and short
 # enough that a hung daemon costs a login almost nothing.
+#
+# The fallback for a host with no 'timeout' runs the probe UNBOUNDED, which is
+# the one thing this wrapper exists to prevent. This file runs as root from
+# pam_motd on every SSH login, and the project has already written down what an
+# unbounded probe here costs: not "the banner is slow" but a machine nobody can
+# log in to in order to restart the daemon that is hanging.
+#
+# So the network probes carry their own --max-time as well (see QUICK_SECONDS
+# below). belt and braces, because the braces are optional on some hosts.
+QUICK_SECONDS=2
 quick() {
   if have timeout; then
-    timeout 2 "$@" 2>/dev/null
+    timeout "${QUICK_SECONDS}" "$@" 2>/dev/null
   else
     "$@" 2>/dev/null
   fi
@@ -169,7 +179,7 @@ engine_up() {
   if have systemctl && quick systemctl is-active --quiet ollama; then
     return 0
   fi
-  if have curl && quick curl -fsS "$(ollama_url)/api/version" >/dev/null; then
+  if have curl && quick curl -fsS --max-time "${QUICK_SECONDS}" "$(ollama_url)/api/version" >/dev/null; then
     return 0
   fi
   return 1
@@ -322,7 +332,7 @@ banner_stalled() {
 model_missing() {
   have curl || return 1
   local tags
-  tags="$(quick curl -fsS "$(ollama_url)/api/tags" || true)"
+  tags="$(quick curl -fsS --max-time "${QUICK_SECONDS}" "$(ollama_url)/api/tags" || true)"
   [[ "${tags}" == *'"models"'* ]] || return 1
   grep -qF "\"${MODEL_NAME}\"" <<<"${tags}" && return 1
   return 0
@@ -380,7 +390,7 @@ banner_ready() {
 chat_down_row() {
   [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
   have curl || return 0
-  quick curl -fsS "$(webui_url)/health" >/dev/null 2>&1 && return 0
+  quick curl -fsS --max-time "${QUICK_SECONDS}" "$(webui_url)/health" >/dev/null 2>&1 && return 0
   # 18 characters: row() pads labels to 20, so a longer one eats its own
   # separator and the value no longer lines up with every other row. "Chat is
   # NOT answering" was 21 and did exactly that.

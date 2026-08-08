@@ -13373,6 +13373,46 @@ motd_install_is_honest() {
   grep -qF 'chmod +x' <<<"${bad}" || {
     printf 'a banner that cannot run is not given a fix: %s\n' "${bad}" >&2; return 1; }
 }
+# Every network probe in the login banner carries its own time limit.
+#
+# quick() wraps each probe in 'timeout 2' — and falls back to running the
+# command bare when timeout is missing, which removes the one property it
+# exists to provide. motd.sh runs as root from pam_motd on EVERY SSH login,
+# and this project has already reasoned about what an unbounded probe there
+# costs: not "the banner is slow", but a machine nobody can log in to in order
+# to restart the daemon that is hanging.
+#
+# Checked by reading the calls, not by driving a wedged server, and that is an
+# admission rather than a preference. A behavioural version was written first
+# and deleted: on any host that HAS timeout the fallback is unreachable, and
+# removing timeout from PATH takes curl, stat and sed with it. Every stand-in
+# tried — a timeout that exits 127, a timeout that drops its limit and execs —
+# produced the same elapsed time with the bound present and absent, so the
+# check passed in both states and proved nothing. A test that cannot fail for
+# the reason it names is worse than no test.
+#
+# So the property is read off the source: a probe that reaches the network
+# through quick() must also bound itself.
+banner_network_probes_bound_themselves() {
+  local body line bad=0 seen=0
+  body="$(grep -vn '^[[:space:]]*#' "${REPO}/scripts/motd.sh")"
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    seen=$((seen+1))
+    grep -q -- '--max-time' <<<"${line}" || {
+      printf 'the login banner reaches the network without a time limit of its own, so a host with no timeout(1) hangs every SSH login: %s\n' \
+        "${line}" >&2
+      bad=1
+    }
+  done < <(grep -E 'quick curl' <<<"${body}")
+  (( seen >= 3 )) || {
+    printf 'only %s network probes found in motd.sh — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every network probe in the login banner bounds itself" \
+  banner_network_probes_bound_themselves
 check "a banner that cannot run is not reported as installed" \
   motd_install_is_honest
 # ...and the counterpart for stubs that escalation walks straight past. Every
