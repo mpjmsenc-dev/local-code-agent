@@ -2273,6 +2273,28 @@ start_bg_serialises_against_itself() {
 }
 check "...and only one command at a time starts the server" \
   start_bg_serialises_against_itself
+# ...and the lock it holds must not be committed. lib.sh names the background
+# log with the comment "# *.log is gitignored", which was true and is exactly
+# the assumption a '.lock' suffix breaks: '*.log' does not match
+# '.ollama-serve.log.lock', so the first 'git add -A' after the lock was added
+# committed the running lock file, and it would have arrived in every checkout
+# on the next pull.
+#
+# Generalised past that one name. Runtime state belongs to a machine, not to
+# the repository, and the next such file will have some other suffix.
+no_runtime_artefact_is_tracked() {
+  local tracked
+  # '.env' anchored, so the tracked '.env.example' template it is generated
+  # from is not swept up with it — the first draft of this matched that and
+  # failed on a clean tree.
+  tracked="$(git -C "${REPO}" ls-files 2>/dev/null \
+    | grep -E '(^|/)\.env$|(^|/)\.ollama-serve|\.(log|lock|pid|sock)$' || true)"
+  [[ -z "${tracked}" ]] || {
+    printf 'runtime state is committed to the repository:\n%s\n' "${tracked}" >&2
+    return 1; }
+}
+check "...and no runtime artefact is tracked in the repository" \
+  no_runtime_artefact_is_tracked
 
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
