@@ -11193,6 +11193,31 @@ listing_warns_when_the_disk_cannot_take_it() {
     return 1; }
 }
 
+listing_warns_when_the_pull_would_leave_the_box_short() {
+  # The arm that was missing. The check above only covered a pull the disk
+  # cannot take at all; a pull that SUCCEEDS and leaves the machine under the
+  # free-disk floor printed nothing, which is this box's actual state —
+  # measured at 14 GB free against a 9 GB download and a 15 GB floor:
+  #
+  #   qwen2.5-coder          -> qwen2.5-coder:14b        <- no caveat at all
+  #
+  # and 'lca check' fails the machine for free disk the moment you take it.
+  # Same shape as the tune advice, whose two arms this listing now shares.
+  #
+  # 14 GB free in df's 1K blocks: enough for the 9 GB pull, not enough to stay
+  # above the floor afterwards.
+  local out; out="$(recommend_with $(( 14 * 1024 * 1024 )))"
+  local line; line="$(qwen_line "${out}")"
+  [[ -n "${line}" ]] || { echo 'no qwen2.5-coder line at all' >&2; return 1; }
+  grep -q 'under the .* GB wanted' <<<"${line}" || {
+    printf 'a pull that leaves the box under its own disk floor is recommended silently: %s\n' "${line}" >&2
+    return 1; }
+  # ...and it must not claim the pull is impossible, which it is not.
+  ! grep -q 'needs about .* GB to download' <<<"${line}" || {
+    printf 'a pull that fits is reported as one that does not: %s\n' "${line}" >&2
+    return 1; }
+}
+
 listing_is_quiet_when_the_disk_is_ample() {
   # The complement, so the warning cannot be a constant. 4 TB free.
   local out; out="$(recommend_with 4294967296)"
@@ -11223,6 +11248,8 @@ check "the model listing flags rungs that do not fit this RAM" \
   listing_flags_models_that_do_not_fit
 check "the model listing flags a rung the disk cannot take" \
   listing_warns_when_the_disk_cannot_take_it
+check "...and one that fits but leaves the box under its disk floor" \
+  listing_warns_when_the_pull_would_leave_the_box_short
 check "the model listing says nothing about disk when there is room" \
   listing_is_quiet_when_the_disk_is_ample
 check "the model listing asks no disk for a model already downloaded" \

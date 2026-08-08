@@ -1283,17 +1283,43 @@ MODELS_HEADROOM_GB="${MODELS_HEADROOM_GB:-15}"
 # Nothing when the size cannot be read or the free space is unknown: an
 # unparseable tag must not become a warning any more than it may become a
 # refusal.
+# model_disk_state NEW FREE HEADROOM — 'refused', 'tight', or nothing at all
+# when the disk can take the download comfortably. Nothing, too, when either
+# number is unknown: a guess must not become a warning.
+#
+# The RULE, in one place, because it now has two readers that need different
+# renderings of it. tune_cost_note below turns it into a sentence for a single
+# model. 'lca model --list-recommended' prints five models in a table, where
+# that sentence repeated five times is noise rather than information — it needs
+# a tag, not a paragraph. Splitting the wording from the arithmetic is what
+# lets both exist without a second copy of the thresholds.
+model_disk_state() {
+  local new="$1" free="$2" headroom="$3" need
+  need="$(model_disk_gb "${new}")" || return 0
+  [[ -n "${free}" ]] || return 0
+  if (( free < need )); then
+    printf 'refused'
+  elif (( free - need < headroom )); then
+    printf 'tight'
+  fi
+}
+
 tune_cost_note() {
   local new="$1" free="$2" headroom="$3" dir="$4" old="$5" need
   need="$(model_disk_gb "${new}")" || return 0
   [[ -n "${free}" ]] || return 0
-  if (( free < need )); then
-    printf ' — but it needs about %s GB and only %s GB is free at %s, so the download would be refused; free some space first' \
-      "${need}" "${free}" "${dir}"
-  elif (( free - need < headroom )); then
-    printf " — note that it downloads about %s GB and would leave about %s GB free at %s, under the %s GB this check wants (the old model is kept as a rollback; 'ollama rm %s' reclaims it)" \
-      "${need}" "$(( free - need ))" "${dir}" "${headroom}" "${old}"
-  fi
+  # The thresholds are model_disk_state's, not a second copy of them here. This
+  # function owns the sentence; that one owns the rule.
+  case "$(model_disk_state "${new}" "${free}" "${headroom}")" in
+    refused)
+      printf ' — but it needs about %s GB and only %s GB is free at %s, so the download would be refused; free some space first' \
+        "${need}" "${free}" "${dir}"
+      ;;
+    tight)
+      printf " — note that it downloads about %s GB and would leave about %s GB free at %s, under the %s GB this check wants (the old model is kept as a rollback; 'ollama rm %s' reclaims it)" \
+        "${need}" "$(( free - need ))" "${dir}" "${headroom}" "${old}"
+      ;;
+  esac
 }
 
 pull_model() {

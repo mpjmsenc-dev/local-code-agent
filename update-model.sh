@@ -91,9 +91,23 @@ list_recommended() {
       note="  (too big for ${ram} GiB — auto-tune would fall back to qwen2.5-coder)"
     elif have ollama && model_present "${pick}"; then
       note="  (already downloaded)"
-    elif [[ -n "${free_disk}" ]] && need="$(model_disk_gb "${pick}")" \
-         && (( free_disk < need )); then
-      note="  (needs about ${need} GB to download — only ${free_disk} GB free${store_where})"
+    else
+      # model_disk_state, not a hand-rolled copy of the rule. This carried only
+      # its FIRST arm — the download that would be refused — and nothing for
+      # the second, a download that succeeds and leaves the box under the
+      # free-disk floor. Measured here: 14 GB free, a 9 GB pull, a 15 GB floor,
+      # so the row for qwen2.5-coder:14b printed no note at all, and 'lca check'
+      # fails the machine the moment you take that recommendation.
+      #
+      # Short tags rather than tune_cost_note's sentence, which is written for
+      # one model and read as five identical 130-character lines here — tried,
+      # and it buried the table it was meant to annotate. The thresholds stay
+      # in lib.sh; only the wording is local.
+      need="$(model_disk_gb "${pick}" 2>/dev/null || true)"
+      case "$(model_disk_state "${pick}" "${free_disk}" "${MODELS_HEADROOM_GB}")" in
+        refused) note="  (needs about ${need} GB to download — only ${free_disk} GB free${store_where})" ;;
+        tight)   note="  (downloads ~${need} GB, leaving $(( free_disk - need )) GB${store_where} — under the ${MODELS_HEADROOM_GB} GB wanted)" ;;
+      esac
     fi
     printf '  %-22s -> %s%s\n' "${fam}" "${pick}" "${note}"
   done
