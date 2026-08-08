@@ -70,6 +70,38 @@ The model + context don't fit in RAM. In order:
    run `sudo lca apply` to re-render + restart.
 3. Check nothing else eats RAM: `free -h`, `docker stats`.
 
+## "timed out waiting for llama-server to start" on the very first request
+
+```
+[FAIL] qwen2.5-coder:7b produced no answer. Ollama's own reason:
+       timed out waiting for llama-server to start -
+```
+
+**Run the same command again.** This is almost never a broken install, and it
+is not the out-of-memory case above — that one names memory, and `ollama ps`
+after it shows nothing because the load was *abandoned*, not killed.
+
+What happened is that the first load of a model reads several GB of weights off
+disk, and Ollama stops waiting after `OLLAMA_LOAD_TIMEOUT`. The attempt is not
+wasted: it leaves those weights in the operating system's page cache, so the
+next load reads them from memory. Measured on a cold CPU box, the same command
+twice with nothing else changed:
+
+| Attempt | Result |
+|---|---|
+| first, cold | failed after 304s, nothing resident |
+| second | answered in 32s |
+
+This project ships `OLLAMA_LOAD_TIMEOUT=15m` in `config/ollama.env` — three
+times Ollama's own 5m default, which is a budget sized for a GPU — so a cold
+load on a slow box has room to finish rather than being cut off mid-way. If you
+are hitting the timeout even so, the load is slower than 15 minutes and that is
+worth investigating as its own problem: check `free -h` for a model too big for
+the machine, and `lca logs ollama` for what it was doing.
+
+To avoid meeting it at all, warm the model before you start work — `lca ask
+"say ok"` — and it then stays resident for `OLLAMA_KEEP_ALIVE` (30m default).
+
 ## "It's so slow"
 
 CPU inference (no GPU) is a reading pace, not instant — the base 8 GB droplet
