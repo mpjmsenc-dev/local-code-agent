@@ -298,6 +298,28 @@ correctly — and `add()`, which was never mentioned, was deleted:
 It replaced `add` with `subtract` instead of adding one beside the other. On a
 file with twenty functions you would not notice until something broke.
 
+**The second thing to look for is unsafe handling of input.** Asked for a
+task-list web app, the same model wrote its page like this, three runs out of
+three:
+
+```python
+html += f"<li>{task}</li>"          # task came straight from the form
+```
+
+Add a task called `<script>alert(1)</script>` and it comes back live in the
+page — the app works perfectly and is trivially injectable. The fix a human
+would write is `html.escape(task)`.
+
+Do not expect the conventions file to prevent this. `config/CONVENTIONS.md` was
+given a rule about it — including a version naming `html.escape` and showing
+the exact before/after line — and the model produced the unescaped f-string
+anyway in every run, with the file confirmed loaded into the chat. Steering a
+7B model with prose has a ceiling, and this is under it.
+
+So the rule is the same as above, for the same reason: read the diff. Anywhere
+a value from outside reaches HTML, SQL or a shell command, check it is escaped
+or parameterised, because the model will not do it for you.
+
 This is the model's ceiling, not a fault in the harness — and there is a net
 under it. **aider commits every edit it makes**, so:
 
