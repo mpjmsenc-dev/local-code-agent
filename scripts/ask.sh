@@ -336,6 +336,19 @@ main() {
       # load" — about the same cause, and taken out for the same reason. The
       # reader is told what Ollama said and where the rest of it is.
       err "${MODEL_NAME} produced no answer. Ollama's own reason: ${ollama_err}"
+      # ...and, where it is the load running out of time, the one thing that
+      # fixes it. Measured cold on this box, the same command twice in a row:
+      # the first gave up after 304s with nothing resident, the second answered
+      # in 32s. The failed attempt is not wasted — it leaves the model file in
+      # the page cache, so the second load reads it from memory rather than
+      # from disk. Quoting Ollama and stopping there reads as a broken install
+      # to a reader who is one keystroke from a working answer.
+      #
+      # Through the shared predicate, so the narrowness travels with it: a
+      # runner killed for memory must not collect this advice.
+      if ollama_error_is_slow_load "${ollama_err}"; then
+        info "That is the load giving up before it finished, not a broken install — run the same command again: the first attempt leaves the model in the page cache, and the second load reads it from memory (measured cold here: 304s to fail, then 32s to answer)." >&2
+      fi
       info "The full log is at: $(ollama_log_hint)" >&2
       return 1
     fi

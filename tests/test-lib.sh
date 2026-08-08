@@ -12644,6 +12644,32 @@ ollama_error_is_not_recharacterised() {
 }
 check "...and not recharacterised as something it was not" \
   ollama_error_is_not_recharacterised
+# ...and the reader is told the one thing that fixes it. Measured on a cold
+# box, the same command twice: the first gave up after 304s with nothing
+# resident, the second answered in 32s — the failed attempt leaves the model
+# file in the page cache. The message quoted Ollama and stopped, which reads
+# as a broken install to anyone who does not already know that.
+ollama_slow_load_says_run_it_again() {
+  local out
+  out="$(ask_with_stubbed_curl _ '{"error":"timed out waiting for llama-server to start - "}')"
+  grep -qiF 'run the same command again' <<<"${out}" || {
+    printf 'a load that ran out of time does not tell the reader to retry: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and the reader is told to run it again" \
+  ollama_slow_load_says_run_it_again
+# ...but only where running it again is the cure. A missing model is not fixed
+# by repeating the command, and advice printed on every error is not advice —
+# without this arm the check above passes on an unconditional sentence.
+ollama_retry_advice_is_not_unconditional() {
+  local out
+  out="$(ask_with_stubbed_curl _ '{"error":"model not found"}')"
+  ! grep -qiF 'run the same command again' <<<"${out}" || {
+    printf 'retry advice is printed for an error retrying cannot fix: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and not told to retry what retrying cannot fix" \
+  ollama_retry_advice_is_not_unconditional
 # A -f file that cannot be used is an argument error, and none of the three
 # reasons needs a model server running to diagnose. ask.sh started one first:
 # ensure_ollama_up_announced waits up to 60 seconds, and the check that catches

@@ -1387,6 +1387,16 @@ model_responds() {
   return 1
 }
 
+# ollama_error_is_slow_load ERROR — true when what Ollama reported is its own
+# model load running out of time, rather than something wrong with the install.
+#
+# Narrow on purpose. "llama runner process has terminated" is the other common
+# error on this kind of box and it is usually the load being killed for memory:
+# running it again just kills it again, so it must not collect the advice below.
+ollama_error_is_slow_load() {
+  [[ "${1:-}" == *"timed out waiting for llama-server to start"* ]]
+}
+
 # model_silence_reason — why the last model_responds did not answer.
 #
 # Five messages named RAM, and four of them named it FIRST:
@@ -1414,8 +1424,20 @@ model_silence_reason() {
     # below used to be printed here too, and it ruled out the commonest cause
     # on this kind of box ("this is not a slow load") in exactly the case where
     # that cause was what Ollama had just reported.
-    printf "Ollama's own answer was: %s. %s has the full log." \
-      "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
+    if ollama_error_is_slow_load "${MODEL_PROBE_ERROR}"; then
+      # The one thing that fixes this, and the message did not say it. Measured
+      # on a cold box, the same command twice in a row: the first request gave
+      # up after 304s with nothing resident, the second answered in 32s. The
+      # failed attempt is not wasted — it leaves the model file in the page
+      # cache, so the second load reads it from memory instead of from disk.
+      # Without this the reader is told the model "produced no answer" and left
+      # to conclude the install is broken, one keystroke away from working.
+      printf "Ollama's own answer was: %s. That is its load giving up before it finished, not a broken install — run the same command again. The first attempt leaves the model file in the page cache, so the second load reads it from memory: measured cold on this project's own box, 304s to fail and then 32s to answer. If it keeps timing out, check RAM (free -h) and the full log: %s." \
+        "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
+    else
+      printf "Ollama's own answer was: %s. %s has the full log." \
+        "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
+    fi
   else
     printf 'the server answered, without an answer and without saying why — it returned nothing at all. Its own reason may be in the log: %s' \
       "$(ollama_log_hint)"
