@@ -322,7 +322,21 @@ main() {
     local ollama_err
     ollama_err="$(jq -rj '.error // empty' <"${raw_tmp}" 2>/dev/null || true)"
     if [[ -n "${ollama_err}" ]]; then
-      err "Ollama refused the request and sent no answer: ${ollama_err}"
+      # Quoted, not characterised. This said "Ollama refused the request", and
+      # the commonest thing it says on a CPU-only box is the opposite of a
+      # refusal. Measured, running the pipeline the README documents:
+      #
+      #   $ lca logs | lca ask "what is this log about?"
+      #   [FAIL] Ollama refused the request and sent no answer:
+      #          timed out waiting for llama-server to start -
+      #
+      # Nothing was refused: it tried for five minutes to load the model and
+      # ran out of time. Same overclaim model_silence_reason carried — "the
+      # server answered rather than running out of time, so this is not a slow
+      # load" — about the same cause, and taken out for the same reason. The
+      # reader is told what Ollama said and where the rest of it is.
+      err "${MODEL_NAME} produced no answer. Ollama's own reason: ${ollama_err}"
+      info "The full log is at: $(ollama_log_hint)" >&2
       return 1
     fi
     err "${MODEL_NAME} returned an empty answer — the request succeeded but produced no text at all. That usually means the prompt was rejected for length; try a shorter question, or fewer -f files. Check the engine with: lca check"

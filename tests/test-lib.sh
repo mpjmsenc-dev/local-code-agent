@@ -12571,6 +12571,31 @@ ollama_error_is_not_silence() {
 }
 check "an error from Ollama is reported, with its own words" \
   ollama_error_is_not_silence
+# ...and reported without being characterised. It said "Ollama refused the
+# request", and the commonest thing Ollama says on a CPU-only box is the
+# opposite of a refusal. Measured, running the pipeline the README documents:
+#
+#   $ lca logs | lca ask "what is this log about?"
+#   [FAIL] Ollama refused the request and sent no answer:
+#          timed out waiting for llama-server to start -
+#
+# Nothing was refused: it tried for five minutes to load the model and ran out
+# of time. The same overclaim model_silence_reason carried about the same
+# cause, taken out for the same reason.
+ollama_error_is_not_recharacterised() {
+  local out
+  out="$(ask_with_stubbed_curl _ '{"error":"timed out waiting for llama-server to start - "}')"
+  grep -qF 'timed out waiting for llama-server to start' <<<"${out}" || {
+    printf "Ollama's own reason is thrown away: %s\n" "${out}" >&2; return 1; }
+  ! grep -qiE 'refused' <<<"${out}" || {
+    printf 'a load that ran out of time is reported as a refusal: %s\n' "${out}" >&2
+    return 1; }
+  # ...and the reader is told where the rest of it is.
+  grep -qF 'logs.sh ollama' <<<"${out}" || {
+    printf 'the reader is not told where the full log is: %s\n' "${out}" >&2; return 1; }
+}
+check "...and not recharacterised as something it was not" \
+  ollama_error_is_not_recharacterised
 # A -f file that cannot be used is an argument error, and none of the three
 # reasons needs a model server running to diagnose. ask.sh started one first:
 # ensure_ollama_up_announced waits up to 60 seconds, and the check that catches
