@@ -11822,12 +11822,19 @@ no_ollama_lookup_matches_a_shell() {
   local f body hits="" safe
   while IFS= read -r f; do
     body="$(sed 's/#.*//' "${f}")"
-    if grep -qE 'p(grep|kill) -f .ollama serve' <<<"${body}"; then
+    # Any '-f', not just the ollama one. The trap is the flag, not the pattern:
+    # a later 'pkill -f "python app.py"' has exactly the same hole, and this
+    # rule was learned three times in one day — once in this project's own
+    # code, and twice more in shell typed at it afterwards, each time killing
+    # the shell that asked. There are currently no legitimate '-f' uses here;
+    # every process this project looks for has a name, and 'ss -tlnp' gives a
+    # PID for anything found by port instead.
+    if grep -qE 'p(grep|kill) -f ' <<<"${body}"; then
       hits+="${f}"$'\n'
     fi
   done < <(find "${REPO}" -type f \( -name '*.sh' -o -name '*.md' \) -not -path '*/.git/*')
   [[ -z "${hits}" ]] || {
-    printf 'a command-line match for the ollama process can select the calling shell:\n%s' "${hits}" >&2
+    printf 'a command-line match can select the calling shell — use -x on the process name:\n%s' "${hits}" >&2
     return 1; }
   # Non-vacuous: the safe form has to actually be what the code uses, or this
   # would keep passing after the lookup was deleted entirely.
