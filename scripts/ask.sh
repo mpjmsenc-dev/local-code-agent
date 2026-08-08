@@ -251,10 +251,15 @@ main() {
   # stderr, not stdout: README documents 'lca logs | lca ask "why did this
   # fail?"', and people redirect answers to files. The answer must stay the
   # only thing on stdout.
-  if ! ollama_processor "${MODEL_NAME}" >/dev/null 2>&1; then
-    printf 'Loading %s into memory first — this pause happens once, then the answer streams.\n' \
-      "${MODEL_NAME}" >&2
-  fi
+  # ...and how long, at least in order of magnitude, which the sentence did not
+  # say: those loads are minutes, not seconds — 228s for a 7B on a cold page
+  # cache above, and 304s and 388s measured since on this box. Six minutes into
+  # a silent cursor, "this pause happens once" tells the reader the pause is
+  # normal and gives them nothing to judge it against.
+  #
+  # In lib.sh now, because 'lca' had no such notice at all and needs the same
+  # words rather than a second copy of them.
+  model_load_notice "${MODEL_NAME}"
   # Status captured, not swallowed. Bare under 'set -o pipefail' this pipeline
   # was the last statement of main, so a curl that died mid-answer — the 600s
   # cap, or Ollama being OOM-killed by the very model it just loaded — exited

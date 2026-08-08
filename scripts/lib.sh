@@ -1106,6 +1106,30 @@ model_present() {
   ollama show "$1" >/dev/null 2>&1
 }
 
+# model_load_notice MODEL — warn that the first request has to pull the model
+# into RAM, when it is not already resident. Silent when it is, which is the
+# normal case and would otherwise be noise on every command.
+#
+# One copy, called from both entry points. 'lca ask' grew this notice and 'lca'
+# — the command this project is named for, and the one people sit in front of —
+# did not, so the longest silence in the product was in the place with the
+# least explanation. Two hand-written copies is how 'pkill -f' outlived its own
+# fix in one file while speed.sh had the right form in another.
+#
+# stderr: 'lca ask' documents 'lca logs | lca ask "why did this fail?"' and its
+# answer must stay the only thing on stdout.
+#
+# No duration in the message. The same 7B load measured 32s with the weights in
+# the page cache and 388s without, so any figure would be an order of magnitude
+# wrong in one of the two cases people actually meet — and "several minutes" is
+# what the reader needs to decide it is not broken.
+model_load_notice() {
+  local model="${1:-${MODEL_NAME}}"
+  ollama_processor "${model}" >/dev/null 2>&1 && return 0
+  printf 'Loading %s into memory first — this happens once; later requests skip it. On a cold CPU box it can take several minutes, and it is not stuck.\n' \
+    "${model}" >&2
+}
+
 # input_file_ok PATH OPTION [EXTRA] — die with the right sentence for a file a
 # command was told to read, naming the option that took it.
 #

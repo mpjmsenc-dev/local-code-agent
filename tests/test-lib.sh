@@ -3414,13 +3414,20 @@ check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_
 # 88s to load a 3B and 64s for a 0.5B, and warm_model records 228s for a 7B on
 # a cold page cache. That silence arrives before the stream can start, and it
 # is invisible on a GPU box where the first token lands in about a second.
+#
+# The notice moved to lib.sh's model_load_notice when 'lca' needed the same
+# words, so each arm below now checks it where it lives. All three are kept:
+# relocating a guard is not an excuse to drop one, and the mutation that beat
+# the first version of this check is still the mutation to beat.
 ask_announces_a_cold_load() {
-  local body
+  local body notice
   body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
+  notice="$(sed -n '/^model_load_notice() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  [[ -n "${notice}" ]] || { echo 'could not find model_load_notice in lib.sh' >&2; return 1; }
   # Asked, so the message appears only when it is true — on a resident model
   # the first token is immediate and this would be noise on every question.
-  grep -q 'ollama_processor' <<<"${body}" || {
-    echo 'ask.sh never checks whether the model is already resident, so it cannot know if the wait is coming' >&2
+  grep -q 'ollama_processor' <<<"${notice}" || {
+    echo 'the cold-load notice never checks whether the model is already resident, so it cannot know if the wait is coming' >&2
     return 1; }
   # stderr, or it lands in the answer. README documents
   # 'lca logs | lca ask "why did this fail?"', and answers get redirected.
@@ -3430,7 +3437,7 @@ ask_announces_a_cold_load() {
   # deleted — which is exactly the mutation that walked through the first
   # version of this check.
   local joined
-  joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' <<<"${body}")"
+  joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' <<<"${notice}")"
   grep -qE "printf 'Loading %s.*>&2" <<<"${joined}" || {
     echo 'the cold-load notice is not printed to stderr, so it would contaminate the answer' >&2
     return 1; }
@@ -3438,7 +3445,7 @@ ask_announces_a_cold_load() {
   # END decides, and only END: a rule-level 'exit N' in awk still RUNS the END
   # block, so an 'END { exit 1 }' underneath silently overwrites the status.
   # Second time in this session — see CONTRIBUTING trap #8.
-  awk '/ollama_processor/       { seen = 1 }
+  awk '/model_load_notice/      { seen = 1 }
        /curl .*api\/generate/   { if (!done) { done = 1; in_order = seen } }
        END { exit (done && in_order) ? 0 : 1 }' <<<"${body}" || {
     echo 'the cold-load notice comes after the request it is meant to explain' >&2
@@ -11709,6 +11716,33 @@ no_ollama_lookup_matches_a_shell() {
 }
 check "...and finds it by process name, so it cannot match the calling shell" \
   no_ollama_lookup_matches_a_shell
+# The longest wait in the product is a model load, and both commands that can
+# hit it must say so. 'lca ask' announced it; 'lca' — the one people sit in
+# front of, and the one this project is named for — did not, so the first edit
+# of a session sat silent inside aider for 268s, measured cold on this box.
+#
+# Through one shared function, not two copies of a sentence: the entry points
+# drift, and this suite already carries a gate for the last time that happened
+# (start_ollama_bg hand-copying settings) and a fix for the time before it.
+both_commands_announce_a_model_load() {
+  local f body
+  for f in scripts/ask.sh run-agent.sh; do
+    body="$(sed 's/#.*//' "${REPO}/${f}")"
+    grep -q 'model_load_notice' <<<"${body}" || {
+      printf '%s never tells the reader the model is being loaded, so its first request is a silent multi-minute wait\n' "${f}" >&2
+      return 1; }
+  done
+  # ...and the notice must still be conditional. Printed unconditionally it is
+  # noise on every warm command, and a line that always appears stops being
+  # read at exactly the moment it matters.
+  body="$(sed -n '/^model_load_notice() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || { echo 'could not find model_load_notice' >&2; return 1; }
+  grep -q 'ollama_processor' <<<"${body}" || {
+    echo 'model_load_notice does not check whether the model is resident, so it announces a load that is not happening' >&2
+    return 1; }
+}
+check "both 'lca' and 'lca ask' say when a model is being loaded" \
+  both_commands_announce_a_model_load
 check "an unattended update refuses to continue past a failed backup" \
   update_refuses_unattended_after_a_failed_backup
 check "a failed 'ollama list' ships no model list at all" backup_stages_no_empty_model_list

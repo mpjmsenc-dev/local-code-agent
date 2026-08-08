@@ -153,6 +153,14 @@ EOF
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
   info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${window}-token window"
   info "Edit format: ${edit_format} · repo map: ${map_tokens} tokens (LCA_EDIT_FORMAT=auto picks per model)"
+  # Last, so it sits directly above aider's own first output — where the wait
+  # actually happens. Everything above this checks the server is up and the
+  # model is downloaded; neither says whether it is IN RAM, and a model that is
+  # not resident makes the first edit sit silent for minutes inside aider,
+  # which prints nothing while it waits. Measured on this box, cold: 268s for
+  # the first edit of a new project. 'lca ask' has said this for a while and
+  # this command, the one people sit in front of, said nothing.
+  model_load_notice "${MODEL_NAME}"
   # aider talks to Ollama through litellm, which needs OLLAMA_API_BASE and
   # the ollama_chat/ model prefix.
   export OLLAMA_API_BASE
