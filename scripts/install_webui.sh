@@ -69,7 +69,7 @@ main() {
     listeners="$(ss -ltn 2>/dev/null || true)"
   fi
   if [[ -n "${listeners}" ]] && grep -qE ":${WEBUI_PORT}[[:space:]]" <<<"${listeners}"; then
-    die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run sudo ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)."
+    die "Port ${WEBUI_PORT} is already in use by another process, and the chat app container is NOT what is holding it. Nothing has been changed — your existing container is untouched. Change WEBUI_PORT in .env and re-run sudo ${REPO_ROOT}/scripts/install_webui.sh, or stop the other service. See docs/TROUBLESHOOTING.md ("The WebUI port is already in use")."
   fi
 
   if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then

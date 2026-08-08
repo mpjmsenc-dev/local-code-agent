@@ -44,7 +44,7 @@ to another port and run `sudo lca apply` — which re-renders the drop-in AND
 re-creates the chat app container, so the phone follows Ollama to the new port
 instead of talking to one nothing listens on.
 
-## Port 3000 (WebUI) already in use
+## The WebUI port is already in use (3000 by default)
 
 `scripts/install_webui.sh` now refuses to start if another process already
 holds `WEBUI_PORT` — it would otherwise crash-loop while the squatter answered

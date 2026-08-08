@@ -11143,6 +11143,48 @@ check "the tune advice quotes the number pull_model uses" \
   tune_note_quotes_the_number_pull_model_uses
 check "the FAQ does not promise more than the ruleset delivers" \
   faq_does_not_overclaim_offline
+# ...and a message that sends the reader to a SECTION must send them to one
+# that is there.
+#
+# install_webui.sh built its pointer out of the port it was complaining about:
+#
+#   See docs/TROUBLESHOOTING.md (Port ${WEBUI_PORT} / WebUI port already in use)
+#
+# The heading was "Port 3000 (WebUI) already in use". So the reference resolved
+# to nothing even at the default, and least of all when the reader had changed
+# WEBUI_PORT — which is the situation this very error tells them to be in. The
+# heading is port-independent now and the message quotes it verbatim.
+#
+# The rule is literal text, not "expands to something findable": a reference
+# carrying an expansion cannot be checked here and cannot be searched for by a
+# reader either.
+doc_section_references_resolve() {
+  local ref doc sec bad=0 seen=0 dollar
+  dollar='$'
+  while IFS= read -r ref; do
+    [[ -n "${ref}" ]] || continue
+    seen=$((seen+1))
+    doc="${ref%% (*}"
+    sec="${ref#*(}"; sec="${sec%)}"; sec="${sec%\"}"; sec="${sec#\"}"
+    [[ -f "${REPO}/${doc}" ]] || {
+      printf 'a message points at %s, which does not exist\n' "${doc}" >&2; bad=1; continue; }
+    [[ "${sec}" != *"${dollar}{"* ]] || {
+      printf 'a message builds a %s section name out of a variable, so no reader can search for it: %s\n' \
+        "${doc}" "${ref}" >&2
+      bad=1; continue; }
+    grep -qiF -- "${sec}" "${REPO}/${doc}" || {
+      printf 'a message points at "%s" in %s, and there is no such section\n' "${sec}" "${doc}" >&2
+      bad=1; }
+  done < <(grep -rhoE 'docs/[A-Za-z-]+\.md \("?[^)]+"?\)' \
+             "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh 2>/dev/null | sort -u)
+  (( seen > 0 )) || {
+    echo 'no message points at a documentation section at all — this gate has stopped watching' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every message pointing at a doc section points at a real one" \
+  doc_section_references_resolve
 # ...and neither may the pre-push hook. It said it runs "the exact gates CI
 # runs, so a push never opens a red PR", and that is false twice over, both
 # measured on this project:
