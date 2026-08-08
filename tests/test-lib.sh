@@ -12633,8 +12633,13 @@ ollama_error_is_not_recharacterised() {
   ! grep -qiE 'refused' <<<"${out}" || {
     printf 'a load that ran out of time is reported as a refusal: %s\n' "${out}" >&2
     return 1; }
-  # ...and the reader is told where the rest of it is.
-  grep -qF 'logs.sh ollama' <<<"${out}" || {
+  # ...and the reader is told where the rest of it is. Either command, because
+  # ollama_log_hint deliberately names the one that works where it is standing:
+  # the journal where systemd runs the server, scripts/logs.sh where this
+  # project started it under nohup. Asserting the nohup arm alone passed on this
+  # box, which has no systemd, and failed the CI runner, which has one — the
+  # product was right on both and only the gate was wrong.
+  grep -qE 'journalctl -u ollama|logs\.sh ollama' <<<"${out}" || {
     printf 'the reader is not told where the full log is: %s\n' "${out}" >&2; return 1; }
 }
 check "...and not recharacterised as something it was not" \
