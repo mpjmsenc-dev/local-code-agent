@@ -6869,6 +6869,49 @@ every_promised_setting_is_applied() {
 }
 check "every privacy setting the README promises is actually applied" \
   every_promised_setting_is_applied
+# ...and the half of that promise that is prose rather than a KEY=value.
+#
+# The same README sentence opens with "aider has analytics/update checks off".
+# The gate above reads settings out of backticks, so it covers the six named
+# that way and not this one. It rests on two things, neither asserted anywhere
+# — not in the suite, not in CI:
+#
+#   config/aider.conf.yml setting analytics and check-update to false, and
+#   run-agent.sh passing --config to that file.
+#
+# Delete the flag and aider silently falls back to its own defaults, where both
+# are ON: the headline command would phone home for updates and send analytics
+# on every run. Exactly the shape OLLAMA_NO_CLOUD had — a privacy setting that
+# reaches the product through one link nobody checks.
+aider_privacy_settings_reach_aider() {
+  local arg conf body k strip
+  # The file run-agent.sh actually names, extracted rather than written here a
+  # second time — a second copy of the path is how the two would drift.
+  # Assembled: the literal ${REPO_ROOT} inside a single-quoted sed script reads
+  # to ShellCheck as an expansion that failed to expand.
+  local strip; strip='s|.*--config "$'"{REPO_ROOT}/\\([^\"]*\\)\".*|\\1|p"
+  arg="$(sed -n "${strip}" "${REPO}/run-agent.sh" | head -1)"
+  [[ -n "${arg}" ]] || {
+    echo 'run-agent.sh no longer passes --config to aider, so aider uses its own defaults — where the update check and analytics are both ON' >&2
+    return 1; }
+  conf="${REPO}/${arg}"
+  [[ -f "${conf}" ]] || {
+    printf 'run-agent.sh points aider at %s, which is not there\n' "${arg}" >&2; return 1; }
+  body="$(grep -v '^[[:space:]]*#' "${conf}")"
+  for k in analytics check-update; do
+    grep -qE "^${k}:[[:space:]]*false[[:space:]]*$" <<<"${body}" || {
+      printf '%s does not set %s to false, and the README promises aider has analytics/update checks off\n' \
+        "${arg}" "${k}" >&2
+      return 1; }
+  done
+  # ...and the promise must still be being made, or this is enforcing a rule
+  # nobody stated.
+  grep -q 'aider has analytics/update' "${REPO}/README.md" || {
+    echo 'the README no longer claims aider has analytics and update checks off — this gate is enforcing a promise nobody makes' >&2
+    return 1; }
+}
+check "aider really is given the privacy settings the README promises" \
+  aider_privacy_settings_reach_aider
 # The gate above is only as good as what it can see, and for two settings it
 # saw nothing. It anchored on '^<spaces>-e KEY=', which matches the plain
 # 'docker run' flags but NOT the two baked in from inside an array literal as
