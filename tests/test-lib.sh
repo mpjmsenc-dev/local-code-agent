@@ -6816,6 +6816,59 @@ every_baked_setting_is_compared() {
 }
 check "every setting baked into the container is drift-checked" \
   every_baked_setting_is_compared
+# ...and the settings the README PROMISES must actually be applied somewhere.
+#
+# The gate above deliberately exempts the constants — ENABLE_OPENAI_API and the
+# telemetry switches are not .env-derived, so there is nothing for them to
+# drift from, and its comment says so. But the exemption is by name, and
+# baked_keys reads install_webui.sh: delete '-e ENABLE_OPENAI_API=false' from
+# the installer and the key simply stops being listed, the loop never reaches
+# it, and nothing fails. The README's privacy paragraph would quietly become
+# false.
+#
+# That is not hypothetical. The same paragraph claims "Ollama runs with
+# OLLAMA_NO_CLOUD=1", and until the commit before this one that was untrue on
+# every host without systemd: the drop-in applied config/ollama.env and
+# start_ollama_bg hand-copied a subset of it that left the setting out.
+#
+# Read out of the README itself, so a promise added tomorrow is checked the day
+# it is written rather than the day someone remembers to add it here.
+promised_privacy_settings() {
+  # Backtick through a variable: a matched pair inside single quotes reads to
+  # ShellCheck as a command substitution, and the README marks every setting
+  # with them. Same reason perf_baseline_is_stated_once does it.
+  local bt; bt="$(printf '\140')"
+  awk '/No telemetry, and no other outbound chatter/ { f = 1 }
+       f { print }
+       f && /^$/ { exit }' "${REPO}/README.md" \
+    | grep -oE "${bt}[A-Z][A-Z0-9_]*(=[^${bt}]*)?${bt}" | tr -d "${bt}" | sort -u
+}
+every_promised_setting_is_applied() {
+  local setting key webui ollama bad=0 seen=0
+  webui="$(grep -oE '\-e "?[A-Z_]+=[^ \\"]*' "${REPO}/scripts/install_webui.sh" | sed 's/^-e "\?//')"
+  ollama="$(cat "${REPO}/config/ollama.env")"
+  while read -r setting; do
+    [[ -n "${setting}" ]] || continue
+    seen=$((seen+1))
+    key="${setting%%=*}"
+    # Named with a value, the value has to match too — "ENABLE_OPENAI_API=true"
+    # would satisfy a check that only looked for the key.
+    if [[ "${setting}" == *=* ]]; then
+      grep -qxF "${setting}" <<<"${webui}" || grep -qxF "${setting}" <<<"${ollama}" || {
+        printf 'README promises %s but nothing applies it\n' "${setting}" >&2; bad=1; }
+    else
+      grep -qE "^${key}=" <<<"${webui}" || grep -qE "^${key}=" <<<"${ollama}" || {
+        printf 'README promises %s is set but nothing sets it\n' "${key}" >&2; bad=1; }
+    fi
+  done < <(promised_privacy_settings)
+  (( seen >= 5 )) || {
+    printf 'only %s promised settings read out of the README — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every privacy setting the README promises is actually applied" \
+  every_promised_setting_is_applied
 # The gate above is only as good as what it can see, and for two settings it
 # saw nothing. It anchored on '^<spaces>-e KEY=', which matches the plain
 # 'docker run' flags but NOT the two baked in from inside an array literal as
