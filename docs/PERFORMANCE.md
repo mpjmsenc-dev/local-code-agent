@@ -29,7 +29,7 @@ That line is a **floor**, and it is worth knowing by how much. It prices the
 model request and nothing else, but a whole `lca` run also starts Python, walks
 the repo to build the map, and — because auto-commit is on by default — spends
 a second request writing the commit message. Three one-shot `lca --message`
-edits measured end to end on a CPU-only box slower than the reference one above
+edits measured end to end on a CPU-only box slower than the reference one below
 (`qwen2.5-coder:7b` at ~5.3 tokens/second there, not 6.1), against a model
 already resident in RAM — so treat the shape of these numbers as the lesson,
 not their absolute size:
