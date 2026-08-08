@@ -1737,21 +1737,44 @@ human_duration() {
   fi
 }
 
+# ollama_extra_env — the KEY=VALUE settings config/ollama.env adds, one per
+# line, or nothing when the file is absent.
+#
+# One reader, because there were two and they disagreed. The systemd drop-in
+# took every line of that file; start_ollama_bg hand-copied
+# OLLAMA_MAX_LOADED_MODELS=1 and did not copy OLLAMA_NO_CLOUD=1 — the setting
+# whose own comment says it exists because "Ollama ships with its cloud
+# features ON: remote inference and web search, which contact ollama.com", and
+# that leaving them enabled "contradicted the first line of the README".
+#
+# Measured on this project's own systemd-less box, reading the running
+# server's /proc/PID/environ:
+#
+#   OLLAMA_CONTEXT_LENGTH=8192
+#   OLLAMA_HOST=127.0.0.1:11434
+#   OLLAMA_KEEP_ALIVE=30m
+#   OLLAMA_MAX_LOADED_MODELS=1
+#
+# Four settings, and the privacy one absent. start_ollama_bg's own comment
+# said it starts Ollama "with the same environment the systemd drop-in would
+# apply", which is exactly the promise a second hand-written copy breaks.
+ollama_extra_env() {
+  local extra_env="${REPO_ROOT}/config/ollama.env"
+  [[ -f "${extra_env}" ]] || return 0
+  grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.
 render_ollama_dropin_content() {
-  local extra_env="${REPO_ROOT}/config/ollama.env"
   echo "# Managed by local-code-agent (scripts/install_ollama.sh and scripts/tune.sh)."
   echo "# Manual edits will be overwritten on the next install or tune run."
   echo "[Service]"
   echo "Environment=OLLAMA_HOST=${OLLAMA_HOST}"
   echo "Environment=OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
   echo "Environment=OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"
-  if [[ -f "${extra_env}" ]]; then
-    { grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true; } \
-      | sed 's/^/Environment=/'
-  fi
+  ollama_extra_env | sed 's/^/Environment=/'
 }
 
 # render_ollama_dropin — (re)write the ollama systemd drop-in from the
@@ -1828,11 +1851,18 @@ start_ollama_bg() {
   have ollama || return 1
   local logf="${OLLAMA_BG_LOG}"
   warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
-  OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
-  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
-  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
-  OLLAMA_MAX_LOADED_MODELS=1 \
-    nohup ollama serve >"${logf}" 2>&1 &
+  # config/ollama.env through the same reader the drop-in uses, rather than a
+  # hand-picked copy of some of it — see ollama_extra_env for what that cost.
+  local extra=() line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && extra+=( "${line}" )
+  done < <(ollama_extra_env)
+  nohup env \
+    OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
+    OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
+    OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
+    ${extra[@]+"${extra[@]}"} \
+    ollama serve >"${logf}" 2>&1 &
   wait_for_ollama 30
 }
 

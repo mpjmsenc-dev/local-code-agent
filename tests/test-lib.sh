@@ -2128,6 +2128,80 @@ OLLAMA_CONTEXT_LENGTH="8192"
 rm -f "${DROP}"
 check "missing drop-in counts as a mismatch" dropin_drifted
 
+echo "# ...and the systemd-less start must apply the same settings, not a subset"
+# start_ollama_bg's own comment says it starts Ollama "with the same environment
+# the systemd drop-in would apply". It did not. The drop-in took every line of
+# config/ollama.env; start_ollama_bg hand-copied OLLAMA_MAX_LOADED_MODELS=1 and
+# missed OLLAMA_NO_CLOUD=1 — the setting whose own comment in that file says it
+# exists because "Ollama ships with its cloud features ON: remote inference and
+# web search, which contact ollama.com", and that leaving them enabled
+# "contradicted the first line of the README".
+#
+# So on every systemd-less host — containers, WSL, and this project's own box —
+# the headline privacy claim was not being upheld. Measured by reading the
+# running server's /proc/PID/environ: four OLLAMA_* variables, the privacy one
+# absent.
+#
+# Compared as sets, from the two renderings, so the check is about what the
+# server actually receives rather than about how either line is written.
+# config/ollama.env copied into the sandbox first. REPO_ROOT points there
+# during the suite, so ollama_extra_env finds nothing and BOTH renderings come
+# back without the extra settings — the sets would then match by both being
+# empty, which is the vacuous agreement this pair exists to rule out.
+mkdir -p "${SANDBOX}/config"
+cp "${REPO}/config/ollama.env" "${SANDBOX}/config/ollama.env"
+dropin_env_keys() {
+  render_ollama_dropin_content | sed -n 's/^Environment=//p' | sort
+}
+bg_env_keys() {
+  # The environment start_ollama_bg builds, read out of the function itself:
+  # the three .env-derived settings it names, plus every line of
+  # config/ollama.env it now applies through ollama_extra_env.
+  { printf 'OLLAMA_HOST=%s\n' "${OLLAMA_HOST}"
+    printf 'OLLAMA_CONTEXT_LENGTH=%s\n' "${OLLAMA_CONTEXT_LENGTH}"
+    printf 'OLLAMA_KEEP_ALIVE=%s\n' "${OLLAMA_KEEP_ALIVE}"
+    ollama_extra_env; } | sort
+}
+both_start_paths_apply_the_same_settings() {
+  local a b
+  a="$(dropin_env_keys)"; b="$(bg_env_keys)"
+  [[ -n "${a}" ]] || { echo 'the drop-in rendered nothing at all' >&2; return 1; }
+  [[ "${a}" == "${b}" ]] || {
+    printf 'the systemd drop-in and the background start apply different settings:\n  drop-in only: %s\n  background only: %s\n' \
+      "$(comm -23 <(printf '%s\n' "${a}") <(printf '%s\n' "${b}") | tr '\n' ' ')" \
+      "$(comm -13 <(printf '%s\n' "${a}") <(printf '%s\n' "${b}") | tr '\n' ' ')" >&2
+    return 1; }
+}
+privacy_setting_reaches_both_paths() {
+  # Named, not just "the sets match": this is the one whose absence contradicts
+  # the README, and two paths can agree by both dropping it.
+  grep -q 'OLLAMA_NO_CLOUD' <<<"$(dropin_env_keys)" || {
+    echo "the systemd drop-in no longer disables Ollama's cloud features, which the README's first line promises" >&2
+    return 1; }
+  grep -q 'OLLAMA_NO_CLOUD' <<<"$(bg_env_keys)" || {
+    echo "the systemd-less start no longer disables Ollama's cloud features — on a container or WSL host the model server can reach ollama.com" >&2
+    return 1; }
+}
+start_bg_reads_the_file_rather_than_copying_it() {
+  # The mechanism, not just today's result: a hand-written copy is how the two
+  # drifted, so the function must go through the shared reader.
+  local body
+  body="$(sed -n '/^start_ollama_bg() {/,/^}/p' "${REPO}/scripts/lib.sh" | grep -v '^[[:space:]]*#')"
+  grep -q 'ollama_extra_env' <<<"${body}" || {
+    echo 'start_ollama_bg no longer reads config/ollama.env through the shared reader' >&2
+    return 1; }
+  # ...and carries no second copy of a setting that file already provides.
+  ! grep -qE 'OLLAMA_(MAX_LOADED_MODELS|NO_CLOUD)=' <<<"${body}" || {
+    echo 'start_ollama_bg hand-copies a config/ollama.env setting again — that is exactly how OLLAMA_NO_CLOUD went missing' >&2
+    return 1; }
+}
+check "both start paths apply the same settings" \
+  both_start_paths_apply_the_same_settings
+check "...including the one that keeps Ollama off the cloud" \
+  privacy_setting_reaches_both_paths
+check "...and the background start reads that file instead of copying it" \
+  start_bg_reads_the_file_rather_than_copying_it
+
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
 # has written a byte. Demonstrated by accident, on the real function: an unbound
