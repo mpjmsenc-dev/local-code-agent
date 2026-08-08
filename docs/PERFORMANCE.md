@@ -25,6 +25,47 @@ of the wait is Ollama *reading* — its system prompt, the repo map, the
 conventions file, the history. None of that is your file, and all of it is
 re-read on every request.
 
+That line is a **floor**, and it is worth knowing by how much. It prices the
+model request and nothing else, but a whole `lca` run also starts Python, walks
+the repo to build the map, and — because auto-commit is on by default — spends
+a second request writing the commit message. Three one-shot `lca --message`
+edits measured end to end on a CPU-only box slower than the reference one above
+(`qwen2.5-coder:7b` at ~5.3 tokens/second there, not 6.1), against a model
+already resident in RAM — so treat the shape of these numbers as the lesson,
+not their absolute size:
+
+| Edit | Tokens | Wall clock |
+|---|---|---|
+| create a small file | 2.7k sent, 163 back | 327s |
+| the same, `AIDER_NO_AUTO_COMMIT=true` | 2.7k sent, 163 back | 292s |
+| add a function to it | 2.9k sent, 286 back | 408s |
+
+So budget roughly **1.5–2× the `one code edit` figure** for a real one-shot
+run, and read the two 2.7k rows together: they sent and received the same token
+counts, so the 35 seconds between them is the extra request aider makes to
+write the commit message, and nothing else. That is usually
+worth paying — it is the safety net that makes an unwanted edit a `git revert`
+away — but it is not free, and `AIDER_NO_AUTO_COMMIT=true` turns it off.
+
+One more reason the estimate reads low: generation slows as the context fills,
+because every new token is produced against everything already in the window.
+Measured in a single run on the same resident model, so no reload is hiding in
+these numbers — it is the ratio between the rows that carries, not the absolute
+rates, which move with whatever else the machine is doing:
+
+| Prompt already in context | Generation |
+|---|---|
+| 60 tokens | 4.30 tokens/second |
+| 756 tokens | 4.03 tokens/second |
+| 1,596 tokens | 3.75 tokens/second |
+| 2,316 tokens | **2.48 tokens/second** |
+
+`lca speed` measures generation against a short prompt, so the rate it quotes
+is the top row while a real edit writes its reply down at the bottom one.
+Reading speed does *not* fall off this way — it measured 20.0, 19.7 and 18.8
+tokens/second at 618, 2,236 and 2,537 tokens — which is why the reading half of
+the estimate holds up and the writing half is optimistic.
+
 On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures **6.1
 tokens/second** (the measured table further down has the rest). That is the
 baseline to compare against; if you are far below it, something else is wrong
