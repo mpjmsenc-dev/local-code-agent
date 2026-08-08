@@ -121,8 +121,24 @@ logs_webui() {
 }
 
 logs_setup() {
-  local lines="$1" follow="$2"
-  heading "install log"
+  local lines="$1" follow="$2" when=""
+  # Dated, because the install log is the one source here that is usually OLD
+  # and whose lines carry no timestamps of their own. Ollama's entries above it
+  # are stamped by GIN, so the two sit together under one command and look
+  # equally current — reading this box's own output, the tail was
+  #
+  #   [info] Model change: qwen2.5-coder:7b -> qwen2.5-coder:14b
+  #
+  # from an install eight days earlier, directly beneath requests from seconds
+  # ago. It reads as something that just happened, and it takes a trip to .env
+  # to find out it never did.
+  #
+  # The file's mtime, not a parse of its contents: nothing in the log is
+  # reliably stamped, and this needs no format to stay true.
+  if [[ -e "${SETUP_LOG}" ]]; then
+    when="$(date -r "${SETUP_LOG}" +'%Y-%m-%d %H:%M' 2>/dev/null || true)"
+  fi
+  heading "install log${when:+ (last written ${when})}"
   # "Not readable" is not "not there", and the two need opposite advice. This
   # tested -r and then called the absence normal — so on a box where the log is
   # root-only (it is written by root, through tee, on a droplet) it announced

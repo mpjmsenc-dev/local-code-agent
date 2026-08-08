@@ -3306,6 +3306,27 @@ logs_setup_tells_the_two_apart() {
 }
 check "'lca logs' separates an unreadable install log from a missing one" \
   logs_setup_tells_the_two_apart
+# ...and dates it, because it is the one source here whose own lines carry no
+# timestamps while the section above it is stamped per request. Read off this
+# box, the tail was "Model change: qwen2.5-coder:7b -> qwen2.5-coder:14b" from
+# an install eight days earlier, sitting directly under Ollama requests from
+# seconds ago. It reads as something that just happened; it takes a trip to
+# .env to learn it never did.
+logs_setup_dates_the_install_log() {
+  local body
+  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
+            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
+  grep -q 'date -r' <<<"${body}" || {
+    echo 'the install log is shown undated, beside per-request timestamps, so old lines read as current' >&2
+    return 1; }
+  # From the file, not from its contents: nothing in that log is reliably
+  # stamped, so a parse would go stale the first time a message changed.
+  grep -qE 'date -r "\$\{SETUP_LOG\}"' <<<"${body}" || {
+    echo 'the install log heading is dated from something other than the file itself' >&2
+    return 1; }
+}
+check "...and says when it was last written" \
+  logs_setup_dates_the_install_log
 
 echo "# ...and on a host with no systemd it must read the log THIS project wrote"
 # start_ollama_bg() is what runs Ollama where there is no service manager —
