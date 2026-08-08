@@ -40,8 +40,11 @@ not their absolute size:
 | the same, `AIDER_NO_AUTO_COMMIT=true` | 2.7k sent, 163 back | 292s |
 | add a function to it | 2.9k sent, 286 back | 408s |
 
-So budget roughly **1.5–2× the `one code edit` figure** for a real one-shot
-run, and read the two 2.7k rows together: they sent and received the same token
+So budget **more than the `one code edit` figure** for a real one-shot run.
+Deliberately not a multiplier: those three runs came in at 1.5–1.8× what the
+measured rates predict, but the rates themselves move with what else the
+machine is doing (see below), and a ratio between two different conditions is
+not a property of your box. Read the two 2.7k rows together: they sent and received the same token
 counts, so the 35 seconds between them is the extra request aider makes to
 write the commit message, and nothing else. That is usually
 worth paying — it is the safety net that makes an unwanted edit a `git revert`
@@ -62,9 +65,22 @@ rates, which move with whatever else the machine is doing:
 
 `lca speed` measures generation against a short prompt, so the rate it quotes
 is the top row while a real edit writes its reply down at the bottom one.
-Reading speed does *not* fall off this way — it measured 20.0, 19.7 and 18.8
-tokens/second at 618, 2,236 and 2,537 tokens — which is why the reading half of
-the estimate holds up and the writing half is optimistic.
+
+Reading speed does *not* fall off with prompt size — but it does move a lot
+with how busy the machine is, which is worth knowing before you compare two
+runs. The same box, the same three prompt sizes, measured in a busy window and
+an idle one:
+
+| Prompt | Reading, box busy | Reading, box idle |
+|---|---|---|
+| ~600 tokens | 20.0 tokens/second | 55.9 tokens/second |
+| ~2,000 tokens | 19.7 tokens/second | 48.8 tokens/second |
+| ~2,300 tokens | 18.8 tokens/second | 49.4 tokens/second |
+
+Flat across the column, roughly 2.5× apart between them. So `lca speed` run on
+an idle box predicts an edit that will not be that fast once aider is actually
+working, and two `lca speed` runs are only comparable if the machine was
+equally quiet for both — which is what the `vs last run` line cannot know.
 
 On a CPU-only x86_64 box with 16 GiB RAM, `qwen2.5-coder:7b` measures **6.1
 tokens/second** (the measured table further down has the rest). That is the

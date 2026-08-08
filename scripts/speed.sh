@@ -166,14 +166,27 @@ main() {
   #
   # Computed from the rates just measured, so it is this machine's number: the
   # 3b rung on a base droplet is faster on both counts and says so.
+  #
+  # It prices the Ollama request and only that, so it is a floor and now says
+  # so. A real 'lca' run also starts Python, walks the repo for its map, and by
+  # default spends a second request writing the commit message.
+  #
+  # Deliberately no multiplier on that. Three real edits came in at 1.5x-1.8x
+  # of these rates, which looked like a constant worth printing until the rates
+  # themselves were measured twice: reading ran at ~19 tokens/second with the
+  # box busy and ~50 idle, at every prompt size. A ratio between a number
+  # measured under one load and a number measured under another is not a
+  # property of the machine, so the reader gets the direction and the reason
+  # instead of a figure that would be wrong whenever the two conditions differ.
   local edit_s
   if [[ -n "${read_tps}" ]] && edit_s="$(aider_edit_seconds "${read_tps}" "${tps}")"; then
-    printf '  one code edit   ~%s  (aider sends ~%s tokens and gets ~%s back: %ss reading, %ss writing)\n' \
+    printf '  one code edit   ~%s of model time  (aider sends ~%s tokens and gets ~%s back: %ss reading, %ss writing)\n' \
       "$(human_duration "${edit_s}")" \
       "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" 'BEGIN { printf "%.1fk", t / 1000 }')" \
       "${LCA_EDIT_REPLY_TOKENS}" \
       "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" -v r="${read_tps}" 'BEGIN { printf "%d", t / r }')" \
       "$(awk -v t="${LCA_EDIT_REPLY_TOKENS}" -v g="${tps}" 'BEGIN { printf "%d", t / g }')"
+    printf '                  a real run costs more — aider'"'"'s startup, the repo map and the commit message are on top\n'
   fi
   local load_s=""
   if [[ "${load_ns}" =~ ^[0-9]+$ ]] && (( load_ns > 1000000000 )); then
