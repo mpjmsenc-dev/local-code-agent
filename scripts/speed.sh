@@ -220,14 +220,22 @@ main() {
     prev_model="$(awk -F= '/^model=/ {print $2}' "${BASELINE}")"
     prev_tps="$(awk -F= '/^tps=/ {print $2}' "${BASELINE}")"
     if [[ "${prev_model}" == "${MODEL_NAME}" && -n "${prev_tps}" ]]; then
-      # +/-10% is deliberately wide. Back-to-back runs on the same machine
-      # vary by a few percent (other processes, a shared-VM neighbour), and
-      # reporting that as "slower" would send someone hunting a regression
-      # that is really just noise.
+      # +/-10% rejects small wobble, and the band is kept — but it was justified
+      # here by "back-to-back runs vary by a few percent", and that is not what
+      # this machine does. Reading speed measured 20 tokens/second with the box
+      # busy and 50 idle, at every prompt size; generation moved 5.3 -> 4.5 (-15%)
+      # between two runs where the only thing that changed was what else was
+      # running. A 15% drop is inside the range ambient load produces on its own.
+      #
+      # No threshold separates those, because the difference is not in the
+      # number: two identical figures mean different things depending on how
+      # quiet the machine was, and this has no way to know. So the direction is
+      # still reported -- it is what the reader came for -- and it no longer
+      # claims the model got slower when the box may simply have got busier.
       awk -v now="${tps}" -v was="${prev_tps}" 'BEGIN {
         d = (was > 0) ? (now - was) / was * 100 : 0
-        if (d > 10)       printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — faster)\n", was, now, d
-        else if (d < -10) printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — slower)\n", was, now, d
+        if (d > 10)       printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — faster, or the machine was quieter this time)\n", was, now, d
+        else if (d < -10) printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — slower, or the machine was busier this time)\n", was, now, d
         else              printf "  vs last run:    %.1f -> %.1f tok/s (no real change)\n", was, now
       }'
     elif [[ -n "${prev_model}" ]]; then

@@ -2588,6 +2588,30 @@ speed_measures_reading_separately() {
 }
 check "lca speed measures reading with the probe, and reports what an edit costs" \
   speed_measures_reading_separately
+# ...and its verdict against the previous run must not blame the model for the
+# machine. Measured on this box: reading ran at 20 tokens/second while it was
+# busy and 50 while it was idle, at every prompt size, and generation moved
+# 5.3 -> 4.5 (-15%) between two runs where the only thing that changed was what
+# else was running. The verdict said "slower" outright, which is a claim this
+# command has no way to support -- it never sees how quiet the machine was.
+#
+# Counted, not just grepped: a check that only looked for the confounder would
+# pass vacuously if the verdict arms were renamed or removed.
+speed_comparison_does_not_blame_the_model() {
+  local body arms named
+  body="$(sed 's/#.*//' "${REPO}/scripts/speed.sh")"
+  arms="$(grep -cE 'vs last run.*(faster|slower)' <<<"${body}")"
+  (( arms == 2 )) || {
+    printf 'expected two vs-last-run verdict arms in speed.sh, found %s\n' "${arms}" >&2
+    return 1; }
+  named="$(grep -E 'vs last run.*(faster|slower)' <<<"${body}" | grep -cF 'machine was')"
+  (( named == arms )) || {
+    printf 'a vs-last-run verdict asserts a speed change without naming ambient load (%s of %s name it)\n' \
+      "${named}" "${arms}" >&2
+    return 1; }
+}
+check "...and does not report a busier machine as a slower model" \
+  speed_comparison_does_not_blame_the_model
 # ...and the trap has to be written down where someone hand-rolling this with
 # curl will meet it. PERFORMANCE.md's own closing line is "a change you cannot
 # measure is not an improvement", and it already warns about the cold-model
