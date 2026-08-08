@@ -1249,6 +1249,12 @@ model_ram_gb() {
   awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
 }
 
+# MODELS_HEADROOM_GB — free disk, in GB, that this project wants where models
+# live. It lived in check-system.sh alone, which is the command that JUDGES the
+# disk; tune.sh, the command that fills it, could not see the number it was
+# about to spend past. Here so both read one value.
+MODELS_HEADROOM_GB="${MODELS_HEADROOM_GB:-15}"
+
 # tune_cost_note NEW_MODEL FREE_GB HEADROOM_GB MODELS_DIR OLD_MODEL — what
 # applying the auto-tune recommendation would cost in disk, or nothing at all
 # when the disk can take it comfortably.

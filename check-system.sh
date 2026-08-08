@@ -331,7 +331,8 @@ MODELS_DIR="$(ollama_models_dir)"
 FREE_GB="$(free_gb "${MODELS_DIR}")"
 # The headroom models want, written once. It was spelled out four times, and
 # the sentence added below is a fifth reader of it.
-MODELS_HEADROOM_GB=15
+# MODELS_HEADROOM_GB comes from lib.sh, so tune.sh spends against the same
+# number this report judges against.
 FAM_NOTE="$(unknown_family_note)" && p_warn "${FAM_NOTE}"
 choose_for_ram "${RAM_GIB}"
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"

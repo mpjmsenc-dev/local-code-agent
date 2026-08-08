@@ -11256,6 +11256,46 @@ check "the tune advice guesses at no size it cannot read" \
   tune_note_says_nothing_about_a_size_it_cannot_read
 check "the tune advice quotes the number pull_model uses" \
   tune_note_quotes_the_number_pull_model_uses
+# ...and the command that SPENDS the disk must see the same note as the one
+# that judges it. tune_cost_note lived only in check-system.sh: 'lca check'
+# warned that the recommendation is a 9 GB download leaving the box under its
+# own floor, while 'lca tune' — which performs that download — had every RAM
+# guard and no disk one, and 'lca tune --dry-run' previewed the switch as a
+# version number with no cost attached. Measured on this box: 14 GB free, a
+# 9 GB pull, and a 15 GB floor the same report then FAILS the machine for.
+tune_consults_the_disk_before_pulling() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/tune.sh")"
+  grep -q 'tune_cost_note' <<<"${body}" || {
+    echo 'tune.sh never asks what the pull costs, so it can fill the disk its own health check fails the box for' >&2
+    return 1; }
+  # Before the pull, not after: a warning printed once the bytes are on disk is
+  # a description, not a chance to stop.
+  #
+  # Counted from PAST the dry-run block, which is the whole point. The first
+  # version of this arm only asked that some tune_cost_note precede
+  # pull_model — and the dry run's own copy sits earlier in the file, so
+  # deleting the pre-pull warning entirely still satisfied it. Caught by
+  # mutation, not by reading it.
+  #
+  # END decides, and only END — a rule-level 'exit' still runs the END block.
+  awk '/Dry run complete/           { past_dry = 1 }
+       past_dry && /tune_cost_note/ { seen = 1 }
+       /pull_model /                { if (!done) { done = 1; in_order = seen } }
+       END { exit (done && in_order) ? 0 : 1 }' <<<"${body}" || {
+    echo 'tune.sh pulls the model without saying what the pull costs on that path' >&2
+    return 1; }
+  # ...and the dry run has to carry it too, since that is the command whose
+  # entire job is showing what a real run would do.
+  awk '/dry_run.*==.*true/ { in_dry = 1 }
+       in_dry && /tune_cost_note/ { found = 1 }
+       /^  if \[\[ "\$\{AUTO_TUNE\}"/ { in_dry = 0 }
+       END { exit found ? 0 : 1 }' <<<"${body}" || {
+    echo 'lca tune --dry-run previews the switch without the download it implies' >&2
+    return 1; }
+}
+check "...and 'lca tune' sees that note before it spends the disk" \
+  tune_consults_the_disk_before_pulling
 check "the FAQ does not promise more than the ruleset delivers" \
   faq_does_not_overclaim_offline
 # ...and a message that sends the reader to a SECTION must send them to one

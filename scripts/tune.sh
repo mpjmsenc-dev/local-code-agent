@@ -237,7 +237,18 @@ main() {
     elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
       info "Already tuned — a real run would change nothing."
     else
-      info "A real run would switch to model=${TUNE_MODEL} context=${TUNE_CTX}."
+      # ...including what it costs. A dry run exists to show what a real run
+      # would do, and the biggest thing a real run does is download a model:
+      # measured on this box, the recommendation is a 9 GB pull that leaves it
+      # under the free-disk floor 'lca check' then fails it for. Saying only
+      # "would switch to qwen2.5-coder:14b" hides the whole consequence behind
+      # a version number.
+      #
+      # Same sentence and same numbers as 'lca check', through tune_cost_note,
+      # which is empty when the disk can take it comfortably.
+      info "A real run would switch to model=${TUNE_MODEL} context=${TUNE_CTX}$(tune_cost_note \
+        "${TUNE_MODEL}" "$(free_gb "$(ollama_models_dir)")" "${MODELS_HEADROOM_GB}" \
+        "$(ollama_models_dir)" "${MODEL_NAME}")."
     fi
     ok "Dry run complete; nothing was changed."
     exit 0
@@ -325,7 +336,7 @@ main() {
   # (optional) model validation below, so a validation failure leaves .env,
   # the drop-in and the running service consistent — never a phantom context.
   local old_model="${MODEL_NAME}" old_ctx="${OLLAMA_CONTEXT_LENGTH}"
-  local chosen_model="${TUNE_MODEL}" validate=false
+  local chosen_model="${TUNE_MODEL}" validate=false tune_cost=""
   # Not just "the name changed": a model that is already named in .env but
   # missing from disk has to be fetched too, or the fast path above would be
   # the only thing that could have pulled it — and it cannot.
@@ -350,6 +361,20 @@ main() {
     else
       # Online: try for the ideal model. A persistent failure falls back to
       # the best already-present model; the next boot re-attempts the pull.
+      #
+      # Said BEFORE the pull, not after it. This command had every RAM guard
+      # (model_fits_ram, twice) and no disk one, so on this box it would fetch
+      # 9 GB and leave the machine under the floor 'lca check' fails it for —
+      # a number that lived in check-system.sh, the command that judges the
+      # disk, and was invisible to this one, the command that fills it.
+      #
+      # A warning rather than a refusal: the pull is minutes long and
+      # interruptible, the user asked for this, and a hard stop here would
+      # block the boot unit on a machine that is merely tight. Empty when the
+      # disk can take it, so it does not become noise on every tune.
+      tune_cost="$(tune_cost_note "${TUNE_MODEL}" "$(free_gb "$(ollama_models_dir)")" \
+        "${MODELS_HEADROOM_GB}" "$(ollama_models_dir)" "${MODEL_NAME}")"
+      [[ -z "${tune_cost}" ]] || warn "Pulling ${TUNE_MODEL}${tune_cost}"
       if pull_model "${TUNE_MODEL}"; then
         validate=true
       else
