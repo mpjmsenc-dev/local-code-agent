@@ -2201,6 +2201,45 @@ check "...including the one that keeps Ollama off the cloud" \
   privacy_setting_reaches_both_paths
 check "...and the background start reads that file instead of copying it" \
   start_bg_reads_the_file_rather_than_copying_it
+# Ollama must be the more patient of the two. These deadlines sit in different
+# files and neither mentions the other, and their ORDER is the whole behaviour:
+# whichever expires first decides what a slow cold load is reported as.
+#
+# With Ollama's stock 5m against this probe's 600s, Ollama gave up first, so
+# every slow load arrived as an error and model_silence_reason had to explain a
+# 500 that really meant "still loading". With OLLAMA_LOAD_TIMEOUT=15m the probe
+# gives up first, a slow load is reported as a timeout — which is what it is —
+# and, because Ollama has not abandoned it, the load runs on to completion
+# while the caller backs off, so the next request finds the model resident.
+#
+# Lower that setting under 600 again and the old behaviour returns silently,
+# with nothing failing to say so. Hence a gate rather than a comment.
+ollama_outwaits_the_probe() {
+  local body raw secs
+  # Read first, then match on a herestring: 'sed FILE | awk' is the pipeline
+  # this suite forbids, and it forbids it for a reason that would bite here —
+  # awk exiting early SIGPIPEs sed, and under pipefail the 141 reads as "no
+  # setting found", which is this gate's failure case.
+  body="$(sed 's/#.*//' "${REPO}/config/ollama.env")"
+  raw="$(awk -F= '/OLLAMA_LOAD_TIMEOUT/ {gsub(/[[:space:]]/, "", $2); print $2}' <<<"${body}")"
+  [[ -n "${raw}" ]] || {
+    echo 'config/ollama.env sets no OLLAMA_LOAD_TIMEOUT, so Ollama keeps its 5m default and gives up before the probe does' >&2
+    return 1; }
+  case "${raw}" in
+    *h) secs=$(( ${raw%h} * 3600 )) ;;
+    *m) secs=$(( ${raw%m} * 60 )) ;;
+    *s) secs="${raw%s}" ;;
+    *)  secs="${raw}" ;;
+  esac
+  [[ "${secs}" =~ ^[0-9]+$ ]] || {
+    printf 'OLLAMA_LOAD_TIMEOUT is not a duration this can compare: %s\n' "${raw}" >&2; return 1; }
+  (( secs > MODEL_PROBE_TIMEOUT )) || {
+    printf 'OLLAMA_LOAD_TIMEOUT (%ss) is not longer than MODEL_PROBE_TIMEOUT (%ss), so Ollama abandons the load before the probe stops waiting\n' \
+      "${secs}" "${MODEL_PROBE_TIMEOUT}" >&2
+    return 1; }
+}
+check "...and Ollama is given longer to load than the probe waits" \
+  ollama_outwaits_the_probe
 
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
@@ -9216,10 +9255,10 @@ check "a real answer is recorded as ok" \
 #   curl -fsS ... (the same request)
 #     -> rc=22, body empty
 #
-# The consequence was worse than a missing detail. Ollama gives up loading a
-# model after about five minutes and answers 500; MODEL_PROBE_TIMEOUT is 600,
-# deliberately longer. So on a slow cold load Ollama always replies before curl
-# times out, rc is never 28, and the outcome is "refused" — and the refused
+# The consequence was worse than a missing detail. On Ollama's stock 5m load
+# limit it answered 500 before MODEL_PROBE_TIMEOUT's 600s was up, so on a slow
+# cold load Ollama always replied before curl timed out, rc was never 28, and
+# the outcome was "refused" — and the refused
 # message asserted "the server answered rather than running out of time, so
 # this is not a slow load". Measured on this box, 'lca test' printing that
 # sentence while its own log read:
@@ -9321,11 +9360,13 @@ silence_reason_leads_with_the_measured_cause() {
   (( load_at > 0 && load_at < ram_at )) || {
     printf 'the timeout message reaches RAM before it explains the load: %s\n' "${slow}" >&2; return 1; }
   # This assertion used to REQUIRE "not a slow load" in the refusal message,
-  # and that is why the claim survived as long as it did. It is false. Ollama
-  # gives up loading a model after about five minutes and answers 500;
-  # MODEL_PROBE_TIMEOUT is 600, deliberately longer. So on a slow cold load
-  # Ollama replies first, curl never reaches its own timeout, the outcome is
-  # "refused" — and the message ruled out precisely what had happened.
+  # and that is why the claim survived as long as it did. It is false. On
+  # Ollama's stock 5m load limit it answered 500 before MODEL_PROBE_TIMEOUT's
+  # 600s was up, so on a slow cold load Ollama replied first, curl never
+  # reached its own timeout, the outcome was "refused" — and the message ruled
+  # out precisely what had happened. (config/ollama.env now sets 15m, so a slow
+  # load lands in the timeout branch instead; the claim would still be false
+  # here, and the branch still must not rule out what it cannot see.)
   # Measured on this box, 'lca test' printing that sentence while its own log
   # read:
   #

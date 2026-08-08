@@ -1354,17 +1354,25 @@ model_responds() {
   #   curl -fsS ... (the same request)
   #     -> rc=22, body empty
   #
-  # It mattered most in the case this project is actually on a box for. Ollama
-  # gives up loading a model after about five minutes and answers 500;
-  # MODEL_PROBE_TIMEOUT is 600, deliberately longer. So on a slow cold load
-  # Ollama ALWAYS replies before curl times out, rc is never 28, and the
-  # outcome is "refused" — which made model_silence_reason say "the server
-  # answered rather than running out of time, so this is not a slow load"
-  # about a load that had run out of time. Measured on this box, from its own
-  # log:
+  # It mattered most in the case this project is actually on a box for. With
+  # Ollama's stock 5m load limit it answered 500 before this probe's 600s was
+  # up, so rc was never 28, the outcome was always "refused", and
+  # model_silence_reason said "the server answered rather than running out of
+  # time, so this is not a slow load" about a load that had run out of time.
+  # Measured on this box, from its own log:
   #
   #   Load failed ... error="timed out waiting for llama-server to start - "
   #   [GIN] 500 | 5m1s | POST "/api/generate"
+  #
+  # config/ollama.env now sets OLLAMA_LOAD_TIMEOUT=15m, which puts the two the
+  # other way round: this probe stops waiting first, and a slow cold load lands
+  # in the timeout branch rather than the error one. That is the better of the
+  # two outcomes and it is deliberate — the timeout message says the load may
+  # simply not have finished, which is exactly what is happening, and the load
+  # is no longer abandoned at 5m, so it goes on completing while the caller
+  # backs off and the next request meets a model that is already resident.
+  # Quoting Ollama's own error is still what the error branch is for; it is
+  # just no longer the branch a slow load arrives in.
   #
   # Same fix ask.sh already carries for the streaming path, which tees the raw
   # body so Ollama's error survives.
