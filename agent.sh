@@ -258,7 +258,7 @@ warn_if_model_unreachable() {
 # as seeded. A 200 from this endpoint is not evidence.
 seed_agent_settings() {
   local url="http://127.0.0.1:${AGENT_PORT}/api/v1/settings" body waited=0
-  local model base_url got
+  local model base_url got got_native
   model="$(agent_llm_model "${MODEL_NAME}")"
   base_url="$(agent_llm_base_url)"
   # Wait for the API rather than racing it: the container answers HTTP well
@@ -275,9 +275,24 @@ seed_agent_settings() {
     curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:${AGENT_PORT}/" 2>/dev/null && break
     sleep 3; waited=$(( waited + 3 ))
   done
+  # native_tool_calling is the setting that decides whether this tier does
+  # anything at all, and it is sent as a real boolean rather than a string —
+  # this endpoint accepts unknown keys and drops them silently, so a "false"
+  # that arrives as a string is a setting that looks stored and is not.
+  #
+  # Why false. qwen2.5-coder never fills the API's tool_calls field: its own
+  # template tells it to wrap calls in <tool_call> tags, it ignores that and
+  # writes clean JSON in the message body, and Ollama — finding no tags —
+  # reports zero tool calls. OpenHands reads that as "the assistant is
+  # finished", so the run ends at once with an empty workspace and no error
+  # anywhere. Measured on 3b and 7b, through both /api/chat and
+  # /v1/chat/completions; and with this false the 3b created the file, ran it
+  # and finished the task.
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
+        --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         '{agent_settings_diff:{agent:"CodeActAgent",
-                               llm:{model:$m, base_url:$u, api_key:"local-llm"}}}')"
+                               llm:{model:$m, base_url:$u, api_key:"local-llm",
+                                    native_tool_calling:$native}}}')"
   curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
        -d "${body}" >/dev/null 2>&1 || true
   # Read back, because the POST's status code proved nothing. jq's // guards a
@@ -285,8 +300,15 @@ seed_agent_settings() {
   # neither and is reported as not seeded.
   got="$(curl -fsS --max-time 10 "${url}" 2>/dev/null \
          | jq -r '.agent_settings.llm.model // ""' 2>/dev/null || true)"
+  # Read back separately, because this one is the difference between a tier
+  # that works and one that finishes instantly with an empty workspace.
+  got_native="$(curl -fsS --max-time 10 "${url}" 2>/dev/null \
+                | jq -r '.agent_settings.llm.native_tool_calling // "unset"' 2>/dev/null || true)"
   if [[ "${got}" == "${model}" ]]; then
-    ok "Agent settings seeded: ${model} at ${base_url}"
+    ok "Agent settings seeded: ${model} at ${base_url} (native tool calling: ${got_native:-unset})"
+    if [[ "${got_native}" != "${AGENT_NATIVE_TOOL_CALLING}" ]]; then
+      warn "The agent stored native_tool_calling='${got_native:-unset}', not '${AGENT_NATIVE_TOOL_CALLING}'. With qwen2.5-coder that is the difference between a run that works and one that ends instantly with an empty workspace and no error — see docs/AGENT.md."
+    fi
   else
     # Keeps the stronger check — this reports what the agent ACTUALLY holds, not
     # merely that a POST failed — and names a URL rather than a bare port:

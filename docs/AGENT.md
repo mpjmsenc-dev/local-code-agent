@@ -399,3 +399,56 @@ Asked through `/v1`, that model loads at `context_length: 16384` while the
 server default stays 4096 for everything else. The cost is honest and worth
 knowing: it is a second entry in Ollama's loader, so if both are hot at once
 the box holds two copies of the weights.
+
+---
+
+## The tool-call channel, and why the default is `false`
+
+The first live run of this tier produced correct FizzBuzz and an empty
+workspace. No error, anywhere. The conversation was marked `finished`, which is
+what OpenHands does when the assistant replies without any tool calls.
+
+The cause, isolated in a single request and reproduced on demand:
+
+```
+POST /v1/chat/completions  (tools: [file_editor])   ->  tool_calls: 0
+content: {"name":"file_editor","arguments":{"path":"/workspace/project/fizzbuzz.py",
+          "file_text":"def fizzbuzz(n):\n    if n % 15 == 0:\n ..."}}
+```
+
+The model wrote a **correct, parseable tool call into the message body**. Its
+own chat template tells it not to — *"return a json object ... within
+`<tool_call></tool_call>` ... Do not include any backticks"* — and it ignores
+that instruction. Ollama looks for the tags, finds none, and reports zero tool
+calls. The content is then thrown away by the native path.
+
+Measured across both models and both endpoints:
+
+| Model | Endpoint | `tool_calls` | The body it wrote |
+|---|---|---|---|
+| `qwen2.5-coder:3b` | `/api/chat` | 0 | valid JSON, correct, runs |
+| `qwen2.5-coder:7b` | `/api/chat` | 0 | valid JSON, correct, runs |
+| `qwen2.5-coder:7b` | `/v1/chat/completions` | 0 | valid JSON, correct, runs |
+| `qwen2.5:3b` (instruct) | `/v1/chat/completions` | **1** | a real native call |
+
+So this is a **channel** failure, not a capability failure, and **not a size
+problem** — the 7b fails exactly as the 3b does. The plain `qwen2.5` instruct
+model uses the native channel correctly and writes worse code, which is the
+wrong trade.
+
+`AGENT_NATIVE_TOOL_CALLING=false` makes OpenHands parse the tool call out of
+the text the model actually writes. With it, on this stack:
+
+```
+ActionEvent  agent  {"command":"view","kind":"TaskTrackerAction"}
+ActionEvent  agent  {"kind":"FinishAction","message":"The task has been completed..."}
+$ cat /workspace/project/fizzbuzz.py        # 180 bytes, on disk
+fizzbuzz(3,5,15,7) == ['Fizz','Buzz','FizzBuzz','7']
+```
+
+A `qwen2.5-coder:3b` on CPU, start to finished file, in about ten minutes. The
+run also shows the loop correcting itself — OpenHands rejected two malformed
+calls (`Missing required parameters for function 'think'`, `Parameter
+'security_risk' is expected to be one of [...]`) and the model fixed both.
+
+Set it `true` only for a model that genuinely uses the native channel.

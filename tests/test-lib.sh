@@ -2623,6 +2623,36 @@ step_source_vocabulary_agrees() {
 check "auto is the default in .env.example, lib.sh and the watcher alike" \
   step_source_vocabulary_agrees
 
+# Native tool calling, off by default, and the reason is a measurement.
+#
+# qwen2.5-coder never fills the API's tool_calls field. Its own chat template
+# instructs it to wrap calls in <tool_call> tags; it ignores that and writes
+# clean JSON in the message body; Ollama finds no tags and reports zero tool
+# calls; OpenHands reads zero tool calls as "the assistant has finished". The
+# live run that produced this default ended in seconds with an empty workspace
+# and no error anywhere to find. Flipping this made the same 3b create the
+# file, run it and finish the task.
+check "native tool calling is off by default" \
+  test "${AGENT_NATIVE_TOOL_CALLING}" = false
+# Sent as a JSON boolean, not a string. That endpoint declares
+# additionalProperties:true, so a value of the wrong TYPE is accepted with a
+# 200 and dropped — the same silent-drop this repo already hit with the flat
+# legacy settings body.
+seeds_a_real_boolean() {
+  local body
+  body="$(sed -n '/^seed_agent_settings()/,/^}/p' "${REPO}/agent.sh")"
+  grep -q 'argjson native' <<<"${body}" || return 1
+  grep -q 'native_tool_calling:[$]native' <<<"${body}" || return 1
+  # ...and a string would be --arg, which is exactly the mistake being blocked.
+  ! grep -qE '\-\-arg native' <<<"${body}"
+}
+check "the tool-calling mode is sent as a boolean, not a string" \
+  seeds_a_real_boolean
+# ...and read back, because a 200 from that endpoint has already proved nothing
+# once in this project's history.
+check "the stored tool-calling mode is read back and checked" \
+  grep -q 'native_tool_calling // "unset"' "${REPO}/agent.sh"
+
 echo "# the Ollama relay: containers reach the model, the model stays on loopback"
 # The decision this encodes: Ollama is NOT widened to 0.0.0.0. It stays on
 # 127.0.0.1 and one address — the docker bridge gateway, which is not routable

@@ -517,6 +517,9 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # to read from, but the log arm is what shipped and it costs nothing to keep
   # as the fallback. Nobody's run gets worse by upgrading.
   AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
+  # false, and this is the setting that decides whether the agent tier does
+  # anything at all. Measured, twice, on this stack — see agent.sh.
+  AGENT_NATIVE_TOOL_CALLING="${AGENT_NATIVE_TOOL_CALLING:-false}"
   # The relay that lets containers reach Ollama without Ollama leaving
   # loopback. Off by default like every other component here; the agent tier is
   # what needs it, and 'lca check' says so when the agent is on without it.
