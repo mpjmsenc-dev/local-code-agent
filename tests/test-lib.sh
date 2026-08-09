@@ -16,7 +16,7 @@ REPO="$(cd "${TESTS_DIR}/.." && pwd)"
 LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               webui.sh agent.sh netmode.sh scripts/tune.sh scripts/apply.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
-              scripts/selftest.sh )
+              scripts/selftest.sh scripts/ollama-relay.sh )
 
 FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
@@ -2623,6 +2623,136 @@ step_source_vocabulary_agrees() {
 check "auto is the default in .env.example, lib.sh and the watcher alike" \
   step_source_vocabulary_agrees
 
+echo "# the Ollama relay: containers reach the model, the model stays on loopback"
+# The decision this encodes: Ollama is NOT widened to 0.0.0.0. It stays on
+# 127.0.0.1 and one address — the docker bridge gateway, which is not routable
+# from outside this machine — gets a forwarder. These gates are about the two
+# ways that can go quietly wrong: an address nobody is listening on, and a port
+# the inbound guard has never heard of.
+relay_port_of() ( OLLAMA_RELAY_PORT="$1"; ollama_relay_port )
+check "a real port is the relay port"      test "$(relay_port_of 11435)" = 11435
+# No fallback to a default. A port that cannot be parsed must not become a
+# listening socket somewhere the user never asked for.
+relay_port_unknown() {
+  local out
+  out="$(relay_port_of "$1" 2>/dev/null)" && return 1
+  [[ -z "${out}" ]]
+}
+check "a port that is not a port yields nothing" relay_port_unknown abc
+check "...and neither does an empty one"        relay_port_unknown ''
+check "...nor one out of range"                 relay_port_unknown 70000
+
+relay_address_uses_the_bridge() (
+  # shellcheck disable=SC2317  # called by ollama_relay_address, not from here
+  docker_bridge_gateway() { printf '172.20.0.1'; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  OLLAMA_RELAY_PORT=11435
+  [[ "$(ollama_relay_address)" == "172.20.0.1:11435" ]]
+)
+check "the relay binds the docker bridge gateway, not 0.0.0.0" \
+  relay_address_uses_the_bridge
+# ...and a container dials a NAME, because the address is what the relay binds
+# and the name is what --add-host makes resolve. Two halves of one path.
+relay_url_is_dialled_by_name() ( OLLAMA_RELAY_PORT=11435
+  [[ "$(ollama_relay_url)" == "http://host.docker.internal:11435" ]] )
+check "containers reach the relay by host.docker.internal" \
+  relay_url_is_dialled_by_name
+
+# The agent's model URL has to follow the relay, or the relay is decoration.
+agent_url_with_relay() (
+  # shellcheck disable=SC2317  # called by ollama_relay_address, not from here
+  docker_bridge_gateway() { printf '172.17.0.1'; }
+  ENABLE_OLLAMA_RELAY=true; OLLAMA_RELAY_PORT=11435; OLLAMA_HOST=127.0.0.1:11434
+  agent_llm_base_url )
+agent_url_without_relay() (
+  ENABLE_OLLAMA_RELAY=false; OLLAMA_RELAY_PORT=11435; OLLAMA_HOST=127.0.0.1:11434
+  agent_llm_base_url )
+check "with the relay on, the agent is pointed through it" \
+  test "$(agent_url_with_relay)" = "http://host.docker.internal:11435/v1"
+# With it off the address is the one that CANNOT work, on purpose: that is the
+# state the user is really in, and agent.sh and 'lca check' both say so. An URL
+# invented here to look plausible would hide it.
+check "with it off, the agent still points at Ollama's own port" \
+  test "$(agent_url_without_relay)" = "http://host.docker.internal:11434/v1"
+
+# The inbound guard has to know about every port this stack opens.
+# shellcheck disable=SC2030  # every assignment below is local to the subshell, which is the point
+relay_guarded() ( ENABLE_OLLAMA_RELAY="$1"; OLLAMA_RELAY_PORT="$2"
+  ENABLE_WEBUI=false; ENABLE_AGENT=false; OLLAMA_HOST=127.0.0.1:11434
+  # shellcheck disable=SC2317  # the guard asks these; the fixture answers
+  webui_container_running() { return 1; }
+  # shellcheck disable=SC2317  # ...and this one
+  agent_container_running() { return 1; }
+  # shellcheck disable=SC2317  # ...and this one
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2317  # ...and this one
+  webui_container_env() { return 1; }
+  guarded_ports || true )
+check "the relay's port is guarded when it is on" \
+  grep -qF "Ollama relay 11435" <<<"$(relay_guarded true 11435)"
+check "...and absent when it is off" \
+  test -z "$(relay_guarded false 11435 | grep 'Ollama relay')"
+# Same rule the WebUI port taught: a value that is not a port is a broken
+# setting, not a gap in the guard. check-system.sh names it; this stays quiet.
+check "...and a port that is not a port is not asked for" \
+  test -z "$(relay_guarded true abc | grep 'Ollama relay')"
+
+# Drift. A .socket unit cannot compute an address, so the installer bakes one
+# in — and a docker bridge that moved leaves the relay listening where nothing
+# dials. Reported, never silently repaired.
+relay_drift_seen() (
+  # Captured before the stubs are defined: inside a function body $1 is the
+  # FUNCTION's argument, not the subshell's, so a stub reading $1 directly gets
+  # nothing. Measured here, by this gate failing on its first run.
+  local unit_addr="$1" gw="$2"
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  OLLAMA_RELAY_PORT=11435
+  # shellcheck disable=SC2317  # called by ollama_relay_address, not from here
+  docker_bridge_gateway() { printf '%s' "${gw}"; }
+  # shellcheck disable=SC2317  # called by ollama_relay_drift, not from here
+  ollama_relay_unit_address() { printf '%s' "${unit_addr}"; }
+  ollama_relay_drift )
+check "an address the unit no longer matches is reported" \
+  grep -qF '172.17.0.1:11435 -> 172.20.0.1:11435' \
+    <<<"$(relay_drift_seen 172.17.0.1:11435 172.20.0.1)"
+check "...and agreement is not reported as drift" \
+  test -z "$(relay_drift_seen 172.17.0.1:11435 172.17.0.1)"
+
+# The units themselves, rendered and read back. FreeBind is the line worth a
+# gate of its own: the bridge gateway does not exist until docker has made the
+# bridge, and without it the socket fails to bind at boot on a machine where
+# docker starts later — a relay that survived installation but not a reboot.
+relay_units() {   # ADDR TARGET PROXY -> both unit files
+  local src
+  src="$(sed -n '/^render_socket_unit()/,/^}/p;/^render_service_unit()/,/^}/p' \
+           "${REPO}/scripts/ollama-relay.sh")"
+  [[ -n "${src}" ]] || return 1
+  ( REPO_ROOT="${REPO}"; eval "${src}"; render_socket_unit "$1"; render_service_unit "$2" "$3" )
+}
+UNITS="$(relay_units 172.17.0.1:11435 127.0.0.1:11434 /usr/lib/systemd/systemd-socket-proxyd)"
+check "the socket unit listens on the address it was given" \
+  grep -qx 'ListenStream=172.17.0.1:11435' <<<"${UNITS}"
+check "the socket unit can bind before docker exists" \
+  grep -qx 'FreeBind=true' <<<"${UNITS}"
+check "the service forwards to Ollama's own loopback address" \
+  grep -q 'systemd-socket-proxyd .*127.0.0.1:11434' <<<"${UNITS}"
+check "the units are wired to each other, not started independently" \
+  grep -qx 'Requires=local-code-agent-ollama-relay.socket' <<<"${UNITS}"
+# Nothing here may put Ollama on every interface. That is the entire decision.
+check "no rendered unit binds a wildcard address" \
+  test -z "$(grep -E '0\.0\.0\.0|\[::\]' <<<"${UNITS}")"
+
+# ...and the stack has to be able to take it away again. A socket unit left
+# enabled keeps the bind after an uninstall claims the machine is clean.
+relay_is_uninstalled() {
+  local u="${REPO}/uninstall.sh"
+  grep -q 'disable --now local-code-agent-ollama-relay.socket' "${u}" || return 1
+  grep -q 'local-code-agent-ollama-relay.service' "${u}"
+}
+check "uninstall removes the relay's units and its bind" relay_is_uninstalled
+check "setup installs the relay when .env asks for it" \
+  grep -q 'ollama-relay.sh" install' "${REPO}/setup.sh"
+
 # ...and 'lca check' has to actually reject a value nobody documented.
 #
 # Not a grep for the three words: a case arm can list all three and still
@@ -3687,7 +3817,13 @@ echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has
 # never sourced lib.sh, so lca_system_prompt would be missing there.
-prompt_says() { lca_system_prompt | grep -qi -- "$1"; }
+# Capture first, then match against a here-string, rather than piping into
+# 'grep -q'. That pipeline is gotcha 3 in config/CONVENTIONS.md and it was here,
+# in the gates that police the prompt: grep -q leaves on its first match, the
+# still-writing prompt takes SIGPIPE, and under pipefail the pipeline is 141 —
+# which reads as "not found" exactly when it WAS found. Measured: three prompt
+# gates failed while the strings they looked for were demonstrably present.
+prompt_says() { local p; p="$(lca_system_prompt)"; grep -qi -- "$1" <<<"${p}"; }
 check "system prompt tells the model it is private" prompt_says "leaves that machine"
 check "system prompt forbids inventing flags" prompt_says "never invent"
 
@@ -3740,8 +3876,9 @@ check "every 'lca' command named in the system prompt exists in bin/lca" prompt_
 # reads this prompt, and an unquoted verb after 'lca' is exactly how it learns
 # to tell someone a command that does not exist.
 prompt_scanner_sees_the_whole_prompt() {
-  local found bad=0 want
+  local found bad=0 want prompt_text
   found="$(prompt_lca_commands)"
+  prompt_text="$(lca_system_prompt)"
   # The two the old pattern could not reach, asserted by name so a future
   # narrowing is caught rather than silently shrinking the gate above.
   for want in ask online; do
@@ -3755,7 +3892,7 @@ prompt_scanner_sees_the_whole_prompt() {
   local sub
   while read -r sub; do
     [[ -n "${sub}" ]] || continue
-    lca_system_prompt | grep -qE "\blca ${sub}\b" || {
+    grep -qE "\blca ${sub}\b" <<<"${prompt_text}" || {
       printf "the scanner produced '%s', which the prompt never names\n" "${sub}" >&2
       bad=1
     }
@@ -6369,7 +6506,7 @@ check "the prompt excludes server questions from the handover" \
 # absent from the prompt's own list. Added and measured: 4/4 on that question,
 # where it was 0/4 before because the model had never been told it exists.
 prompt_names_the_apply_command() {
-  lca_system_prompt | grep -qE "^[[:space:]]*lca apply[[:space:]]"
+  grep -qE "^[[:space:]]*lca apply[[:space:]]" <<<"$(lca_system_prompt)"
 }
 check "the prompt names 'lca apply', the fix for every applied setting" \
   prompt_names_the_apply_command

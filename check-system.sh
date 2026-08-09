@@ -104,7 +104,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -123,6 +123,8 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT AGENT
       p_warn "LCA_ASK_TOKENS='${value}' is not a positive number — 'lca ask' silently uses 512. Fix it in ${ENV_FILE}." ;;
     AGENT_PORT)
       p_fail "AGENT_PORT='${value}' is not a port number, so the agent cannot be started and — worse — the inbound guard has no port to close for it. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply" ;;
+    OLLAMA_RELAY_PORT)
+      p_fail "OLLAMA_RELAY_PORT='${value}' is not a port number, so the relay cannot listen and the agent tier has no way to reach the model. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install" ;;
     AGENT_MAX_ITERATIONS)
       p_warn "AGENT_MAX_ITERATIONS='${value}' is not a whole number, so the step ceiling never fires and an unattended run is bounded only by the wall clock. Set a number (or 0 for no limit, on purpose) in ${ENV_FILE}." ;;
     AGENT_TIMEOUT_MINUTES)
@@ -177,6 +179,35 @@ if [[ "${ENABLE_AGENT}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
     fi
   else
     p_warn "the agent is enabled in .env but its container is not running (start it: ${SCRIPT_DIR}/bin/lca agent start)"
+  fi
+  # ...and whether it can reach the model at all, which is a different question
+  # from whether it started. The agent runs in its own network namespace, where
+  # loopback is the container, so with Ollama on 127.0.0.1 and no relay every
+  # task it is given fails without producing a token — and nothing above this
+  # line would look wrong. That is the state this check exists to name.
+  if [[ "${ENABLE_OLLAMA_RELAY}" != "true" ]]; then
+    p_warn "the agent is enabled but ENABLE_OLLAMA_RELAY is false, so it cannot reach Ollama on ${OLLAMA_HOST} — a container's loopback is the container. Set ENABLE_OLLAMA_RELAY=true in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install"
+  fi
+fi
+
+# The relay itself, whenever it is switched on — with or without the agent,
+# because a socket this stack opened is this stack's to account for.
+if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]]; then
+  if ! RELAY_ADDR="$(ollama_relay_address 2>/dev/null)"; then
+    p_fail "OLLAMA_RELAY_PORT='${OLLAMA_RELAY_PORT}' is not a port number, so the relay has no address to listen on and the agent cannot reach the model. Fix it in ${ENV_FILE}."
+  else
+    if RELAY_DRIFT="$(ollama_relay_drift 2>/dev/null)"; then
+      # The unit bakes an address in because a .socket cannot compute one. A
+      # docker bridge that moved leaves the relay listening where nothing dials.
+      p_warn "the relay's boot unit listens on a different address than this machine now has (${RELAY_DRIFT}) — re-install it: sudo ${SCRIPT_DIR}/bin/lca relay install"
+    fi
+    if ollama_relay_healthy; then
+      p_pass "Ollama answers through the relay on ${RELAY_ADDR}"
+    elif ! ollama_relay_unit_address >/dev/null 2>&1; then
+      p_warn "the relay is enabled in .env but its boot units are not installed, so nothing is listening on ${RELAY_ADDR} (sudo ${SCRIPT_DIR}/bin/lca relay install)"
+    else
+      p_warn "the relay is installed on ${RELAY_ADDR} but Ollama did not answer through it — the agent's tasks will fail without producing a token (check Ollama: ${SCRIPT_DIR}/bin/lca logs ollama)"
+    fi
   fi
 fi
 

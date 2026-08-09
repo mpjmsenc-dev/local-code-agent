@@ -256,6 +256,7 @@ lca                 # starts aider on the local model, right here
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
 | `lca agent <cmd>` | the autonomous agent: `start`, `stop`, `restart`, `status`, `url`, `logs`, `watch` |
+| `lca relay <cmd>` | the Ollama relay containers reach the model through: `status`, `install`, `remove` |
 
 `lca <command> --help` explains any of them — and only explains it. That is
 tested: `lca test --help` used to run the whole acceptance suite, and
@@ -314,6 +315,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 | `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
+| `scripts/ollama-relay.sh` | `lca relay` — the docker-bridge→loopback relay, so containers reach Ollama without it leaving 127.0.0.1 |
 | `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 
 ## `.env` reference
@@ -341,6 +343,8 @@ Created from `.env.example` on first run. All keys:
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `ENABLE_AGENT` | `false` | run the autonomous agent tier (see docs/AGENT.md) |
 | `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
+| `ENABLE_OLLAMA_RELAY` | `false` | let containers reach Ollama via the docker bridge, without binding Ollama to 0.0.0.0 |
+| `OLLAMA_RELAY_PORT` | `11435` | the port that relay listens on (bridge gateway only) |
 | `AGENT_CONTAINER` | `openhands-app` | name of the agent's docker container |
 | `AGENT_IMAGE` | `docker.openhands.dev/openhands/openhands:1.8` | pinned agent image |
 | `AGENT_RUNTIME_IMAGE` | `ghcr.io/openhands/agent-server` | its sandbox image |

@@ -224,6 +224,16 @@ main() {
     warn "The netmode boot service could not be installed — the kill switch's state will not survive a reboot. Continuing."
     setup_ok=false
   fi
+  # The relay, only when it was asked for. It is what makes ENABLE_AGENT=true an
+  # honest state: without it the agent runs in its own network namespace and
+  # cannot reach 127.0.0.1:11434 at all, so every task it is given fails without
+  # producing a token. Not fatal here for the same reason as the two above.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]]; then
+    if ! "${SCRIPT_DIR}/scripts/ollama-relay.sh" install; then
+      warn "The Ollama relay could not be installed — the agent tier will not be able to reach the model. Continuing."
+      setup_ok=false
+    fi
+  fi
   # Apply the always-on inbound guard now so the WebUI/Ollama ports are not
   # publicly reachable even before the first reboot.
   "${SCRIPT_DIR}/netmode.sh" harden || warn "Could not apply the inbound guard now — it will be applied on the next boot."

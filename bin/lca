@@ -44,6 +44,7 @@ Usage: lca [command] [args...]
   lca harden              re-close ports 3000/11434 now and on every boot (sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs
   lca agent <cmd>         autonomous agent: start|stop|restart|status|url|logs|watch
+  lca relay <cmd>         Ollama relay for containers: status|install|remove
   lca help                this text
 
 Every command explains itself, and only explains itself:
@@ -89,6 +90,7 @@ case "${cmd}" in
                    exec "${REPO}/netmode.sh" "${cmd}" "$@" ;;
   webui)           exec "${REPO}/webui.sh" "$@" ;;
   agent)           exec "${REPO}/agent.sh" "$@" ;;
+  relay)           exec "${REPO}/scripts/ollama-relay.sh" "$@" ;;
   tune)            exec "${REPO}/scripts/tune.sh" "$@" ;;
   help|-h|--help)  usage ;;
   # 'lca help' has advertised "lca --no-auto-commits (arguments for aider)"

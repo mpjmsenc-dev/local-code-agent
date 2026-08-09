@@ -517,6 +517,11 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # to read from, but the log arm is what shipped and it costs nothing to keep
   # as the fallback. Nobody's run gets worse by upgrading.
   AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
+  # The relay that lets containers reach Ollama without Ollama leaving
+  # loopback. Off by default like every other component here; the agent tier is
+  # what needs it, and 'lca check' says so when the agent is on without it.
+  ENABLE_OLLAMA_RELAY="${ENABLE_OLLAMA_RELAY:-false}"
+  OLLAMA_RELAY_PORT="${OLLAMA_RELAY_PORT:-11435}"
   # Off by default: the agent's workspace holds whole checked-out projects and
   # is the one thing here whose size nobody controls. The ceiling applies only
   # when it is switched on; 0 means no ceiling, as it does everywhere else.
@@ -2738,6 +2743,84 @@ agent_event_steps() {
   return 1
 }
 
+# --- the Ollama relay -------------------------------------------------------
+#
+# A container's loopback is the container. Ollama sits on 127.0.0.1 by design,
+# so the agent tier reaches this machine as the docker bridge gateway, where
+# nothing is listening — and every task it is given then fails without
+# producing a token while nothing else looks wrong.
+#
+# The two ways out are not equal. Widening OLLAMA_HOST to 0.0.0.0 puts the
+# model server on every interface and leaves the inbound guard as the only
+# thing between it and the internet. The relay keeps Ollama where it is and
+# binds ONE address — the bridge gateway — which is not routable from outside
+# the machine at all.
+
+# ollama_relay_port — the port the relay listens on, or nothing when it is not
+# a port. Not a fallback to a default: an unusable value must not silently
+# become a listening socket somewhere the user did not ask for.
+ollama_relay_port() {
+  valid_port "${OLLAMA_RELAY_PORT}" || return 1
+  printf '%s' "${OLLAMA_RELAY_PORT}"
+}
+
+# ollama_relay_address — where the relay listens, as the HOST writes it.
+ollama_relay_address() {
+  local port
+  port="$(ollama_relay_port)" || return 1
+  printf '%s:%s' "$(docker_bridge_gateway)" "${port}"
+}
+
+# ollama_relay_url — the relay as a CONTAINER dials it.
+#
+# host.docker.internal, not the gateway's literal address: the address is what
+# the relay binds, the name is what a container resolves, and agent.sh's
+# --add-host is what connects the two.
+ollama_relay_url() {
+  local port
+  port="$(ollama_relay_port)" || return 1
+  printf 'http://host.docker.internal:%s' "${port}"
+}
+
+# ollama_relay_healthy — the relay is not merely configured, it answers.
+#
+# Asked through the relay, not of it: a listening socket that forwards nowhere
+# is the failure this exists to catch, and only Ollama's own reply proves the
+# whole path. Same rule as webui_healthy, for the same reason.
+ollama_relay_healthy() {
+  local addr
+  have curl || return 1
+  addr="$(ollama_relay_address)" || return 1
+  curl -fsS --max-time 3 "http://${addr}/api/version" >/dev/null 2>&1
+}
+
+# ollama_relay_unit_address — the address baked into the installed socket unit.
+#
+# It is baked in because a .socket unit cannot compute one, and that is exactly
+# why this function exists: docker's bridge gateway is stable in practice but
+# not guaranteed, and a unit still listening on last week's address is the same
+# drift class as a chat app still serving the old WEBUI_PORT. Reported, not
+# silently repaired.
+ollama_relay_unit_address() {
+  local unit="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.socket"
+  local line
+  [[ -r "${unit}" ]] || return 1
+  line="$(grep -m1 '^ListenStream=' "${unit}" 2>/dev/null || true)"
+  line="${line#ListenStream=}"
+  [[ -n "${line}" ]] || return 1
+  printf '%s' "${line}"
+}
+
+# ollama_relay_drift — the unit's address and the one it should have, when they
+# differ. Nothing, and non-zero, when they agree or when there is no unit.
+ollama_relay_drift() {
+  local want have
+  want="$(ollama_relay_address)" || return 1
+  have="$(ollama_relay_unit_address)" || return 1
+  [[ "${want}" != "${have}" ]] || return 1
+  printf '%s -> %s' "${have}" "${want}"
+}
+
 # agent_workspace_dir — where the agent keeps its workspace and settings.
 agent_workspace_dir() {
   printf '%s/.openhands' "${HOME}"
@@ -2824,7 +2907,15 @@ agent_llm_model() {
 # host.docker.internal:host-gateway' flag in agent.sh is what makes this
 # resolve, so the two belong together and both are gated.
 agent_llm_base_url() {
-  local port
+  local port url
+  # Through the relay when there is one. Ollama itself stays on loopback, so
+  # without the relay this address resolves to a gateway with nothing behind
+  # it — which is a real state a user can be in, and agent.sh says so out loud
+  # rather than this function inventing a working-looking URL.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]] && url="$(ollama_relay_url)"; then
+    printf '%s/v1' "${url}"
+    return 0
+  fi
   port="$(ollama_url)"; port="${port##*:}"
   printf 'http://host.docker.internal:%s/v1' "${port}"
 }
@@ -3069,6 +3160,15 @@ guarded_ports() {
   if [[ "${ENABLE_AGENT}" == "true" && "${AGENT_PORT}" != "22" ]] \
      && valid_port "${AGENT_PORT}"; then
     out+=("Agent ${AGENT_PORT}")
+  fi
+  # The relay, by the same rule. It binds ONE address — the docker bridge
+  # gateway — which is not routable from outside this machine, so it is not an
+  # exposure the way the two above are. It is listed anyway: the guard's job is
+  # to know every port this stack opens, and a port it has never heard of is
+  # one nobody notices when a future change moves it somewhere routable.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" && "${OLLAMA_RELAY_PORT}" != "22" ]] \
+     && valid_port "${OLLAMA_RELAY_PORT}"; then
+    out+=("Ollama relay ${OLLAMA_RELAY_PORT}")
   fi
   # The port the container is REALLY on, when that is not the one .env names.
   #

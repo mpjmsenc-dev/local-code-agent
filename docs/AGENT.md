@@ -332,3 +332,70 @@ It does not replace `lca`. For a change you can describe in a sentence, aider
 in your project directory is faster, cheaper and easier to review — and `git
 diff HEAD~1` still works exactly the same way afterwards. Reach for the agent
 when the work is genuinely multi-step and you want to hand it over.
+
+---
+
+## How the agent reaches the model
+
+A container's loopback is the container. Ollama is bound to `127.0.0.1` on
+purpose, so the agent — which runs in its own network namespace — sees this
+machine only as the docker bridge gateway, where nothing is listening. Every
+task it is given then fails without producing a single token, and nothing else
+in the stack looks wrong.
+
+There were two ways out and they are not equal.
+
+**Not chosen: `OLLAMA_HOST=0.0.0.0`.** That puts an unauthenticated model API on
+every interface this box has, leaving the inbound guard as the only thing
+between it and the internet. One misapplied ruleset and the model server is
+public.
+
+**Shipped: a relay.** Ollama stays exactly where it is. A socket-activated
+forwarder binds the bridge gateway **alone** — an address that is not routable
+from outside the machine — and forwards to loopback.
+
+```bash
+ENABLE_OLLAMA_RELAY=true        # in .env
+OLLAMA_RELAY_PORT=11435
+sudo lca relay install          # writes and enables the boot units
+lca relay status                # is it bound, and does Ollama answer through it
+```
+
+It uses **`systemd-socket-proxyd`**, which ships inside systemd. Not socat,
+which would be a new package on every install; not a proxy of our own, which
+would put a new HTTP parser on the path every token travels. `FreeBind=true` on
+the socket is what makes it survive a reboot on a machine where docker starts
+after it — the gateway address does not exist until the bridge does.
+
+`lca check` reports it, `guarded_ports` knows the port, `uninstall.sh` removes
+both units and releases the bind.
+
+### Why it is not also a context injector
+
+The relay was going to be a small HTTP proxy so it could inject
+`options.num_ctx` per client — giving the agent a large window without raising
+`OLLAMA_CONTEXT_LENGTH` for aider and the chat app. **Measured, and it cannot
+work that way.** Ollama's OpenAI-compatible endpoint — the one OpenHands speaks
+— ignores it:
+
+| Request | Loaded `context_length` |
+|---|---|
+| `POST /v1/chat/completions` `{"options":{"num_ctx":8192}}` | 4096 |
+| `POST /v1/chat/completions` `{"num_ctx":8192}` | 4096 |
+| `POST /api/chat` `{"options":{"num_ctx":8192}}` | **8192** |
+
+(read back from `/api/ps`, server default 4096). A proxy could only have
+delivered it by rewriting `/v1` requests onto `/api` — reimplementing the
+translation Ollama already does, on the hot path.
+
+**A derived model does it properly**, and `/v1` honours that:
+
+```bash
+printf 'FROM qwen2.5-coder:3b\nPARAMETER num_ctx 16384\n' > agent.Modelfile
+ollama create qwen2.5-coder:3b-agent -f agent.Modelfile
+```
+
+Asked through `/v1`, that model loads at `context_length: 16384` while the
+server default stays 4096 for everything else. The cost is honest and worth
+knowing: it is a second entry in Ollama's loader, so if both are hot at once
+the box holds two copies of the weights.
