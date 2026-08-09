@@ -2481,6 +2481,27 @@ agent_publishes_on_loopback() {
 }
 check "the agent's port is published on loopback, not on every interface" \
   agent_publishes_on_loopback
+# The wall clock has to be able to fire while the agent says NOTHING, because
+# silence is the exact shape of the runaway it exists to catch: a process wedged
+# on a network call writes no log at all. A loop that judges once per log line
+# never judges such a run. Both of these were found by watching a real
+# container, not by reading the loop.
+watch_judges_on_time_not_only_on_output() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
+  grep -qE 'read -r -t' <<<"${body}" || {
+    echo 'agent-watch.sh blocks in read, so a silent agent is never judged and the wall clock cannot fire' >&2
+    return 1; }
+  # ...and the status it reads must be read's own. '! cmd' inverts the status,
+  # so $? in that branch is the negation's 0 rather than read's 128+ timeout —
+  # measured: the loop broke on the first tick and announced "the agent stopped
+  # on its own" about a container that was still serving.
+  ! grep -qE '^\s*if ! IFS= read' <<<"${body}" || {
+    echo "agent-watch.sh reads \$? after a negated read, so a tick is mistaken for the stream ending" >&2
+    return 1; }
+}
+check "the wall clock can fire while the agent is silent" \
+  watch_judges_on_time_not_only_on_output
 
 echo "# one instructions file, respected on every surface"
 # config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing
@@ -10097,6 +10118,14 @@ source "$1"
 # every key in .env over whatever the caller had set.
 HAVE_NFT="$2"; CAN_ROOT="$3"; NFT_DUMP="$4"; DRY_RUN="$5"
 ENABLE_WEBUI=true; WEBUI_PORT="${6:-3000}"; OLLAMA_HOST=127.0.0.1:11434
+# The agent seams, pinned for the same reason as the three above: guarded_ports
+# asks them, and unpinned they answer from whatever containers this machine is
+# running. Measured — with a real agent container up, this probe saw a "live
+# Agent 3001" that its fixture never described, and the no-op guard case
+# reported a change.
+ENABLE_AGENT=false
+agent_container_running() { return 1; }
+agent_live_port() { return 1; }
 have()     { case "$1" in nft) return "${HAVE_NFT}" ;; *) return 0 ;; esac; }
 can_root() { return "${CAN_ROOT}"; }
 as_root()  { printf '%s' "${NFT_DUMP}"; }

@@ -79,14 +79,34 @@ long instructions file eats the window. The unit gate still bounds the part
 this project ships, measured with the appendix off — raising that budget to fit
 a user's file would have been weakening a gate to pass.
 
+## Verified live, not just gated
+
+The app image turned out to be 0.35 GB compressed (~2 GB on disk), so it WAS
+pulled and run here, and the design was checked against a real container:
+
+    3000/tcp -> 127.0.0.1:3001        published on loopback only
+    lca agent status -> running, answering on 3001
+    guarded_ports    -> WebUI 3000 / Ollama 11434 / Agent 3001
+    wall clock       -> fired at exactly 60s on a SILENT log, --dry-run left
+                        the container running
+
+That found two bugs no unit test would have. The image has since been removed
+and .env restored (ENABLE_AGENT=false, AGENT_TIMEOUT_MINUTES=180).
+
+## Still untested, and why
+
+`AGENT_STEP_PATTERN` has never matched a real agent STEP: doing that needs the
+several-GB agent-server sandbox image and a full task at ~5 tok/s. `watch`
+already refuses to call such a run clean — it warns that the ceiling could
+never fire and exits non-zero — so the failure is loud rather than silent, but
+the pattern itself is still a guess. Tune it against a real run before relying
+on the step ceiling.
+
 ## Next step, precisely
 
-All three named priorities are done. The ladder below is the remaining work:
-the highest-value item is that **the agent images have never been pulled on
-this box** (~14 GB free against a 15 GB floor), so everything needing a live
-container is untested — whether OpenHands answers on 3001, and whether
-`AGENT_STEP_PATTERN` matches its real log. Do that on a machine with disk, or
-free some here first.
+All three named priorities are done and the ladder is largely swept. The
+remaining item is the one above: run a real agent task on a machine with disk
+and tune AGENT_STEP_PATTERN from its log.
 
 ## Standing constraints observed
 

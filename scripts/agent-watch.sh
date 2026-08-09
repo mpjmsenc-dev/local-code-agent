@@ -79,11 +79,35 @@ main() {
   # is the consumer, so nothing here exits early on it — the SIGPIPE trap this
   # project has hit repeatedly is the other way round, a consumer that leaves
   # while the producer still writes.
-  while IFS= read -r line; do
-    if [[ "${line}" =~ ${AGENT_STEP_PATTERN} ]]; then
+  # 'read -t', not a bare read, and this is the difference between a wall clock
+  # that works and one that only looks like it does.
+  #
+  # The first version evaluated the limits once per log line, which means a
+  # silent agent was never checked at all — and silence is exactly the shape of
+  # the runaway this timeout exists to catch: a process wedged on a network
+  # call or a prompt writes nothing, so the loop blocks in read for ever and
+  # the clock is never consulted. Found by watching a real container's log
+  # rather than by reasoning about the loop.
+  #
+  # rc > 128 is the timeout (nothing to read yet, keep going and re-judge);
+  # anything else non-zero is end of stream, which means the container is gone.
+  local rc
+  while true; do
+    line=""
+    # No '!' on the read. '! cmd' INVERTS the status, so inside that branch $?
+    # is the negation's 0 and not read's own 128+timeout code — measured: the
+    # loop broke on the first tick and announced "the agent stopped on its own"
+    # about a container that was still serving.
+    if IFS= read -r -t "${AGENT_WATCH_TICK:-20}" line; then
+      : # a line arrived; fall through and judge it
+    else
+      rc=$?
+      (( rc > 128 )) || break
+    fi
+    if [[ -n "${line}" ]] && [[ "${line}" =~ ${AGENT_STEP_PATTERN} ]]; then
       iters=$(( iters + 1 )); matched_steps=$(( matched_steps + 1 ))
     fi
-    if [[ "${line}" =~ ${AGENT_FAIL_PATTERN} ]]; then
+    if [[ -n "${line}" ]] && [[ "${line}" =~ ${AGENT_FAIL_PATTERN} ]]; then
       matched_fails=$(( matched_fails + 1 ))
       sig="$(agent_failure_signature "${line}")"
       if [[ -n "${sig}" && "${sig}" == "${last_sig}" ]]; then
