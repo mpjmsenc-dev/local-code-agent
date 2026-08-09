@@ -239,3 +239,65 @@ cache. It now sends a fresh, larger prompt with a nonce at the **front** (a
 nonce at the end leaves everything before it cacheable, which is most of it).
 If you ever hand-roll this measurement with `curl`, do the same, or you will
 measure a cache and conclude your box is ten times faster than it is.
+
+---
+
+## Does a 7b fit? Measured, and the answer has two halves
+
+The ladder puts anything under 9 GiB on `qwen2.5-coder:3b`. That is a RAM rule,
+and RAM turns out not to be the binding constraint. Both models were measured
+here rather than reasoned about.
+
+**Resident cost**, from Ollama's own accounting (`ollama ps`), one model at a
+time, each loaded at the context named:
+
+| Context | `3b` | `7b` |
+|---|---|---|
+| 2048 | 2.1 GB | 4.9 GB |
+| 4096 | 2.2 GB | **5.1 GB** |
+| 8192 | 2.4 GB | 5.5 GB |
+| 16384 | 2.7 GB | 5.9 GB |
+| 32768 | 3.4 GB | — |
+
+5.1 GB is about 4.8 GiB. On a 7.8 GiB box that leaves roughly 3 GiB for the OS
+and the chat app, so **a 7b fits at 4096 and even at 8192**. "It does not fit"
+would be the wrong reason to keep the ladder where it is.
+
+**Speed is the real constraint.** Same box, same prompt, one coding task:
+
+| | prompt eval | generation |
+|---|---|---|
+| `3b` @ 4096 | 53.7 tok/s | 10.41 tok/s |
+| `7b` @ 4096 | 24.4 tok/s | 5.44 tok/s |
+
+The 7b is **1.9× slower to think and 2.2× slower to read**, for a model that
+this project's other measurement shows is *not* better at the thing that was
+blocking the agent tier (see docs/AGENT.md — the 7b fails the tool-call channel
+exactly as the 3b does).
+
+### The measurements above are from a faster machine than the target, and here is the factor
+
+These numbers were taken on a 4-vCPU / 16 GB box, not on the 7.8 GiB droplet the
+ladder is written for, so the throughput figures do **not** transfer directly.
+The memory figures do — weights plus KV cache do not care about the CPU.
+
+One configuration was run on both machines, which is what makes a conversion
+possible at all: `3b` at `num_ctx=32768` with a ~16k-token prompt.
+
+| | prompt eval | generation |
+|---|---|---|
+| this box | 28.07 tok/s | 4.07 tok/s |
+| the droplet (live agent run) | 8.99 tok/s | 0.59 tok/s |
+| ratio | **3.1×** | **6.9×** |
+
+The two ratios differ by more than a factor of two, which is itself the finding:
+prompt evaluation is compute-bound and generation is memory-bandwidth-bound, and
+the droplet is much worse at the second than its core count suggests. Projecting
+the 7b onto it with the generation ratio gives roughly **0.8 tok/s** — a
+300-token answer in six minutes.
+
+**So the ladder stands, for a corrected reason.** Under 9 GiB stays on the 3b
+not because a 7b would not fit, but because it would halve an already slow box
+for a model that is not better at the work this stack actually failed at. Anyone
+revisiting this should re-measure the two ratios above on their own hardware
+first; on a box with real memory bandwidth the trade could go the other way.
