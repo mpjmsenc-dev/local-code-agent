@@ -2502,6 +2502,42 @@ watch_judges_on_time_not_only_on_output() {
 }
 check "the wall clock can fire while the agent is silent" \
   watch_judges_on_time_not_only_on_output
+# 'lca apply' has to know the agent exists. docs/AGENT.md told people to run it
+# and, until this, apply reconciled the guard while never once looking at the
+# container — so the doc described work the code did not do.
+apply_reconciles_the_agent() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/apply.sh")"
+  grep -q 'apply_agent' <<<"${body}" || {
+    echo 'lca apply never looks at the agent, while docs/AGENT.md tells people to run it' >&2
+    return 1; }
+  # ...and it must be CALLED, not merely defined. A applier that is written and
+  # never dispatched is the quietest kind of dead code.
+  awk '/^apply_agent\(\) \{/ { defined = 1 }
+       /^  apply_agent$/     { called = 1 }
+       END { exit (defined && called) ? 0 : 1 }' <<<"${body}" || {
+    echo 'apply_agent is defined but never called from main' >&2
+    return 1; }
+  # The disabled-but-running case, which is this project'"'"'s hardest-won rule:
+  # a container still serving after ENABLE_AGENT=false must be named, because
+  # this one hands out a session that runs commands on the machine.
+  # Bounded to the DISABLED branch — between the ENABLE_AGENT test and the
+  # "disabled in .env" line it ends with. The first version of this only asked
+  # that agent_container_running appear somewhere after ENABLE_AGENT anywhere
+  # in the function, and the enabled path below uses it too: replacing the
+  # disabled branch's check with 'false' left the string in place and the gate
+  # green. Caught by mutation, not by reading it.
+  awk '/^apply_agent\(\) \{/                { inb = 1 }
+       inb && /ENABLE_AGENT.*!=.*true/      { arm = 1; next }
+       inb && arm && /disabled in .env/     { arm = 0 }
+       inb && arm && /agent_container_running/ { found = 1 }
+       inb && /^\}/                         { exit }
+       END { exit found ? 0 : 1 }' <<<"${body}" || {
+    echo 'apply_agent trusts ENABLE_AGENT without asking whether the container is still running' >&2
+    return 1; }
+}
+check "'lca apply' reports the agent, including one running while .env says off" \
+  apply_reconciles_the_agent
 
 echo "# one instructions file, respected on every surface"
 # config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing

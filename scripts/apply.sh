@@ -249,6 +249,57 @@ apply_backup_timer() {
 # chat app is off, or when docker is unreachable. In that case 'lca apply'
 # printed "Everything already matches .env" while the unauthenticated Ollama
 # API listened, publicly, on a port nothing was guarding.
+# apply_agent — reconcile the agent tier, by REPORTING rather than acting.
+#
+# Deliberately the most conservative applier here. apply_webui recreates its
+# container, which is right: a chat app is stateless between messages. The
+# agent may be halfway through a task somebody left it running overnight, and
+# tearing that down because a config line changed would destroy the work this
+# whole tier exists to do. So this names the drift and the one-line fix, and
+# leaves the timing to the person who knows what it is doing.
+#
+# The two cases are the ones the chat app taught this project, in the same
+# order and for the same reasons.
+apply_agent() {
+  if [[ "${SKIP_DOCKER}" == "true" ]]; then
+    info "Agent:    SKIP_DOCKER=true — nothing to apply."
+    return 0
+  fi
+  if ! docker_daemon_reachable; then
+    warn "Agent:    cannot reach the Docker daemon, so its container was neither checked nor applied. $(docker_unreachable_advice). Then re-run."
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  if [[ "${ENABLE_AGENT}" != "true" ]]; then
+    # Intent says off. A running container says otherwise, and this one hands
+    # out a browser session that can run commands on the machine — so it is
+    # named, loudly, rather than passed over as "disabled, nothing to do".
+    if agent_container_running; then
+      warn "Agent:    .env has it disabled, but its container is still RUNNING — it still answers on its port, and nothing in this command stops it. Stop it with: sudo ${REPO_ROOT}/bin/lca agent stop"
+      UNCHECKED=$((UNCHECKED+1))
+      return 0
+    fi
+    info "Agent:    disabled in .env — nothing to apply."
+    return 0
+  fi
+  if ! agent_container_running; then
+    info "Agent:    enabled in .env but not running — start it with: ${REPO_ROOT}/bin/lca agent start"
+    return 0
+  fi
+  # Its port is baked in at creation, exactly like the chat app's, so an edited
+  # AGENT_PORT leaves the running UI on the old one. guarded_ports already
+  # covers the live port so the box is not exposed by the drift; this is the
+  # half that tells the user their edit has not taken effect.
+  local live
+  live="$(agent_live_port 2>/dev/null || true)"
+  if [[ "${live}" =~ ^[0-9]+$ ]] && [[ "${live}" != "${AGENT_PORT}" ]]; then
+    warn "Agent:    running on port ${live}, not .env's ${AGENT_PORT} — its port is fixed when the container is created. Re-create it when the current task is finished: sudo ${REPO_ROOT}/bin/lca agent restart"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  ok "Agent:    already matches .env (port ${AGENT_PORT})."
+}
+
 apply_guard() {
   local want dump gaps
   want="$(guarded_ports || true)"
@@ -324,6 +375,7 @@ main() {
   # anyway — so by the time we get there it usually has nothing left to do.
   apply_ollama
   apply_webui
+  apply_agent
   apply_backup_timer
   apply_guard
 

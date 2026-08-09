@@ -15,8 +15,8 @@ ENABLE_AGENT=true
 ```
 
 ```bash
-sudo lca apply        # creates the container and closes its port in the guard
-lca agent start
+sudo lca apply        # closes its port in the inbound guard
+lca agent start       # creates and starts the container
 lca agent url         # the address to open on your phone, over Tailscale
 ```
 
@@ -144,6 +144,14 @@ Two things protect it, and both are checked:
 
 `sudo lca status` shows what the guard covers. `lca check` reports the agent's
 port among the rest.
+
+`sudo lca apply` **reports** the agent rather than acting on it — that is the
+one applier that does not recreate its container. The chat app is stateless
+between messages; this may be halfway through a task you left running
+overnight, and tearing that down because a config line changed would destroy
+exactly the work the tier exists for. It names the drift and the one-line fix
+(`lca agent restart`) and leaves the timing to you. It also says so, loudly, if
+`ENABLE_AGENT=false` while the container is still running.
 
 ## What it does not do
 
