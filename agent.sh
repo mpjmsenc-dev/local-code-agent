@@ -88,9 +88,10 @@ start_agent() {
     as_root docker rm -f "${AGENT_CONTAINER}" >/dev/null 2>&1 || true
   fi
 
-  local model base_url instructions
+  local model base_url instructions bridge_gw
   model="$(agent_llm_model "${MODEL_NAME}")"
   base_url="$(agent_llm_base_url)"
+  bridge_gw="$(docker_bridge_gateway)"
   # The same instructions file aider reads and the chat app is given, so the
   # third surface does not become the one place the user's preferences are
   # ignored. Passed as the agent's default task framing; empty when the file is
@@ -103,6 +104,53 @@ start_agent() {
   # without it the agent cannot see Ollama at all. The docker socket is what
   # lets it start its own sandbox containers; that is also why this tier is
   # opt-in, and docs/AGENT.md says so in those words.
+  #
+  # OH_SANDBOX_HOST_PORT is the other half of publishing on a non-default port,
+  # and leaving it out cost this project a whole verification run.
+  #
+  # The container listens on 3000 and we publish it on AGENT_PORT, because 3000
+  # is WEBUI_PORT here. But the app also hands its OWN address to every sandbox
+  # it starts — the MCP tool server the agent must list its tools from, and the
+  # webhook it reports events to — and it builds that address from a port it
+  # merely assumes: 'http://host.docker.internal:<host_port>', where host_port
+  # defaults to 3000. Nothing tells it about the -p mapping.
+  #
+  # So the sandbox dialled host.docker.internal:3000 and reached Open WebUI,
+  # which accepts the connection and then never speaks MCP. It does not refuse
+  # — it hangs — so the agent waited out its 30 s tool-listing timeout and died
+  # in init with MCPTimeoutError, before one token was ever asked of the model.
+  # Measured here: load average 0.52 and zero Ollama requests at the moment it
+  # failed, which is why "it ran out of CPU" was the wrong reading of it.
+  #
+  # OpenHands documents the fix on the field itself: "If running OpenHands on a
+  # non-default port, set this to match." The two flags are one decision and
+  # must not drift apart, so they sit together. OH_SANDBOX_HOST_PORT is what
+  # the webhook callback is built from and OH_WEB_URL what the MCP URL is built
+  # from — two different code paths off the same mistake, so both are set.
+  #
+  # OH_SANDBOX_KIND is not redundant, and leaving it out is a silent no-op.
+  # 'sandbox' is a discriminated union, and its env parser reads <KEY>_KIND
+  # FIRST; with three candidate kinds and no KIND set it cannot choose, so it
+  # discards the whole nested entry — every OH_SANDBOX_* var with it. Measured
+  # in the container: with OH_SANDBOX_HOST_PORT=3001 alone, config_from_env()
+  # still reported host_port 3000 and the webhooks still went to Open WebUI,
+  # which answers 405 rather than refusing. Naming the kind we are already
+  # using makes the port setting take.
+  #
+  # And the second -p is the other half again: naming the right port is no use
+  # if nothing can dial it. Publishing ONLY on 127.0.0.1 puts the agent behind
+  # the host's loopback, where a sandbox container — which reaches this machine
+  # as the bridge gateway, never as 127.0.0.1 — cannot reach it at all.
+  # Measured from inside a live sandbox: both the MCP URL and the app's root
+  # answered 000, connection refused, on a container that was up and healthy.
+  #
+  # So it is published twice, on two addresses that are both private: the
+  # host's loopback, for the human and for 'lca agent status', and the docker
+  # bridge gateway, for the sandboxes. What that DOES widen is honest and worth
+  # stating: any container on the default bridge can now reach the agent's UI.
+  # What it does not do is put it on a public interface — the gateway address
+  # is routable only from this host and its containers, guarded_ports still
+  # covers AGENT_PORT, and docs/AGENT.md says all of this in the same words.
   local extra_env=()
   if [[ -n "${instructions}" ]]; then
     # LLM_SYSTEM_PROMPT_SUFFIX is not a documented OpenHands variable, so this
@@ -119,6 +167,9 @@ start_agent() {
     -v "${REPO_ROOT}/config/CONVENTIONS.md:/.openhands/lca-instructions.txt:ro" \
     -e AGENT_SERVER_IMAGE_REPOSITORY="${AGENT_RUNTIME_IMAGE}" \
     -e AGENT_SERVER_IMAGE_TAG="${AGENT_RUNTIME_TAG}" \
+    -e OH_SANDBOX_KIND=DockerSandboxServiceInjector \
+    -e OH_SANDBOX_HOST_PORT="${AGENT_PORT}" \
+    -e OH_WEB_URL="$(agent_web_url)" \
     -e LLM_MODEL="${model}" \
     -e LLM_BASE_URL="${base_url}" \
     -e LLM_API_KEY=local-llm \
@@ -126,6 +177,7 @@ start_agent() {
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "${HOME}/.openhands:/.openhands" \
     -p "127.0.0.1:${AGENT_PORT}:3000" \
+    -p "${bridge_gw}:${AGENT_PORT}:3000" \
     --add-host host.docker.internal:host-gateway \
     "${AGENT_IMAGE}" >/dev/null \
     || die "Could not start the agent container. Its own output: lca agent logs"
@@ -133,6 +185,43 @@ start_agent() {
   ok "Agent started. ${AGENT_CONTAINER} is running."
   info "It may take a minute to answer while it unpacks. Then: $(agent_url_line)"
   seed_agent_settings
+  warn_if_model_unreachable
+}
+
+# warn_if_model_unreachable — ask the agent's own container whether it can see
+# Ollama, and say so plainly when it cannot.
+#
+# This is a probe, not a guess about the config. The app container sits on the
+# same docker bridge as every sandbox and reaches this machine by the same
+# route, so what it can dial is what they can dial.
+#
+# The failure it catches is the one that costs a whole night. OLLAMA_HOST is
+# 127.0.0.1 by default — deliberately, and .env says why — but a container's
+# loopback is the container, so it reaches this machine as the bridge gateway
+# instead, and nothing is listening for it there. The stack still looks
+# perfectly healthy: the container is up, the UI answers, 'lca agent status' is
+# green, and the task simply never produces a token.
+#
+# Warned, not refused, and that is deliberate too: a relay or a widened bind
+# are both legitimate answers, and this cannot tell that one is in place except
+# by trying — which is exactly what it does.
+warn_if_model_unreachable() {
+  local base probe
+  base="$(agent_llm_base_url)"
+  # Its own curl, inside its own network namespace. '|| true' so a container
+  # that is still unpacking, or an image without curl, is not turned into a
+  # failure of 'start' — an unanswerable question gets no verdict.
+  if ! as_root docker exec "${AGENT_CONTAINER}" \
+        curl -fsS -m 8 -o /dev/null "${base}/models" >/dev/null 2>&1; then
+    probe="$(as_root docker exec "${AGENT_CONTAINER}" command -v curl 2>/dev/null || true)"
+    if [[ -z "${probe}" ]]; then
+      info "Could not check whether the agent can reach the model (no curl in its image); if tasks never start, that is the first thing to test."
+      return 0
+    fi
+    warn "The agent cannot reach Ollama at ${base}, so every task it is given will fail without producing a token — and nothing else here will look wrong."
+    info "Why: OLLAMA_HOST is '${OLLAMA_HOST}', and a container's loopback is the container. It reaches this machine as the docker bridge gateway ($(docker_bridge_gateway)), where nothing is listening."
+    info "Two ways out, and both are yours to choose: bind Ollama where the bridge can see it (OLLAMA_HOST=0.0.0.0:${OLLAMA_HOST##*:}, which the inbound guard already covers), or run a relay from the gateway to loopback. See docs/AGENT.md."
+  fi
 }
 
 # seed_agent_settings — write the LLM settings the agent needs before it can
@@ -153,8 +242,25 @@ start_agent() {
 # POSTed once at start, and best-effort: a failure here is a warning, never a
 # reason to fail a container that did start. It is idempotent, so a restart
 # re-asserts .env's model rather than leaving a stale one from an older run.
+#
+# The payload is a *_diff, and the shape is not cosmetic. The flat legacy body
+# this function used to send — {llm_model, llm_base_url, ...} — is answered
+# with 200 {"message":"Settings stored"} and stores NONE of it: the endpoint
+# declares 'additionalProperties: true', so unknown keys are accepted and
+# dropped. Measured on 1.8: after that 200, GET /api/v1/settings still read
+# model 'gpt-5.5' with a null base_url, and this function had already printed
+# "Agent settings seeded: openai/qwen2.5-coder:3b". A success message for
+# something that did not happen, which is the exact class this repo keeps
+# closing. The server names the right shape when asked for the wrong one:
+# 422 {"error":"Use *_diff nested settings payloads instead of legacy keys"}.
+#
+# So the write is READ BACK, and only a value that actually landed is reported
+# as seeded. A 200 from this endpoint is not evidence.
 seed_agent_settings() {
   local url="http://127.0.0.1:${AGENT_PORT}/api/v1/settings" body waited=0
+  local model base_url got
+  model="$(agent_llm_model "${MODEL_NAME}")"
+  base_url="$(agent_llm_base_url)"
   # Wait for the API rather than racing it: the container answers HTTP well
   # before this route exists.
   while (( waited < 90 )); do
@@ -163,15 +269,20 @@ seed_agent_settings() {
     curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:${AGENT_PORT}/" 2>/dev/null && break
     sleep 3; waited=$(( waited + 3 ))
   done
-  body="$(jq -nc --arg m "$(agent_llm_model "${MODEL_NAME}")" \
-                 --arg u "$(agent_llm_base_url)" \
-        '{llm_model:$m, llm_base_url:$u, llm_api_key:"local-llm",
-          agent:"CodeActAgent", language:"en", confirmation_mode:false}')"
-  if curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
-       -d "${body}" >/dev/null 2>&1; then
-    ok "Agent settings seeded: $(agent_llm_model "${MODEL_NAME}") at $(agent_llm_base_url)"
+  body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
+        '{agent_settings_diff:{agent:"CodeActAgent",
+                               llm:{model:$m, base_url:$u, api_key:"local-llm"}}}')"
+  curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
+       -d "${body}" >/dev/null 2>&1 || true
+  # Read back, because the POST's status code proved nothing. jq's // guards a
+  # null model; an unreachable API yields an empty string, which matches
+  # neither and is reported as not seeded.
+  got="$(curl -fsS --max-time 10 "${url}" 2>/dev/null \
+         | jq -r '.agent_settings.llm.model // ""' 2>/dev/null || true)"
+  if [[ "${got}" == "${model}" ]]; then
+    ok "Agent settings seeded: ${model} at ${base_url}"
   else
-    warn "Could not seed the agent's LLM settings, so its first task may fail with 'Settings not found'. Open ${AGENT_PORT}'s settings screen once, or re-run: lca agent restart"
+    warn "The agent's LLM settings did not take — it still reports '${got:-none}', not '${model}', so its first task will fail or run against the wrong model. Open port ${AGENT_PORT}'s settings screen once, or re-run: lca agent restart"
   fi
 }
 

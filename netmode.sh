@@ -135,6 +135,24 @@ webui_port_from_env() {
   [[ "${port}" =~ ^[0-9]+$ ]] || port=3000
   printf '%s\n' "${port}"
 }
+# The agent's UI port, but ONLY when the tier is switched on — the same intent
+# arm guarded_ports uses, so the two lists agree and 'lca apply' can actually
+# close the gap it reports. Before this, guarded_ports asked for "Agent 3001"
+# and this renderer never emitted it: apply saw an uncovered port, re-applied a
+# ruleset that still did not cover it, and reported the same gap next run. That
+# is the unfixable loop this file already refuses to create elsewhere.
+agent_port_from_env() {
+  local enabled="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_AGENT:-false}" )"
+    # shellcheck disable=SC1090
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${AGENT_PORT:-}" )"
+  fi
+  [[ "${enabled}" == "true" ]] || return 0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${port}"
+}
 ollama_port_from_env() {
   local url="" port=""
   if [[ -f "${ENV_FILE}" ]]; then
@@ -153,10 +171,12 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port p q seen port_list=""
+  local webui_port ollama_port agent_port bridge_if p q seen port_list=""
   local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
+  agent_port="$(agent_port_from_env)"
+  bridge_if="$(docker_bridge_interface)"
   # ENFORCE the "can never lock you out" invariant below instead of merely
   # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
   # or someone fronting a service on the SSH port), the drop rule would
@@ -164,7 +184,7 @@ render_inbound_rules() {
   # the guard after each reboot: the box would then be reachable only from the
   # provider's recovery console. Refuse to guard 22, and say so on stderr so
   # the ruleset on stdout stays byte-clean for nft.
-  for p in "${webui_port}" "${ollama_port}"; do
+  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"}; do
     [[ "${p}" =~ ^[0-9]+$ ]] || continue
     if (( p == 22 )); then
       warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
@@ -194,6 +214,15 @@ render_inbound_rules() {
     echo "    # tailscale0."
     echo "    iifname \"lo\" accept"
     echo "    iifname \"tailscale0\" accept"
+    echo "    # ...and the docker bridge, which is local traffic for the same"
+    echo "    # reason lo is. A container reaches this machine as the bridge"
+    echo "    # gateway, never as 127.0.0.1, so without this line the guard"
+    echo "    # drops the stack's own containers: measured, the agent's sandbox"
+    echo "    # could not reach Ollama (all 626 packets dropped here) and, once"
+    echo "    # AGENT_PORT joined the set below, could not reach the agent app"
+    echo "    # it must call back into either. This widens nothing that faces"
+    echo "    # the network — the bridge is routable only from this host."
+    echo "    iifname \"${bridge_if}\" accept"
     echo "    ct state established,related accept"
     echo ""
     echo "    # Drop NEW inbound to the private-only services on any OTHER"

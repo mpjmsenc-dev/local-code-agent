@@ -323,6 +323,53 @@ fi
 SSH_ALL_FILE="$(mktemp)"
 printf '%s\n' "${SSH_ALL}" > "${SSH_ALL_FILE}"
 
+# The docker bridge is accepted, always. Not a convenience: this machine's own
+# containers reach it as the bridge gateway rather than as loopback, so without
+# this line the guard drops the stack's own traffic. Measured before it existed
+# — the guard's counter had eaten 626 packets from the agent's sandbox trying
+# to reach Ollama, and the tier could not work at all.
+BRIDGE_RENDER="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"')"
+if grep -qE '^\s*iifname "[A-Za-z0-9_.-]+" accept' <<<"$(grep -v 'lo\|tailscale0' <<<"${BRIDGE_RENDER}")"; then
+  t_ok "the guard accepts the docker bridge, so local containers are not dropped"
+else
+  t_fail "the guard accepts only lo and tailscale0 — this machine's own containers are dropped"
+fi
+
+# AGENT_PORT must be RENDERED when the tier is on, because guarded_ports asks
+# for it. When the two disagree, 'lca apply' reports an uncovered port,
+# re-applies a ruleset that still does not cover it, and says the same thing
+# again next run — the unfixable loop netmode.sh refuses to create elsewhere.
+AGENT_ON="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_AGENT=true
+AGENT_PORT=3001')"
+if grep -qE 'dport \{[^}]*\b3001\b' <<<"${AGENT_ON}"; then
+  t_ok "AGENT_PORT is guarded when the agent tier is enabled"
+else
+  t_fail "ENABLE_AGENT=true but AGENT_PORT is not in the drop set — 'lca apply' can never close the gap it reports"
+fi
+AGENT_OFF="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_AGENT=false
+AGENT_PORT=3001')"
+if grep -qE 'dport \{[^}]*\b3001\b' <<<"${AGENT_OFF}"; then
+  t_fail "AGENT_PORT is guarded even with the tier switched off"
+else
+  t_ok "...and is not, when it is off"
+fi
+# The same SSH invariant, through the new door. An agent parked on 22 must not
+# reach the drop set any more than a WebUI on 22 does.
+AGENT_SSH="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_AGENT=true
+AGENT_PORT=22')"
+if grep -qE 'dport \{[^}]*\b22\b' <<<"${AGENT_SSH}"; then
+  t_fail "AGENT_PORT=22 reached the drop set — this would lock SSH out"
+else
+  t_ok "...and AGENT_PORT=22 is refused too, like every other port 22"
+fi
+
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
 if command -v nft >/dev/null 2>&1; then
@@ -440,11 +487,27 @@ elif [[ -s "${GUARD_SB}/inbound.nft" ]]; then
 else
   t_fail "apply_inbound_guard did not produce a guard ruleset"
 fi
-if diff -q "${INBOUND}" "${GUARD_SB}/inbound.nft" >/dev/null 2>&1; then
+# Compared against a render of the SAME .env the apply above was given, not
+# against ${INBOUND} — which is rendered from whatever .env this machine
+# happens to have. The two agreed only for as long as nothing in the ruleset
+# depended on a setting that differed between them; the moment AGENT_PORT
+# started being rendered (it is guarded when ENABLE_AGENT=true, exactly as
+# guarded_ports has always asked), a developer with the agent enabled saw this
+# fail while the writer was working perfectly.
+#
+# The invariant under test is "apply writes byte for byte what render prints",
+# and it is stronger this way, not weaker: both sides now describe one
+# configuration, so a real difference is the only thing that can show up here.
+GUARD_REFERENCE="$(mktemp)"
+render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST=127.0.0.1:11434' > "${GUARD_REFERENCE}"
+if diff -q "${GUARD_REFERENCE}" "${GUARD_SB}/inbound.nft" >/dev/null 2>&1; then
   t_ok "...byte for byte what render-inbound prints"
 else
   t_fail "the written guard differs from the rendered one"
+  diff "${GUARD_REFERENCE}" "${GUARD_SB}/inbound.nft" | head -10 >&2
 fi
+rm -f "${GUARD_REFERENCE}"
 # The sentence this prints is the one that must never be wrong: it tells the
 # reader which ports are now private. Asserted by RUNNING it, where before only
 # a grep for the '!= "22"' comparison stood in for it.

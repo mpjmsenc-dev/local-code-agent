@@ -2481,6 +2481,102 @@ agent_publishes_on_loopback() {
 }
 check "the agent's port is published on loopback, not on every interface" \
   agent_publishes_on_loopback
+# ...and ALSO on the docker bridge, which is not a second thought: a sandbox
+# reaches this machine as the bridge gateway and never as its loopback, so with
+# the loopback publish alone every callback the agent makes into itself is
+# refused. Measured from inside a live sandbox: 000 for the MCP URL and 000 for
+# the app's root, on a container that was up and healthy.
+agent_publishes_on_the_bridge_too() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -qE '\-p "\$\{bridge_gw\}:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
+    echo 'agent.sh publishes only on loopback, which its own sandboxes cannot reach — MCP tool listing will time out in init' >&2
+    return 1; }
+  # The address must be DISCOVERED, not written down: 172.17.0.1 is only the
+  # usual gateway, and a daemon with a custom bip has another.
+  grep -q 'docker_bridge_gateway' <<<"${body}" || {
+    echo 'agent.sh hardcodes a bridge address instead of asking docker for it' >&2
+    return 1; }
+  # And it must not have reached for 0.0.0.0 to solve the same problem.
+  ! grep -qE '\-p "0\.0\.0\.0:' <<<"${body}" || {
+    echo 'agent.sh publishes the agent on every interface' >&2; return 1; }
+}
+check "...and on the docker bridge, which is the only address its sandboxes have" \
+  agent_publishes_on_the_bridge_too
+# The three variables that decide whether a sandbox can call back into the app
+# at all. Without them OpenHands advertises its CONTAINER-side port 3000, which
+# on this stack is Open WebUI — and Open WebUI hangs rather than refusing, so
+# the failure is a 30 s MCP timeout in init rather than an error anyone can read.
+agent_sh_corrects_the_callback_address() {
+  local body v
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  for v in OH_WEB_URL OH_SANDBOX_HOST_PORT OH_SANDBOX_KIND; do
+    grep -q -- "-e ${v}" <<<"${body}" || {
+      printf '%s is not passed to the agent, so its sandboxes call back to the wrong port\n' "${v}" >&2
+      return 1; }
+  done
+  # OH_SANDBOX_KIND is the one whose absence is SILENT: the env parser reads
+  # <KEY>_KIND first and, unable to choose between three kinds, drops every
+  # other OH_SANDBOX_* value with it. Measured in the container: host_port
+  # stayed 3000 with OH_SANDBOX_HOST_PORT=3001 set on its own.
+  grep -qE -- '-e OH_SANDBOX_KIND=[A-Za-z]+' <<<"${body}" || {
+    echo 'OH_SANDBOX_KIND is passed without a value, so OH_SANDBOX_HOST_PORT is silently discarded' >&2
+    return 1; }
+}
+check "the agent tells its sandboxes the port it is really published on" \
+  agent_sh_corrects_the_callback_address
+# The URL must be built from AGENT_PORT, not from the 3000 the container listens
+# on internally. This is the whole bug in one function.
+agent_web_url_follows_agent_port() {
+  local u
+  u="$(AGENT_PORT=3999 agent_web_url)"
+  [[ "${u}" == "http://host.docker.internal:3999" ]] || {
+    printf 'agent_web_url ignored AGENT_PORT: %s\n' "${u}" >&2; return 1; }
+}
+check "...and builds that address from AGENT_PORT" \
+  agent_web_url_follows_agent_port
+# A bridge name is interpolated straight into an nft ruleset, so anything that
+# is not a plain interface name must become the fallback rather than reach nft.
+bridge_interface_is_a_safe_name() {
+  local n
+  n="$(docker_bridge_interface)"
+  [[ "${n}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+    printf 'docker_bridge_interface produced something that is not an interface name: %s\n' "${n}" >&2
+    return 1; }
+  # Docker absent, or answering with junk, must still yield a usable default.
+  n="$(bash -c 'source "$1" >/dev/null 2>&1; have() { return 1; }; docker_bridge_interface' _ "${REPO}/scripts/lib.sh")"
+  [[ "${n}" == "docker0" ]] || {
+    printf 'with no docker present the bridge name should fall back to docker0, got: %s\n' "${n}" >&2
+    return 1; }
+}
+check "the docker bridge interface name is always safe to put in a ruleset" \
+  bridge_interface_is_a_safe_name
+# The seeder POSTs a *_diff, because the flat legacy body is answered 200 and
+# stored NOT AT ALL — the endpoint declares additionalProperties and drops what
+# it does not know. That 200 is why this function used to announce a model the
+# agent was not running.
+seed_uses_a_diff_and_reads_it_back() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -q 'agent_settings_diff' <<<"${body}" || {
+    echo 'agent.sh still POSTs the flat legacy settings body, which this build accepts with 200 and ignores' >&2
+    return 1; }
+  # 'llm_model:' with the colon, which is the jq key. A bare 'llm_model' also
+  # matches the agent_llm_model CALL two lines above it in agent.sh, so this
+  # test would fail on correct code.
+  ! grep -q 'llm_model:' <<<"${body}" || {
+    echo 'agent.sh still sends the legacy llm_model key' >&2; return 1; }
+  # And the success line must be gated on a READ, not on the POST's status.
+  awk '/^seed_agent_settings\(\) \{/     { inb = 1 }
+       inb && /got=/                     { read = 1 }
+       inb && /\$\{got\}.*==.*\$\{model\}/ { gated = 1 }
+       inb && /^\}/                      { exit }
+       END { exit (read && gated) ? 0 : 1 }' <<<"${body}" || {
+    echo 'the "settings seeded" message is not gated on reading the value back, so a 200 that stored nothing still reports success' >&2
+    return 1; }
+}
+check "the settings seeder proves the write landed instead of trusting a 200" \
+  seed_uses_a_diff_and_reads_it_back
 # The wall clock has to be able to fire while the agent says NOTHING, because
 # silence is the exact shape of the runaway it exists to catch: a process wedged
 # on a network call writes no log at all. A loop that judges once per log line

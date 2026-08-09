@@ -48,15 +48,80 @@ this project's chat app (`WEBUI_PORT`). The chat app runs with `--network=host`,
 so the two would fight over one socket. `lca agent start` refuses to start if
 the two ports are equal, rather than letting docker fail obscurely.
 
+**And why moving the port is not enough on its own.** The traffic runs both
+ways. The app publishes a UI for you, but every sandbox it starts must also
+call *back* into it — to list its tools over MCP, and to report its events —
+and OpenHands builds that callback address from a port it merely assumes,
+`http://host.docker.internal:3000`, knowing nothing about the `-p` mapping. On
+this stack host port 3000 is Open WebUI, which accepts the connection and then
+never speaks MCP: not a refusal, a **hang**, ending in `MCPTimeoutError` after
+30 seconds, in agent init, before the model is asked for a single token.
+
+Three environment variables are therefore set for you, and each fixes a
+different half of the same mistake:
+
+| Variable | What it corrects |
+|---|---|
+| `OH_WEB_URL` | the MCP URL the sandbox is given |
+| `OH_SANDBOX_HOST_PORT` | the webhook URL the sandbox reports events to |
+| `OH_SANDBOX_KIND` | makes the line above take effect at all |
+
+That third one is not padding. `sandbox` is a discriminated union whose env
+parser reads `OH_SANDBOX_KIND` **first**, and with three candidate kinds and no
+kind named it discards every `OH_SANDBOX_*` variable with it. Measured inside
+the container: with `OH_SANDBOX_HOST_PORT=3001` set on its own,
+`config_from_env()` still reported `host_port 3000`, and the webhooks still
+went to Open WebUI — which answers `405` rather than refusing, so they failed
+four times per event and the app's UI stayed empty while the agent worked.
+
 ## Where it is weak here, honestly
 
-**The model is smaller than this agent wants.** OpenHands' own local-LLM guide
-asks for a context window of at least ~22k tokens and suggests
-`OLLAMA_CONTEXT_LENGTH=32768`. This project's RAM ladder gives **8192** on a
-16 GiB box, because that is what leaves room for the model itself. The agent
-will therefore lose the thread on long tasks sooner than its documentation
-assumes. Nothing here hides that: if you have the RAM, raising
-`OLLAMA_CONTEXT_LENGTH` is the single change that helps it most.
+**The model is smaller than this agent wants, and the window is the hard
+floor.** OpenHands' own local-LLM guide asks for a context window of at least
+~22k tokens and suggests `OLLAMA_CONTEXT_LENGTH=32768`. This project's RAM
+ladder gives **8192** on a 16 GiB box and **4096** on an 8 GiB one, because
+that is what leaves room for the model itself.
+
+This is not a "loses the thread sooner" problem, it is a "cannot start"
+problem. Measured on a real run: the agent's first request to the model was
+**15,492 tokens** — its system prompt plus 22 tool definitions — before the
+task text. At the 4096 rung Ollama silently truncates that, and there is no
+window in which the agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at
+least 16384, and 32768 if the RAM is there, or do not enable this tier.
+
+**The 3b model finishes the loop without doing the work.** This is the one to
+read before enabling the tier on a small droplet. Measured end to end: the
+agent started, thought for 26m48s, answered — and OpenHands marked the
+conversation `finished` with an empty workspace. What the model returned was:
+
+````
+```
+{
+    "name": "file_editor",
+    "arguments": {"file_text": "def fizzbuzz(n): ...", "path": "/workspace/project/fizzbuzz.py"}
+}
+```
+````
+
+The code in it was **correct**. It is just prose — a fabricated tool call
+inside a markdown fence, not a tool call — so nothing executed, and an
+assistant message with no tool calls is how the agent says it is done. The run
+therefore *succeeds* and produces nothing, which is worse than failing.
+
+This is the same pathology this project already documented for the phone chat
+("the chat invented a tool call rather than admit it has no filesystem"), and
+it is not a configuration problem: `native_tool_calling` is on, and Ollama
+reports this model as `tools`-capable. A 3B model is simply not reliable at
+emitting one. Give the agent tier the largest model your RAM allows, and do not
+judge it by a run on the small rung.
+
+**It is slower than the client's own patience.** That 15,492-token prompt is
+processed at roughly **17 tokens/second** on 4 CPU cores — about fifteen
+minutes for the first call. The LLM client gives up at its `timeout` (300 s by
+default) and cancels, which Ollama logs as a `500`, and the run makes no
+progress. Raise the LLM timeout in the agent's settings before handing it a
+task on CPU. Each retry does resume from Ollama's prompt cache rather than
+starting over, so it inches forward — but it inches.
 
 **It is slow.** Every step is a full model round trip on a CPU. `lca speed`
 prices one aider edit; an agent task is many of those in a row. This is a tool
@@ -138,14 +203,40 @@ while a sandbox appeared **twelve seconds after** the watcher started, and its
 lines are what drove the ceiling. A list of containers resolved once at launch
 would have counted nothing.
 
-**What it still cannot promise.** These patterns are read off one observed run,
-not a documented interface. They matched real `openhands.tools.*` and
-`openhands.sdk.*` lines, but those were tool *initialisation*; a full agent
-reasoning loop has not been observed here, because the sandbox failed first on
-an MCP server timeout (30s default) under a CPU busy running the model. If a
-run ends with **no** line having matched, `watch` says so and exits non-zero
-rather than reporting a clean run — a limit that silently never fires is worse
-than no limit, because it was believed.
+**What the step ceiling cannot do, measured on real hardware.** The pattern
+matches, and what it matches is not steps.
+
+A live run was followed end to end on a machine where the agent genuinely
+worked — MCP tools created, 22 tools loaded, the conversation started, real
+traffic to the model. Against that sandbox's whole log:
+
+```
+lines: 65   step matches: 6   failure matches: 0
+     2  openhands.tools.browser_use.impl
+     1  openhands.tools.terminal.terminal.tmux_pane_pool
+     1  openhands.tools.terminal.impl
+     1  openhands.sdk.conversation.impl.local_conversation
+     1  openhands.sdk.agent.base
+```
+
+All six are emitted **once**, while the sandbox starts its tools. The log then
+stayed at exactly 65 lines while the model was called over and over: at its
+default level (`ENV_LOG_LEVEL=20`) the sandbox writes **nothing per reasoning
+step**.
+
+So `AGENT_MAX_ITERATIONS` counts initialisation lines — about six per sandbox,
+then nothing — and at its default of 100 it **cannot fire**. Do not rely on it.
+No regex fixes this, because the information is not in the log; the step stream
+OpenHands does publish is its event API, which is where a real ceiling has to
+read from.
+
+`AGENT_TIMEOUT_MINUTES` and `AGENT_STUCK_STRIKES` are unaffected — neither
+depends on step lines, and both were proved against real log streams.
+
+If a run ends with **no** line having matched, `watch` says so and exits
+non-zero rather than reporting a clean run — a limit that silently never fires
+is worse than no limit, because it was believed. That guard is what made this
+visible instead of comfortable.
 
 ## Your instructions reach it too
 
@@ -169,14 +260,30 @@ it can start its own sandboxes.
 
 Two things protect it, and both are checked:
 
-1. **It is published on loopback only** — `127.0.0.1:AGENT_PORT`, never
-   `0.0.0.0`. Reachable from your phone through Tailscale, not from the
-   internet, even in the moments when the guard is not loaded.
+1. **It is published on private addresses only** — never `0.0.0.0`. There are
+   two of them, and the second one is not decoration: `127.0.0.1:AGENT_PORT`
+   for you, and `<docker-bridge-gateway>:AGENT_PORT` for the agent's own
+   sandbox containers, which reach this machine as the bridge gateway and can
+   never reach its loopback. Measured: with the loopback publish alone, a live
+   sandbox got `000` — connection refused — for both the MCP URL it must list
+   its tools from and the app's own root, and the run died in init.
+
+   What that widens, stated plainly: **any container on the default docker
+   bridge can now reach the agent's UI.** What it does not do is put it on a
+   public interface — a bridge gateway is routable only from this host and its
+   containers.
 2. **The inbound guard covers its port**, by exactly the rule the chat app
    taught this project: `ENABLE_AGENT` is a statement of intent, a listening
    socket is a fact. A container still running after you set `ENABLE_AGENT=false`
    is still listed and still guarded — turning a feature off in `.env` must
    never make this box more exposed.
+
+   The guard **accepts the docker bridge**, alongside `lo` and `tailscale0`,
+   and that is what makes 1 and 2 able to coexist. Traffic from this machine's
+   own containers arrives on `docker0`, which is not loopback, so the guard used
+   to drop it: measured, 626 packets from the agent's sandbox to Ollama were
+   dropped by the guard's own counter, and the tier could not work at all. A
+   bridge is local traffic for the same reason `lo` is.
 
 `sudo lca status` shows what the guard covers. `lca check` reports the agent's
 port among the rest.

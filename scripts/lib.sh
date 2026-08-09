@@ -2691,6 +2691,65 @@ agent_llm_base_url() {
   printf 'http://host.docker.internal:%s/v1' "${port}"
 }
 
+# docker_bridge_gateway — the host's address ON the default docker bridge, i.e.
+# the one thing 'host.docker.internal' resolves to inside a container.
+#
+# The agent needs this because its traffic runs BOTH ways. It publishes its UI
+# for a human, and separately every sandbox container it starts must call back
+# into it — the MCP server it lists its tools from, and the webhook it reports
+# events to. Sandboxes are put on the default bridge by OpenHands itself (its
+# DockerSandboxService offers host networking or the default bridge and nothing
+# else), so the callback address can only be this gateway.
+#
+# Read from docker rather than assumed to be 172.17.0.1: that is merely the
+# usual value, and a host with a customised bip or an occupied 172.17/16 gets a
+# different one. The usual value is the fallback, not the answer.
+docker_bridge_gateway() {
+  local gw=""
+  if have docker; then
+    gw="$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
+          || { root_for_probe && as_root docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
+          || true)"
+  fi
+  # One address, even if docker ever reports several IPAM entries.
+  gw="${gw%%$'\n'*}"; gw="${gw%% *}"
+  [[ "${gw}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || gw="172.17.0.1"
+  printf '%s' "${gw}"
+}
+
+# docker_bridge_interface — the NAME of the default docker bridge, for the one
+# place that needs an interface rather than an address: the inbound guard.
+#
+# Docker names it 'docker0' unless the daemon was told otherwise, and it says
+# which in the network's own options, so that is asked first and the usual
+# answer is only the fallback. A name is all nft needs; an interface that does
+# not exist simply never matches, so a wrong guess here cannot break a ruleset.
+docker_bridge_interface() {
+  local name=""
+  if have docker; then
+    name="$(docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
+            || { root_for_probe && as_root docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
+            || true)"
+  fi
+  name="${name%%$'\n'*}"
+  # Only a plain interface name. Anything else — empty, '<no value>', a word
+  # with a quote in it — would be interpolated straight into an nft ruleset.
+  [[ "${name}" =~ ^[A-Za-z0-9_.-]+$ ]] || name="docker0"
+  printf '%s' "${name}"
+}
+
+# agent_web_url — the agent app's address as its own SANDBOXES must dial it.
+#
+# Not a cosmetic setting: OpenHands builds the sandbox's MCP URL from this, and
+# when it is unset it guesses 'http://host.docker.internal:3000' from the port
+# INSIDE the container, which knows nothing about the -p mapping. On this stack
+# host port 3000 is Open WebUI, so the guess sends every sandbox to the chat
+# app, which accepts the connection and never speaks MCP — a 30 s hang, then
+# MCPTimeoutError in agent init, before the model is asked for one token.
+agent_web_url() {
+  printf 'http://host.docker.internal:%s' "${AGENT_PORT}"
+}
+
 # webui_volume_has_data — true when the chat app's volume exists AND has
 # something in it, i.e. there is something in there to lose.
 #
