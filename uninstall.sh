@@ -83,6 +83,24 @@ remove_webui() {
     warn "The Docker daemon is not responding, so the chat app was NOT removed — its container and the 'open-webui' volume (every account and chat) are still on this machine. $(docker_unreachable_advice). Then re-run this script to finish."
     return 1
   fi
+  # The agent's container first, and it is not optional. It is the one thing
+  # this project runs that hands out a browser session able to execute commands
+  # on the machine, and it holds the docker socket. "Uninstall complete" while
+  # that is still serving is the worst instance of this file's own failure
+  # shape — the one where the chat app's container survived a run that reported
+  # success, one screen after asking permission to remove it.
+  if as_root docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; then
+    if as_root docker rm -f "${AGENT_CONTAINER}" >/dev/null 2>&1; then
+      ok "Agent container '${AGENT_CONTAINER}' removed."
+    else
+      # No command in the message: every removal this file names must be one it
+      # performs itself through as_root, and the gate that enforces that reads
+      # the line rather than the intent. The chat app's warning beside this one
+      # states the fact and stops for the same reason.
+      warn "The agent container '${AGENT_CONTAINER}' could not be removed and is STILL on this machine — while it runs it answers on its port and can execute commands."
+      left=1
+    fi
+  fi
   if as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1; then
     # Reported rather than fatal. A bare 'as_root docker rm -f' under set -e
     # ends the run here, and the four steps after this one — Ollama's models,

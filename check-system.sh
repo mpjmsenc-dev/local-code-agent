@@ -147,6 +147,27 @@ else
   p_pass "system prompt fits its share of the context (~${PROMPT_TOKENS} tokens)"
 fi
 
+# The agent tier, when it is switched on. Reported for the same reason the chat
+# app is: a health check that stays silent about a service the user enabled
+# cannot tell them it never came up. Silent when ENABLE_AGENT is false, so the
+# common case gains no noise.
+if [[ "${ENABLE_AGENT}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
+  if ! have docker; then
+    p_fail "the agent is enabled in .env but docker is not installed, so it cannot run at all (run sudo ${SCRIPT_DIR}/setup.sh)"
+  elif ! docker_daemon_reachable; then
+    p_warn "the agent is enabled but the Docker daemon could not be read, so whether it is running is UNKNOWN. $(docker_unreachable_advice)"
+  elif agent_container_running; then
+    AGENT_LIVE="$(agent_live_port 2>/dev/null || printf '%s' "${AGENT_PORT}")"
+    if [[ "${AGENT_LIVE}" != "${AGENT_PORT}" ]]; then
+      p_warn "the agent is running on port ${AGENT_LIVE}, not .env's ${AGENT_PORT} — its port is fixed when the container is created. Re-create it when its current task is done: sudo ${SCRIPT_DIR}/bin/lca agent restart"
+    else
+      p_pass "agent container running on port ${AGENT_PORT}"
+    fi
+  else
+    p_warn "the agent is enabled in .env but its container is not running (start it: ${SCRIPT_DIR}/bin/lca agent start)"
+  fi
+fi
+
 # --- Binaries ---------------------------------------------------------------
 step "Binaries"
 for bin in git curl jq python3 ollama nft; do

@@ -2538,6 +2538,38 @@ apply_reconciles_the_agent() {
 }
 check "'lca apply' reports the agent, including one running while .env says off" \
   apply_reconciles_the_agent
+# An uninstall that leaves the agent behind is this file's own worst failure
+# shape repeated: it once printed "Uninstall complete" while the chat app's
+# container and every account in it were still on the machine. The agent is the
+# more serious version — it holds the docker socket and serves a session that
+# runs commands.
+uninstall_removes_the_agent() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
+  grep -q 'AGENT_CONTAINER' <<<"${body}" || {
+    echo 'uninstall.sh leaves the agent container running and still reports the stack removed' >&2
+    return 1; }
+  # Removed, not merely mentioned — and through as_root, like every other
+  # removal here.
+  grep -qE 'as_root docker rm -f "\$\{AGENT_CONTAINER\}"' <<<"${body}" || {
+    echo 'uninstall.sh names the agent container but never removes it with as_root' >&2
+    return 1; }
+}
+check "uninstall removes the agent container too" \
+  uninstall_removes_the_agent
+# ...and 'lca check' has to report it, or a health check stays silent about a
+# service its owner switched on and which never came up.
+check_reports_the_agent() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  awk '/ENABLE_AGENT.*==.*true/      { arm = 1 }
+       arm && /agent_container_running/ { found = 1 }
+       END { exit found ? 0 : 1 }' <<<"${body}" || {
+    echo "lca check never asks whether the enabled agent is actually running" >&2
+    return 1; }
+}
+check "...and 'lca check' reports the agent when it is enabled" \
+  check_reports_the_agent
 
 echo "# one instructions file, respected on every surface"
 # config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing
