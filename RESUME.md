@@ -140,29 +140,32 @@ The ladder is UNCHANGED — that is a default affecting every user.
 - `lca check` validated the agent's settings but never said whether it was
   running.
 
-## Proposals — deliberately NOT built
+## Proposals — both since resolved by the owner
 
-Both are bigger than the brief and are logged rather than done:
-
-1. **Back up `~/.openhands`.** `backup.sh` captures `.env`, the model list and
-   the chat app's volume. The agent's workspace and settings are neither, so a
-   restore returns a machine with no memory of what the agent was doing. It is
-   also unbounded in size — it holds whole checked-out projects — so it needs a
-   size policy and probably its own `.env` switch, not a line in the existing
-   tarball.
-2. **Exercise the agent in CI.** The app image is only 0.35 GB compressed, so a
-   job that starts it, asserts the UI answers on `AGENT_PORT` and asserts the
-   published binding is loopback-only is affordable. It would have caught
-   nothing that the live run here did not, which is why it is a proposal rather
-   than a gap.
+1. **Back up `~/.openhands`** — **APPROVED AND BUILT**. `BACKUP_AGENT_WORKSPACE`
+   (off by default) with a `BACKUP_AGENT_MAX_MB` ceiling, one pure decision
+   function, and a restore that moves a live workspace aside rather than
+   overwriting it. Round-tripped on real files.
+2. **Exercise the agent in CI** — **DECLINED, deliberately**. It would have
+   caught nothing the live run did not.
 
 ## Next step, precisely
 
-All three named priorities are done and the ladder is swept. The one thing
-still unverifiable here is `AGENT_STEP_PATTERN` against a real OpenHands STEP
-line: run a real agent task on a machine with disk and tune it from that log.
-`watch` already refuses to call such a run clean, so the gap is loud, not
-silent.
+Nothing is mid-flight. All three named priorities are done, the ladder is
+swept, and both proposals are resolved.
+
+The one open item needs a machine this session cannot reach: confirm
+`AGENT_STEP_PATTERN` against a **full agent reasoning loop**. The pattern has
+been corrected against a real sandbox log (the original matched zero lines),
+but the five matches observed were tool *initialisation* — the sandbox died
+first on an MCP server timeout (30s) with the CPU busy running the model. Run a
+task on the droplet, let the loop complete, and re-check. `watch` refuses to
+call a run clean when nothing matched, so the gap is loud, not silent.
+
+Also noted, not done: OpenHands' API accepts `system_message_suffix` per
+conversation — a real documented field, unlike the `LCA_USER_INSTRUCTIONS` env
+var priority 3 currently passes on spec. Worth rewiring the instructions
+through it. The bind mount already works and is what docs/AGENT.md claims.
 
 ## Standing constraints observed
 
