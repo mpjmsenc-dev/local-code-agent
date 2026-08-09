@@ -132,6 +132,21 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT AGENT
   esac
 done
 
+# The chat app's system prompt is this project's text plus config/CONVENTIONS.md,
+# and that file belongs to the user. A long one is a legitimate choice and it is
+# not free: everything in the prompt is re-sent on every message and comes out of
+# the same context the conversation has to fit in. The 3b rung runs at 4096, so
+# 15% of that is the share this project budgets for its own text — and the point
+# here is that the cost is stated rather than quietly spent.
+PROMPT_CHARS="$(lca_system_prompt | wc -c)"
+PROMPT_TOKENS=$(( PROMPT_CHARS / 4 ))
+PROMPT_CAP=$(( OLLAMA_CONTEXT_LENGTH * 15 / 100 ))
+if [[ "${OLLAMA_CONTEXT_LENGTH}" =~ ^[0-9]+$ ]] && (( PROMPT_TOKENS > PROMPT_CAP )); then
+  p_warn "the chat app's system prompt is ~${PROMPT_TOKENS} tokens, over the ${PROMPT_CAP} this stack budgets (15% of your ${OLLAMA_CONTEXT_LENGTH}-token context) — config/CONVENTIONS.md is appended to it, so a long instructions file is paid for on every message. Shorten it, or set AIDER_CONVENTIONS=false to drop it from the chat app, aider and the agent together."
+else
+  p_pass "system prompt fits its share of the context (~${PROMPT_TOKENS} tokens)"
+fi
+
 # --- Binaries ---------------------------------------------------------------
 step "Binaries"
 for bin in git curl jq python3 ollama nft; do

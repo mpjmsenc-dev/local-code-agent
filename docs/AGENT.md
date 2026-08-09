@@ -103,6 +103,20 @@ a run ends with **no** line having matched the step pattern, `watch` says so and
 exits non-zero rather than reporting a clean run — a limit that silently never
 fires is worse than no limit, because it was believed.
 
+## Your instructions reach it too
+
+`config/CONVENTIONS.md` is the one file that steers all three surfaces — aider,
+the chat app, and this agent. The agent gets it two ways, because only one of
+them is guaranteed:
+
+- **Mounted** at `/.openhands/lca-instructions.txt` inside the container, which
+  is a plain bind mount and therefore certain.
+- **Passed** as `LCA_USER_INSTRUCTIONS`, which is *not* a documented OpenHands
+  variable. It costs nothing if the agent ignores it, and this project does not
+  claim it works — the mount is the part that does.
+
+`AIDER_CONVENTIONS=false` switches the file off for all three at once.
+
 ## Security
 
 This is the most dangerous port this project opens. A browser session on it can

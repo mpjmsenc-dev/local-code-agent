@@ -88,9 +88,14 @@ start_agent() {
     as_root docker rm -f "${AGENT_CONTAINER}" >/dev/null 2>&1 || true
   fi
 
-  local model base_url
+  local model base_url instructions
   model="$(agent_llm_model "${MODEL_NAME}")"
   base_url="$(agent_llm_base_url)"
+  # The same instructions file aider reads and the chat app is given, so the
+  # third surface does not become the one place the user's preferences are
+  # ignored. Passed as the agent's default task framing; empty when the file is
+  # absent or AIDER_CONVENTIONS is off, and an empty -e is simply not added.
+  instructions="$(lca_user_instructions)"
   info "Starting the agent on port ${AGENT_PORT}, using ${model} at ${base_url}"
   info "First run downloads several GB of images — this takes a while."
 
@@ -98,9 +103,20 @@ start_agent() {
   # without it the agent cannot see Ollama at all. The docker socket is what
   # lets it start its own sandbox containers; that is also why this tier is
   # opt-in, and docs/AGENT.md says so in those words.
+  local extra_env=()
+  if [[ -n "${instructions}" ]]; then
+    # LLM_SYSTEM_PROMPT_SUFFIX is not a documented OpenHands variable, so this
+    # does not pretend it is one: the file is also mounted where the agent can
+    # read it, and docs/AGENT.md says which of the two is guaranteed. An env
+    # var that may do nothing is fine only when something else does the job.
+    extra_env+=( -e "LCA_USER_INSTRUCTIONS=${instructions}" )
+  fi
+
   as_root docker run -d \
     --name "${AGENT_CONTAINER}" \
     --restart unless-stopped \
+    ${extra_env[@]+"${extra_env[@]}"} \
+    -v "${REPO_ROOT}/config/CONVENTIONS.md:/.openhands/lca-instructions.txt:ro" \
     -e AGENT_SERVER_IMAGE_REPOSITORY="${AGENT_RUNTIME_IMAGE}" \
     -e AGENT_SERVER_IMAGE_TAG="${AGENT_RUNTIME_TAG}" \
     -e LLM_MODEL="${model}" \

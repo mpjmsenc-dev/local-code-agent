@@ -2161,8 +2161,41 @@ restart_ollama() {
 # editing anything here: re-wrapping that same sentence — identical words, one
 # line break moved — took service from 9/20 to 6/20. About one standard error
 # at n=20, which is the scale of wobble to expect from any edit at all.
+# lca_user_instructions — the user's own instructions, for every surface.
+#
+# config/CONVENTIONS.md was written for aider and reached aider alone, through
+# '--read'. Someone who edits it to say "always use tabs" or "answer in French"
+# is stating how they want THIS STACK to behave, and had to say it three times:
+# once in that file, once in the chat app's settings, and once in every agent
+# task. One file, one place to edit, three consumers.
+#
+# Returns nothing when the file is missing or AIDER_CONVENTIONS is off, so
+# every caller can append unconditionally. The toggle keeps its name: it is
+# what .env.example has always called this, and renaming a setting to widen it
+# would break the files people already have.
+lca_user_instructions() {
+  # Defaulted, not bare. This is called from lca_system_prompt, which the login
+  # banner reaches through load_env_readonly — a path that does not apply the
+  # .env defaults — so a bare ${AIDER_CONVENTIONS} is an unbound variable under
+  # 'set -u'. Measured: the banner then computed a prompt WITHOUT this appendix,
+  # compared it to the container's, and reported the chat app out of date on a
+  # machine where nothing had drifted.
+  [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || return 0
+  local f="${REPO_ROOT:-}/config/CONVENTIONS.md"
+  [[ -r "${f}" ]] || return 0
+  cat "${f}"
+}
+
 lca_system_prompt() {
-  cat <<'EOF'
+  # Assembled, then written ONCE. This used to be a bare heredoc followed by a
+  # second printf for the appendix, and that second write is a SIGPIPE waiting
+  # to happen: a reader like 'lca_system_prompt | grep -q' matches inside the
+  # heredoc, exits, and the printf lands on a closed pipe — 141 under pipefail,
+  # which reads as "the prompt does not say that" precisely when it did.
+  # Measured the moment the appendix was added: five gates that had passed for
+  # months went red at once, none of them about the appendix.
+  local base extra
+  base="$(cat <<'EOF'
 You are the assistant for local-code-agent, a private AI stack running entirely
 on the user's own Linux server. Nothing the user types leaves that machine.
 
@@ -2207,6 +2240,14 @@ The server manages itself through one command, 'lca':
   lca status     kill-switch status
 Only mention these when they are actually relevant to the question.
 EOF
+)"
+  extra="$(lca_user_instructions)"
+  if [[ -n "${extra}" ]]; then
+    printf '%s\n\n--- the owner of this machine also asked for the following ---\n%s\n' \
+      "${base}" "${extra}"
+  else
+    printf '%s\n' "${base}"
+  fi
 }
 
 # lca_webui_banners — the always-visible notice at the top of every chat, as the

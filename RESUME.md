@@ -42,7 +42,7 @@ wall clock and stuck detector are therefore **our own supervisor**, written as
 pure, unit-testable policy over a log stream, with the marker patterns
 configurable and documented as needing tuning against a real run.
 
-### 3. One instructions file, respected everywhere — NOT STARTED
+### 3. One instructions file, respected everywhere — DONE
 
 Today `config/CONVENTIONS.md` is aider-only (via `--read`), and the WebUI's
 system prompt is a separate hardcoded heredoc, `lca_system_prompt` in
@@ -67,13 +67,26 @@ tested; the parts that need a running container (does OpenHands answer on
 3001, do the watch patterns match its real log) are untested and marked as
 such in docs/AGENT.md.
 
+Shipped for 3: `lca_user_instructions` in `scripts/lib.sh`, read by aider
+(unchanged), by `lca_system_prompt` (appended, never substituted, and last so
+it is the most recent thing the model reads), and by the agent (bind-mounted,
+plus a best-effort env var that docs/AGENT.md explicitly does not claim works).
+`AIDER_CONVENTIONS` keeps its name and now governs all three at once.
+
+The size cost is reported rather than spent: `lca check` measures the whole
+prompt against 15% of THIS machine's `OLLAMA_CONTEXT_LENGTH` and warns when a
+long instructions file eats the window. The unit gate still bounds the part
+this project ships, measured with the appendix off — raising that budget to fit
+a user's file would have been weakening a gate to pass.
+
 ## Next step, precisely
 
-Priority 3: one instructions file respected everywhere. Add
-`lca_user_instructions` to `scripts/lib.sh` reading `config/CONVENTIONS.md`,
-have `lca_system_prompt` append it (keeping the product-authored part that
-describes what the chat box *is*), and have the agent's task framing use it
-too. Then document what it does and does not override.
+All three named priorities are done. The ladder below is the remaining work:
+the highest-value item is that **the agent images have never been pulled on
+this box** (~14 GB free against a 15 GB floor), so everything needing a live
+container is untested — whether OpenHands answers on 3001, and whether
+`AGENT_STEP_PATTERN` matches its real log. Do that on a machine with disk, or
+free some here first.
 
 ## Standing constraints observed
 

@@ -32,6 +32,13 @@ trap 'rm -rf "${SANDBOX}"' EXIT
 mkdir -p "${SANDBOX}/scripts"
 cp "${REPO}/scripts/lib.sh" "${SANDBOX}/scripts/"
 cp "${REPO}/.env.example" "${SANDBOX}/"
+# ...and the instructions file, for the same reason as .env.example: lib.sh is
+# sourced from this sandbox, so REPO_ROOT is the sandbox, and lca_user_instructions
+# resolves config/CONVENTIONS.md against it. Without this the chat app's system
+# prompt loses its appendix here and only here, and the gates that prove the
+# three surfaces share one file would pass on an empty string.
+mkdir -p "${SANDBOX}/config"
+cp "${REPO}/config/CONVENTIONS.md" "${SANDBOX}/config/"
 
 # shellcheck source=../scripts/lib.sh
 source "${SANDBOX}/scripts/lib.sh"
@@ -2475,6 +2482,96 @@ agent_publishes_on_loopback() {
 check "the agent's port is published on loopback, not on every interface" \
   agent_publishes_on_loopback
 
+echo "# one instructions file, respected on every surface"
+# config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing
+# it to say "always use tabs" or "answer in French" is describing how they want
+# THIS STACK to behave, and had to say it in three places to get it.
+instructions_reach_the_chat_app() {
+  local out
+  out="$(lca_system_prompt)"
+  grep -qF 'the owner of this machine also asked for the following' <<<"${out}" || {
+    echo "the chat app's system prompt does not carry config/CONVENTIONS.md" >&2
+    return 1; }
+  # A line only the user's file has, so this cannot pass on the built-in text.
+  grep -qF 'smallest change that satisfies the request' <<<"${out}" || {
+    echo "the chat app's prompt has the heading but not the file's content" >&2
+    return 1; }
+}
+check "the user's instructions reach the chat app's system prompt" \
+  instructions_reach_the_chat_app
+# ...and the built-in part survives. Everything above the append says what that
+# chat box IS — no filesystem, no shell, no tools, and 'lca' is the thing that
+# writes files. A persona must not be able to cost the user that, because a
+# model claiming it just edited their project is the bug this branch opened on.
+instructions_do_not_replace_the_product_prompt() {
+  local out
+  out="$(lca_system_prompt)"
+  grep -qF 'no filesystem, no shell' <<<"${out}" || {
+    echo 'the user instructions replaced the description of what the chat box is' >&2
+    return 1; }
+  # ...and they come last, so they are the most recent thing the model reads.
+  local nature_at extra_at
+  nature_at="$(grep -nF 'no filesystem, no shell' <<<"${out}" | head -1 | cut -d: -f1)"
+  extra_at="$(grep -nF 'the owner of this machine also asked' <<<"${out}" | head -1 | cut -d: -f1)"
+  [[ -n "${nature_at}" && -n "${extra_at}" ]] || return 1
+  (( extra_at > nature_at )) || {
+    echo "the user's instructions are placed before the description they must not override" >&2
+    return 1; }
+}
+check "...without replacing what the chat box is told it is" \
+  instructions_do_not_replace_the_product_prompt
+# The toggle keeps its old name and its old meaning, and now governs all three.
+instructions_respect_the_toggle() {
+  local on off
+  on="$(AIDER_CONVENTIONS=true lca_user_instructions)"
+  off="$(AIDER_CONVENTIONS=false lca_user_instructions)"
+  [[ -n "${on}" ]] || { echo 'the instructions file is not read even when enabled' >&2; return 1; }
+  [[ -z "${off}" ]] || { echo 'AIDER_CONVENTIONS=false does not switch the instructions off' >&2; return 1; }
+  # ...and off must mean the chat prompt loses only the appendix.
+  local prompt_off
+  prompt_off="$(AIDER_CONVENTIONS=false lca_system_prompt)"
+  grep -qF 'no filesystem, no shell' <<<"${prompt_off}" || return 1
+  ! grep -qF 'the owner of this machine also asked' <<<"${prompt_off}"
+}
+check "...and AIDER_CONVENTIONS=false switches it off everywhere at once" \
+  instructions_respect_the_toggle
+# All three surfaces read the ONE function, rather than each opening the file.
+# Three readers is how the WebUI prompt and the aider file drifted apart in the
+# first place.
+every_surface_reads_one_instructions_source() {
+  local f body missing=()
+  for f in agent.sh run-agent.sh; do
+    body="$(sed 's/#.*//' "${REPO}/${f}")"
+    grep -qE 'lca_user_instructions|CONVENTIONS\.md' <<<"${body}" || missing+=("${f}")
+  done
+  body="$(sed -n '/^lca_system_prompt() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  grep -q 'lca_user_instructions' <<<"${body}" || missing+=("lca_system_prompt")
+  (( ${#missing[@]} == 0 )) || {
+    printf 'these surfaces do not use the shared instructions file: %s\n' "${missing[*]}" >&2
+    return 1; }
+}
+check "aider, the chat app and the agent all read the same file" \
+  every_surface_reads_one_instructions_source
+# ...and the cost of a long one is stated, not spent quietly. Everything in the
+# system prompt is re-sent on every message and comes out of the same window the
+# conversation has to fit in, so an instructions file that doubles the prompt
+# halves what the user can actually say on the 3b rung.
+prompt_budget_overrun_is_reported() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -q 'PROMPT_TOKENS' <<<"${body}" || {
+    echo "lca check never measures the system prompt, so a long CONVENTIONS.md eats the context silently" >&2
+    return 1; }
+  # Against the user's real context, not a constant: the ladder runs 4096 on
+  # 8 GB and 16384 on 24 GB, and a budget that ignored that would nag one and
+  # miss the other.
+  grep -q 'OLLAMA_CONTEXT_LENGTH \* 15 / 100' <<<"${body}" || {
+    echo "the prompt budget is not measured against this machine's context length" >&2
+    return 1; }
+}
+check "...and 'lca check' says when the instructions file is eating the context" \
+  prompt_budget_overrun_is_reported
+
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
 # has written a byte. Demonstrated by accident, on the real function: an unbound
@@ -3147,13 +3244,20 @@ check "system prompt tells the model it has no tools" prompt_forbids_tool_calls
 # left as an assertion: the shipped prompt is 2,255 characters, this estimates
 # 563 tokens, and ollama reports prompt_eval_count=559 for it on the 3b model.
 # Within one percent, in the safe direction.
+# Measured on the prompt this project SHIPS, which is the part it controls.
+# config/CONVENTIONS.md is now appended for the chat app too, and that file
+# belongs to the user: capping it here would either cap their instructions or
+# force this budget up, and the second is just weakening the gate. So the
+# built-in prompt is still bounded, and the cost of a long instructions file is
+# reported by 'lca check' instead of being spent silently — see
+# prompt_budget_overrun_is_reported below.
 prompt_fits_its_budget() {
   local chars tokens cap
-  chars="$(lca_system_prompt | wc -c)"
+  chars="$(AIDER_CONVENTIONS=false lca_system_prompt | wc -c)"
   tokens=$(( chars / 4 ))
   cap=$(( 4096 * 15 / 100 ))
   (( tokens <= cap )) || {
-    printf 'the system prompt is ~%s tokens (%s chars) — over the %s-token budget, which is 15%%%% of the 4096 context the 3b rung runs with\n' \
+    printf 'the system prompt this project ships is ~%s tokens (%s chars) — over the %s-token budget, which is 15%%%% of the 4096 context the 3b rung runs with\n' \
       "${tokens}" "${chars}" "${cap}" >&2
     return 1
   }
