@@ -13056,6 +13056,19 @@ empty_answer_is_not_success() {
     printf 'an empty answer exits 0: %s\n' "${out}" >&2; return 1; }
   grep -qi 'empty answer' <<<"${out}" || {
     printf 'an empty answer is not named as one: %s\n' "${out}" >&2; return 1; }
+  # ...and not blamed on length. Ollama does not refuse an over-long prompt, it
+  # truncates it and answers anyway — measured at num_ctx=512 with a 3,600-token
+  # prompt: no error, a normal reply, prompt_eval_count 258. So a message that
+  # says "the prompt was rejected for length; try a shorter question" is naming
+  # a cause that cannot produce an empty answer, and pointing the reader at the
+  # one thing to shorten that was never the problem.
+  ! grep -qiE 'rejected for length|shorter question' <<<"${out}" || {
+    printf 'an empty answer is blamed on prompt length, which Ollama truncates rather than refusing: %s\n' "${out}" >&2
+    return 1; }
+  # ...and the reader is told where the request is, as the error path does.
+  grep -qE 'journalctl -u ollama|logs\.sh ollama' <<<"${out}" || {
+    printf 'an empty answer does not point at the log that holds the request: %s\n' "${out}" >&2
+    return 1; }
 }
 check "...and so is an answer with no text in it at all" \
   empty_answer_is_not_success

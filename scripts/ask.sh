@@ -357,7 +357,21 @@ main() {
       info "The full log is at: $(ollama_log_hint)" >&2
       return 1
     fi
-    err "${MODEL_NAME} returned an empty answer — the request succeeded but produced no text at all. That usually means the prompt was rejected for length; try a shorter question, or fewer -f files. Check the engine with: lca check"
+    # The length explanation this used to give is not one. Ollama does not
+    # reject an over-long prompt; it silently truncates it and answers from
+    # what fits. Measured against a deliberately tiny window — 3,600 tokens of
+    # prompt at num_ctx=512:
+    #
+    #   error field : None
+    #   response    : 'ok'
+    #   prompt_eval : 258        <- the rest was dropped, not refused
+    #
+    # So "try a shorter question, or fewer -f files" was advice for a cause
+    # that cannot produce this symptom, and it sent the reader to shorten the
+    # one thing that was never the problem. Same overclaim as "Ollama refused
+    # the request" and "this is not a slow load", both removed for the same
+    # reason: say what was seen, name no cause that was not.
+    err "${MODEL_NAME} returned an empty answer — the request succeeded, Ollama reported no error, and the reply carried no text. Ask again or rephrase; if it keeps happening the request is in the log: $(ollama_log_hint). Engine check: lca check"
     return 1
   fi
 
