@@ -105,11 +105,39 @@ never fire and exits non-zero — so the failure is loud rather than silent, but
 the pattern itself is still a guess. Tune it against a real run before relying
 on the step ceiling.
 
+## Swept after the three priorities
+
+- `lca apply` did not know the agent existed while docs/AGENT.md said it did —
+  `apply_agent` added, reporting rather than recreating (an agent may be hours
+  into a task; the chat app is stateless and can be recreated, this cannot).
+- `uninstall.sh` left the agent container running and still reported the stack
+  removed. It holds the docker socket. Removed first now.
+- `lca check` validated the agent's settings but never said whether it was
+  running.
+
+## Proposals — deliberately NOT built
+
+Both are bigger than the brief and are logged rather than done:
+
+1. **Back up `~/.openhands`.** `backup.sh` captures `.env`, the model list and
+   the chat app's volume. The agent's workspace and settings are neither, so a
+   restore returns a machine with no memory of what the agent was doing. It is
+   also unbounded in size — it holds whole checked-out projects — so it needs a
+   size policy and probably its own `.env` switch, not a line in the existing
+   tarball.
+2. **Exercise the agent in CI.** The app image is only 0.35 GB compressed, so a
+   job that starts it, asserts the UI answers on `AGENT_PORT` and asserts the
+   published binding is loopback-only is affordable. It would have caught
+   nothing that the live run here did not, which is why it is a proposal rather
+   than a gap.
+
 ## Next step, precisely
 
-All three named priorities are done and the ladder is largely swept. The
-remaining item is the one above: run a real agent task on a machine with disk
-and tune AGENT_STEP_PATTERN from its log.
+All three named priorities are done and the ladder is swept. The one thing
+still unverifiable here is `AGENT_STEP_PATTERN` against a real OpenHands STEP
+line: run a real agent task on a machine with disk and tune it from that log.
+`watch` already refuses to call such a run clean, so the gap is loud, not
+silent.
 
 ## Standing constraints observed
 
