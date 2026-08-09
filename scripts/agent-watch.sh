@@ -36,6 +36,9 @@ Follows the running agent and stops it when one of the limits in .env is hit:
   AGENT_STUCK_STRIKES=${AGENT_STUCK_STRIKES}     identical failures in a row before the
                              approach is abandoned (0 = never)
 
+  AGENT_STEP_SOURCE=${AGENT_STEP_SOURCE}    where steps are counted from:
+                             auto (event API, log as fallback) | events | log
+
   --dry-run   report what it would stop on, and stop nothing
 
 Why it says what it says, and what it cannot see: docs/AGENT.md
@@ -67,6 +70,41 @@ EOF
 # events. These match the logger 'name', which is the stable part.
 AGENT_STEP_PATTERN="${AGENT_STEP_PATTERN:-openhands\.(sdk|tools|agent_server)\.[a-z_.]*(agent|terminal|tool|action|impl)}"
 AGENT_FAIL_PATTERN="${AGENT_FAIL_PATTERN:-(\"levelname\": \"ERROR\"|Traceback|CommandFailed|non-zero exit)}"
+
+# Where the STEP COUNT comes from, which is a different question from where the
+# failures come from.
+#
+# The pattern above was rewritten twice against real logs and it is still not
+# enough, and that is a measurement, not a suspicion: across a 27-minute
+# reasoning turn that ran to 'finished', the sandbox log grew by one line, and
+# that line was a cost-calculation warning. Everything the pattern matches is
+# tool initialisation from sandbox startup. So on this build the log can tell
+# you a run is failing — the failure pattern and the stuck detector both work
+# on it — but it cannot tell you a run is *stepping*.
+#
+# The app's event API can, so that is tried first and the log is the fallback.
+#
+#   auto    use the event API when it answers, the log when it does not
+#   events  event API only; if it never answers, the ceiling is reported dead
+#           rather than silently replaced
+#   log     the old behaviour, for a build whose log does carry steps
+#
+# 'auto' is the default because the fallback loses nothing: the log arm is
+# exactly what shipped before, warning included.
+AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
+
+# step_source_label SOURCE — what the number next to "Steps seen" actually
+# counted. Named rather than left bare, because the two sources do not count
+# the same thing: an event is finer-grained than a reasoning turn (the one
+# measured turn here produced five), so the same ceiling means different
+# amounts of work depending on which arm is live, and a reader deserves to know
+# which they are looking at.
+step_source_label() {
+  case "${1:-log}" in
+    events) printf 'events on the agent API' ;;
+    *)      printf 'log lines matching the step pattern' ;;
+  esac
+}
 
 # agent_log_sources — every container whose log this run should be read from.
 #
@@ -125,7 +163,30 @@ main() {
 
   local started iters=0 strikes=0 last_sig="" line sig verdict elapsed now
   local matched_steps=0 matched_fails=0
+  local step_source="log" conv_id="" events_base=0 events_now="" ticks=0
   started="$(date +%s)"
+
+  # Which stream the ceiling counts, asked now and said out loud.
+  #
+  # The answer decides whether AGENT_MAX_ITERATIONS means anything on this
+  # build, and somebody who is about to walk away for a night should learn that
+  # in the first second rather than in the morning. 'log' is not an error here —
+  # it is what shipped before, and it is right for a build whose log does carry
+  # steps. It is only called a dead ceiling at the end, once a whole run has
+  # gone by with nothing matched.
+  if [[ "${AGENT_STEP_SOURCE}" != "log" ]]; then
+    conv_id="$(agent_conversation_ref 2>/dev/null || true)"
+    [[ -n "${conv_id}" ]] && events_now="$(agent_event_steps "${conv_id}" 2>/dev/null || true)"
+    if [[ "${events_now}" =~ ^[0-9]+$ ]]; then
+      step_source="events"
+      events_base="${events_now}"
+      info "Steps come from the agent's event API (conversation ${conv_id}; ${events_now} event(s) already recorded, and the ceiling counts what happens from here)."
+    elif [[ "${AGENT_STEP_SOURCE}" == "events" ]]; then
+      warn "The agent's event API has not answered yet, so the step ceiling is not armed. It arms as soon as a conversation exists; the wall clock and the stuck detector are already on."
+    else
+      info "The agent's event API has no conversation to count yet — counting log lines until it does."
+    fi
+  fi
 
   # Read the log as it arrives. 'docker logs -f' is the producer and this loop
   # is the consumer, so nothing here exits early on it — the SIGPIPE trap this
@@ -157,7 +218,11 @@ main() {
       (( rc > 128 )) || break
     fi
     if [[ -n "${line}" ]] && [[ "${line}" =~ ${AGENT_STEP_PATTERN} ]]; then
-      iters=$(( iters + 1 )); matched_steps=$(( matched_steps + 1 ))
+      matched_steps=$(( matched_steps + 1 ))
+      # Only the log arm feeds the ceiling. Counted either way, because a run
+      # where nothing ever matched is worth saying at the end even when the
+      # ceiling was armed from somewhere better.
+      if [[ "${step_source}" == "log" ]]; then iters=$(( iters + 1 )); fi
     fi
     if [[ -n "${line}" ]] && [[ "${line}" =~ ${AGENT_FAIL_PATTERN} ]]; then
       matched_fails=$(( matched_fails + 1 ))
@@ -170,6 +235,33 @@ main() {
       fi
     fi
 
+    # Re-read the count from the event API on a TICK, not on a log line. A step
+    # that writes nothing to the log is the entire reason this source exists,
+    # so a counter that only advanced when a line arrived would be the same bug
+    # in a new hat.
+    ticks=$(( ticks + 1 ))
+    if [[ "${AGENT_STEP_SOURCE}" != "log" ]]; then
+      if [[ "${step_source}" == "events" ]]; then
+        events_now="$(agent_event_steps "${conv_id}" 2>/dev/null || true)"
+        if [[ "${events_now}" =~ ^[0-9]+$ ]]; then
+          iters=$(( events_now - events_base ))
+          (( iters >= 0 )) || iters=0
+        fi
+      # The upgrade probe every third tick, not every one: each of its calls
+      # burns its own timeout when the API is not there, and five of those
+      # would stretch a 20 s tick into something that is no longer a tick. The
+      # armed path above polls every time, where the calls are cheap because
+      # they answer.
+      elif (( ticks % 3 == 1 )); then
+        [[ -n "${conv_id}" ]] || conv_id="$(agent_conversation_ref 2>/dev/null || true)"
+        [[ -n "${conv_id}" ]] && events_now="$(agent_event_steps "${conv_id}" 2>/dev/null || true)"
+        if [[ "${events_now}" =~ ^[0-9]+$ ]]; then
+          step_source="events"; events_base="${events_now}"; iters=0
+          info "The agent's event API is answering now (conversation ${conv_id}) — the step ceiling counts events from here."
+        fi
+      fi
+    fi
+
     now="$(date +%s)"; elapsed=$(( now - started ))
     verdict="$(agent_run_verdict "${iters}" "${AGENT_MAX_ITERATIONS}" \
                  "${elapsed}" "${AGENT_TIMEOUT_MINUTES}" \
@@ -177,7 +269,7 @@ main() {
     [[ "${verdict}" == "ok" ]] && continue
 
     warn "Stopping the agent: $(agent_stop_reason "${verdict}")"
-    info "Steps seen: ${iters} · failures seen: ${matched_fails} · run time: $(human_duration "${elapsed}")"
+    info "Steps seen: ${iters} ($(step_source_label "${step_source}")) · failures seen: ${matched_fails} · run time: $(human_duration "${elapsed}")"
     [[ "${verdict}" == "stuck" ]] && info "The failure it kept repeating: ${last_sig}"
     if [[ "${dry_run}" == "true" ]]; then
       info "--dry-run: the agent is still running."
@@ -193,12 +285,23 @@ main() {
 
   # The stream ended, which means the container did.
   elapsed=$(( $(date +%s) - started ))
+  if [[ "${step_source}" == "events" ]]; then
+    ok "The agent stopped on its own after $(human_duration "${elapsed}") and ${iters} event(s) on its own API."
+    return 0
+  fi
+  # Everything below is the log arm, and the two ways it can end badly are
+  # different questions: whether the ceiling was armed at all, and whether the
+  # pattern fits.
+  if [[ "${AGENT_STEP_SOURCE}" == "events" ]]; then
+    warn "The agent stopped on its own after $(human_duration "${elapsed}"), and its event API never answered, so with AGENT_STEP_SOURCE=events the step ceiling never armed. The wall clock and the stuck detector were the only limits in force. Set AGENT_STEP_SOURCE=auto to fall back to the log."
+    return 1
+  fi
   if (( matched_steps == 0 )); then
     # Said out loud rather than reported as a clean run. Zero matches over a
     # whole run means the step pattern does not fit this agent build, and the
     # ceiling was therefore never able to fire — a limit that cannot trigger is
     # worse than no limit, because it was believed.
-    warn "The agent stopped on its own after $(human_duration "${elapsed}"), and NO log line matched the step pattern, so the step ceiling was never able to fire. Check the pattern against a real log: lca agent logs   (override with AGENT_STEP_PATTERN)"
+    warn "The agent stopped on its own after $(human_duration "${elapsed}"), its event API never answered, and NO log line matched the step pattern, so the step ceiling was never able to fire. Check the pattern against a real log: lca agent logs   (override with AGENT_STEP_PATTERN)"
     return 1
   fi
   ok "The agent stopped on its own after $(human_duration "${elapsed}") and ${iters} step(s)."

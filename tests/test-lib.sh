@@ -2390,6 +2390,224 @@ check "a genuinely different failure keeps its own signature" \
   test '!' "$(agent_failure_signature 'ERROR build failed in /tmp/a1')" = \
            "$(agent_failure_signature 'ERROR tests failed in /tmp/a1')"
 
+# The step ceiling's second source.
+#
+# The log arm shipped first and was then MEASURED not to work: across a
+# 27-minute reasoning turn that ran to 'finished', the sandbox log grew by one
+# line and that line was a cost-calculation warning. Everything the step
+# pattern matches is sandbox startup. So at the default of 100 the ceiling
+# could never fire, and 'lca agent watch' would have reported a clean run.
+#
+# These gates cover the replacement, and the property that matters most is not
+# "can it count" — it is "does it know when it cannot". Every envelope below is
+# a guess about somebody else's response body; the ONE thing that is not a
+# guess is that an unreadable answer must come back as unknown, never as zero.
+ec() { agent_events_count "$1"; }
+check "a bare list of events is counted"  test "$(ec '[{},{},{}]')" = 3
+check "...an empty one as 0, not unknown" test "$(ec '[]')" = 0
+check "a numeric total is counted"        test "$(ec '{"count": 12}')" = 12
+check "...under any of the names it may carry" \
+  test "$(ec '{"total": 4}')$(ec '{"total_count": 4}')$(ec '{"num_events": 4}')" = 444
+check "a wrapped list is counted"         test "$(ec '{"items":[1,2,3,4]}')" = 4
+check "...under any of those names too" \
+  test "$(ec '{"results":[1,2]}')$(ec '{"events":[1,2]}')$(ec '{"data":[1,2]}')" = 222
+check "a null total does not shadow the list beside it" \
+  test "$(ec '{"count": null, "items":[1,2,3]}')" = 3
+
+# Unknown is a THIRD answer, and the reason this suite has five gates for it:
+# a ceiling handed 0 every tick never fires and then calls the run clean, which
+# is precisely the failure the log arm turned out to be. Silence must be loud.
+count_is_unknown() {
+  local out
+  out="$(agent_events_count "$1" 2>/dev/null)" && return 1
+  [[ -z "${out}" ]]
+}
+check "a body with no count at all is unknown, and unknown is not 0" \
+  count_is_unknown '{"nothing": 1}'
+check "...so is a count that is not a number" count_is_unknown '{"count": "many"}'
+check "...so is a body that is not JSON"      count_is_unknown 'not json at all'
+check "...so is an empty body"                count_is_unknown ''
+check "...so is a bare scalar"                count_is_unknown '7'
+
+cid() { agent_conversation_id "$1"; }
+check "a conversation id is read from a listing" \
+  test "$(cid '[{"id":"abc123"}]')" = abc123
+check "...from a wrapped listing" \
+  test "$(cid '{"items":[{"conversation_id":"c-1"}]}')" = c-1
+check "...and from a single conversation object" \
+  test "$(cid '{"id":"solo"}')" = solo
+id_is_unknown() {
+  local out
+  out="$(agent_conversation_id "$1" 2>/dev/null)" && return 1
+  [[ -z "${out}" ]]
+}
+check "an empty listing yields no id"  id_is_unknown '{"results":[]}'
+check "...and neither does a null one" id_is_unknown '[{"id":null}]'
+# The id is interpolated straight into a URL by agent_event_steps, so this is a
+# safety property rather than tidiness: it is what stops a broken — or hostile —
+# listing from pointing the supervisor's own requests somewhere else.
+check "a path traversal in an id is refused"  id_is_unknown '[{"id":"../../etc/passwd"}]'
+check "...as is a whole other URL"            id_is_unknown '[{"id":"http://elsewhere/x"}]'
+check "...as is an id carrying a space"       id_is_unknown '[{"id":"a b"}]'
+check "...as is one carrying a query string"  id_is_unknown '[{"id":"c1?limit=1"}]'
+
+# The fetch side, driven against a stubbed curl so the suite stays offline.
+#
+# Two spellings of the events path are in circulation and the search route
+# answers where the count route does not, so the caller tries a list. A list
+# that gave up at the first refusal would be a ceiling that silently never
+# arms, which is the whole bug being fixed here.
+event_steps_tries_every_route() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  curl() {
+    case "${*: -1}" in
+      *"/events/search"*) printf '{"items":[1,2,3,4,5,6,7]}'; return 0 ;;
+      *) return 22 ;;
+    esac
+  }
+  [[ "$(agent_event_steps abc123)" == 7 ]]
+)
+check "the step count falls through to whichever route answers" \
+  event_steps_tries_every_route
+
+event_steps_reports_unknown() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  curl() { return 22; }
+  local out
+  out="$(agent_event_steps abc123)" && return 1
+  [[ -z "${out}" ]]
+)
+check "an API that answers nothing is unknown, not a run with 0 steps" \
+  event_steps_reports_unknown
+
+# The id check has to happen BEFORE the request, not after it: a URL built from
+# a rejected id has already been sent by the time anyone looks at the answer.
+bad_id_never_reaches_the_network() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  local marker="${SANDBOX}/agent-curl-called"
+  rm -f "${marker}"
+  curl() { : > "${marker}"; return 22; }
+  agent_event_steps '../../etc/passwd' >/dev/null 2>&1 && return 1
+  [[ ! -e "${marker}" ]]
+)
+check "an id that failed validation is never put in a request" \
+  bad_id_never_reaches_the_network
+
+conversation_ref_tries_both_listings() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  curl() {
+    case "${*: -1}" in
+      */api/v1/conversations) printf '[{"id":"second"}]'; return 0 ;;
+      *) return 22 ;;
+    esac
+  }
+  [[ "$(agent_conversation_ref)" == second ]]
+)
+check "the conversation is looked for under both listing paths" \
+  conversation_ref_tries_both_listings
+
+# Same drift the WebUI port taught, and the same answer: editing AGENT_PORT
+# after the container was created leaves the running UI on the old one, so a
+# supervisor polling the new number would find nothing and quietly fall back to
+# a ceiling that cannot fire.
+api_base_prefers_the_live_port() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { printf '3999'; }
+  AGENT_PORT=3001
+  [[ "$(agent_api_base)" == "http://127.0.0.1:3999" ]]
+)
+api_base_falls_back_to_the_setting() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  [[ "$(agent_api_base)" == "http://127.0.0.1:3001" ]]
+)
+check "the API is dialled on the port the container really published" \
+  api_base_prefers_the_live_port
+check "...and on the configured one when nothing is running" \
+  api_base_falls_back_to_the_setting
+
+# ...and the supervisor has to actually use it.
+watch_reads_the_event_source() {
+  local src
+  src="$(cat "${REPO}/scripts/agent-watch.sh")"
+  grep -q 'agent_conversation_ref' <<<"${src}" || return 1
+  grep -q 'agent_event_steps' <<<"${src}" || return 1
+  # Re-read on a TICK, not on a log line. A step that writes nothing to the log
+  # is the entire reason this source exists, so a counter that only advanced
+  # when a line arrived would be the same bug in a new hat.
+  # shellcheck disable=SC2016  # the source text is the search string, not an expansion
+  grep -q 'ticks=$(( ticks + 1 ))' <<<"${src}"
+}
+check "the supervisor counts steps from the event API, on a clock" \
+  watch_reads_the_event_source
+
+# Two sources counting into one total would be worse than either alone: the
+# ceiling would fire early by an amount nobody could explain. The log arm has
+# to be switched off once the event arm is live, so the single place that
+# increments from a log line must name the source it is allowed to run under.
+watch_log_arm_cannot_feed_an_armed_ceiling() {
+  local file="${REPO}/scripts/agent-watch.sh" n line
+  # shellcheck disable=SC2016  # ...and here, for the same reason
+  n="$(grep -Fc 'iters=$(( iters + 1 ))' "${file}")"
+  [[ "${n}" == "1" ]] || return 1
+  # shellcheck disable=SC2016  # ...and here
+  line="$(grep -F 'iters=$(( iters + 1 ))' "${file}")"
+  grep -q 'step_source' <<<"${line}"
+}
+check "the log arm only feeds the ceiling when it is the source" \
+  watch_log_arm_cannot_feed_an_armed_ceiling
+
+# One vocabulary for the setting, in all three places that read it. A value
+# .env.example offers and check-system.sh has never heard of is the shape this
+# repo keeps closing.
+step_source_vocabulary_agrees() {
+  grep -q '^AGENT_STEP_SOURCE=auto$' "${REPO}/.env.example" || return 1
+  grep -q 'AGENT_STEP_SOURCE:-auto' "${REPO}/scripts/lib.sh" || return 1
+  grep -q 'AGENT_STEP_SOURCE:-auto' "${REPO}/scripts/agent-watch.sh"
+}
+check "auto is the default in .env.example, lib.sh and the watcher alike" \
+  step_source_vocabulary_agrees
+
+# ...and 'lca check' has to actually reject a value nobody documented.
+#
+# Not a grep for the three words: a case arm can list all three and still
+# accept everything, and that mutant SURVIVED a grep-based gate here. So the
+# block is extracted and RUN, with p_warn stubbed, and asked what it does.
+step_source_check_says() {   # VALUE -> whatever check-system.sh would print
+  local block
+  block="$(sed -n '/^case .*AGENT_STEP_SOURCE/,/^esac$/p' "${REPO}/check-system.sh")"
+  [[ -n "${block}" ]] || { echo "no AGENT_STEP_SOURCE block in check-system.sh" >&2; return 1; }
+  (
+    # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+    AGENT_STEP_SOURCE="$1"; ENV_FILE=/dev/null
+    # shellcheck disable=SC2317  # called by the extracted block, not from here
+    p_warn() { printf 'WARNED: %s\n' "$*"; }
+    eval "${block}"
+  )
+}
+check "'lca check' passes a documented step source in silence" \
+  test -z "$(step_source_check_says auto)"
+check "...and each of the other two as well" \
+  test -z "$(step_source_check_says events)$(step_source_check_says log)"
+check "...and warns about one it has never heard of" \
+  grep -q WARNED <<<"$(step_source_check_says evnts)"
+check "...including an empty one" \
+  grep -q WARNED <<<"$(step_source_check_says '')"
+
 # The port. This is the most dangerous surface this project has ever had — a
 # browser session on it runs commands on the box — so the guard must cover it
 # by exactly the rule the WebUI port taught: intent first, and then the fact of

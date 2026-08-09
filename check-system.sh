@@ -134,6 +134,16 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT AGENT
   esac
 done
 
+# Not a number, so it is checked apart from the loop above. An unrecognised
+# value is treated as 'auto' by the supervisor rather than rejected — the safe
+# direction, since auto is both the default and the arm that loses nothing —
+# but it is still worth saying, because somebody who wrote AGENT_STEP_SOURCE=events
+# as 'event' believes they turned the log fallback OFF and they have not.
+case "${AGENT_STEP_SOURCE}" in
+  auto|events|log) ;;
+  *) p_warn "AGENT_STEP_SOURCE='${AGENT_STEP_SOURCE}' is not one of auto, events or log, so 'lca agent watch' treats it as auto. Nothing is broken by that; it just is not what you asked for. Fix it in ${ENV_FILE}." ;;
+esac
+
 # The chat app's system prompt is this project's text plus config/CONVENTIONS.md,
 # and that file belongs to the user. A long one is a legitimate choice and it is
 # not free: everything in the prompt is re-sent on every message and comes out of

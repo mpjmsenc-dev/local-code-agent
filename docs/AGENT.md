@@ -146,6 +146,7 @@ lca agent watch --dry-run    # report what it would stop, stop nothing
 | `AGENT_MAX_ITERATIONS` | 100 | it taking thousands of tiny steps |
 | `AGENT_TIMEOUT_MINUTES` | 180 | it running for ever |
 | `AGENT_STUCK_STRIKES` | 3 | it retrying one broken idea until the clock runs out |
+| `AGENT_STEP_SOURCE` | `auto` | where the ceiling counts steps from — see below |
 
 `0` means "no limit" for all three — the same convention `BACKUP_KEEP=0`
 already uses in this project for "keep everything". A value that is not a
@@ -224,14 +225,43 @@ stayed at exactly 65 lines while the model was called over and over: at its
 default level (`ENV_LOG_LEVEL=20`) the sandbox writes **nothing per reasoning
 step**.
 
-So `AGENT_MAX_ITERATIONS` counts initialisation lines — about six per sandbox,
-then nothing — and at its default of 100 it **cannot fire**. Do not rely on it.
-No regex fixes this, because the information is not in the log; the step stream
-OpenHands does publish is its event API, which is where a real ceiling has to
-read from.
+So counting log lines gives about six per sandbox and then nothing, and a
+ceiling of 100 **cannot fire**. No regex fixes this, because the information is
+not in the log.
 
 `AGENT_TIMEOUT_MINUTES` and `AGENT_STUCK_STRIKES` are unaffected — neither
 depends on step lines, and both were proved against real log streams.
+
+**So the ceiling reads from the event API instead.** The stream OpenHands does
+publish, one entry per event, is the conversation's own event log, and
+`AGENT_STEP_SOURCE` says which stream the ceiling counts:
+
+| Value | Counts |
+|---|---|
+| `auto` (default) | the event API, falling back to the container log |
+| `events` | the event API only |
+| `log` | the container log only |
+
+On `auto` the supervisor asks the app for its conversation at start and every
+third tick until it gets one, then polls the event count every tick — on a
+clock, not on a log line, because a step that writes nothing to the log is the
+entire reason this source exists. `watch` says which arm is live in its first
+line and again in every stop message, so a ceiling that is not armed is visible
+in the first minute rather than in the morning.
+
+Two things are deliberately blunt about it:
+
+- **An event is finer-grained than a reasoning turn.** The one measured turn
+  here produced five events (system prompt, task, `running`, the reply,
+  `finished`). The ceiling counts events *from the moment watching starts*, so
+  the prologue is not charged to the run, but `AGENT_MAX_ITERATIONS=100` is
+  still a bound on events rather than on turns.
+- **An unreadable answer is `unknown`, never `0`.** OpenHands publishes the
+  event routes but no schema this project could pin to, so several plausible
+  response envelopes are accepted and anything else yields nothing at all. A
+  ceiling handed `0` every tick would never fire and would then report a clean
+  run — which is exactly the failure the log arm turned out to be, and it is
+  not worth reproducing in a new place.
 
 If a run ends with **no** line having matched, `watch` says so and exits
 non-zero rather than reporting a clean run — a limit that silently never fires

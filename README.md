@@ -348,6 +348,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_MAX_ITERATIONS` | `100` | steps before an unattended run is stopped (0 = no limit) |
 | `AGENT_TIMEOUT_MINUTES` | `180` | wall-clock limit for a run (0 = no limit) |
 | `AGENT_STUCK_STRIKES` | `3` | identical failures in a row before the approach is abandoned (0 = never) |
+| `AGENT_STEP_SOURCE` | `auto` | where the step ceiling counts from: `auto` (agent's event API, container log as fallback), `events`, `log` |
 | `BACKUP_AGENT_WORKSPACE` | `false` | include the agent's `~/.openhands` workspace in backups |
 | `BACKUP_AGENT_MAX_MB` | `2048` | skip that workspace above this size (0 = no ceiling) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |

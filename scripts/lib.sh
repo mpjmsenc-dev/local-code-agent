@@ -513,6 +513,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   AGENT_MAX_ITERATIONS="${AGENT_MAX_ITERATIONS:-100}"
   AGENT_TIMEOUT_MINUTES="${AGENT_TIMEOUT_MINUTES:-180}"
   AGENT_STUCK_STRIKES="${AGENT_STUCK_STRIKES:-3}"
+  # 'auto' rather than 'events': the event API is where a real step ceiling has
+  # to read from, but the log arm is what shipped and it costs nothing to keep
+  # as the fallback. Nobody's run gets worse by upgrading.
+  AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
   # Off by default: the agent's workspace holds whole checked-out projects and
   # is the one thing here whose size nobody controls. The ceiling applies only
   # when it is switched on; 0 means no ceiling, as it does everywhere else.
@@ -2598,6 +2602,122 @@ agent_stop_reason() {
     stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
     *)          printf 'the run ended on its own' ;;
   esac
+}
+
+# --- the step ceiling's second source: the agent's own event API -------------
+#
+# The container log cannot support a step ceiling, and that is measured, not
+# suspected: across one 27-minute reasoning turn that ran to 'finished', the
+# sandbox log went from 65 lines to 66, and the one new line was an unrelated
+# cost-calculation warning. Every line the step pattern DOES match is tool
+# initialisation, emitted once when the sandbox comes up. At the default of 100
+# the ceiling can therefore never fire — a limit that cannot trigger, which is
+# worse than no limit because it was believed.
+#
+# The stream that does carry one step per step is the app's event API. These
+# functions read it. They are deliberately tolerant about the response body and
+# deliberately intolerant about guessing: OpenHands publishes the event routes
+# but no schema this project could pin to, and this repo has already been burnt
+# once by writing to an assumed shape — the settings POST that answered 200 and
+# stored nothing. So several plausible envelopes are accepted, and a payload
+# none of them fit yields NOTHING and a non-zero status.
+#
+# That distinction is the whole point. 'unknown' and 'zero' differ by an entire
+# feature: a ceiling fed unknown-as-zero never fires and then reports a clean
+# run, which is exactly the failure the log-based counter turned out to be.
+
+# agent_events_count PAYLOAD — the number of events in an event-API response.
+#
+# Accepts a bare array, an object carrying a numeric total, or an object
+# carrying the events themselves under a list key. Returns 1 and prints nothing
+# for anything else, including invalid JSON and an empty body.
+agent_events_count() {
+  local payload="${1:-}" n
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  # numbers/arrays are jq's type filters, so a null or a string under one of
+  # these keys is skipped rather than becoming a count. Collected into a list
+  # and indexed instead of using first(), which older jq builds lack; '.[0] //
+  # empty' keeps a legitimate 0, since jq's // only rejects null and false.
+  n="$(printf '%s' "${payload}" | jq -r '
+        [ if type == "array" then length
+          elif type == "object" then
+            ( .count, .total, .total_count, .num_events | numbers ),
+            ( .items, .results, .events, .data | arrays | length )
+          else empty end ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${n}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${n}"
+}
+
+# agent_conversation_id PAYLOAD — the conversation to count events for, out of
+# the app's conversation listing.
+#
+# The first entry the server returned, and nothing here re-sorts it: the field
+# that would carry a timestamp is not published either, and inventing one is
+# how the settings write went wrong. A listing, a wrapped listing and a single
+# conversation object are all read.
+#
+# The id is validated before it is returned, and that is a safety property, not
+# tidiness: it is interpolated straight into a URL by the caller.
+agent_conversation_id() {
+  local payload="${1:-}" id
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  id="$(printf '%s' "${payload}" | jq -r '
+        [ ( if type == "array" then .[]
+            elif type == "object" then
+              ( ( .items, .results, .conversations, .data | arrays | .[] ), . )
+            else empty end )
+          | objects | ( .id, .conversation_id ) | strings ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s' "${id}"
+}
+
+# agent_api_base — the agent app's API as the HOST dials it.
+#
+# The live published port when there is one, for the same reason agent_live_port
+# exists at all: editing AGENT_PORT after the container was created leaves the
+# running UI on the old one, and a supervisor polling the new number would find
+# nothing and quietly fall back to a ceiling that cannot fire.
+agent_api_base() {
+  local port
+  port="$(agent_live_port 2>/dev/null || true)"
+  [[ "${port}" =~ ^[0-9]+$ ]] || port="${AGENT_PORT}"
+  printf 'http://127.0.0.1:%s' "${port}"
+}
+
+# agent_conversation_ref — the id of the conversation now running, or rc 1.
+agent_conversation_ref() {
+  local base path payload id
+  have curl || return 1
+  base="$(agent_api_base)"
+  for path in /api/v1/app-conversations /api/v1/conversations; do
+    payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
+    id="$(agent_conversation_id "${payload}" 2>/dev/null || true)"
+    [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
+  done
+  return 1
+}
+
+# agent_event_steps ID — how many events that conversation has, or rc 1.
+#
+# Three routes are tried because two spellings of the path are in circulation
+# and the search route answers when the count route does not. A limit is passed
+# to the search one; it is far above any ceiling worth setting, so a run that
+# could reach it was stopped long before.
+agent_event_steps() {
+  local id="${1:-}" base path payload n
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  have curl || return 1
+  base="$(agent_api_base)"
+  for path in "/api/v1/conversation/${id}/events/count" \
+              "/api/v1/conversations/${id}/events/count" \
+              "/api/v1/conversation/${id}/events/search?limit=10000"; do
+    payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
+    n="$(agent_events_count "${payload}" 2>/dev/null || true)"
+    [[ "${n}" =~ ^[0-9]+$ ]] && { printf '%s' "${n}"; return 0; }
+  done
+  return 1
 }
 
 # agent_workspace_dir — where the agent keeps its workspace and settings.
