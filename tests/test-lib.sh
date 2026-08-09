@@ -2653,6 +2653,24 @@ check "the tool-calling mode is sent as a boolean, not a string" \
 check "the stored tool-calling mode is read back and checked" \
   grep -q 'native_tool_calling // "unset"' "${REPO}/agent.sh"
 
+# The agent's workspace at uninstall. Nothing removed it at all, and it is the
+# one directory here holding the user's own work rather than settings.
+uninstall_handles_the_agent_workspace() {
+  local body
+  body="$(cat "${REPO}/uninstall.sh")"
+  grep -q 'remove_agent_workspace' <<<"${body}" || return 1
+  # Through as_root, because the agent container runs as root and creates it:
+  # a plain rm from the user's shell fails with EACCES on a path inside their
+  # own home, and an uninstall that reports success while the workspace is
+  # still there is the shape this repo keeps closing.
+  grep -qE 'as_root rm -rf "\$\{dir\}"' <<<"${body}" || return 1
+  # ...and it follows --keep-data, exactly as the chat app's volume does.
+  # shellcheck disable=SC2016  # the source text is the search string, not an expansion
+  grep -q 'remove_agent_workspace "${keep_data}"' <<<"${body}"
+}
+check "uninstall removes the agent's workspace, as root, unless --keep-data" \
+  uninstall_handles_the_agent_workspace
+
 echo "# the Ollama relay: containers reach the model, the model stays on loopback"
 # The decision this encodes: Ollama is NOT widened to 0.0.0.0. It stays on
 # 127.0.0.1 and one address — the docker bridge gateway, which is not routable

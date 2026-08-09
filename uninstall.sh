@@ -9,7 +9,8 @@
 #
 # Usage: sudo ./uninstall.sh [--yes] [--keep-data]
 #   --yes        don't ask for confirmation (REQUIRED when non-interactive)
-#   --keep-data  keep the 'open-webui' docker volume (accounts + chats)
+#   --keep-data  keep the 'open-webui' docker volume (accounts + chats) and
+#                the agent's ~/.openhands workspace
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,6 +129,36 @@ remove_webui() {
   return "${left}"
 }
 
+# remove_agent_workspace KEEP_DATA — the agent's ~/.openhands, which nothing
+# used to remove at all.
+#
+# It is the one directory here that holds the USER's work — whole checked-out
+# projects, not just settings — so it follows --keep-data exactly as the chat
+# app's volume does, and it is the last thing removed rather than the first.
+#
+# It also needs root, and that is not a guess: the agent container runs as root
+# and creates this directory, so a plain 'rm -rf' from the user's own shell
+# fails with EACCES on a path inside their own home. An uninstall that reported
+# success while leaving the agent's workspace behind is exactly the shape this
+# repo keeps closing.
+remove_agent_workspace() {
+  local keep_data="$1" dir
+  dir="$(agent_workspace_dir)"
+  [[ -e "${dir}" ]] || return 0
+  if [[ "${keep_data}" == "true" ]]; then
+    info "Keeping the agent's workspace ${dir} (--keep-data)."
+    return 0
+  fi
+  step "Removing the agent's workspace"
+  info "${dir} holds whatever the agent checked out and wrote. It is root-owned, so this needs sudo."
+  if as_root rm -rf "${dir}"; then
+    ok "Agent workspace removed."
+    return 0
+  fi
+  warn "The agent's workspace ${dir} could not be removed and is still on this machine, including anything it checked out. Delete it yourself, as root: ${dir}"
+  return 1
+}
+
 # closing_banner WEBUI_LEFT — the last thing an uninstall says.
 #
 # "complete" has to mean it. A warning printed sixty lines earlier is not where
@@ -213,6 +244,7 @@ main() {
   # 3. Open WebUI.
   local webui_left=0
   remove_webui "${keep_data}" || webui_left=1
+  remove_agent_workspace "${keep_data}" || true
 
   # Homes to clean. Under sudo, ${HOME} is root's while the files that matter
   # were written by the human's own runs, so both are in scope. Computed here
