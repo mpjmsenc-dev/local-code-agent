@@ -96,14 +96,39 @@ pulled and run here, and the design was checked against a real container:
 That found two bugs no unit test would have. The image has since been removed
 and .env restored (ENABLE_AGENT=false, AGENT_TIMEOUT_MINUTES=180).
 
-## Still untested, and why
+## The live run (done — on the sandbox box, NOT the droplet)
 
-`AGENT_STEP_PATTERN` has never matched a real agent STEP: doing that needs the
-several-GB agent-server sandbox image and a full task at ~5 tok/s. `watch`
-already refuses to call such a run clean — it warns that the ceiling could
-never fire and exits non-zero — so the failure is loud rather than silent, but
-the pattern itself is still a guess. Tune it against a real run before relying
-on the step ceiling.
+A real OpenHands task was submitted against the local model. It confirmed
+`AGENT_STEP_PATTERN` by disproving it, and found a second blocker:
+
+- The work happens in a **sandbox** container (`oh-agent-server-<random>`), not
+  the one you start. Old pattern: **0 matches**. New pattern (matching the
+  JSON logger `name`): **5 step, 4 failure matches**. `watch` now follows both
+  and rediscovers sandboxes as they appear.
+- The agent could not run **any** task: `GET /api/v1/settings` →
+  `{"error":"Settings not found"}`, then `assert settings is not None`. The
+  `LLM_*` env vars do not create that record. `lca agent start` now seeds it.
+
+**Still not observed:** a full agent reasoning loop. The five matches are tool
+initialisation; the sandbox died first on an MCP server timeout (30s) with the
+CPU busy running the model. Re-check the pattern against a droplet run where
+the loop completes.
+
+## Context above the ladder — measured, not changed
+
+| `num_ctx` | resident | gen tok/s (short prompt) |
+|---|---|---|
+| 4096 | 5.1 GB | — |
+| 8192 | 5.5 GB | 4.82 |
+| 16384 | 5.9 GB | — |
+| 32768 | 6.9 GB | 3.93 |
+
+~60 MB per 1k tokens; 32768 costs +1.4 GB over the 16384 rung and **−18%
+throughput before the window is even filled**. `OLLAMA_CONTEXT_LENGTH` is
+server-wide, so the agent cannot have a bigger window than aider and the chat
+app without raising it for all three (a second Ollama instance would double
+model residency). Per-request `num_ctx` works but OpenHands does not expose it.
+The ladder is UNCHANGED — that is a default affecting every user.
 
 ## Swept after the three priorities
 
