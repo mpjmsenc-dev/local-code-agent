@@ -130,6 +130,14 @@ part. The first version of it was written for plain text against the app
 container and matched **zero** lines of a real run — which is exactly why the
 next paragraph exists.
 
+**Verified against the real log shape.** A container emitting the JSON above was
+followed end to end: three step lines counted, the ceiling fired at exactly
+three, and no `docker logs -f` follower was left behind afterwards. The
+rediscovery was tested too — the app container emitted only non-matching lines
+while a sandbox appeared **twelve seconds after** the watcher started, and its
+lines are what drove the ceiling. A list of containers resolved once at launch
+would have counted nothing.
+
 **What it still cannot promise.** These patterns are read off one observed run,
 not a documented interface. They matched real `openhands.tools.*` and
 `openhands.sdk.*` lines, but those were tool *initialisation*; a full agent
