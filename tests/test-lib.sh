@@ -2427,7 +2427,23 @@ check "a body with no count at all is unknown, and unknown is not 0" \
 check "...so is a count that is not a number" count_is_unknown '{"count": "many"}'
 check "...so is a body that is not JSON"      count_is_unknown 'not json at all'
 check "...so is an empty body"                count_is_unknown ''
-check "...so is a bare scalar"                count_is_unknown '7'
+check "...so is a bare string"                count_is_unknown '"many"'
+
+# A bare number is the count, and this gate exists because the opposite one was
+# here first. Measured against a real OpenHands 1.8 container, the count route
+# answers with a single byte:
+#
+#   GET /api/v1/conversation/<id>/events/count  ->  0
+#
+# The unit suite was green while refusing exactly that, which would have left
+# the ceiling on its fallback for ever without a single test complaining. This
+# is the shape the endpoint actually returns.
+check "a bare number is the count, which is what the API really sends" \
+  test "$(ec '11')" = 11
+check "...including a bare 0"                 test "$(ec '0')" = 0
+# ...and the other real shape, from the same container.
+check "the search route's envelope is counted too" \
+  test "$(ec '{"items":[1,2],"next_page_id":null}')" = 2
 
 cid() { agent_conversation_id "$1"; }
 check "a conversation id is read from a listing" \
@@ -2436,6 +2452,13 @@ check "...from a wrapped listing" \
   test "$(cid '{"items":[{"conversation_id":"c-1"}]}')" = c-1
 check "...and from a single conversation object" \
   test "$(cid '{"id":"solo"}')" = solo
+# The real listing, copied from a live container. The id that matters is NOT
+# the one the start-task POST returns — that call answers with its own task id,
+# and asking the events API for it gets nothing. The conversation has to be
+# discovered from the listing, which is why this path exists at all.
+check "the live listing shape yields the conversation id" \
+  test "$(cid '{"items":[{"id":"0d9f67c3b0454efc96b5541d6e3f9db7","sandbox_id":"oh-agent-server-38Y9naNC4VTLg1ok068d3z","title":"FizzBuzz Script"}],"next_page_id":null}')" \
+     = 0d9f67c3b0454efc96b5541d6e3f9db7
 id_is_unknown() {
   local out
   out="$(agent_conversation_id "$1" 2>/dev/null)" && return 1
@@ -2502,7 +2525,7 @@ bad_id_never_reaches_the_network() (
 check "an id that failed validation is never put in a request" \
   bad_id_never_reaches_the_network
 
-conversation_ref_tries_both_listings() (
+conversation_ref_tries_every_listing() (
   # shellcheck disable=SC2317  # reached through agent_api_base, not from here
   agent_live_port() { return 1; }
   # shellcheck disable=SC2030  # setting it only inside this subshell is the point
@@ -2515,8 +2538,26 @@ conversation_ref_tries_both_listings() (
   }
   [[ "$(agent_conversation_ref)" == second ]]
 )
-check "the conversation is looked for under both listing paths" \
-  conversation_ref_tries_both_listings
+check "the conversation is looked for under every listing path" \
+  conversation_ref_tries_every_listing
+# ...and the one that answers on a real container is tried FIRST, because each
+# route tried before it costs a refused request. Measured on 1.8: a bare GET of
+# /api/v1/app-conversations is a 422 asking for the very ids being discovered,
+# while /api/v1/app-conversations/search answers with the listing.
+conversation_ref_asks_the_working_route_first() (
+  # shellcheck disable=SC2317  # reached through agent_api_base, not from here
+  agent_live_port() { return 1; }
+  # shellcheck disable=SC2030  # setting it only inside this subshell is the point
+  AGENT_PORT=3001
+  local order="${SANDBOX}/listing-order"
+  rm -f "${order}"
+  curl() { printf '%s\n' "${*: -1}" >> "${order}"; return 22; }
+  agent_conversation_ref >/dev/null 2>&1 || true
+  [[ -s "${order}" ]] || return 1
+  grep -q 'app-conversations/search' <<<"$(head -1 "${order}")"
+)
+check "the listing route that answers on a real container is tried first" \
+  conversation_ref_asks_the_working_route_first
 
 # Same drift the WebUI port taught, and the same answer: editing AGENT_PORT
 # after the container was created leaves the running UI on the old one, so a

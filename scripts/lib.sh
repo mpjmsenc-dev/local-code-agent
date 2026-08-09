@@ -2628,9 +2628,20 @@ agent_stop_reason() {
 
 # agent_events_count PAYLOAD — the number of events in an event-API response.
 #
-# Accepts a bare array, an object carrying a numeric total, or an object
-# carrying the events themselves under a list key. Returns 1 and prints nothing
-# for anything else, including invalid JSON and an empty body.
+# Accepts a bare number, a bare array, an object carrying a numeric total, or
+# an object carrying the events themselves under a list key. Returns 1 and
+# prints nothing for anything else, including invalid JSON and an empty body.
+#
+# The bare number is not hypothetical and it is why this function was written
+# tolerantly. Measured against a real OpenHands 1.8 container:
+#
+#   GET /api/v1/conversation/<id>/events/count    -> 0        (one byte)
+#   GET /api/v1/conversation/<id>/events/search   -> {"items":[...],"next_page_id":null}
+#
+# The first version of this refused a bare scalar on purpose, and a gate said
+# so. Against the live API that gate was wrong: it rejected the exact shape the
+# endpoint returns, which would have left the ceiling on its fallback for ever
+# while every unit test passed.
 agent_events_count() {
   local payload="${1:-}" n
   [[ -n "${payload}" ]] || return 1
@@ -2640,7 +2651,8 @@ agent_events_count() {
   # and indexed instead of using first(), which older jq builds lack; '.[0] //
   # empty' keeps a legitimate 0, since jq's // only rejects null and false.
   n="$(printf '%s' "${payload}" | jq -r '
-        [ if type == "array" then length
+        [ if type == "number" then .
+          elif type == "array" then length
           elif type == "object" then
             ( .count, .total, .total_count, .num_events | numbers ),
             ( .items, .results, .events, .data | arrays | length )
@@ -2687,11 +2699,17 @@ agent_api_base() {
 }
 
 # agent_conversation_ref — the id of the conversation now running, or rc 1.
+# The search route is FIRST because it is the one that answers. Measured on
+# 1.8: a bare GET /api/v1/app-conversations is a 422 —
+# {"detail":[{"type":"missing","loc":["query","ids"]}]} — it wants the ids you
+# are trying to discover. The other two stay as fallbacks for a build that
+# spells it differently, and cost one refused request each.
 agent_conversation_ref() {
   local base path payload id
   have curl || return 1
   base="$(agent_api_base)"
-  for path in /api/v1/app-conversations /api/v1/conversations; do
+  for path in "/api/v1/app-conversations/search?limit=1" \
+              /api/v1/app-conversations /api/v1/conversations; do
     payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
     id="$(agent_conversation_id "${payload}" 2>/dev/null || true)"
     [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
