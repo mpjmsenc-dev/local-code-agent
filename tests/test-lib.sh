@@ -2815,6 +2815,34 @@ every_surface_reads_one_instructions_source() {
 }
 check "aider, the chat app and the agent all read the same file" \
   every_surface_reads_one_instructions_source
+# ...and the gotchas in it must stay demonstrated ones. Each of the four broke
+# something in this repo for real, and each is written as before/after because
+# that is the form that changes what a small model produces. A rule stated
+# abstractly here is a rule the 7b ignores — measured on the escaping rule that
+# was tried and reverted.
+conventions_carry_the_measured_gotchas() {
+  local f="${REPO}/config/CONVENTIONS.md" body missing=() rule
+  body="$(cat "${f}")"
+  # The four by their distinguishing token, not by prose that could drift.
+  for rule in 'total++' 'local matches' 'grep -q' 'shellcheck disable'; do
+    grep -qF "${rule}" <<<"${body}" || missing+=("${rule}")
+  done
+  (( ${#missing[@]} == 0 )) || {
+    printf 'the gotchas section lost a demonstrated case: %s\n' "${missing[*]}" >&2
+    return 1; }
+  # Before AND after. A section that shows only the broken form teaches the bug.
+  # The literal characters total=$((total+1)) are what must appear in the file;
+  # expanding them here would search for this suite's own arithmetic and match
+  # nothing. Directive immediately above the line it excuses — gotcha 4 of the
+  # very section this is checking.
+  # shellcheck disable=SC2016
+  grep -qF 'total=$((total+1))' <<<"${body}" || {
+    echo 'the ((x++)) gotcha shows the break without the fix' >&2; return 1; }
+  grep -qF '<<<' <<<"${body}" || {
+    echo 'the pipefail gotcha shows the break without the here-string fix' >&2; return 1; }
+}
+check "the conventions file carries the four measured bash gotchas, with fixes" \
+  conventions_carry_the_measured_gotchas
 # ...and the cost of a long one is stated, not spent quietly. Everything in the
 # system prompt is re-sent on every message and comes out of the same window the
 # conversation has to fit in, so an instructions file that doubles the prompt

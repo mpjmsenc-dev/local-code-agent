@@ -263,6 +263,12 @@ seed_agent_settings() {
   base_url="$(agent_llm_base_url)"
   # Wait for the API rather than racing it: the container answers HTTP well
   # before this route exists.
+  #
+  # Announced, because measured this takes the full 90s when the API never
+  # comes up — and a silent 90-second pause straight after "Agent started" is
+  # the "is it hung?" this project keeps removing. Same reason the model load
+  # says how long it may take.
+  info "Waiting for the agent's API so its settings can be written (up to 90s)..."
   while (( waited < 90 )); do
     curl -fsS --max-time 3 -o /dev/null "${url}" 2>/dev/null && break
     # 404/500 still means the server is answering, which is all this needs.
@@ -282,7 +288,11 @@ seed_agent_settings() {
   if [[ "${got}" == "${model}" ]]; then
     ok "Agent settings seeded: ${model} at ${base_url}"
   else
-    warn "The agent's LLM settings did not take — it still reports '${got:-none}', not '${model}', so its first task will fail or run against the wrong model. Open port ${AGENT_PORT}'s settings screen once, or re-run: lca agent restart"
+    # Keeps the stronger check — this reports what the agent ACTUALLY holds, not
+    # merely that a POST failed — and names a URL rather than a bare port:
+    # "open port 3001's settings screen" reads as an instruction to open a
+    # number.
+    warn "The agent's LLM settings did not take — it still reports '${got:-none}', not '${model}', so its first task will fail or run against the wrong model. Open http://127.0.0.1:${AGENT_PORT} and save its settings once, or re-run: lca agent restart"
   fi
 }
 
