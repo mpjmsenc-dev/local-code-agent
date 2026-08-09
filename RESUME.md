@@ -89,6 +89,9 @@ pulled and run here, and the design was checked against a real container:
     guarded_ports    -> WebUI 3000 / Ollama 11434 / Agent 3001
     wall clock       -> fired at exactly 60s on a SILENT log, --dry-run left
                         the container running
+    step ceiling     -> stopped at exactly 5 of 5 steps, real log stream
+    stuck detector   -> fired on 3 repeats of one failure whose id and
+                        timestamp differed every round
 
 That found two bugs no unit test would have. The image has since been removed
 and .env restored (ENABLE_AGENT=false, AGENT_TIMEOUT_MINUTES=180).

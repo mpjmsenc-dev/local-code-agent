@@ -96,6 +96,14 @@ ERROR build failed in /tmp/c1d0e5f8 after 47 retries
 
 are one signature, while `build failed` and `tests failed` stay two.
 
+**What has been proved, and against what.** All three limits were run against
+real `docker logs -f` streams, not only unit-tested: the wall clock fires at
+exactly 60s on a container that logs *nothing* (silence is the shape of a hung
+run, and a loop that only judges on output would never notice), the step
+ceiling stops at exactly `AGENT_MAX_ITERATIONS` lines, and the stuck detector
+fires on three repeats of one failure whose id and timestamp differ every
+round. `--dry-run` left the container running in each case.
+
 **What it cannot see.** `watch` reads the container's log and counts steps and
 failures by pattern. Those patterns (`AGENT_STEP_PATTERN`, `AGENT_FAIL_PATTERN`)
 are a guess about somebody else's output format, not a documented interface. If
