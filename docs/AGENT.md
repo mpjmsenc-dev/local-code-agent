@@ -20,6 +20,14 @@ lca agent start       # creates and starts the container
 lca agent url         # the address to open on your phone, over Tailscale
 ```
 
+`lca agent start` also writes the agent's LLM settings for you. That is not a
+convenience: on a fresh container `GET /api/v1/settings` answers
+`{"error":"Settings not found"}`, and the first task submitted dies inside the
+app on `assert settings is not None`. Without it the stack looks perfectly
+healthy — container up, UI answering, `lca agent status` green — and cannot run
+a single task until somebody opens the settings screen in a desktop browser,
+which is not much use from a phone.
+
 ## What it is
 
 [OpenHands](https://docs.openhands.dev), pinned to a specific image, pointed at
@@ -104,12 +112,32 @@ ceiling stops at exactly `AGENT_MAX_ITERATIONS` lines, and the stuck detector
 fires on three repeats of one failure whose id and timestamp differ every
 round. `--dry-run` left the container running in each case.
 
-**What it cannot see.** `watch` reads the container's log and counts steps and
-failures by pattern. Those patterns (`AGENT_STEP_PATTERN`, `AGENT_FAIL_PATTERN`)
-are a guess about somebody else's output format, not a documented interface. If
-a run ends with **no** line having matched the step pattern, `watch` says so and
-exits non-zero rather than reporting a clean run — a limit that silently never
-fires is worse than no limit, because it was believed.
+**Where the steps actually are.** The container you start is not the one that
+does the work. It spawns a **sandbox** per conversation, named
+`oh-agent-server-<random>`, and every `openhands.sdk` / `openhands.tools` line
+is logged there — the app container's own log contains no step line at all. So
+`watch` follows both, and rediscovers sandboxes as they appear, because one
+started after the run began would otherwise never be read.
+
+That sandbox logs **JSON**, one object per line:
+
+```json
+{"asctime": "...", "levelname": "INFO", "name": "openhands.tools.terminal.impl", "message": "..."}
+```
+
+`AGENT_STEP_PATTERN` therefore matches the logger `name`, which is the stable
+part. The first version of it was written for plain text against the app
+container and matched **zero** lines of a real run — which is exactly why the
+next paragraph exists.
+
+**What it still cannot promise.** These patterns are read off one observed run,
+not a documented interface. They matched real `openhands.tools.*` and
+`openhands.sdk.*` lines, but those were tool *initialisation*; a full agent
+reasoning loop has not been observed here, because the sandbox failed first on
+an MCP server timeout (30s default) under a CPU busy running the model. If a
+run ends with **no** line having matched, `watch` says so and exits non-zero
+rather than reporting a clean run — a limit that silently never fires is worse
+than no limit, because it was believed.
 
 ## Your instructions reach it too
 

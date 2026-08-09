@@ -50,8 +50,60 @@ EOF
 # off while looking like it was on. 'watch' says which patterns it is using and
 # how many lines each has matched, so a mismatch is visible in the first
 # minute rather than after a wasted night.
-AGENT_STEP_PATTERN="${AGENT_STEP_PATTERN:-(^|[^A-Za-z])(STEP|ACTION|AgentController)}"
-AGENT_FAIL_PATTERN="${AGENT_FAIL_PATTERN:-(ERROR|Traceback|CommandFailed|non-zero exit)}"
+# Both defaults were rewritten after watching a real run, and both were wrong
+# in the same way: they described the wrong process's output.
+#
+# The app container (AGENT_CONTAINER) starts conversations and hands the actual
+# work to a SANDBOX container it creates per conversation, named
+# oh-agent-server-<random>. Measured: the app container's log contains no step
+# line at all, while the sandbox is where openhands.sdk and openhands.tools
+# report what the agent is doing. A watcher following only the app container
+# can never see a step, which is precisely the "limit that cannot fire" this
+# file exists to refuse.
+#
+# The sandbox also logs JSON, one object per line —
+#   {"asctime": "...", "levelname": "INFO", "name": "openhands.tools.terminal.impl", ...}
+# — so a pattern written for plain text matches the field names rather than the
+# events. These match the logger 'name', which is the stable part.
+AGENT_STEP_PATTERN="${AGENT_STEP_PATTERN:-openhands\.(sdk|tools|agent_server)\.[a-z_.]*(agent|terminal|tool|action|impl)}"
+AGENT_FAIL_PATTERN="${AGENT_FAIL_PATTERN:-(\"levelname\": \"ERROR\"|Traceback|CommandFailed|non-zero exit)}"
+
+# agent_log_sources — every container whose log this run should be read from.
+#
+# The app container plus any sandbox it has spawned. Sandbox names are assigned
+# at conversation start, so they are discovered rather than configured; when
+# there is no sandbox yet the app container alone is the honest answer.
+agent_log_sources() {
+  printf '%s\n' "${AGENT_CONTAINER}"
+  as_root docker ps --format '{{.Names}}' 2>/dev/null \
+    | grep -E '^oh-agent-server-' || true
+}
+
+# agent_follow_logs — one merged stream from the app container and every
+# sandbox it has spawned.
+#
+# Sandboxes appear after the run starts, so this re-checks for new ones rather
+# than resolving the list once: a watcher that fixed the list at launch would
+# follow the app container for the whole run and see none of the work.
+#
+# Each follower is backgrounded and writes into this function's stdout, which
+# the caller reads. They are killed with the subshell when the loop returns.
+agent_follow_logs() {
+  local seen="" name
+  while true; do
+    while read -r name; do
+      [[ -n "${name}" ]] || continue
+      case " ${seen} " in *" ${name} "*) continue ;; esac
+      seen="${seen} ${name}"
+      as_root docker logs -f --tail 0 "${name}" 2>&1 &
+    done < <(agent_log_sources)
+    # Cheap: a sandbox takes tens of seconds to appear, so polling for one is
+    # not a hot loop, and the read -t in the caller keeps the clock honest
+    # regardless of how quiet these streams are.
+    sleep 5
+    agent_container_running || break
+  done
+}
 
 main() {
   local dry_run=false arg
@@ -137,7 +189,7 @@ main() {
       fi
     fi
     return 0
-  done < <(as_root docker logs -f --tail 0 "${AGENT_CONTAINER}" 2>&1)
+  done < <(agent_follow_logs)
 
   # The stream ended, which means the container did.
   elapsed=$(( $(date +%s) - started ))

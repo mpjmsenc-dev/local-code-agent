@@ -2502,6 +2502,42 @@ watch_judges_on_time_not_only_on_output() {
 }
 check "the wall clock can fire while the agent is silent" \
   watch_judges_on_time_not_only_on_output
+# ...and it must read the container the work actually happens in. Measured on a
+# real run: the app container spawns a SANDBOX per conversation, named
+# oh-agent-server-<random>, and every openhands.sdk / openhands.tools line is
+# there. The app container's own log contained zero step lines, so a watcher
+# following only it can never count a step — the "limit that cannot fire" this
+# file refuses to ship.
+watch_follows_the_sandbox_too() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
+  grep -q 'oh-agent-server' <<<"${body}" || {
+    echo 'agent-watch.sh follows only the app container, where no step is ever logged' >&2
+    return 1; }
+  # Discovered per poll, not resolved once: sandboxes appear after the run
+  # starts, so a list fixed at launch would miss every one of them.
+  grep -q 'agent_log_sources' <<<"${body}" || {
+    echo 'agent-watch.sh does not rediscover sandboxes, so one started later is never read' >&2
+    return 1; }
+}
+check "...and follows the sandbox container where the steps really are" \
+  watch_follows_the_sandbox_too
+# The agent cannot run a single task until a settings record exists — measured:
+# GET /api/v1/settings answers {"error":"Settings not found"} on a fresh
+# container, and the first task dies on 'assert settings is not None'. A
+# container that is up, answering, and green in 'lca agent status' is still
+# unusable until that is written.
+start_seeds_the_settings() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -q 'api/v1/settings' <<<"${body}" || {
+    echo 'agent.sh never seeds the LLM settings, so the first task fails with "Settings not found"' >&2
+    return 1; }
+  grep -q 'seed_agent_settings' <<<"${body}" || {
+    echo 'the settings seeder is never called from start' >&2; return 1; }
+}
+check "'lca agent start' seeds the settings a task cannot run without" \
+  start_seeds_the_settings
 # 'lca apply' has to know the agent exists. docs/AGENT.md told people to run it
 # and, until this, apply reconciled the guard while never once looking at the
 # container — so the doc described work the code did not do.

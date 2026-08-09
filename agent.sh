@@ -132,6 +132,47 @@ start_agent() {
 
   ok "Agent started. ${AGENT_CONTAINER} is running."
   info "It may take a minute to answer while it unpacks. Then: $(agent_url_line)"
+  seed_agent_settings
+}
+
+# seed_agent_settings — write the LLM settings the agent needs before it can
+# start ANY conversation.
+#
+# The LLM_MODEL / LLM_BASE_URL environment variables the docs give are not
+# enough on their own. Measured on a freshly started container: GET
+# /api/v1/settings answers {"error":"Settings not found"}, and the first task
+# submitted then dies inside the app with
+#
+#   File ".../user/auth_user_context.py", line 50, in get_user_info
+#     assert settings is not None
+#
+# So a stack that looks healthy — container up, UI answering, 'lca agent
+# status' green — cannot run a single task until somebody opens the settings
+# screen by hand. That is a phone-first product asking for a desktop browser.
+#
+# POSTed once at start, and best-effort: a failure here is a warning, never a
+# reason to fail a container that did start. It is idempotent, so a restart
+# re-asserts .env's model rather than leaving a stale one from an older run.
+seed_agent_settings() {
+  local url="http://127.0.0.1:${AGENT_PORT}/api/v1/settings" body waited=0
+  # Wait for the API rather than racing it: the container answers HTTP well
+  # before this route exists.
+  while (( waited < 90 )); do
+    curl -fsS --max-time 3 -o /dev/null "${url}" 2>/dev/null && break
+    # 404/500 still means the server is answering, which is all this needs.
+    curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:${AGENT_PORT}/" 2>/dev/null && break
+    sleep 3; waited=$(( waited + 3 ))
+  done
+  body="$(jq -nc --arg m "$(agent_llm_model "${MODEL_NAME}")" \
+                 --arg u "$(agent_llm_base_url)" \
+        '{llm_model:$m, llm_base_url:$u, llm_api_key:"local-llm",
+          agent:"CodeActAgent", language:"en", confirmation_mode:false}')"
+  if curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
+       -d "${body}" >/dev/null 2>&1; then
+    ok "Agent settings seeded: $(agent_llm_model "${MODEL_NAME}") at $(agent_llm_base_url)"
+  else
+    warn "Could not seed the agent's LLM settings, so its first task may fail with 'Settings not found'. Open ${AGENT_PORT}'s settings screen once, or re-run: lca agent restart"
+  fi
 }
 
 agent_url_line() {
