@@ -255,6 +255,7 @@ lca                 # starts aider on the local model, right here
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
+| `lca agent <cmd>` | the autonomous agent: `start`, `stop`, `restart`, `status`, `url`, `logs`, `watch` |
 
 `lca <command> --help` explains any of them — and only explains it. That is
 tested: `lca test --help` used to run the whole acceptance suite, and
@@ -304,6 +305,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `update.sh` | Update safely: backup → new code → re-run setup → self-test (`--check` previews) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
+| `agent.sh` | `start\|stop\|restart\|status\|url\|logs\|watch` for the autonomous agent |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary (`--quick` skips the real-generation probe) |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
@@ -337,6 +339,15 @@ Created from `.env.example` on first run. All keys:
 | `SKIP_DOCKER` | `false` | Skip Docker (disables WebUI) |
 | `ENABLE_WEBUI` | `true` | Install/run Open WebUI |
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
+| `ENABLE_AGENT` | `false` | run the autonomous agent tier (see docs/AGENT.md) |
+| `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
+| `AGENT_CONTAINER` | `openhands-app` | name of the agent's docker container |
+| `AGENT_IMAGE` | `docker.openhands.dev/openhands/openhands:1.8` | pinned agent image |
+| `AGENT_RUNTIME_IMAGE` | `ghcr.io/openhands/agent-server` | its sandbox image |
+| `AGENT_RUNTIME_TAG` | `1.26.0-python` | sandbox image tag |
+| `AGENT_MAX_ITERATIONS` | `100` | steps before an unattended run is stopped (0 = no limit) |
+| `AGENT_TIMEOUT_MINUTES` | `180` | wall-clock limit for a run (0 = no limit) |
+| `AGENT_STUCK_STRIKES` | `3` | identical failures in a row before the approach is abandoned (0 = never) |
 | `WEBUI_CONTAINER` | `open-webui` | Container name |
 | `WEBUI_NAME` | `local-code-agent` | Title shown in the chat app on your phone |
 | `WEBUI_ENABLE_SIGNUP` | `true` | Set `false` after creating your account |
@@ -351,13 +362,14 @@ local-code-agent/
 ├── install.sh                  # one-command installer (curl | bash)
 ├── Makefile                    # make gates/lint/test/hooks — the local dev loop
 ├── bin/lca                     # the short command installed on PATH
-├── setup.sh · update.sh · run-agent.sh · webui.sh · netmode.sh
+├── setup.sh · update.sh · run-agent.sh · webui.sh · agent.sh · netmode.sh
 ├── backup.sh · restore.sh · check-system.sh · update-model.sh · uninstall.sh
 ├── scripts/
 │   ├── lib.sh · tune.sh · selftest.sh · apply.sh · ask.sh
 │   ├── logs.sh · speed.sh · motd.sh · prompt-bench.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
+│   ├── agent-watch.sh
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md

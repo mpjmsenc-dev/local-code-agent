@@ -43,6 +43,7 @@ Usage: lca [command] [args...]
   lca status              kill-switch + guard status (needs sudo)
   lca harden              re-close ports 3000/11434 now and on every boot (sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs
+  lca agent <cmd>         autonomous agent: start|stop|restart|status|url|logs|watch
   lca help                this text
 
 Every command explains itself, and only explains itself:
@@ -63,7 +64,11 @@ if (( $# > 0 )); then
 fi
 
 case "${cmd}" in
-  ""|agent|code)   exec "${REPO}/run-agent.sh" "$@" ;;
+  # 'agent' used to be an undocumented third alias for aider here. It now names
+  # the autonomous tier below, because that is what a reader means by it and
+  # what docs/AGENT.md calls it. Bare 'lca' and 'lca code' are unchanged, and
+  # both were the documented ways in; this alias appeared in no doc.
+  ""|code)         exec "${REPO}/run-agent.sh" "$@" ;;
   ask)             exec "${REPO}/scripts/ask.sh" "$@" ;;
   # "$@" forwarded like every other branch, even though 'url' takes no
   # arguments: dropping it swallowed 'lca chat --help', which then printed the
@@ -83,6 +88,7 @@ case "${cmd}" in
   offline|online|status|harden)
                    exec "${REPO}/netmode.sh" "${cmd}" "$@" ;;
   webui)           exec "${REPO}/webui.sh" "$@" ;;
+  agent)           exec "${REPO}/agent.sh" "$@" ;;
   tune)            exec "${REPO}/scripts/tune.sh" "$@" ;;
   help|-h|--help)  usage ;;
   # 'lca help' has advertised "lca --no-auto-commits (arguments for aider)"

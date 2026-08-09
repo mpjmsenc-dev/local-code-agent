@@ -104,10 +104,14 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES; do
   value="${!setting}"
   case "${setting}" in
-    BACKUP_KEEP) [[ "${value}" =~ ^[0-9]+$ ]] && continue ;;
+    # 0 is a legitimate value for all four of these, not a typo: it means
+    # "keep everything" for BACKUP_KEEP and "no limit" for the three agent
+    # limits, which is the convention agent_run_verdict already implements.
+    BACKUP_KEEP|AGENT_MAX_ITERATIONS|AGENT_TIMEOUT_MINUTES|AGENT_STUCK_STRIKES)
+      [[ "${value}" =~ ^[0-9]+$ ]] && continue ;;
     *)           [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} > 0 )) && continue ;;
   esac
   case "${setting}" in
@@ -117,6 +121,14 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP; do
       p_warn "BACKUP_KEEP='${value}' is not a whole number, so retention never runs and backups accumulate until the disk is full. Set a number (or 0 to keep everything on purpose) in ${ENV_FILE}." ;;
     LCA_ASK_TOKENS)
       p_warn "LCA_ASK_TOKENS='${value}' is not a positive number — 'lca ask' silently uses 512. Fix it in ${ENV_FILE}." ;;
+    AGENT_PORT)
+      p_fail "AGENT_PORT='${value}' is not a port number, so the agent cannot be started and — worse — the inbound guard has no port to close for it. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply" ;;
+    AGENT_MAX_ITERATIONS)
+      p_warn "AGENT_MAX_ITERATIONS='${value}' is not a whole number, so the step ceiling never fires and an unattended run is bounded only by the wall clock. Set a number (or 0 for no limit, on purpose) in ${ENV_FILE}." ;;
+    AGENT_TIMEOUT_MINUTES)
+      p_warn "AGENT_TIMEOUT_MINUTES='${value}' is not a whole number, so a run has no wall-clock limit at all — the one limit that lets you walk away. Set a number (or 0 for no limit, on purpose) in ${ENV_FILE}." ;;
+    AGENT_STUCK_STRIKES)
+      p_warn "AGENT_STUCK_STRIKES='${value}' is not a whole number, so a run that keeps failing the same way loops until it hits another limit. Set a number (or 0 to never give up, on purpose) in ${ENV_FILE}." ;;
   esac
 done
 

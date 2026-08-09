@@ -500,6 +500,19 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
   WEBUI_NAME="${WEBUI_NAME:-local-code-agent}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
+  # The agent tier. Off by default: it is a multi-gigabyte download and it runs
+  # commands on this machine without asking, which is not something to switch
+  # on for somebody. AGENT_PORT is 3001 because 3000 is WEBUI_PORT's default
+  # AND the agent's own documented port — the collision is real, not defensive.
+  ENABLE_AGENT="${ENABLE_AGENT:-false}"
+  AGENT_PORT="${AGENT_PORT:-3001}"
+  AGENT_CONTAINER="${AGENT_CONTAINER:-openhands-app}"
+  AGENT_IMAGE="${AGENT_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}"
+  AGENT_RUNTIME_IMAGE="${AGENT_RUNTIME_IMAGE:-ghcr.io/openhands/agent-server}"
+  AGENT_RUNTIME_TAG="${AGENT_RUNTIME_TAG:-1.26.0-python}"
+  AGENT_MAX_ITERATIONS="${AGENT_MAX_ITERATIONS:-100}"
+  AGENT_TIMEOUT_MINUTES="${AGENT_TIMEOUT_MINUTES:-180}"
+  AGENT_STUCK_STRIKES="${AGENT_STUCK_STRIKES:-3}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
@@ -2465,6 +2478,147 @@ webui_container_running() {
   [[ "${state}" == "true" ]]
 }
 
+# --------------------------------------------------------------------------
+# Long-run supervision for the agent tier
+#
+# OpenHands' V1 documentation does not publish environment variables for an
+# iteration ceiling or for confirmation mode, so this project does not ship
+# any: an env var that may quietly do nothing is the "reported something that
+# did not happen" shape this repo keeps removing. The limits below are ours,
+# enforced from outside the container, and the parts that decide are pure
+# functions so they can be tested without a multi-gigabyte image.
+#
+# agent_failure_signature LINE — the part of a log line worth comparing to the
+# previous one when deciding "same failure again".
+#
+# Digits, hex blobs and quoted strings are dropped, because the interesting
+# case is the SAME error with a new timestamp, pid, container id or path index
+# each round — compare the raw lines and every repeat looks novel, which is how
+# a loop runs to the wall clock instead of the strike count.
+agent_failure_signature() {
+  local line="${1:-}"
+  # Order matters: quoted strings first (they contain digits), then hex, then
+  # bare numbers.
+  line="$(printf '%s' "${line}" | sed -E "s/'[^']*'/'X'/g; s/\"[^\"]*\"/\"X\"/g")"
+  # ANY word containing a digit collapses whole, rather than digits alone.
+  # Digits-only was wrong and measured wrong: a hex id needs a word boundary to
+  # match as hex, so 'x7f3a9b2' kept its letters and became 'xNfNaNbN' while
+  # 'c1d0e5f8' became 'H' — two runs of the SAME failure produced different
+  # signatures, and a stuck detector that cannot see a repeat is decoration.
+  line="$(printf '%s' "${line}" | sed -E 's/[A-Za-z0-9_]*[0-9][A-Za-z0-9_]*/N/g')"
+  # Collapse whitespace so indentation changes are not differences.
+  printf '%s' "${line}" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'
+}
+
+# agent_run_verdict ITERATIONS MAX ELAPSED_S TIMEOUT_MIN STRIKES MAX_STRIKES
+#   -> 'ok' | 'iterations' | 'timeout' | 'stuck'
+#
+# One place that decides whether an unattended run should stop, and why. The
+# caller does the watching; this does the judging, so the policy is testable
+# and the two cannot disagree.
+#
+# A limit of 0 means "no limit" — the same convention BACKUP_KEEP=0 already
+# uses here for "keep everything", so a reader who has met one has met both.
+# A non-numeric limit is also no limit rather than an error: a typo in .env
+# must not stop a run that is going fine.
+agent_run_verdict() {
+  local iters="${1:-0}" max_iters="${2:-0}" elapsed="${3:-0}" \
+        timeout_min="${4:-0}" strikes="${5:-0}" max_strikes="${6:-0}"
+  [[ "${max_iters}" =~ ^[0-9]+$ ]] || max_iters=0
+  [[ "${timeout_min}" =~ ^[0-9]+$ ]] || timeout_min=0
+  [[ "${max_strikes}" =~ ^[0-9]+$ ]] || max_strikes=0
+  [[ "${iters}" =~ ^[0-9]+$ ]] || iters=0
+  [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed=0
+  [[ "${strikes}" =~ ^[0-9]+$ ]] || strikes=0
+  # Wall clock first: it is the one a runaway run is most likely to hit, and
+  # the one the user set to be able to walk away.
+  if (( timeout_min > 0 )) && (( elapsed >= timeout_min * 60 )); then
+    printf 'timeout'; return 0
+  fi
+  if (( max_strikes > 0 )) && (( strikes >= max_strikes )); then
+    printf 'stuck'; return 0
+  fi
+  if (( max_iters > 0 )) && (( iters >= max_iters )); then
+    printf 'iterations'; return 0
+  fi
+  printf 'ok'
+}
+
+# agent_stop_reason VERDICT — what to tell the user, in this project's voice.
+agent_stop_reason() {
+  case "${1:-}" in
+    timeout)    printf 'the wall-clock limit (AGENT_TIMEOUT_MINUTES) was reached — the run was stopped, not finished' ;;
+    iterations) printf 'the step ceiling (AGENT_MAX_ITERATIONS) was reached — the run was stopped, not finished' ;;
+    stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
+    *)          printf 'the run ended on its own' ;;
+  esac
+}
+
+# agent_container_running — true when the agent's container is actually
+# running. Same distinction, and for the same reason, as
+# webui_container_running: a stopped container is not an exposure.
+agent_container_running() {
+  have docker || return 1
+  local state
+  state="$(docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
+           || true)"
+  [[ "${state}" == "true" ]]
+}
+
+# agent_container_exists — in any state, which is the right question for "has
+# it been created" and the wrong one for "is it exposed".
+agent_container_exists() {
+  have docker || return 1
+  docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
+    || { root_for_probe && as_root docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
+}
+
+# agent_live_port — the host port the running agent container really publishes.
+#
+# Read from the port MAPPING, not from an environment variable: unlike the chat
+# app, which runs with --network=host and carries its port in PORT, the agent
+# is published with '-p HOST:3000'. Its container-side port is always 3000; the
+# host side is whatever AGENT_PORT said at creation, so editing AGENT_PORT
+# afterwards leaves the running UI on the old one — the same drift that made
+# 'ENABLE_WEBUI=false' a security hole, and it is answered the same way.
+agent_live_port() {
+  have docker || return 1
+  local spec
+  spec="$(docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
+          || { root_for_probe && as_root docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
+          || true)"
+  # '0.0.0.0:3001' / '[::]:3001' -> 3001. First line only: docker prints one
+  # per address family and they are the same host port.
+  spec="${spec%%$'\n'*}"
+  spec="${spec##*:}"
+  [[ "${spec}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${spec}"
+}
+
+# agent_llm_model MODEL — the model name OpenHands needs for a local Ollama.
+#
+# 'openai/<model>' against a '/v1' base URL, which is what OpenHands' own local
+# LLM guide specifies: it talks to Ollama through its OpenAI-compatible
+# endpoint, not through litellm's 'ollama/' provider. Getting this wrong is a
+# silent 404 inside a container, so it is one function rather than a string
+# spelled out at each call site.
+agent_llm_model() {
+  printf 'openai/%s' "${1:-${MODEL_NAME}}"
+}
+
+# agent_llm_base_url — the Ollama endpoint as seen from INSIDE the container.
+#
+# host.docker.internal, not 127.0.0.1: the agent runs in its own network
+# namespace, where loopback is the container. The '--add-host
+# host.docker.internal:host-gateway' flag in agent.sh is what makes this
+# resolve, so the two belong together and both are gated.
+agent_llm_base_url() {
+  local port
+  port="$(ollama_url)"; port="${port##*:}"
+  printf 'http://host.docker.internal:%s/v1' "${port}"
+}
+
 # webui_volume_has_data — true when the chat app's volume exists AND has
 # something in it, i.e. there is something in there to lose.
 #
@@ -2640,6 +2794,13 @@ guarded_ports() {
   if [[ "${oport}" != "22" ]] && valid_port "${oport}"; then
     out+=("Ollama ${oport}")
   fi
+  # The agent's UI, by the same rule as the WebUI above: it is a port this
+  # machine offers to the network, and it is the most dangerous one here — a
+  # browser session on it can run anything on the box. Intent first...
+  if [[ "${ENABLE_AGENT}" == "true" && "${AGENT_PORT}" != "22" ]] \
+     && valid_port "${AGENT_PORT}"; then
+    out+=("Agent ${AGENT_PORT}")
+  fi
   # The port the container is REALLY on, when that is not the one .env names.
   #
   # Open WebUI's port is baked in at creation and it runs with --network=host,
@@ -2689,6 +2850,21 @@ guarded_ports() {
       [[ "${entry}" == *" ${live}" ]] && already=1
     done
     (( already )) || out+=("live WebUI ${live}")
+  fi
+  # ...and the agent's real published port, on the same terms. Deduplicated
+  # against what is already in the list rather than against AGENT_PORT — the
+  # distinction the WebUI comment above spells out, and the whole of why
+  # turning a feature off in .env once made this box more exposed.
+  local alive=""
+  if agent_container_running; then
+    alive="$(agent_live_port 2>/dev/null || true)"
+  fi
+  if [[ "${alive}" =~ ^[0-9]+$ && "${alive}" != "22" ]]; then
+    already=0
+    for entry in ${out[@]+"${out[@]}"}; do
+      [[ "${entry}" == *" ${alive}" ]] && already=1
+    done
+    (( already )) || out+=("live Agent ${alive}")
   fi
   (( ${#out[@]} )) || return 1
   printf '%s\n' "${out[@]}"

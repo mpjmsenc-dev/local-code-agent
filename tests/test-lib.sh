@@ -14,7 +14,7 @@ REPO="$(cd "${TESTS_DIR}/.." && pwd)"
 # lives here rather than in whichever section happened to need it first.
 # run-agent.sh is absent on purpose: it forwards to aider.
 LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
-              webui.sh netmode.sh scripts/tune.sh scripts/apply.sh
+              webui.sh agent.sh netmode.sh scripts/tune.sh scripts/apply.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
               scripts/selftest.sh )
 
@@ -90,6 +90,17 @@ webui_container_running() {
 }
 webui_container_env() {
   printf 'webui_container_env %s\n' "${1:-}" >> "${LCA_UNSTUBBED_LOG}"; return 1
+}
+# The agent tier adds two more seams onto the same daemon, and they must be
+# stubbed here for the same reason as the two above: guarded_ports asks both,
+# so any gate that touches it would otherwise answer from whatever containers
+# happen to exist on the machine running the suite. That is exactly how a
+# commit passed here and failed CI once already.
+agent_container_running() {
+  printf 'agent_container_running\n' >> "${LCA_UNSTUBBED_LOG}"; return 1
+}
+agent_live_port() {
+  printf 'agent_live_port\n' >> "${LCA_UNSTUBBED_LOG}"; return 1
 }
 
 # make_stub_dir DIR — create DIR for PATH stubs, and put a 'sudo' in it.
@@ -223,6 +234,8 @@ guarded_without() {   # WEBUI_PORT value -> the list guarded_ports produces
     load_env
     ENABLE_WEBUI=true; WEBUI_PORT="$2"; OLLAMA_HOST=127.0.0.1:11434
     webui_container_running() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     webui_container_env() { return 1; }
     guarded_ports || true' _ "${REPO}/scripts/lib.sh" "$2" 2>/dev/null
 }
@@ -2295,6 +2308,172 @@ no_runtime_artefact_is_tracked() {
 }
 check "...and no runtime artefact is tracked in the repository" \
   no_runtime_artefact_is_tracked
+
+echo "# the agent tier: limits that can be shown to work, and a guarded port"
+# The whole reason these limits are ours rather than the agent's: OpenHands' V1
+# docs publish no environment variable for an iteration ceiling or confirmation
+# mode, so passing one would be a setting that might quietly do nothing. What
+# is enforced here is enforced by code in this repo, and code in this repo can
+# be tested — which is the point of keeping the decision in a pure function.
+verdict() { agent_run_verdict "$@"; }
+check "a run inside every limit keeps going" \
+  test "$(verdict 5 100 60 180 0 3)" = ok
+check "the step ceiling stops it" \
+  test "$(verdict 100 100 60 180 0 3)" = iterations
+check "...and one step short of it does not" \
+  test "$(verdict 99 100 60 180 0 3)" = ok
+check "the wall clock stops it" \
+  test "$(verdict 5 100 10800 180 0 3)" = timeout
+check "...and a second short of it does not" \
+  test "$(verdict 5 100 10799 180 0 3)" = ok
+check "repeated identical failures stop it" \
+  test "$(verdict 5 100 60 180 3 3)" = stuck
+check "...and one strike short of it does not" \
+  test "$(verdict 5 100 60 180 2 3)" = ok
+# 0 means "no limit", the convention BACKUP_KEEP=0 already uses here. A reader
+# who has met one has met all four.
+check "0 is no limit, not an instant stop" \
+  test "$(verdict 9999 0 999999 0 999 0)" = ok
+# ...and a typo must not stop a run that is going fine. The safe direction for
+# an unreadable limit is to leave the run alone, not to kill it.
+check "a non-numeric limit is no limit, not a stop" \
+  test "$(verdict 9999 abc 999999 abc 999 abc)" = ok
+# The wall clock is reported first when several limits are hit together: it is
+# the one the user set in order to be able to walk away, so it is the one they
+# need to see.
+check "the wall clock is named first when limits coincide" \
+  test "$(verdict 100 100 10800 180 3 3)" = timeout
+# Every verdict has to say something specific — a stop the user cannot explain
+# is a stop they will disable.
+agent_reasons_are_distinct() {
+  local a b c d
+  a="$(agent_stop_reason timeout)"; b="$(agent_stop_reason iterations)"
+  c="$(agent_stop_reason stuck)";   d="$(agent_stop_reason ok)"
+  [[ -n "${a}" && -n "${b}" && -n "${c}" && -n "${d}" ]] || return 1
+  [[ "${a}" != "${b}" && "${b}" != "${c}" && "${a}" != "${c}" ]] || return 1
+  # ...and each names the setting that produced it, so it can be changed.
+  grep -q 'AGENT_TIMEOUT_MINUTES' <<<"${a}" || return 1
+  grep -q 'AGENT_MAX_ITERATIONS'  <<<"${b}" || return 1
+  grep -q 'AGENT_STUCK_STRIKES'   <<<"${c}" || return 1
+}
+check "each stop names the setting that caused it" agent_reasons_are_distinct
+
+# The stuck detector is only as good as its idea of "the same failure again".
+# Measured while writing it: collapsing digits alone left 'x7f3a9b2' as
+# 'xNfNaNbN' and 'c1d0e5f8' as 'H', so two runs of the SAME failure produced
+# different signatures and the detector could never fire.
+signatures_match() {
+  local a b
+  a="$(agent_failure_signature "$1")"; b="$(agent_failure_signature "$2")"
+  [[ "${a}" == "${b}" ]]
+}
+check "the same failure with different ids is one signature" \
+  signatures_match \
+  "2026-08-09 01:02:03 ERROR build failed in /tmp/x7f3a9b2 after 12 retries" \
+  "2026-08-09 04:55:10 ERROR build failed in /tmp/c1d0e5f8 after 47 retries"
+check "...and a pid, a port and a duration do not make it new" \
+  signatures_match \
+  "pid 1234 could not bind port 8080 after 3s" \
+  "pid 99 could not bind port 9931 after 41s"
+check "...and quoted payloads do not either" \
+  signatures_match \
+  "cannot open 'src/alpha.py': No such file" \
+  "cannot open 'lib/zeta.py': No such file"
+check "a genuinely different failure keeps its own signature" \
+  test '!' "$(agent_failure_signature 'ERROR build failed in /tmp/a1')" = \
+           "$(agent_failure_signature 'ERROR tests failed in /tmp/a1')"
+
+# The port. This is the most dangerous surface this project has ever had — a
+# browser session on it runs commands on the box — so the guard must cover it
+# by exactly the rule the WebUI port taught: intent first, and then the fact of
+# a listening socket regardless of intent.
+# Driven in a clean subshell with every docker seam stubbed, the way
+# guarded_without does above: guarded_ports asks four of them, and a gate that
+# lets any through answers from whatever containers this machine happens to be
+# running rather than from its fixture.
+agent_guarded_with() {   # ENABLE_AGENT AGENT_PORT -> the list guarded_ports produces
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env
+    ENABLE_WEBUI=false; OLLAMA_HOST=127.0.0.1:11434
+    ENABLE_AGENT="$2"; AGENT_PORT="$3"
+    webui_container_running() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
+    webui_container_env() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
+    guarded_ports || true' _ "${REPO}/scripts/lib.sh" "$1" "$2" 2>/dev/null
+}
+agent_port_is_guarded_when_enabled() {
+  local out
+  out="$(agent_guarded_with true 3001)"
+  grep -q 'Agent 3001' <<<"${out}" || {
+    printf 'the agent port is not in the guard list: %s\n' "${out}" >&2; return 1; }
+}
+check "the agent's port is guarded when it is enabled" \
+  agent_port_is_guarded_when_enabled
+agent_port_absent_when_disabled() {
+  local out
+  out="$(agent_guarded_with false 3001)"
+  ! grep -q 'Agent 3001' <<<"${out}"
+}
+check "...and absent when it is off and not running" \
+  agent_port_absent_when_disabled
+# A port that is not a port is a broken setting, not a gap in the guard —
+# reporting it as a gap creates the unfixable loop guarded_ports' own comment
+# describes. check-system.sh names the real fault instead.
+agent_bad_port_is_not_a_gap() {
+  local out
+  out="$(agent_guarded_with true abc)"
+  ! grep -qi 'agent' <<<"${out}"
+}
+check "...and a non-port value is a broken setting, not a gap" \
+  agent_bad_port_is_not_a_gap
+# SSH is never guarded, by netmode's own refusal. An agent parked on 22 must
+# not put it in the drop set through this door either.
+agent_never_guards_ssh() {
+  local out
+  out="$(agent_guarded_with true 22)"
+  ! grep -q 'Agent 22' <<<"${out}"
+}
+check "...and port 22 is never guarded, whatever AGENT_PORT says" \
+  agent_never_guards_ssh
+
+# The two strings that decide whether the agent can reach the model at all. A
+# wrong prefix or a loopback base URL is a 404 inside a container, which is the
+# hardest kind of failure to read from outside it.
+check "the agent addresses Ollama through its OpenAI-compatible endpoint" \
+  test "$(agent_llm_model qwen2.5-coder:7b)" = "openai/qwen2.5-coder:7b"
+agent_base_url_is_not_loopback() {
+  local u; u="$(agent_llm_base_url)"
+  # host.docker.internal, because inside the container 127.0.0.1 is the
+  # container. The --add-host flag in agent.sh is what makes it resolve.
+  grep -q '^http://host.docker.internal:[0-9]\+/v1$' <<<"${u}"
+}
+check "...at host.docker.internal, not at the container's own loopback" \
+  agent_base_url_is_not_loopback
+agent_sh_adds_the_host_gateway() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -q 'add-host host.docker.internal:host-gateway' <<<"${body}" || {
+    echo 'agent.sh points the agent at host.docker.internal without the --add-host that makes it resolve' >&2
+    return 1; }
+}
+check "...and agent.sh passes the flag that makes that name resolve" \
+  agent_sh_adds_the_host_gateway
+# Published on loopback only. The guard is the real defence, but a container
+# published on 0.0.0.0 is reachable the instant the guard is not loaded — and
+# this box has been in exactly that state twice today, after a restart.
+agent_publishes_on_loopback() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -qE '\-p "127\.0\.0\.1:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
+    echo 'agent.sh publishes its port on all interfaces, so it is exposed whenever the guard is not loaded' >&2
+    return 1; }
+}
+check "the agent's port is published on loopback, not on every interface" \
+  agent_publishes_on_loopback
 
 echo "# a config file must never be half-replaced by a write that failed"
 # 'producer | as_root tee DEST' opens DEST and TRUNCATES it before the producer
@@ -7351,6 +7530,8 @@ wait_is_not_silent() {
     sleep() { :; }
     webui_responds() { return 1; }
     webui_container_running() { return 0; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     wait_for_webui 90 2>&1 || true' _ "${REPO}/scripts/lib.sh")"
   [[ -n "${out}" ]] || { echo 'a multi-minute wait prints nothing at all' >&2; return 1; }
   grep -qi 'still starting' <<<"${out}" || {
@@ -9528,12 +9709,16 @@ ports_for() {  # ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
   ( ENABLE_WEBUI="$1"; WEBUI_PORT="$2"; OLLAMA_HOST="$3"
     webui_container_env() { return 1; }
     webui_container_running() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     guarded_ports | paste -sd'|' - )
 }
 uncovered_for() {  # DUMP ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST
   ( local dump="$1"; ENABLE_WEBUI="$2"; WEBUI_PORT="$3"; OLLAMA_HOST="$4"
     webui_container_env() { return 1; }
     webui_container_running() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     inbound_guard_uncovered "${dump}" | paste -sd'|' - )
 }
 # ...and the live-container case itself, which nothing covered deterministically
@@ -9545,6 +9730,8 @@ live_ports_for() {  # WEBUI_PORT LIVE_PORT [ENABLE_WEBUI] [RUNNING]
     LIVE="$2"; webui_container_env() { printf '%s' "${LIVE}"; }
     RUNNING="${4:-yes}"
     webui_container_running() { [[ "${RUNNING}" == "yes" ]]; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     guarded_ports | paste -sd'|' - )
 }
 check "a chat app still on the old port is named alongside the new one" \
@@ -9568,6 +9755,8 @@ nothing_to_guard() {
   ( ENABLE_WEBUI=false; OLLAMA_HOST=127.0.0.1:22
     webui_container_env() { return 1; }
     webui_container_running() { return 1; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     ! guarded_ports )
 }
 check "and with neither, there is nothing to guard" nothing_to_guard
@@ -9613,6 +9802,8 @@ guard_ruleset_covers_a_disabled_but_live_chat_app() {
   gaps="$( ENABLE_WEBUI=false; WEBUI_PORT=3000; OLLAMA_HOST=127.0.0.1:11434
            webui_container_env() { printf '3000'; }
            webui_container_running() { return 0; }
+           agent_container_running() { return 1; }
+           agent_live_port() { return 1; }
            inbound_guard_uncovered "${dump}" || true )"
   [[ -z "${gaps}" ]] || {
     printf 'the guard netmode writes does not cover what guarded_ports asks for: %s\n' "${gaps}" >&2
@@ -9654,6 +9845,8 @@ apply_webui_run() {  # ENABLE_WEBUI RUNNING -> output, then counters
     have() { return 0; }
     docker_daemon_reachable() { return 0; }
     webui_container_running() { [[ "${RUN}" == "yes" ]]; }
+    agent_container_running() { return 1; }
+    agent_live_port() { return 1; }
     webui_container_exists() { [[ "${RUN}" == "yes" ]]; }
     webui_drift() { return 1; }
     apply_webui
@@ -9699,18 +9892,24 @@ live_port_is_guarded_too() {
   # running the tests. That is the environment dependence this branch has hit
   # three times now, and the third was this file.
   webui_container_running() { return 0; }
+  agent_container_running() { return 1; }
+  agent_live_port() { return 1; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434|live WebUI 3000" ]]
 }
 live_port_adds_nothing_when_it_agrees() {
   local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
   webui_container_running() { return 0; }
+  agent_container_running() { return 1; }
+  agent_live_port() { return 1; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 3000|Ollama 11434" ]]
 }
 live_port_is_silent_without_docker() {
   local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
   webui_container_running() { return 1; }
+  agent_container_running() { return 1; }
+  agent_live_port() { return 1; }
   webui_container_env() { return 1; }   # docker unreadable — cannot ask
   [[ "$(guarded_ports | paste -sd'|' -)" == "WebUI 8080|Ollama 11434" ]]
 }
@@ -9718,6 +9917,8 @@ live_port_is_silent_without_docker() {
 live_port_reads_as_uncovered() {
   local ENABLE_WEBUI=true WEBUI_PORT=8080 OLLAMA_HOST=127.0.0.1:11434
   webui_container_running() { return 0; }
+  agent_container_running() { return 1; }
+  agent_live_port() { return 1; }
   webui_container_env() { [[ "$1" == PORT ]] && printf '3000'; }
   # a guard built from .env alone: 8080 and 11434, not 3000
   [[ "$(inbound_guard_uncovered 'tcp dport { 8080, 11434 } drop')" == "live WebUI 3000" ]]
@@ -9732,6 +9933,8 @@ check "a guard built from .env alone leaves the live port uncovered" \
 covers_everything() {
   local ENABLE_WEBUI=true WEBUI_PORT=3000 OLLAMA_HOST=127.0.0.1:11434
   webui_container_running() { return 1; }
+  agent_container_running() { return 1; }
+  agent_live_port() { return 1; }
   webui_container_env() { return 1; }
   ! inbound_guard_uncovered "${GUARD_DUMP}"
 }
@@ -12486,6 +12689,8 @@ guard_round_trip() {  # $1 = .env content, $2 = label
       # nothing to the renderer, so without the stub the check failed on any
       # box with the container up — which is a real install.
       webui_container_running() { return 1; }
+      agent_container_running() { return 1; }
+      agent_live_port() { return 1; }
       webui_container_env() { return 1; }
       inbound_guard_uncovered "$3" || true
     ' _ "${REPO}/scripts/lib.sh" "$1" "${dump}")" || rc=$?
