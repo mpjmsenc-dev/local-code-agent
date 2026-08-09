@@ -60,6 +60,7 @@ machine_advice() {
 # exercised — it had never been run, and it aborted the whole recovery.
 restore_webui_volume() {
   local workdir="$1" vol_rc=0
+  local ws="" ws_aside=""
   if [[ ! -f "${workdir}/open-webui-volume.tar.gz" ]]; then
     warn "Backup contains no WebUI volume archive — skipping."
     return 0
@@ -293,7 +294,7 @@ main() {
   # points this at the wrong file is told their data came back, and may then
   # delete the source it was still sitting in.
   local components=0 component
-  for component in env open-webui-volume.tar.gz models.txt meta; do
+  for component in env open-webui-volume.tar.gz models.txt meta agent-workspace.tar.gz; do
     [[ -e "${workdir}/${component}" ]] && components=$(( components + 1 ))
   done
   (( components > 0 )) || die "'${tarball}' is a valid archive but contains none of a local-code-agent backup's parts (no env, no WebUI volume, no model list, no machine details) — it is some other tarball. Nothing was changed. Backups made by this project live in ${BACKUP_DIR} and are named local-code-agent-backup-*.tar.gz."
@@ -368,6 +369,33 @@ main() {
     fi
   else
     warn "Backup contains no model list — skipping."
+  fi
+
+  # The agent's workspace, when the backup carried one.
+  #
+  # Restored ALONGSIDE what is there, never over the top of it: this directory
+  # is where an agent keeps work in progress, and a restore that silently
+  # replaced a live workspace with an older one would destroy exactly what the
+  # user was trying to protect. An existing directory is moved aside first and
+  # named, the way .env.pre-restore already works here.
+  if [[ -f "${workdir}/agent-workspace.tar.gz" ]]; then
+    ws="$(agent_workspace_dir)"
+    if [[ -d "${ws}" ]]; then
+      ws_aside="${ws}.pre-restore"
+      if mv "${ws}" "${ws_aside}" 2>/dev/null; then
+        warn "An agent workspace was already at ${ws}; it has been moved to ${ws_aside} rather than overwritten."
+      else
+        warn "An agent workspace is already at ${ws} and could not be moved aside, so the backup's copy was NOT restored. Move it yourself, then re-run."
+        ws=""
+      fi
+    fi
+    if [[ -n "${ws}" ]]; then
+      if tar -xzf "${workdir}/agent-workspace.tar.gz" -C "$(dirname "${ws}")" 2>/dev/null; then
+        ok "Agent workspace restored to ${ws}."
+      else
+        warn "The backup's agent workspace could not be unpacked — ${ws} is unchanged."
+      fi
+    fi
   fi
 
   # A restore replaces .env wholesale, which makes it the single most likely

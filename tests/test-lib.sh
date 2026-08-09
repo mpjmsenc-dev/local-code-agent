@@ -2571,6 +2571,48 @@ check_reports_the_agent() {
 check "...and 'lca check' reports the agent when it is enabled" \
   check_reports_the_agent
 
+echo "# the agent workspace in backups: opt-in, capped, and never silently empty"
+wsd() { agent_backup_decision "$@"; }
+check "off by default, whatever the size" \
+  test "$(wsd false 10 2048)" = off
+check "an absent workspace is absent, not skipped for size" \
+  test "$(wsd true absent 2048)" = absent
+check "a workspace inside the ceiling is included" \
+  test "$(wsd true 500 2048)" = include
+check "...and one over it is skipped" \
+  test "$(wsd true 4096 2048)" = too-big
+check "...exactly at the ceiling still fits" \
+  test "$(wsd true 2048 2048)" = include
+# 0 is no ceiling, the convention BACKUP_KEEP=0 set in this project.
+check "0 means no ceiling, not skip-everything" \
+  test "$(wsd true 999999 0)" = include
+# The one that matters most. An unreadable directory measures as nothing, and
+# nothing must not be mistaken for zero: a workspace reported as 0 MB and
+# "captured" is a backup that silently contains none of the work it promised.
+check "a size that could not be read is skipped, not treated as empty" \
+  test "$(wsd true '' 2048)" = too-big
+check "...and neither is a non-numeric one" \
+  test "$(wsd true abc 2048)" = too-big
+# Both halves have to exist, or the component is written and never read back.
+backup_and_restore_agree_on_the_component() {
+  local b r
+  b="$(sed 's/#.*//' "${REPO}/backup.sh")"
+  r="$(sed 's/#.*//' "${REPO}/restore.sh")"
+  grep -q 'agent-workspace.tar.gz' <<<"${b}" || {
+    echo 'backup.sh never stages the agent workspace' >&2; return 1; }
+  grep -q 'agent-workspace.tar.gz' <<<"${r}" || {
+    echo 'restore.sh does not know the component backup.sh writes, so it is dead weight in every archive' >&2
+    return 1; }
+  # ...and restore must not clobber a live workspace with an older one: that is
+  # where work in progress lives, and replacing it is the loss this feature
+  # exists to prevent.
+  grep -q 'pre-restore' <<<"${r}" || {
+    echo 'restore.sh overwrites an existing agent workspace instead of moving it aside' >&2
+    return 1; }
+}
+check "backup writes the workspace and restore reads it back" \
+  backup_and_restore_agree_on_the_component
+
 echo "# one instructions file, respected on every surface"
 # config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing
 # it to say "always use tabs" or "answer in French" is describing how they want

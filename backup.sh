@@ -251,6 +251,50 @@ do_backup() {
     warn "Ollama not installed — skipping the model list."
   fi
 
+  # 3b. The agent's workspace, when asked for and when it fits.
+  #
+  #     Opt-in and capped, unlike everything else here. .env is a few KB, the
+  #     model list is a few lines, the chat app's volume is bounded by how much
+  #     you have typed at it. This directory holds whole checked-out projects,
+  #     so it is the only component whose size nobody controls — and a backup
+  #     that silently grows from 4 KB to 40 GB on a VPS with a fixed disk is a
+  #     worse failure than not having it.
+  #
+  #     Never fatal, like the model list above: a workspace that cannot be
+  #     captured must not cost the user the .env and the model list that could.
+  local ws ws_mb ws_decision
+  ws="$(agent_workspace_dir)"
+  if [[ -d "${ws}" ]]; then
+    # du -sm, and the failure case matters: an unreadable tree yields nothing,
+    # which agent_backup_decision treats as too big rather than as empty. A
+    # directory reported as 0 MB and "backed up" is the shape this project
+    # keeps removing.
+    ws_mb="$(du -sm "${ws}" 2>/dev/null | awk '{print $1}' || true)"
+  else
+    ws_mb="absent"
+  fi
+  ws_decision="$(agent_backup_decision "${BACKUP_AGENT_WORKSPACE}" "${ws_mb}" "${BACKUP_AGENT_MAX_MB}")"
+  case "${ws_decision}" in
+    off)
+      [[ "${ws_mb}" == "absent" ]] \
+        || info "Agent workspace not included (BACKUP_AGENT_WORKSPACE=false; it is ${ws_mb} MB)."
+      ;;
+    absent)
+      info "No agent workspace at ${ws} — nothing to include."
+      ;;
+    too-big)
+      warn "Agent workspace NOT included: ${ws_mb:-unreadable} MB against the ${BACKUP_AGENT_MAX_MB} MB ceiling (BACKUP_AGENT_MAX_MB). Everything else in this backup is unaffected. Raise the ceiling, or prune ${ws}, then re-run."
+      ;;
+    include)
+      if tar -czf "${workdir}/agent-workspace.tar.gz" -C "$(dirname "${ws}")" "$(basename "${ws}")" 2>/dev/null; then
+        ok "Agent workspace captured (${ws_mb} MB before compression)."
+      else
+        rm -f "${workdir}/agent-workspace.tar.gz"
+        warn "Could not archive the agent workspace at ${ws} — skipping it. The rest of this backup is unaffected."
+      fi
+      ;;
+  esac
+
   # 4. Provenance. A backup carries the SOURCE machine's model and context
   #    length, and the commonest reason to restore one is moving to different
   #    hardware — docs/MIGRATE.md is about nothing else. Without this, restore

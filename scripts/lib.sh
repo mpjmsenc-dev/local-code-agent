@@ -513,6 +513,11 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   AGENT_MAX_ITERATIONS="${AGENT_MAX_ITERATIONS:-100}"
   AGENT_TIMEOUT_MINUTES="${AGENT_TIMEOUT_MINUTES:-180}"
   AGENT_STUCK_STRIKES="${AGENT_STUCK_STRIKES:-3}"
+  # Off by default: the agent's workspace holds whole checked-out projects and
+  # is the one thing here whose size nobody controls. The ceiling applies only
+  # when it is switched on; 0 means no ceiling, as it does everywhere else.
+  BACKUP_AGENT_WORKSPACE="${BACKUP_AGENT_WORKSPACE:-false}"
+  BACKUP_AGENT_MAX_MB="${BACKUP_AGENT_MAX_MB:-2048}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
 }
@@ -2593,6 +2598,32 @@ agent_stop_reason() {
     stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
     *)          printf 'the run ended on its own' ;;
   esac
+}
+
+# agent_workspace_dir — where the agent keeps its workspace and settings.
+agent_workspace_dir() {
+  printf '%s/.openhands' "${HOME}"
+}
+
+# agent_backup_decision ENABLED SIZE_MB MAX_MB — 'off' | 'absent' | 'too-big' |
+# 'include'. The rule, once, so backup.sh's message and this project's tests
+# cannot disagree about it.
+#
+# SIZE_MB empty means "could not be measured", which is NOT the same as zero:
+# an unreadable directory must not be reported as an empty one that was
+# faithfully backed up. It is treated as too big, because the safe direction
+# for an unknown size is to skip and say so rather than to swallow it.
+agent_backup_decision() {
+  local enabled="${1:-false}" size="${2:-}" max="${3:-0}"
+  [[ "${enabled}" == "true" ]] || { printf 'off'; return 0; }
+  [[ "${size}" != "absent" ]] || { printf 'absent'; return 0; }
+  [[ "${size}" =~ ^[0-9]+$ ]] || { printf 'too-big'; return 0; }
+  [[ "${max}" =~ ^[0-9]+$ ]] || max=0
+  # 0 is no ceiling, the convention BACKUP_KEEP=0 set here.
+  if (( max > 0 )) && (( size > max )); then
+    printf 'too-big'; return 0
+  fi
+  printf 'include'
 }
 
 # agent_container_running — true when the agent's container is actually
