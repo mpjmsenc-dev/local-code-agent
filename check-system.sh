@@ -214,6 +214,17 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
     || p_warn "derived agent models left over from an earlier rung: ${AGENT_STALE}— they are manifests over shared blobs, but they are yours to remove: ollama rm ${AGENT_STALE}"
 fi
 
+# The agent's prompt cache, which is really a question about OLLAMA_KEEP_ALIVE.
+#
+# Measured: the agent's first prompt is ~15,000 tokens of OpenHands' own framing
+# and it is IDENTICAL on every step, so Ollama's prefix cache makes step two
+# nearly free — 13,430 tokens of prompt eval on the first call, 171 on the next.
+# The cache lives with the loaded model, so when keep-alive expires mid-thought
+# the next step pays the whole prompt again plus a model load.
+if agent_prompt_cache_at_risk; then
+  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's ~15,000-token prompt is re-read from scratch on the next step (measured: 13,430 tokens the first time, 171 the next while it stayed loaded). Set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} to keep it resident, if you can spare the RAM."
+fi
+
 # The relay itself, whenever it is switched on — with or without the agent,
 # because a socket this stack opened is this stack's to account for.
 if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]]; then

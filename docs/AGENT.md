@@ -571,3 +571,68 @@ What would still improve it, in order:
 Both are upstream of this project. Neither blocks anyone today: turn it on, run
 `lca agent selftest`, and you get your own box's number in about a quarter of an
 hour.
+
+---
+
+## The 15,000-token prompt: what it is, and what you can do about it
+
+Every step of this tier reads about 15,000 tokens before the model writes one,
+and that is most of what a task costs. This section is what recording the
+agent's actual requests showed.
+
+### It is one system message, and it is mostly the browser
+
+The first request the sandbox sends, decomposed:
+
+| | ~tokens | |
+|---|---|---|
+| whole request | 15,225 | |
+| **system message** | **12,898** | **86% of it** |
+| the user's task | 2,041 | |
+| `tools` array | 0 | with `AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system message |
+
+And inside that system message, the biggest single block is **~5,985 tokens**
+— 46% of it — documenting the **browser tool**: 46 mentions of "browser", 41 of
+"tab", plus clicking, scrolling and screenshots. A coding agent on a private
+CPU box never opens a browser.
+
+### The knob for that exists, and OpenHands 1.8 ignores it
+
+`agent_settings.tools` takes an explicit tool list, and it round-trips —
+`POST` it, `GET` it back, and it is there:
+
+```
+[{"name":"TerminalTool","params":{}},{"name":"FileEditorTool","params":{}},…]
+```
+
+The sandbox then logs `Loaded 22 tools from spec` and sends a byte-identical
+15,225-token prompt. Measured before and after: **0 tokens saved, 57 browser
+mentions either way.** `filter_tools_regex` and `include_default_tools` exist on
+the `Agent` schema and are not on the settings diff at all — posting
+`filter_tools_regex` stores `null`.
+
+Nothing this project can do closes that; it is upstream. It is written down here
+so nobody spends another evening discovering the setting works and does nothing.
+
+### What DOES help, and it is large
+
+The 15,000 tokens are paid **once per conversation, not once per step.** That
+system message is identical every time, and Ollama caches the prefix. One
+conversation, two consecutive calls:
+
+```
+first call    13,430 tokens of prompt eval   543 s
+next call        171 tokens of prompt eval     3.6 s
+```
+
+The cache lives with the **loaded model**. Same prompt twice with it resident:
+**50.2 s, then 0.1 s.** So when `OLLAMA_KEEP_ALIVE` expires while you are
+thinking, the next step pays all 15,000 again *and* a model load.
+
+Two things follow, and both are yours to choose:
+
+- **Stay in one conversation.** A new conversation re-pays the whole prompt. The
+  second question you ask in a thread is dramatically cheaper than the first.
+- **Set `OLLAMA_KEEP_ALIVE=-1` while you use this tier**, if you can spare the
+  RAM — it keeps the model, and its cache, resident. `lca check` warns when the
+  agent is on and this is finite, with the numbers above.

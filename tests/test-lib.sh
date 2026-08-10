@@ -2719,6 +2719,26 @@ no_reader_uses_the_false_swallowing_form() {
 check "no caller reads the setting through jq's // again" \
   no_reader_uses_the_false_swallowing_form
 
+# The agent's prompt cache — really a question about OLLAMA_KEEP_ALIVE.
+#
+# Measured by recording the requests the agent actually sends: its first prompt
+# is ~15,000 tokens and 86% of it is one system message that is IDENTICAL on
+# every step. Ollama caches the prefix, so within one conversation the first
+# call cost 13,430 tokens of prompt eval and the next cost 171. The cache lives
+# with the loaded model — same prompt twice with it resident: 50.2s then 0.1s —
+# so a keep-alive that expires mid-thought makes the next step pay all 15,000
+# again, plus a model load.
+# shellcheck disable=SC2030  # confining both to this subshell is the point
+cache_risk() ( ENABLE_AGENT="$1"; OLLAMA_KEEP_ALIVE="$2"; agent_prompt_cache_at_risk )
+check "a model that unloads while the agent is on is flagged" cache_risk true 30m
+check "...and so is any finite keep-alive"                    cache_risk true 5m
+cache_safe() { cache_risk "$1" "$2" && return 1; return 0; }
+check "a permanently resident model is not flagged"  cache_safe true -1
+# Silent when the tier is off: the chat app re-reads a 600-token prompt, not a
+# 15,000-token one, so this trade is the agent's alone.
+check "...and nothing is said when the agent is off" cache_safe false 30m
+check "'lca check' warns about it"                   grep -q 'agent_prompt_cache_at_risk' "${REPO}/check-system.sh"
+
 echo "# the agent's own derived model: a bigger window for one tier, not for all"
 # OLLAMA_CONTEXT_LENGTH is server-wide and Ollama's OpenAI endpoint — the one
 # the agent speaks — ignores a per-request num_ctx. Measured:

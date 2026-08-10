@@ -3053,6 +3053,33 @@ refresh_agent_model_after_tune() {
     || info "Left behind by earlier rungs: ${stale}— remove with: ollama rm ${stale}"
 }
 
+# agent_prompt_cache_at_risk — true when the agent tier is on and the model is
+# allowed to unload, which is the one setting that decides whether its enormous
+# prompt is paid once or over and over.
+#
+# The agent's first prompt is ~15,000 tokens and almost all of it is OpenHands'
+# own framing, identical on every step of a conversation. Ollama caches the KV
+# prefix of a prompt it has already processed, so that cost is paid ONCE and
+# every later step in the same conversation reads almost nothing. Measured here
+# on one conversation:
+#
+#   first call    13,430 tokens of prompt eval   543 s
+#   later call       171 tokens of prompt eval     3.6 s
+#
+# ...and the cache lives with the LOADED MODEL. Measured directly, same prompt
+# twice with the model resident: 50.2 s, then 0.1 s. When OLLAMA_KEEP_ALIVE
+# expires the model unloads, the cache goes with it, and the next step of a
+# conversation the user is in the middle of pays the whole 15,000 again — plus
+# the model load. On a small box that is the difference between a reply in
+# seconds and a reply in a quarter of an hour, for a step that changed nothing.
+#
+# -1 is Ollama's "keep it resident for ever", and .env.example already documents
+# it. This does not change the setting: it is the user's RAM.
+agent_prompt_cache_at_risk() {
+  [[ "${ENABLE_AGENT}" == "true" ]] || return 1
+  [[ "${OLLAMA_KEEP_ALIVE}" != "-1" ]]
+}
+
 # agent_workspace_dir — where the agent keeps its workspace and settings.
 agent_workspace_dir() {
   printf '%s/.openhands' "${HOME}"
