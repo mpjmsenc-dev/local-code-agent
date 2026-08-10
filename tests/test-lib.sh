@@ -2790,24 +2790,89 @@ check "...and neither is one whose window cannot be read" \
   test "$(loaded='' build_result)" = 2
 
 # The rest of the stack has to know about it too.
-# The CALL, not merely the definition: a mutant that deleted the call and left
-# the function survived a gate that only grepped for the name.
-check "tune builds it" \
-  grep -qE '^[[:space:]]+refresh_agent_model_after_tune ' "${REPO}/scripts/tune.sh"
-# ...on EVERY tune, not only inside the "something changed" branch. Placed
-# there, a first-time user who set ENABLE_AGENT=true on an already-correct box
-# ran 'sudo lca tune', was told nothing had changed, never got the model, and
-# was then sent back to 'sudo lca tune' by the selftest. A loop with no exit.
-tune_builds_it_unconditionally() {
-  local body call changed
-  body="$(sed -n '/^main()/,$p' "${REPO}/scripts/tune.sh")"
-  call="$(grep -n 'refresh_agent_model_after_tune "' <<<"${body}" | head -1 | cut -d: -f1)"
-  changed="$(grep -n 'Already at the best-available config' <<<"${body}" | head -1 | cut -d: -f1)"
-  [[ -n "${call}" && -n "${changed}" ]] || return 1
-  (( call > changed ))
+# RUN tune.sh, do not read it.
+#
+# The gate that used to be here compared the line number of the call against
+# the line number of one message, concluded the call came "after the changed
+# branch", and passed. It shipped a bug anyway, reported from a real droplet:
+# main() has FOUR exits, and on a box already at the right rung 'lca tune'
+# printed "Already tuned for this machine. Nothing to do." and left through one
+# of them hundreds of lines before the call. No model was built, and the
+# selftest then sent the user back to 'lca tune' — the bootstrap loop the fix
+# was supposed to close.
+#
+# A source gate cannot see an early exit. This one runs the script down each
+# path and asks the only question that matters: was 'ollama create' called?
+tune_builds_on_path() {   # ENV_LINES [ARGS...] -> "built" | "not built"
+  local envlines="$1"; shift
+  local dir="${SANDBOX}/tune-run" stub="${SANDBOX}/tune-stub" calls
+  rm -rf "${dir}" "${stub}"
+  mkdir -p "${dir}/scripts" "${dir}/config"
+  cp "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "${dir}/scripts/"
+  cp "${REPO}/config/CONVENTIONS.md" "${REPO}/config/prompt-suggestions.json" "${dir}/config/"
+  printf '%s' "${envlines}" > "${dir}/.env"
+  make_stub_dir "${stub}"
+  calls="${dir}/ollama-calls"
+  : > "${calls}"
+  # The one command whose invocation IS the answer. It also has to look like a
+  # working ollama, or tune.sh takes a different path for a different reason.
+  cat > "${stub}/ollama" <<STUB
+#!/bin/sh
+printf '%s\\n' "\$*" >> "${calls}"
+case "\$1" in
+  list) printf 'NAME\\tID\\tSIZE\\tMODIFIED\\n${TUNE_GATE_MODEL}\\tx\\t9 GB\\t1 day ago\\n' ;;
+esac
+exit 0
+STUB
+  chmod +x "${stub}/ollama"
+  PATH="$(stub_path "${stub}")" bash "${dir}/scripts/tune.sh" "$@" >/dev/null 2>&1 || true
+  if grep -q '^create' "${calls}"; then printf 'built'; else printf 'not built'; fi
 }
-check "...on every tune, not only when the rung moved" \
-  tune_builds_it_unconditionally
+# The ladder's own pick for THIS machine, so the "already tuned" path is
+# reached deterministically wherever this suite runs — including CI, whose RAM
+# is not this box's. Extracted and evaluated rather than hardcoded.
+tune_gate_setup() {
+  local picker
+  picker="$(sed -n '/^choose_for_ram()/,/^}/p' "${REPO}/scripts/tune.sh")"
+  [[ -n "${picker}" ]] || return 1
+  eval "${picker}"
+  choose_for_ram "$(detect_ram_gib)"
+  TUNE_GATE_MODEL="${TUNE_MODEL}"
+  TUNE_GATE_CTX="${TUNE_CTX}"
+  [[ -n "${TUNE_GATE_MODEL}" && -n "${TUNE_GATE_CTX}" ]]
+}
+if tune_gate_setup; then
+  TUNE_GATE_ENV="MODEL_FAMILY=qwen2.5-coder
+OLLAMA_HOST=127.0.0.1:11434
+AGENT_MODEL_CONTEXT=16384
+MODEL_NAME=${TUNE_GATE_MODEL}
+OLLAMA_CONTEXT_LENGTH=${TUNE_GATE_CTX}
+"
+  # The exact path the droplet was on: .env already matches the ladder.
+  check "an already-tuned box still gets the agent's model built" \
+    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+ENABLE_AGENT=true
+")" = built
+  # ...and the other early exit, which leaves even sooner.
+  check "...and so does a box with a manual pin (AUTO_TUNE=false)" \
+    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=false
+ENABLE_AGENT=true
+")" = built
+  # Nothing is built for a tier nobody switched on: this runs from the on-boot
+  # oneshot, on every boot, on every machine.
+  check "...and nothing is built when the agent is off" \
+    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+ENABLE_AGENT=false
+")" = "not built"
+  # A dry run says what a real run would do and changes nothing, and that has
+  # to keep being true of the newest thing a real run does.
+  check "...and a dry run still builds nothing" \
+    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+ENABLE_AGENT=true
+" --dry-run)" = "not built"
+else
+  echo "skip - could not read the ladder from tune.sh, so the tune paths were not driven"
+fi
 # ...and it costs nothing when the model is already right: read from the
 # model's declared parameters, not by loading it, which on a CPU box is minutes
 # and would be paid on every boot.

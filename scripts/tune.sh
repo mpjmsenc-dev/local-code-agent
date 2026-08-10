@@ -196,6 +196,29 @@ install_service() {
   ok "Auto-tune will re-run on every boot (resize adapts automatically)."
 }
 
+# tune_exit_refresh — run the derived-model check on the way OUT of main, down
+# every path it can leave by.
+#
+# A trap and not a call at the end of main, because main has FOUR exits and the
+# tail is only one of them. Placing the call there passed a gate and shipped a
+# bug: on a box already at the right rung, 'lca tune' printed "Already tuned for
+# this machine. Nothing to do." and left through an exit hundreds of lines
+# earlier, so the model was never built — and the selftest then sent the user
+# back to 'lca tune', which did nothing. The bootstrap loop this was supposed to
+# close, reported from a real droplet.
+#
+# 'local rc=$?' is correct here and is NOT the gotcha in config/CONVENTIONS.md:
+# that one is about command SUBSTITUTION, whose status 'local' swallows. A plain
+# $? is expanded before local runs.
+#
+# Only on a clean exit: after a failed tune the model may not even be on disk,
+# and a second failure about a convenience model would bury the first.
+tune_exit_refresh() {
+  local rc=$?
+  (( rc == 0 )) || return 0
+  refresh_agent_model_after_tune "${MODEL_NAME}" || true
+}
+
 # refresh_agent_model_after_tune MODEL — make sure the agent's derived model
 # exists for this rung and carries the right window.
 #
@@ -290,6 +313,10 @@ main() {
     ok "Dry run complete; nothing was changed."
     exit 0
   fi
+
+  # Armed HERE: after the dry-run branch, which must change nothing, and before
+  # the first of the exits that leave without reaching the bottom of main.
+  trap tune_exit_refresh EXIT
 
   if [[ "${AUTO_TUNE}" != "true" ]]; then
     # AUTO_TUNE=false means "do not re-pick the model from RAM". It does NOT
@@ -483,12 +510,6 @@ main() {
   else
     ok "Already at the best-available config (${chosen_model}, ctx ${TUNE_CTX}); nothing to apply."
   fi
-
-  # The agent's derived model, on every tune rather than only when the ladder
-  # moved. It exits immediately when the model already declares the right
-  # window, so the on-boot oneshot pays one 'ollama show' for it; see the
-  # function for the loop this placement fixes.
-  refresh_agent_model_after_tune "${chosen_model}"
 
   # Last, after any restart_ollama above — a restart drops whatever is loaded,
   # so warming before it would be wasted. This is what makes the first message
