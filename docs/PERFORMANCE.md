@@ -275,29 +275,51 @@ this project's other measurement shows is *not* better at the thing that was
 blocking the agent tier (see docs/AGENT.md — the 7b fails the tool-call channel
 exactly as the 3b does).
 
-### The measurements above are from a faster machine than the target, and here is the factor
+### The measurements above are from a faster machine than the target — and one of the two conversion factors does not travel
 
 These numbers were taken on a 4-vCPU / 16 GB box, not on the 7.8 GiB droplet the
 ladder is written for, so the throughput figures do **not** transfer directly.
 The memory figures do — weights plus KV cache do not care about the CPU.
 
-One configuration was run on both machines, which is what makes a conversion
-possible at all: `3b` at `num_ctx=32768` with a ~16k-token prompt.
+One configuration was run on both machines: `3b` at `num_ctx=32768` with a
+~16k-token prompt.
 
-| | prompt eval | generation |
+| `3b` @ 32768, ~16k prompt | prompt eval | generation |
 |---|---|---|
 | this box | 28.07 tok/s | 4.07 tok/s |
-| the droplet (live agent run) | 8.99 tok/s | 0.59 tok/s |
+| the droplet | 8.99 tok/s | 0.59 tok/s |
 | ratio | **3.1×** | **6.9×** |
 
-The two ratios differ by more than a factor of two, which is itself the finding:
-prompt evaluation is compute-bound and generation is memory-bandwidth-bound, and
-the droplet is much worse at the second than its core count suggests. Projecting
-the 7b onto it with the generation ratio gives roughly **0.8 tok/s** — a
-300-token answer in six minutes.
+**Read that table as belonging to that configuration, not to those machines.**
+The heading matters, and it was learned by getting it wrong: this section used
+to hand the 6.9× figure out as a general "writing" conversion, and `docs/AGENT.md`
+used it to project an agent task on the droplet at 35–60 minutes. Measured on
+that droplet, the task takes **12 minutes**.
 
-**So the ladder stands, for a corrected reason.** Under 9 GiB stays on the 3b
-not because a 7b would not fit, but because it would halve an already slow box
-for a model that is not better at the work this stack actually failed at. Anyone
-revisiting this should re-measure the two ratios above on their own hardware
-first; on a box with real memory bandwidth the trade could go the other way.
+Here is the same machine, twice:
+
+| the droplet, `3b` | prompt eval | generation |
+|---|---|---|
+| @ 32768, ~16k-token prompt | 8.99 tok/s | **0.59 tok/s** |
+| @ 16384, a small prompt | 19.6 tok/s | **8.5 tok/s** |
+
+Fourteen times the generation rate, on one box, from nothing but the
+configuration. Generation on CPU slows down with the number of tokens already in
+the window, and a 32768 allocation on a 7.8 GiB machine is near its limit
+besides. Prompt evaluation moved by a factor of two over the same change, which
+is why the 3.1× reading ratio has held up in every later measurement while the
+6.9× one has not.
+
+**The rule this leaves:** reading converts roughly across machines; generation
+does not convert across *configurations*, and any projection that crosses one
+should be treated as a guess until a `lca agent selftest` or `lca speed` on the
+actual box replaces it.
+
+**The ladder stands, and the argument for it is now narrower.** Under 9 GiB
+stays on the 3b, but not because the droplet generates at 0.59 tok/s — at the
+window this stack actually uses it generates at 8.5. What is left is memory: the
+7b needs 5.1 GB at 4096 and 5.9 GB at 16384, and the agent tier's window is
+16384, which on a 7.8 GiB box leaves under 2 GiB for everything else. Nobody has
+run `lca agent selftest` with a 7b on that hardware. Anyone who wants the ladder
+changed should do exactly that and bring the number — which is now a
+twenty-minute experiment rather than an argument.

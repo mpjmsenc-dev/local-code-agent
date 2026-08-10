@@ -239,6 +239,18 @@ finish. Retries do resume from Ollama's prompt cache rather than starting over,
 so a too-short timeout inches forward rather than looping for ever — but an
 agent step costing 27 minutes is not a tier anyone will use on this rung.
 
+> **Superseded, and this is the correction that matters most in this file.**
+> Every number above was measured at `num_ctx=32768`. The agent now runs on a
+> derived model at **16384**, and on the *same droplet* one whole `lca agent
+> selftest` task — six links, a file written — takes **12 minutes**, reading at
+> 19.6 tok/s and generating at **8.5 tok/s**. Fourteen times the generation rate
+> of the 0.59 above, from nothing but the configuration.
+>
+> The sentence "not a tier anyone will use on this rung" was wrong, and it was
+> wrong in a way worth remembering: it generalised one configuration's numbers
+> into a verdict about the hardware. `docs/PERFORMANCE.md` now scopes those
+> ratios to the run they came from.
+
 ---
 
 ## `AGENT_STEP_PATTERN` — the answer, and it is not the hoped-for one

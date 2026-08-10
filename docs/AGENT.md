@@ -485,57 +485,89 @@ Set it `true` only for a model that genuinely uses the native channel.
 
 ## What one task costs, and whether this tier is honest to switch on
 
-Measured, on a 4 vCPU / 16 GB box, with `lca agent selftest` — one task
-("create a file with a function that returns `ok`"), start to file-on-disk:
+Measured with `lca agent selftest` — one task ("create a file with a function
+that returns `ok`"), start to file-on-disk, all six links green:
 
-| | |
-|---|---|
-| `qwen2.5-coder:7b-agent` @ 16384 | **11 min**, reading 50.2 tok/s, writing 6.2 tok/s |
-| `qwen2.5-coder:3b-agent` @ 16384 | ~10 min (an earlier run of the same shape) |
+| Box | Model | Task |
+|---|---|---|
+| 4 vCPU / 16 GB | `qwen2.5-coder:7b-agent` @ 16384 | **11 min** — reading 50.2 tok/s, writing 6.2 tok/s |
+| 4 vCPU / 16 GB | `qwen2.5-coder:3b-agent` @ 16384 | ~10 min (an earlier run of the same shape) |
+| **4 vCPU / 7.8 GiB** | `qwen2.5-coder:3b-agent` @ 16384 | **12 min** — reading 19.6 tok/s, writing 8.5 tok/s |
 
-The model size barely moves that number, and the reason is worth internalising:
-an agent step is dominated by **reading**, not writing. OpenHands' prompt is
-around 15,000 tokens before the model produces its first one. A two-line
-function and a two-hundred-line refactor cost nearly the same on the way in.
+Two things in that table are worth internalising.
 
-### On a smaller box, multiply
+**Model size barely moves the number**, because an agent step is dominated by
+**reading**, not writing: OpenHands' prompt is around 15,000 tokens before the
+model produces its first one. A two-line function and a two-hundred-line
+refactor cost nearly the same on the way in.
 
-Those numbers are from a machine faster than the 7.8 GiB droplet this project
-targets. `docs/PERFORMANCE.md` has the conversion, taken from one configuration
-run on both machines: **3.1× for reading, 6.9× for writing.** Applying it:
+**Neither does halving the machine.** The 7.8 GiB droplet is the box this
+project targets, and one task there costs 12 minutes against 11 on a box with
+twice the RAM. It reads 2.6× slower and writes 1.4× *faster* — the second
+because it is running the smaller rung. Reading is where the hardware shows.
 
-| | reading | writing | one task like the above |
-|---|---|---|---|
-| this box (4 vCPU / 16 GB) | 50 tok/s | 6.2 tok/s | 11 min |
-| a 7.8 GiB droplet (projected) | ~16 tok/s | ~0.9 tok/s | **35–60 min** |
+### On the target box, measured — and the projection that was wrong
 
-Do not take the second row as measured — it is a projection, and the honest way
-to replace it with a fact is to run `lca agent selftest` on that box.
+The row below used to be a projection, derived by applying `docs/PERFORMANCE.md`'s
+6.9× "writing" conversion to this box's numbers. It said 35–60 minutes. It has
+now been replaced by a measurement on the real hardware, and **the projection was
+wrong by a factor of three**:
+
+| | model | reading | writing | one task like the above |
+|---|---|---|---|---|
+| 4 vCPU / 16 GB | `7b-agent` @ 16384 | 50.2 tok/s | 6.2 tok/s | 11 min |
+| **4 vCPU / 7.8 GiB droplet** | `3b-agent` @ 16384 | **19.6 tok/s** | **8.5 tok/s** | **12 min** |
+
+Both rows are `lca agent selftest`, all six links green, exit 0, with a file
+actually written. The droplet ran its own ladder rung (3b) through the relay.
+
+Why the projection missed by so much is worth knowing, because it is the same
+mistake anyone reasoning from this project's numbers can make. The 6.9× figure
+came from a *32768-context run with a ~16k-token prompt*, where the droplet
+generated at 0.59 tok/s. At 16384 with the selftest's much smaller prompt, the
+**same droplet** generates at 8.5 tok/s — fourteen times faster. That difference
+is not the machine; it is the configuration. Generation on CPU slows down with
+the number of tokens already in the window, and a 3.4 GB KV allocation on a
+7.8 GiB box is near its limit besides.
+
+**Reading converts across machines; writing does not convert across
+configurations.** See `docs/PERFORMANCE.md`, where the ratios are now scoped to
+the run they came from.
+
+The practical rule: the only trustworthy answer for a box is that box's own
+`lca agent selftest`.
 
 ### So: is `ENABLE_AGENT=true` an honest default now?
 
-**No, and the reason is time, not correctness.** Every link is wired and
-checked: the relay ships, the derived model is rebuilt by `lca tune` and proved
-to load at its window, the settings are seeded and read back, the tool channel
-is set to the mode this model family actually uses, and one command runs a real
-task end to end. What is left is that on the box this project targets, "write me
-a small function" plausibly costs the better part of an hour, and a default that
-takes an hour to do something `lca` does in two minutes would be a bad default
-however correct it is.
+This file used to answer **no, and the reason is time** — that on the hardware
+this project targets, "write me a small function" plausibly cost the better part
+of an hour. That was the wrong answer, and it was wrong because it was a
+projection rather than a measurement. On the real droplet the task takes **12
+minutes**, which clears the 15-minute bar this section itself set.
 
-It also costs about **7 GB of images** on first start, and it can run anything
-on the machine. Both are reasons to opt in rather than be opted in.
+So the time objection is answered. The default stays `false` anyway, and the
+reason is now a different and more honest one: **consent and disk, not
+viability.**
 
-Three things would make it an honest default, in this order:
+- It costs about **7 GB of images** on first start. A default that downloads
+  that much is a default that fails on a small disk.
+- It can **run anything on the machine** — installs, services, deletions —
+  inside a sandbox that shares the host's docker daemon. That is the point of
+  the tier and it is not something to inherit without choosing it.
 
-1. **`lca agent selftest` passing on the target box inside 15 minutes.** That is
-   a number anyone can check, and it is the one that decides this.
-2. **A smaller first prompt.** 15k tokens before the first output token is what
-   makes every step expensive; most of it is OpenHands' own framing, not the
-   task.
-3. **Images that are not 7 GB.** A default that downloads that much on first
-   start is a default that fails on a small disk.
+Neither of those gets fixed by being faster, and neither is a reason to call the
+tier unusable. It is usable on the hardware this project targets; it is opt-in
+because of what it can do and what it costs to fetch, which is the same reason
+`lca offline` is a command rather than a default.
 
-Until then it is an opt-in tier that genuinely works, with one command to prove
-it on your own hardware — which is a much better answer than this file used to
-be able to give.
+What would still improve it, in order:
+
+1. **A smaller first prompt.** ~15k tokens before the first output token is most
+   of what a step costs, and most of that is OpenHands' own framing rather than
+   the task. This is the one change that would make every step cheaper on every
+   box.
+2. **Images that are not 7 GB.**
+
+Both are upstream of this project. Neither blocks anyone today: turn it on, run
+`lca agent selftest`, and you get your own box's number in about a quarter of an
+hour.

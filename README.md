@@ -167,11 +167,14 @@ successfully while being unable to execute a single tool call — runs finished,
 reported success, and left an empty workspace. `lca agent selftest` runs one
 small real task, asserts a file actually appeared, and reports the wall clock
 and this machine's speed, so "is it usable here?" has a number rather than an
-opinion. On a 4 vCPU / 16 GB box, one task takes about 11 minutes.
+opinion. Measured: **12 minutes** on a 4 vCPU / 7.8 GiB droplet running the 3b,
+11 minutes on a 16 GB box running the 7b. Reading is where the hardware shows;
+the model size barely moves it.
 
-Everything about it — including why `AGENT_NATIVE_TOOL_CALLING` defaults to
-`false`, and an honest answer to whether `ENABLE_AGENT=true` should be a
-default yet (it should not, and why) — is in [docs/AGENT.md](docs/AGENT.md).
+It stays off by default for what it costs to fetch and what it can do, not
+because it is too slow — that distinction, why `AGENT_NATIVE_TOOL_CALLING`
+defaults to `false`, and the numbers above are all in
+[docs/AGENT.md](docs/AGENT.md).
 
 ## Updating
 
