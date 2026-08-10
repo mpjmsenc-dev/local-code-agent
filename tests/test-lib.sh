@@ -3511,8 +3511,16 @@ check "aider, the chat app and the agent all read the same file" \
 conventions_carry_the_measured_gotchas() {
   local f="${REPO}/config/CONVENTIONS.md" body missing=() rule
   body="$(cat "${f}")"
-  # The four by their distinguishing token, not by prose that could drift.
-  for rule in 'total++' 'local matches' 'grep -q' 'shellcheck disable'; do
+  # The four by their distinguishing token, not by prose that could drift — and
+  # not by a VARIABLE NAME either. Two of these used to pin one ('local matches',
+  # 'total++'), so shortening an example to fit the prompt budget failed a gate
+  # that is supposed to be about the four cases being present, twice. Each token
+  # below names the CASE. Syntax tokens were tried and were not enough either:
+  # 'shellcheck disable' and 'grep -q' both appear inside the CODE BLOCKS, so a
+  # mutant that deleted a whole heading survived. The case's own words are the
+  # only thing that goes when the case goes.
+  for rule in 'kills the script' 'swallows the exit status' \
+              'SIGPIPEs the writer' 'NEXT line only'; do
     grep -qF "${rule}" <<<"${body}" || missing+=("${rule}")
   done
   (( ${#missing[@]} == 0 )) || {
@@ -3524,8 +3532,8 @@ conventions_carry_the_measured_gotchas() {
   # nothing. Directive immediately above the line it excuses — gotcha 4 of the
   # very section this is checking.
   # shellcheck disable=SC2016
-  grep -qF 'total=$((total+1))' <<<"${body}" || {
-    echo 'the ((x++)) gotcha shows the break without the fix' >&2; return 1; }
+  grep -qE '=\$\(\([a-z_]+\+1\)\)' <<<"${body}" || {
+    echo 'the ((x++)) gotcha shows the break without the arithmetic-assignment fix' >&2; return 1; }
   grep -qF '<<<' <<<"${body}" || {
     echo 'the pipefail gotcha shows the break without the here-string fix' >&2; return 1; }
 }
@@ -4250,6 +4258,37 @@ prompt_fits_its_budget() {
 }
 check "the system prompt stays inside its share of a 4096-token context" \
   prompt_fits_its_budget
+# ...and the SHIPPED DEFAULT must not trip this project's own warning.
+#
+# The gate above measures the part this repo writes, with the instructions file
+# off. That is the right question for the prompt, and it is not the question a
+# new user's first 'lca check' asks: that one measures the whole thing, with
+# config/CONVENTIONS.md appended, against THEIR context — 8192 from
+# .env.example. Found by running setup.sh from scratch on a bare Ubuntu, where
+# the first check of a brand-new install warned about the defaults it had just
+# been given: ~1480 tokens against a 1228 budget, because four bash gotchas had
+# been added to the instructions file and nothing measured the total.
+#
+# A product that ships a default tripping its own warning teaches people to
+# ignore the warning.
+shipped_default_is_inside_its_own_budget() {
+  local chars tokens ctx cap
+  chars="$(lca_system_prompt | wc -c)"
+  tokens=$(( chars / 4 ))
+  # The context a fresh install really gets, read from .env.example rather than
+  # hardcoded, so changing that default moves this gate with it.
+  ctx="$(sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' "${REPO}/.env.example" | head -1)"
+  [[ "${ctx}" =~ ^[0-9]+$ ]] || return 1
+  cap=$(( ctx * 15 / 100 ))
+  (( tokens <= cap )) || {
+    printf 'a fresh install would warn about its own defaults: prompt ~%s tokens against a %s budget (15%%%% of .env.example OLLAMA_CONTEXT_LENGTH=%s). Trim config/CONVENTIONS.md.\n' \
+      "${tokens}" "${cap}" "${ctx}" >&2
+    return 1
+  }
+}
+check "a fresh install does not warn about the prompt it ships with" \
+  shipped_default_is_inside_its_own_budget
+
 # ...and sends project work to the ONE command that can write files. The first
 # version of this fix said only "the terminal agent", and the model duly
 # suggested 'lca ask' — which is also text-only. Caught by running it.
