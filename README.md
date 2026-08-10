@@ -343,6 +343,7 @@ Created from `.env.example` on first run. All keys:
 | `WEBUI_PORT` | `3000` | WebUI port (reached via Tailscale) |
 | `ENABLE_AGENT` | `false` | run the autonomous agent tier (see docs/AGENT.md) |
 | `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
+| `AGENT_MODEL_CONTEXT` | `16384` | context for the agent's own derived model, without raising it server-wide |
 | `AGENT_NATIVE_TOOL_CALLING` | `false` | use the model's native tool-call channel; `false` parses tool calls from the text, which is what `qwen2.5-coder` needs |
 | `ENABLE_OLLAMA_RELAY` | `false` | let containers reach Ollama via the docker bridge, without binding Ollama to 0.0.0.0 |
 | `OLLAMA_RELAY_PORT` | `11435` | the port that relay listens on (bridge gateway only) |

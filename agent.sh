@@ -89,7 +89,7 @@ start_agent() {
   fi
 
   local model base_url instructions bridge_gw
-  model="$(agent_llm_model "${MODEL_NAME}")"
+  model="$(agent_llm_model "$(agent_model_for_run)")"
   base_url="$(agent_llm_base_url)"
   bridge_gw="$(docker_bridge_gateway)"
   # The same instructions file aider reads and the chat app is given, so the
@@ -224,6 +224,20 @@ warn_if_model_unreachable() {
   fi
 }
 
+# agent_model_for_run — the model the agent should actually be pointed at.
+#
+# The derived one when it exists, because that is the only way this tier gets a
+# context bigger than the chat app's: OLLAMA_CONTEXT_LENGTH is server-wide, and
+# Ollama's OpenAI endpoint — the one the agent speaks — ignores a per-request
+# num_ctx entirely. The plain rung when it does not, so a missing derived model
+# degrades to a small window rather than to a 404 on a model that is not there.
+# 'lca check' says which of the two is in force.
+agent_model_for_run() {
+  local derived
+  derived="$(agent_model_name "${MODEL_NAME}")"
+  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${MODEL_NAME}"; fi
+}
+
 # seed_agent_settings — write the LLM settings the agent needs before it can
 # start ANY conversation.
 #
@@ -259,7 +273,7 @@ warn_if_model_unreachable() {
 seed_agent_settings() {
   local url="http://127.0.0.1:${AGENT_PORT}/api/v1/settings" body waited=0
   local model base_url got got_native
-  model="$(agent_llm_model "${MODEL_NAME}")"
+  model="$(agent_llm_model "$(agent_model_for_run)")"
   base_url="$(agent_llm_base_url)"
   # Wait for the API rather than racing it: the container answers HTTP well
   # before this route exists.

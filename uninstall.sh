@@ -159,6 +159,30 @@ remove_agent_workspace() {
   return 1
 }
 
+# remove_agent_models — the derived <model>-agent entries this project creates.
+#
+# They are manifests over blobs the base model already owns, so removing them
+# frees almost nothing — but leaving them is leaving this project's fingerprints
+# in 'ollama list' after an uninstall said the machine was clean. The base
+# models are NOT touched: they were pulled by the user's choice of ladder rung
+# and are gigabytes they may well want to keep.
+remove_agent_models() {
+  local found name
+  have ollama || return 0
+  found="$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -E -- '-agent$' || true)"
+  [[ -n "${found}" ]] || return 0
+  step "Removing the agent's derived models"
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    if ollama rm "${name}" >/dev/null 2>&1; then
+      ok "Removed ${name}."
+    else
+      warn "Could not remove ${name} — it is still listed by 'ollama list'."
+    fi
+  done <<<"${found}"
+  info "Base models were left alone: they are gigabytes you chose to pull."
+}
+
 # closing_banner WEBUI_LEFT — the last thing an uninstall says.
 #
 # "complete" has to mean it. A warning printed sixty lines earlier is not where
@@ -245,6 +269,7 @@ main() {
   local webui_left=0
   remove_webui "${keep_data}" || webui_left=1
   remove_agent_workspace "${keep_data}" || true
+  remove_agent_models || true
 
   # Homes to clean. Under sudo, ${HOME} is root's while the files that matter
   # were written by the human's own runs, so both are in scope. Computed here

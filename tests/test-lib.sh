@@ -2688,6 +2688,109 @@ uninstall_handles_the_agent_workspace() {
 check "uninstall removes the agent's workspace, as root, unless --keep-data" \
   uninstall_handles_the_agent_workspace
 
+echo "# the agent's own derived model: a bigger window for one tier, not for all"
+# OLLAMA_CONTEXT_LENGTH is server-wide and Ollama's OpenAI endpoint — the one
+# the agent speaks — ignores a per-request num_ctx. Measured:
+#   /v1 {"options":{"num_ctx":8192}} -> loads at 4096
+#   /api/chat same body              -> loads at 8192
+# So the agent gets a derived model instead. It is DERIVED, never configured: a
+# second model name in .env would be a second source of truth able to drift
+# from a ladder that re-picks on every boot.
+check "the derived name is built from the rung" \
+  test "$(agent_model_name qwen2.5-coder:3b)" = qwen2.5-coder:3b-agent
+check "...and defaults to the current one" \
+  test "$(agent_model_name)" = "${MODEL_NAME}-agent"
+check "a derived model is recognised as one" agent_model_is_derived qwen2.5-coder:3b-agent
+# It matters at restore, where a derived model must be REBUILT: it was never in
+# a registry, so pulling it fails on every restore for ever.
+derived_says_no() { agent_model_is_derived "$1" && return 1; return 0; }
+check "...and a base model is not"          derived_says_no qwen2.5-coder:3b
+check "...nor is one merely containing the word" derived_says_no agent-model:7b
+
+# shellcheck disable=SC2030  # confining both to this subshell is the point
+ctx_with() ( AGENT_MODEL_CONTEXT="$1"; OLLAMA_CONTEXT_LENGTH="$2"; agent_model_context )
+check "the agent's window is the one it was given" test "$(ctx_with 16384 4096)" = 16384
+# Never BELOW the server default: a derived model with a smaller window than
+# everything else would be a downgrade wearing the word "agent".
+check "...but never smaller than the server's" test "$(ctx_with 2048 8192)" = 8192
+check "a value that is not a number falls back" test "$(ctx_with abc 4096)" = 16384
+check "...and so does a broken server value"   test "$(ctx_with 16384 abc)" = 16384
+
+# The drift check, driven with the daemon stubbed. The 'context' arm is the one
+# that matters: a Modelfile that did not take is invisible — the model answers,
+# the agent runs, and it silently truncates at the server default in the middle
+# of a long task. Creating a model proves nothing; loading it is the evidence.
+model_drift_when() (   # PRESENT LOADED_CTX -> the verdict
+  # shellcheck disable=SC2317  # asked by agent_model_drift, not from here
+  model_present() { [[ "${present}" == "yes" ]]; }
+  # shellcheck disable=SC2317  # ...and this one
+  agent_model_loaded_context() { [[ -n "${loaded}" ]] || return 1; printf '%s' "${loaded}"; }
+  agent_model_drift || printf 'fine'
+)
+drift_is() {
+  local want="$1" got
+  got="$(present="$2" loaded="$3" model_drift_when)"
+  [[ "${got}" == "${want}" ]]
+}
+check "no derived model at all is reported as absent" drift_is absent  no  16384
+check "a model loading the wrong window is reported"  drift_is context yes 4096
+check "...and the right one is not"                   drift_is fine    yes "$(agent_model_context)"
+# A window nobody could read is NOT drift. Same rule as the chat app's config:
+# an unanswerable question must not become a list of things to rebuild.
+check "a window that cannot be read is not called drift" drift_is fine yes ""
+
+# Building it must PROVE it, not assume it. rc 2 is reserved for "created, but
+# Ollama did not load it at that window", which is the failure that would
+# otherwise be silent.
+build_result() (   # LOADED_CTX -> rc
+  # shellcheck disable=SC2317  # ensure_agent_model calls these
+  model_present() { return 0; }
+  # shellcheck disable=SC2317  # ...and this
+  ollama() { return 0; }
+  # shellcheck disable=SC2317  # ...and this
+  agent_model_loaded_context() { [[ -n "${loaded}" ]] || return 1; printf '%s' "${loaded}"; }
+  ensure_agent_model >/dev/null 2>&1; printf '%s' "$?"
+)
+check "a model that loads at the right window builds cleanly" \
+  test "$(loaded="$(agent_model_context)" build_result)" = 0
+check "a model that loads at the wrong window is not called built" \
+  test "$(loaded=4096 build_result)" = 2
+check "...and neither is one whose window cannot be read" \
+  test "$(loaded='' build_result)" = 2
+
+# The rest of the stack has to know about it too.
+# The CALL, not merely the definition: a mutant that deleted the call and left
+# the function survived a gate that only grepped for the name.
+check "tune rebuilds it when the rung moves" \
+  grep -qE '^[[:space:]]+refresh_agent_model_after_tune ' "${REPO}/scripts/tune.sh"
+check "'lca check' names all three states of it" \
+  test "$(grep -cE 'absent\)|context\)' "${REPO}/check-system.sh")" -ge 2
+# Restore must REBUILD, never pull: a derived model was never in a registry, so
+# a restore that pulls it fails on that model on every restore, for ever.
+restore_rebuilds_derived() {
+  local body; body="$(cat "${REPO}/restore.sh")"
+  grep -q 'agent_model_is_derived' <<<"${body}" || return 1
+  grep -q 'ensure_agent_model' <<<"${body}"
+}
+check "restore rebuilds a derived model instead of pulling it" restore_rebuilds_derived
+# ...and uninstall takes this project's models away without touching the
+# gigabytes the user chose to pull.
+uninstall_removes_only_derived() {
+  local body; body="$(sed -n '/^remove_agent_models()/,/^}/p' "${REPO}/uninstall.sh")"
+  [[ -n "${body}" ]] || return 1
+  # -F: the suffix it matches on ends with '$', which as a pattern would anchor
+  # to end-of-line and never match the line it lives on.
+  grep -qF -- '-agent$' <<<"${body}" || return 1
+  grep -q 'ollama rm' <<<"${body}"
+}
+check "uninstall removes the derived models and leaves the base ones" \
+  uninstall_removes_only_derived
+# ...and the same trap: deleting the call and keeping the function passed.
+check "...and the uninstall path actually calls it" \
+  grep -qE '^[[:space:]]+remove_agent_models( |$)' "${REPO}/uninstall.sh"
+check "...as it does for the workspace beside it" \
+  grep -qE '^[[:space:]]+remove_agent_workspace ' "${REPO}/uninstall.sh"
+
 echo "# the Ollama relay: containers reach the model, the model stays on loopback"
 # The decision this encodes: Ollama is NOT widened to 0.0.0.0. It stays on
 # 127.0.0.1 and one address — the docker bridge gateway, which is not routable

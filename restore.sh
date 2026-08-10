@@ -348,12 +348,26 @@ main() {
     # exactly when you want the model server up, and the silent form spent
     # half a minute looking like a hang right at the end of a recovery.
     if have ollama && ensure_ollama_up_announced 30; then
-      local model
+      local model derived_base
       # `ollama list` output: NAME  ID  SIZE  MODIFIED (header on line 1).
       while read -r model; do
         [[ -n "${model}" ]] || continue
         if model_present "${model}"; then
           ok "Model '${model}' already present."
+        elif agent_model_is_derived "${model}"; then
+          # A derived model was never in a registry, so pulling it fails on
+          # every restore for ever. It is re-CREATED from its base instead —
+          # one Modelfile line over weights the base model already owns — and
+          # only once that base is here, which is why this runs inside the same
+          # loop rather than before it.
+          derived_base="${model%-agent}"
+          if ! model_present "${derived_base}"; then
+            warn "'${model}' is this project's derived agent model and its base '${derived_base}' is not on this machine yet, so it was not rebuilt. Re-run this restore once the base has been pulled, or: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+          elif ensure_agent_model "${derived_base}" >/dev/null; then
+            ok "Agent model '${model}' rebuilt from '${derived_base}' and verified at $(agent_model_context) tokens."
+          else
+            warn "'${model}' could not be rebuilt from '${derived_base}'. The agent tier will run at the server-wide context until it is: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+          fi
         elif net_blocked; then
           # Per model, not once before the loop: which models arrived and which
           # did not is the whole answer here, and the offline branch used to

@@ -520,6 +520,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # false, and this is the setting that decides whether the agent tier does
   # anything at all. Measured, twice, on this stack — see agent.sh.
   AGENT_NATIVE_TOOL_CALLING="${AGENT_NATIVE_TOOL_CALLING:-false}"
+  # The window the agent's own derived model carries. Server-wide context stays
+  # where the ladder put it; only the agent gets this. Never applied below the
+  # server default — see agent_model_context.
+  AGENT_MODEL_CONTEXT="${AGENT_MODEL_CONTEXT:-16384}"
   # The relay that lets containers reach Ollama without Ollama leaving
   # loopback. Off by default like every other component here; the agent tier is
   # what needs it, and 'lca check' says so when the agent is on without it.
@@ -2762,6 +2766,132 @@ agent_event_steps() {
     [[ "${n}" =~ ^[0-9]+$ ]] && { printf '%s' "${n}"; return 0; }
   done
   return 1
+}
+
+# --- the agent's own model ----------------------------------------------------
+#
+# The agent needs a far bigger context than the chat app does — its first prompt
+# on a real run was 15,492 tokens — and OLLAMA_CONTEXT_LENGTH is SERVER-WIDE.
+# Raising it for the agent would raise it for aider and the phone too, and that
+# is not free: measured here, the 3b at 32768 costs 3.4 GB resident against
+# 2.2 GB at 4096, and generates at 4.07 tok/s against 10.41.
+#
+# Per-request num_ctx cannot do it either, and that is measured rather than
+# assumed. Ollama's OpenAI-compatible endpoint — the one the agent speaks —
+# ignores it:
+#
+#   POST /v1/chat/completions {"options":{"num_ctx":8192}} -> loads at 4096
+#   POST /api/chat            {"options":{"num_ctx":8192}} -> loads at 8192
+#
+# What /v1 does honour is a model that carries the setting itself. So the agent
+# gets a DERIVED model — the same weights, one PARAMETER line — and the rest of
+# the stack is untouched.
+#
+# It is derived, not configured: a second model name in .env would be a second
+# source of truth able to drift from the ladder, and the ladder moves on every
+# boot. tune.sh regenerates this whenever the rung changes.
+
+# agent_model_name [BASE] — the derived model's name.
+agent_model_name() {
+  printf '%s-agent' "${1:-${MODEL_NAME}}"
+}
+
+# agent_model_is_derived NAME — true for a name this project generates.
+#
+# It matters at restore: a derived model cannot be PULLED, only re-created, and
+# a restore that tries to pull one fails on a model that was never in a
+# registry.
+agent_model_is_derived() {
+  [[ "${1:-}" == *-agent ]]
+}
+
+# agent_model_context — the context the derived model should carry.
+#
+# Never below the server default: a derived model with a SMALLER window than
+# everything else would be a downgrade wearing the word "agent".
+agent_model_context() {
+  local want="${AGENT_MODEL_CONTEXT:-16384}" base="${OLLAMA_CONTEXT_LENGTH:-4096}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=16384
+  [[ "${base}" =~ ^[0-9]+$ ]] || base=4096
+  (( want >= base )) || want="${base}"
+  printf '%s' "${want}"
+}
+
+# agent_model_loaded_context MODEL — the context Ollama ACTUALLY loads it at,
+# read back from the server after asking it through the same endpoint the agent
+# uses. Non-zero when it cannot be determined.
+#
+# This is the check that matters. A Modelfile that did not take is invisible:
+# the model answers, the agent runs, and it silently truncates at 4096 in the
+# middle of a long task. Creating the model proves nothing; loading it does.
+agent_model_loaded_context() {
+  local model="${1:-}" url ctx
+  [[ -n "${model}" ]] || return 1
+  have curl && have jq || return 1
+  url="$(ollama_url)"
+  curl -fsS --max-time 600 -X POST "${url}/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "$(jq -nc --arg m "${model}" \
+             '{model:$m, max_tokens:1, messages:[{role:"user",content:"hi"}]}')" \
+       >/dev/null 2>&1 || return 1
+  ctx="$(curl -fsS --max-time 10 "${url}/api/ps" 2>/dev/null \
+         | jq -r --arg m "${model}" \
+             '.models[]? | select(.name == $m) | .context_length' 2>/dev/null | head -1)"
+  [[ "${ctx}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${ctx}"
+}
+
+# stale_agent_models — derived models left over from a rung the ladder has
+# moved off, one per line.
+#
+# The ladder re-picks on every boot, so a resize leaves 'qwen2.5-coder:3b-agent'
+# behind while the stack now runs the 7b. Listed rather than deleted here: the
+# caller decides, and 'lca tune' and 'uninstall' want different things.
+stale_agent_models() {
+  local keep
+  have ollama || return 1
+  keep="$(agent_model_name "${MODEL_NAME}")"
+  ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' \
+    | grep -E -- '-agent$' | grep -vxF "${keep}" || true
+}
+
+# agent_model_drift — why the derived model is not what it should be, or
+# non-zero when it is fine.
+#
+# Two answers, because they need different remedies:
+#   absent   there is no derived model for the current rung
+#   context  it exists but Ollama loads it at the wrong window
+agent_model_drift() {
+  local derived want got
+  derived="$(agent_model_name "${MODEL_NAME}")"
+  model_present "${derived}" || { printf 'absent'; return 0; }
+  want="$(agent_model_context)"
+  got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
+  [[ -n "${got}" ]] || return 1
+  [[ "${got}" != "${want}" ]] || return 1
+  printf 'context'
+}
+
+# ensure_agent_model [BASE] — create or refresh the derived model, and prove it
+# took. Prints the model's name on success.
+ensure_agent_model() {
+  local base="${1:-${MODEL_NAME}}" derived want tmp got
+  derived="$(agent_model_name "${base}")"
+  want="$(agent_model_context)"
+  have ollama || return 1
+  model_present "${base}" || return 1
+  tmp="$(mktemp)" || return 1
+  printf 'FROM %s\nPARAMETER num_ctx %s\n' "${base}" "${want}" > "${tmp}"
+  # 'ollama create' over the same weights: the blob is shared on disk, so this
+  # costs a manifest rather than another copy of the model.
+  if ! ollama create "${derived}" -f "${tmp}" >/dev/null 2>&1; then
+    rm -f "${tmp}" || true
+    return 1
+  fi
+  rm -f "${tmp}" || true
+  got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
+  [[ "${got}" == "${want}" ]] || return 2
+  printf '%s' "${derived}"
 }
 
 # --- the Ollama relay -------------------------------------------------------

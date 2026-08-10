@@ -104,7 +104,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -125,6 +125,8 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_fail "AGENT_PORT='${value}' is not a port number, so the agent cannot be started and — worse — the inbound guard has no port to close for it. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca apply" ;;
     OLLAMA_RELAY_PORT)
       p_fail "OLLAMA_RELAY_PORT='${value}' is not a port number, so the relay cannot listen and the agent tier has no way to reach the model. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install" ;;
+    AGENT_MODEL_CONTEXT)
+      p_warn "AGENT_MODEL_CONTEXT='${value}' is not a positive number, so the agent's derived model falls back to 16384. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     AGENT_MAX_ITERATIONS)
       p_warn "AGENT_MAX_ITERATIONS='${value}' is not a whole number, so the step ceiling never fires and an unattended run is bounded only by the wall clock. Set a number (or 0 for no limit, on purpose) in ${ENV_FILE}." ;;
     AGENT_TIMEOUT_MINUTES)
@@ -188,6 +190,28 @@ if [[ "${ENABLE_AGENT}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
   if [[ "${ENABLE_OLLAMA_RELAY}" != "true" ]]; then
     p_warn "the agent is enabled but ENABLE_OLLAMA_RELAY is false, so it cannot reach Ollama on ${OLLAMA_HOST} — a container's loopback is the container. Set ENABLE_OLLAMA_RELAY=true in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install"
   fi
+fi
+
+# The agent's derived model: does it exist, and does Ollama really load it at
+# the window it was built for?
+#
+# The second half is the point. A Modelfile that did not take is invisible — the
+# model answers, the agent runs, and it silently truncates in the middle of a
+# long task at the server default instead. Creating a model proves nothing;
+# loading it is the only evidence, so that is what this asks.
+if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
+  AGENT_MODEL="$(agent_model_name "${MODEL_NAME}")"
+  case "$(agent_model_drift 2>/dev/null || printf ok)" in
+    absent)
+      p_warn "the agent is on but '${AGENT_MODEL}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was over 15,000 tokens. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+    context)
+      p_warn "'${AGENT_MODEL}' exists but Ollama loads it at a different context than $(agent_model_context), so the agent is silently working in a smaller window than it was given. Rebuild it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+    *)
+      p_pass "agent model ${AGENT_MODEL} loads at $(agent_model_context) tokens" ;;
+  esac
+  AGENT_STALE="$(stale_agent_models 2>/dev/null | tr '\n' ' ' || true)"
+  [[ -z "${AGENT_STALE// /}" ]] \
+    || p_warn "derived agent models left over from an earlier rung: ${AGENT_STALE}— they are manifests over shared blobs, but they are yours to remove: ollama rm ${AGENT_STALE}"
 fi
 
 # The relay itself, whenever it is switched on — with or without the agent,

@@ -196,6 +196,30 @@ install_service() {
   ok "Auto-tune will re-run on every boot (resize adapts automatically)."
 }
 
+# refresh_agent_model_after_tune MODEL — rebuild the agent's derived model for
+# the rung just chosen, and say what happened.
+#
+# Silent when the agent tier is off: it is the only thing that uses this model,
+# and building a second copy of the weights' manifest for a feature nobody
+# switched on is noise on every boot.
+refresh_agent_model_after_tune() {
+  local base="$1" derived rc stale
+  [[ "${ENABLE_AGENT}" == "true" ]] || return 0
+  derived="$(agent_model_name "${base}")"
+  info "Rebuilding the agent's ${derived} at context $(agent_model_context) (the rung changed)..."
+  derived="$(ensure_agent_model "${base}")"; rc=$?
+  case "${rc}" in
+    0) ok "Agent model ${derived} rebuilt and verified at $(agent_model_context) tokens." ;;
+    2) warn "The agent's model was created but Ollama did not load it at $(agent_model_context) tokens, so the agent would silently run at the server default instead. Check it with: lca check" ;;
+    *) warn "Could not rebuild the agent's derived model for ${base}. The agent tier will run at the server-wide context until this is fixed: sudo ${SCRIPT_DIR}/tune.sh" ;;
+  esac
+  # A rung change strands the previous one. Named, not deleted: it is several
+  # gigabytes of manifest over shared blobs and the choice is the user's.
+  stale="$(stale_agent_models | tr '\n' ' ')"
+  [[ -z "${stale// /}" ]] \
+    || info "Left behind by earlier rungs: ${stale}— remove with: ollama rm ${stale}"
+}
+
 main() {
   local dry_run=false
   case "${1:-}" in
@@ -408,6 +432,16 @@ main() {
     write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
       "MODEL_NAME was written but the context length was not; Ollama has NOT been restarted, so nothing is running settings .env does not name. Re-run 'lca tune' once there is room."
     render_ollama_dropin
+    # The agent's derived model is generated FROM the rung, so a rung change
+    # invalidates it. Regenerated here rather than at 'lca agent start', because
+    # this is the moment the ladder moves and the only moment anything knows it
+    # moved — and a second model name in .env would be a second source of truth
+    # able to disagree with the ladder for ever.
+    #
+    # Best effort: this runs from the on-boot oneshot, and a failure to build a
+    # convenience model must not fail a tune that has already changed the model
+    # the whole stack uses. It is REPORTED, and 'lca check' says so again.
+    refresh_agent_model_after_tune "${chosen_model}"
     restart_ollama
     if [[ "${old_model}" != "${chosen_model}" ]]; then
       info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
