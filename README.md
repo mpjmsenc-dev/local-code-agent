@@ -134,11 +134,44 @@ caveat: the encrypted Tailscale tunnel still uses the network as transport;
 "offline" means the AI stack can't reach the internet, not that the NIC is dead.
 
 Separately, an **always-on inbound guard** (installed by `setup.sh`, re-applied
-every boot) keeps the WebUI and Ollama ports reachable only over loopback and
-Tailscale — never from a public IP — without touching SSH. Re-apply or verify it
+every boot) keeps every port this stack opens — the WebUI, Ollama, and the
+agent tier's two when it is on — reachable only over loopback and Tailscale,
+never from a public IP, without touching SSH. Re-apply or verify it
 with `sudo lca harden` / `sudo lca status`; `harden` also (re)installs the boot
 service, so one command closes the ports for good rather than until the next
 reboot.
+
+## The second tier: an agent that does the work itself
+
+`lca` (aider) edits files in the directory you are standing in, one request at
+a time, and you read the diff. There is a tier above it: you give a task to a
+browser UI on your phone, and it plans and carries the work out — writing
+files, running builds, starting services — inside its own Docker sandbox,
+without stopping to confirm each step.
+
+It is **off by default**, and that is deliberate: it can run anything on the
+machine, and its images are about 7 GB.
+
+```bash
+# in .env
+ENABLE_AGENT=true
+ENABLE_OLLAMA_RELAY=true
+
+sudo lca apply && sudo lca relay install && sudo lca tune
+lca agent start
+lca agent selftest      # one real task, end to end, with the timing
+```
+
+That last command is the point. This tier spent most of its life *starting*
+successfully while being unable to execute a single tool call — runs finished,
+reported success, and left an empty workspace. `lca agent selftest` runs one
+small real task, asserts a file actually appeared, and reports the wall clock
+and this machine's speed, so "is it usable here?" has a number rather than an
+opinion. On a 4 vCPU / 16 GB box, one task takes about 11 minutes.
+
+Everything about it — including why `AGENT_NATIVE_TOOL_CALLING` defaults to
+`false`, and an honest answer to whether `ENABLE_AGENT=true` should be a
+default yet (it should not, and why) — is in [docs/AGENT.md](docs/AGENT.md).
 
 ## Updating
 
@@ -162,10 +195,11 @@ What "private" means here, precisely — and what it doesn't.
   anyone who can reach the host — `check-system.sh` warns if you set one.
 - **Open WebUI** binds all interfaces (it runs with Docker host networking so
   it can reach loopback Ollama). It is kept private by the **inbound guard**:
-  an always-on nftables table (`lca_inbound`) that drops new inbound to the
-  WebUI and Ollama ports on every interface **except loopback and
-  `tailscale0`**. SSH (22) and all other ports are untouched, so the guard can
-  never lock you out. It is re-applied on every boot and whenever WebUI is
+  an always-on nftables table (`lca_inbound`) that drops new inbound to every
+  port this stack opens — the WebUI, Ollama, and, when they are switched on,
+  the agent's UI and the Ollama relay — on every interface **except loopback
+  and `tailscale0`**. SSH (22) and all other ports are untouched, so the guard
+  can never lock you out. It is re-applied on every boot and whenever WebUI is
   (re)created.
 - **Phone access** rides Tailscale — an encrypted, private WireGuard network.
   Nothing is port-forwarded; you reach WebUI at `http://<tailscale-ip>:3000`.
@@ -306,7 +340,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `update.sh` | Update safely: backup → new code → re-run setup → self-test (`--check` previews) |
 | `run-agent.sh` | Start aider in the current directory |
 | `webui.sh` | `start\|stop\|restart\|status\|url\|logs` for Open WebUI |
-| `agent.sh` | `start\|stop\|restart\|status\|url\|logs\|watch` for the autonomous agent |
+| `agent.sh` | `start\|stop\|restart\|status\|url\|logs\|watch\|selftest` for the autonomous agent |
 | `netmode.sh` | `offline\|online\|status` kill switch + `harden` inbound guard |
 | `check-system.sh` | Full health check with colored summary (`--quick` skips the real-generation probe) |
 | `update-model.sh` | Safely switch models (`--list`, `--remove-old`) |
@@ -481,7 +515,8 @@ the cost of the per-change trail. Full example and reasoning in
 [INSTALL](docs/INSTALL.md) · [YOUR-TURN (start here!)](docs/YOUR-TURN.md) ·
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
-[PERFORMANCE](docs/PERFORMANCE.md) · [GPU](docs/GPU.md) · [BACKUPS](docs/BACKUPS.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[PERFORMANCE](docs/PERFORMANCE.md) · [GPU](docs/GPU.md) · [BACKUPS](docs/BACKUPS.md) ·
+[AGENT (the autonomous tier)](docs/AGENT.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 
