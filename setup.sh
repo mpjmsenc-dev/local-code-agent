@@ -170,6 +170,24 @@ main() {
     setup_ok=false
   fi
 
+  # The agent's derived model, AFTER the pull and not before it.
+  #
+  # tune.sh already tries this on the way out of every path it can take — but
+  # setup runs tune BEFORE this block, so on a clean machine that attempt finds
+  # no base model to derive from and correctly does nothing. Without this second
+  # call nothing ever comes back to it, and a first install with
+  # ENABLE_AGENT=true ends with no <model>-agent: 'lca agent selftest' fails and
+  # sends the user to 'lca tune'. That is the bootstrap loop, and fixing tune.sh
+  # alone did not close it — tests/test-fresh-install.sh caught the other half
+  # on its first real run.
+  #
+  # Silent when the agent tier is off, and never fatal: it is a convenience
+  # model, and an install that has just pulled a working one must not be
+  # reported as failed over it.
+  if [[ "${have_model}" == "true" ]]; then
+    refresh_agent_model_after_tune "${MODEL_NAME}" || true
+  fi
+
   if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
     # A WebUI failure (e.g. the Docker daemon isn't running on a no-systemd
     # host) must NOT abort the rest of setup — the terminal stack still works.

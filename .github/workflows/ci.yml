@@ -268,6 +268,28 @@ jobs:
             grep "^Environment=${key}=" /etc/systemd/system/ollama.service.d/local-code-agent.conf
           done
 
+  fresh-install:
+    # THE claim nobody had ever tested: a clean machine walked through setup.sh
+    # end to end. Every install this project has had was incremental, including
+    # the one in the E2E lane below — that one installs Ollama and aider itself
+    # first, so it proves setup.sh is safe to RE-run, not that it works from
+    # nothing.
+    #
+    # Two bugs reached a real droplet through that gap, and this job asserts both
+    # by name: ENABLE_AGENT=true leaving no derived model (the bootstrap loop),
+    # and tune.sh skipping the build on an already-tuned box (main() has four
+    # exits and the call sat past all of them). Neither is a unit-testable shape;
+    # both are what a first user meets in the first five minutes.
+    #
+    # It runs the real thing in a disposable ubuntu:24.04 and pulls a real 3b, so
+    # it is slow. That is the price of the one claim the README opens with.
+    name: Fresh install — a clean machine through setup.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: A clean machine, one setup.sh, and the questions a first user asks
+        run: bash tests/test-fresh-install.sh
+
   minimal-base:
     # Guards the dependency contract on a TRULY minimal image. The normal
     # runners (and cloud images) preinstall zstd, ca-certificates, iproute2,

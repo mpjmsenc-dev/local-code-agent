@@ -12,10 +12,11 @@
 # on this project. (Paraphrased rather than quoted: a gate in the test suite
 # refuses those sentences, and it greps this file.)
 #
-# CI has 6 jobs and this runs two of them. The other four need a fresh machine
+# CI has 7 jobs and this runs two of them. The other five need a fresh machine
 # and cannot exist here: the system-artifact job (nft ruleset and systemd
-# units), the minimal-base install, the real Ollama install and generation, and
-# the Open WebUI container with its backup/restore round trip.
+# units), the fresh-install job (a clean ubuntu:24.04 walked through setup.sh
+# with a real model pull), the minimal-base install, the real Ollama install and
+# generation, and the Open WebUI container with its backup/restore round trip.
 #
 # And the two it DOES run can answer differently there. CI's runner is a
 # non-root passwordless sudoer with a real Docker daemon behind it; a developer

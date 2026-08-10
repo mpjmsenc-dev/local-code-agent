@@ -3016,6 +3016,43 @@ ollama_relay_drift() {
   printf '%s -> %s' "${have}" "${want}"
 }
 
+# refresh_agent_model_after_tune MODEL — make sure the agent's derived model
+# exists for this rung and carries the right window.
+#
+# Called on EVERY tune, not only when the rung moved, and that placement is the
+# fix for a loop with no exit. Inside the "something changed" block, a first-time
+# user who set ENABLE_AGENT=true on a correctly-tuned box ran 'sudo lca tune',
+# was told nothing had changed, and never got the model — so the selftest failed
+# at link 2 telling them to run 'sudo lca tune', which again did nothing.
+#
+# Silent when the agent tier is off: it is the only thing that uses this model.
+# Silent too when the model already declares the right window — read from its
+# parameters, which costs nothing, rather than by loading it, which on a CPU box
+# is minutes and would be paid on every boot. A rung change needs no special
+# case: the name carries its base, so a new rung means a name that does not
+# exist yet.
+refresh_agent_model_after_tune() {
+  local base="$1" derived rc stale have_ctx
+  [[ "${ENABLE_AGENT}" == "true" ]] || return 0
+  derived="$(agent_model_name "${base}")"
+  if have_ctx="$(agent_model_declared_context "${derived}")" \
+     && [[ "${have_ctx}" == "$(agent_model_context)" ]]; then
+    return 0
+  fi
+  info "Building the agent's ${derived} at context $(agent_model_context)..."
+  derived="$(ensure_agent_model "${base}")"; rc=$?
+  case "${rc}" in
+    0) ok "Agent model ${derived} rebuilt and verified at $(agent_model_context) tokens." ;;
+    2) warn "The agent's model was created but Ollama did not load it at $(agent_model_context) tokens, so the agent would silently run at the server default instead. Check it with: lca check" ;;
+    *) warn "Could not rebuild the agent's derived model for ${base}. The agent tier will run at the server-wide context until this is fixed: sudo ${REPO_ROOT}/scripts/tune.sh" ;;
+  esac
+  # A rung change strands the previous one. Named, not deleted: it is several
+  # gigabytes of manifest over shared blobs and the choice is the user's.
+  stale="$(stale_agent_models | tr '\n' ' ')"
+  [[ -z "${stale// /}" ]] \
+    || info "Left behind by earlier rungs: ${stale}— remove with: ollama rm ${stale}"
+}
+
 # agent_workspace_dir — where the agent keeps its workspace and settings.
 agent_workspace_dir() {
   printf '%s/.openhands' "${HOME}"

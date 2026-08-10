@@ -2876,8 +2876,26 @@ fi
 # ...and it costs nothing when the model is already right: read from the
 # model's declared parameters, not by loading it, which on a CPU box is minutes
 # and would be paid on every boot.
+# The function moved to lib.sh when setup.sh became its second caller, so the
+# question is about the function, not about which file it sits in.
 check "the cheap check is what runs on every boot" \
-  grep -q 'agent_model_declared_context' "${REPO}/scripts/tune.sh"
+  grep -q 'agent_model_declared_context' "${REPO}/scripts/lib.sh"
+# ...and setup.sh must ensure it AFTER the model pull. It tunes BEFORE pulling,
+# so the tune-time attempt finds no base model on a clean machine and correctly
+# does nothing; without this second call a first install with ENABLE_AGENT=true
+# ends with no derived model at all. Fixing tune.sh did not close that — the
+# fresh-install test caught the other half.
+setup_ensures_the_model_after_the_pull() {
+  local body pull ensure
+  body="$(sed -n '/^main()/,$p' "${REPO}/setup.sh")"
+  # shellcheck disable=SC2016  # the source text is the search string, not an expansion
+  pull="$(grep -n 'pull_model "${MODEL_NAME}"' <<<"${body}" | head -1 | cut -d: -f1)"
+  ensure="$(grep -n 'refresh_agent_model_after_tune ' <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${pull}" && -n "${ensure}" ]] || return 1
+  (( ensure > pull ))
+}
+check "setup.sh builds the agent's model after the pull, not before it" \
+  setup_ensures_the_model_after_the_pull
 declared_ctx_reads_the_parameter() (
   # shellcheck disable=SC2317  # called by agent_model_declared_context
   ollama() { printf 'num_ctx                        16384\nstop  "<|im_end|>"\n'; }
