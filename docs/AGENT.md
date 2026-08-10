@@ -9,15 +9,43 @@ Docker sandbox, without stopping to confirm each step.
 That is the point of it and it is also the whole of its risk. It is **off by
 default**.
 
+## Does it work? Yes — and there is one command that proves it here
+
+For most of this project's history that question had no honest answer. The tier
+started every time while being silently incapable of executing a single tool
+call: runs finished, reported success, and left an empty workspace with no error
+anywhere to find. It now completes real tasks — the first one it ever finished
+wrote a correct `fizzbuzz.py` to disk, on a 3b model, on CPU, in about ten
+minutes.
+
+Rather than ask you to take that on trust for *your* box:
+
+```bash
+lca agent selftest
+```
+
+One small real task, end to end, with the wall clock and this machine's
+measured reading and writing speeds at the end. It checks six links in the
+order they break — relay, model, container, settings, tool-call channel, and
+whether a file actually appeared — and each failure names the remedy. Every one
+of those six produced the sentence "the agent does not work" at least once
+while this tier was being built.
+
+## Turning it on
+
 ```bash
 # in .env
 ENABLE_AGENT=true
+ENABLE_OLLAMA_RELAY=true    # required: see "How the agent reaches the model"
 ```
 
 ```bash
-sudo lca apply        # closes its port in the inbound guard
-lca agent start       # creates and starts the container
-lca agent url         # the address to open on your phone, over Tailscale
+sudo lca apply             # closes its port in the inbound guard
+sudo lca relay install     # the docker-bridge -> loopback forwarder
+sudo lca tune              # builds the agent's own wide-context model
+lca agent start            # creates and starts the container
+lca agent selftest         # proves the whole chain on this machine
+lca agent url              # the address to open on your phone, over Tailscale
 ```
 
 `lca agent start` also writes the agent's LLM settings for you. That is not a
@@ -452,3 +480,62 @@ calls (`Missing required parameters for function 'think'`, `Parameter
 'security_risk' is expected to be one of [...]`) and the model fixed both.
 
 Set it `true` only for a model that genuinely uses the native channel.
+
+---
+
+## What one task costs, and whether this tier is honest to switch on
+
+Measured, on a 4 vCPU / 16 GB box, with `lca agent selftest` — one task
+("create a file with a function that returns `ok`"), start to file-on-disk:
+
+| | |
+|---|---|
+| `qwen2.5-coder:7b-agent` @ 16384 | **11 min**, reading 50.2 tok/s, writing 6.2 tok/s |
+| `qwen2.5-coder:3b-agent` @ 16384 | ~10 min (an earlier run of the same shape) |
+
+The model size barely moves that number, and the reason is worth internalising:
+an agent step is dominated by **reading**, not writing. OpenHands' prompt is
+around 15,000 tokens before the model produces its first one. A two-line
+function and a two-hundred-line refactor cost nearly the same on the way in.
+
+### On a smaller box, multiply
+
+Those numbers are from a machine faster than the 7.8 GiB droplet this project
+targets. `docs/PERFORMANCE.md` has the conversion, taken from one configuration
+run on both machines: **3.1× for reading, 6.9× for writing.** Applying it:
+
+| | reading | writing | one task like the above |
+|---|---|---|---|
+| this box (4 vCPU / 16 GB) | 50 tok/s | 6.2 tok/s | 11 min |
+| a 7.8 GiB droplet (projected) | ~16 tok/s | ~0.9 tok/s | **35–60 min** |
+
+Do not take the second row as measured — it is a projection, and the honest way
+to replace it with a fact is to run `lca agent selftest` on that box.
+
+### So: is `ENABLE_AGENT=true` an honest default now?
+
+**No, and the reason is time, not correctness.** Every link is wired and
+checked: the relay ships, the derived model is rebuilt by `lca tune` and proved
+to load at its window, the settings are seeded and read back, the tool channel
+is set to the mode this model family actually uses, and one command runs a real
+task end to end. What is left is that on the box this project targets, "write me
+a small function" plausibly costs the better part of an hour, and a default that
+takes an hour to do something `lca` does in two minutes would be a bad default
+however correct it is.
+
+It also costs about **7 GB of images** on first start, and it can run anything
+on the machine. Both are reasons to opt in rather than be opted in.
+
+Three things would make it an honest default, in this order:
+
+1. **`lca agent selftest` passing on the target box inside 15 minutes.** That is
+   a number anyone can check, and it is the one that decides this.
+2. **A smaller first prompt.** 15k tokens before the first output token is what
+   makes every step expensive; most of it is OpenHands' own framing, not the
+   task.
+3. **Images that are not 7 GB.** A default that downloads that much on first
+   start is a default that fails on a small disk.
+
+Until then it is an opt-in tier that genuinely works, with one command to prove
+it on your own hardware — which is a much better answer than this file used to
+be able to give.

@@ -32,6 +32,8 @@ Commands:
   logs      Follow the agent's logs (Ctrl-C to stop)
   watch     Supervise a run in progress: stop it at the step ceiling, the
             wall-clock limit, or when the same failure keeps repeating
+  selftest  Run one small real task end to end, assert a file appeared, and
+            report the timing — the honest answer to "is this usable here?"
 
 Limits for an unattended run live in .env:
   AGENT_MAX_ITERATIONS=${AGENT_MAX_ITERATIONS}   AGENT_TIMEOUT_MINUTES=${AGENT_TIMEOUT_MINUTES}   AGENT_STUCK_STRIKES=${AGENT_STUCK_STRIKES}
@@ -316,8 +318,8 @@ seed_agent_settings() {
          | jq -r '.agent_settings.llm.model // ""' 2>/dev/null || true)"
   # Read back separately, because this one is the difference between a tier
   # that works and one that finishes instantly with an empty workspace.
-  got_native="$(curl -fsS --max-time 10 "${url}" 2>/dev/null \
-                | jq -r '.agent_settings.llm.native_tool_calling // "unset"' 2>/dev/null || true)"
+  got_native="$(agent_stored_native_tool_calling \
+                "$(curl -fsS --max-time 10 "${url}" 2>/dev/null || true)")"
   if [[ "${got}" == "${model}" ]]; then
     ok "Agent settings seeded: ${model} at ${base_url} (native tool calling: ${got_native:-unset})"
     if [[ "${got_native}" != "${AGENT_NATIVE_TOOL_CALLING}" ]]; then
@@ -361,6 +363,7 @@ main() {
       fi
       ;;
     restart) main stop || true; main start ;;
+    selftest) exec "${SCRIPT_DIR}/scripts/agent-selftest.sh" "$@" ;;
     status)
       require_cmd docker
       if agent_container_running; then

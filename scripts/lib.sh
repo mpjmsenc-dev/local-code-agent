@@ -2768,6 +2768,32 @@ agent_event_steps() {
   return 1
 }
 
+# agent_stored_native_tool_calling PAYLOAD — 'true' | 'false' | 'unset', out of
+# a settings response.
+#
+# A function rather than a jq expression at two call sites, and the reason is
+# the bug it was written for. Both call sites had
+#
+#   jq -r '.agent_settings.llm.native_tool_calling // "unset"'
+#
+# and jq's // treats FALSE as absent. So the one value this project actually
+# wants stored — false — read back as "unset", and 'lca agent start' warned
+# that the setting had not taken about a container that was holding it
+# correctly. Measured against a live 1.8 container: the API returned
+# native_tool_calling:false and the shipped code called it unset.
+#
+# A warning that fires on the correct configuration is worse than no warning:
+# it is the one people learn to ignore.
+agent_stored_native_tool_calling() {
+  local payload="${1:-}"
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    .agent_settings.llm
+    | if type == "object" and has("native_tool_calling") and .native_tool_calling != null
+      then (.native_tool_calling | tostring) else "unset" end' 2>/dev/null \
+    || printf 'unset'
+}
+
 # --- the agent's own model ----------------------------------------------------
 #
 # The agent needs a far bigger context than the chat app does — its first prompt

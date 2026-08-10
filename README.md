@@ -255,7 +255,7 @@ lca                 # starts aider on the local model, right here
 | `lca tune` | re-pick the model for this machine's RAM (auto-tune) |
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
-| `lca agent <cmd>` | the autonomous agent: `start`, `stop`, `restart`, `status`, `url`, `logs`, `watch` |
+| `lca agent <cmd>` | the autonomous agent: `start`, `stop`, `restart`, `status`, `url`, `logs`, `watch`, `selftest` |
 | `lca relay <cmd>` | the Ollama relay containers reach the model through: `status`, `install`, `remove` |
 
 `lca <command> --help` explains any of them — and only explains it. That is
@@ -315,6 +315,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 | `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
+| `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
 | `scripts/ollama-relay.sh` | `lca relay` — the docker-bridge→loopback relay, so containers reach Ollama without it leaving 127.0.0.1 |
 | `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 

@@ -16,7 +16,8 @@ REPO="$(cd "${TESTS_DIR}/.." && pwd)"
 LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               webui.sh agent.sh netmode.sh scripts/tune.sh scripts/apply.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
-              scripts/selftest.sh scripts/ollama-relay.sh )
+              scripts/selftest.sh scripts/ollama-relay.sh
+              scripts/agent-selftest.sh )
 
 FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
@@ -2668,7 +2669,7 @@ check "the tool-calling mode is sent as a boolean, not a string" \
 # ...and read back, because a 200 from that endpoint has already proved nothing
 # once in this project's history.
 check "the stored tool-calling mode is read back and checked" \
-  grep -q 'native_tool_calling // "unset"' "${REPO}/agent.sh"
+  grep -q 'agent_stored_native_tool_calling' "${REPO}/agent.sh"
 
 # The agent's workspace at uninstall. Nothing removed it at all, and it is the
 # one directory here holding the user's own work rather than settings.
@@ -2687,6 +2688,36 @@ uninstall_handles_the_agent_workspace() {
 }
 check "uninstall removes the agent's workspace, as root, unless --keep-data" \
   uninstall_handles_the_agent_workspace
+
+# false is a value, not an absence — and jq's // does not agree.
+#
+# Both places that read this setting back had
+#   jq -r '.agent_settings.llm.native_tool_calling // "unset"'
+# and jq's // treats FALSE as missing. So the one value this project actually
+# wants stored read back as "unset", and 'lca agent start' warned that the
+# setting had not taken about a container that was holding it correctly.
+# Measured against a live container: the API returned false and the shipped
+# code called it unset. A warning that fires on the CORRECT configuration is
+# the one people learn to ignore.
+ntc() { agent_stored_native_tool_calling "$1"; }
+check "a stored false reads back as false, not as absent" \
+  test "$(ntc '{"agent_settings":{"llm":{"native_tool_calling":false}}}')" = false
+check "...and a stored true as true" \
+  test "$(ntc '{"agent_settings":{"llm":{"native_tool_calling":true}}}')" = true
+check "a setting that really is missing reads as unset" \
+  test "$(ntc '{"agent_settings":{"llm":{"model":"x"}}}')" = unset
+check "...as does an explicit null"  \
+  test "$(ntc '{"agent_settings":{"llm":{"native_tool_calling":null}}}')" = unset
+check "...and a body that is not settings at all" \
+  test "$(ntc '{"error":"Settings not found"}')" = unset
+check "...and a body that is not JSON" test "$(ntc 'nope')" = unset
+# Neither reader may go back to the // form.
+no_reader_uses_the_false_swallowing_form() {
+  # shellcheck disable=SC2016  # the source text is the search string, not an expansion
+  ! grep -rqF 'native_tool_calling // ' "${REPO}/agent.sh" "${REPO}/scripts/agent-selftest.sh"
+}
+check "no caller reads the setting through jq's // again" \
+  no_reader_uses_the_false_swallowing_form
 
 echo "# the agent's own derived model: a bigger window for one tier, not for all"
 # OLLAMA_CONTEXT_LENGTH is server-wide and Ollama's OpenAI endpoint — the one
