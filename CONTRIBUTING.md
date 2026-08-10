@@ -9,15 +9,19 @@ passed the exact checks CI runs.
 ## The loop
 
 ```
-  agent edits  ──▶  make gates  ──▶  git push  ──▶  CI (6 jobs)  ──▶  you review the PR  ──▶  merge
+  agent edits  ──▶  make gates  ──▶  git push  ──▶  CI (7 jobs)  ──▶  you review the PR  ──▶  merge
   (aider / CC)      (local, fast)     (pre-push        (real installs      (diff + green ticks)
                                        hook reruns      on clean VMs)
                                        gates)
 ```
 
-`make gates` runs the same three checks as CI's `lint`/`test` jobs, so a green
-local run means a green PR — no round-trips waiting on the runner to tell you
-about a missing semicolon.
+`make gates` runs the same three checks as CI's `lint`/`test` jobs. That is two
+of CI's seven, and the other five need a clean machine: system artifacts, a
+fresh install through `setup.sh`, the minimal-base dependency check, a real
+Ollama install and generation, and the chat app's container. So a green local
+run is a fast way to catch a missing semicolon, **not** a promise of a green PR
+— `.githooks/pre-push` says the same thing, and a gate in the suite keeps both
+of them honest about it.
 
 ## One-time setup
 

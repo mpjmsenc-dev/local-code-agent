@@ -12994,6 +12994,18 @@ hook_does_not_promise_more_than_it_runs() {
     printf 'the hook does not say how many CI jobs there are (%s now) — a new one widens the gap silently\n' \
       "${jobs}" >&2
     return 1; }
+  # ...and CONTRIBUTING.md, which is where the promise actually survived: the
+  # hook was fixed and the diagram beside it still said a green local run means
+  # a green PR, over a job count that was one short. A gate that watches one
+  # file while the same claim lives in three is a gate with a blind spot.
+  local doc="${REPO}/CONTRIBUTING.md" docbody
+  docbody="$(cat "${doc}")"
+  grep -qE 'green local run means a green PR' <<<"${docbody}" && {
+    echo 'CONTRIBUTING.md promises a green PR from a local run — it runs two of the jobs' >&2
+    return 1; }
+  grep -qE "CI \(${jobs} jobs\)" <<<"${docbody}" || {
+    printf 'CONTRIBUTING.md does not say how many CI jobs there are (%s now)\n' "${jobs}" >&2
+    return 1; }
   # The Makefile target's own help line made the same claim.
   ran="$(grep -E '^gates:' "${REPO}/Makefile")"
   grep -qiE 'everything|all of' <<<"${ran}" && {

@@ -421,6 +421,7 @@ local-code-agent/
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md
 ├── tests/                      # unit tests (lib, tune ladder, netmode ruleset)
+│                               # + test-fresh-install.sh: a clean machine through setup.sh
 ├── .githooks/pre-push          # runs `make gates` before every push (make hooks)
 ├── .github/workflows/ci.yml    # CI: lint · unit · system · minimal-base · e2e · webui
 └── docs/  INSTALL · PHONE · DO · MIGRATE · YOUR-TURN · TROUBLESHOOTING · FAQ ·
