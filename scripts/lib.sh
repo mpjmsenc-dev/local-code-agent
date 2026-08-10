@@ -2462,8 +2462,17 @@ webui_wait_or_die() {
 
 # webui_container_env KEY — the value KEY was baked into the running container
 # with. Non-zero (and prints nothing) when the container or the key is absent.
-webui_container_env() {
-  local env_lines out fmt runner=()
+# webui_container_env_list — every environment line the running container was
+# created with, or non-zero when that cannot be read at all.
+#
+# Split out from webui_container_env because the two failures underneath it are
+# NOT the same thing, and treating them as one hid a real bug for the life of
+# this file: "docker cannot be read" is unknown, and "the container has no such
+# variable" is a container built before that setting existed. Every caller here
+# used to see an empty string for both, so every caller had to treat absent as
+# fine — which is precisely the pre-feature install these checks exist to find.
+webui_container_env_list() {
+  local env_lines fmt runner=()
   have docker || return 1
   # Bounded, because 'docker inspect' is not. The CLI waits for ever on a
   # daemon that accepts the socket connection and then answers nothing, and
@@ -2488,6 +2497,15 @@ webui_container_env() {
     || { root_for_probe && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
     || true)"
   [[ -n "${env_lines}" ]] || return 1
+  printf '%s\n' "${env_lines}"
+}
+
+# webui_container_env KEY — one value out of that list. Non-zero when the list
+# cannot be read OR when the key is not in it; callers that need to tell those
+# apart ask webui_container_env_list first.
+webui_container_env() {
+  local env_lines out
+  env_lines="$(webui_container_env_list)" || return 1
   out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
   [[ -n "${out}" ]] || return 1
   printf '%s' "${out}"
@@ -3013,23 +3031,38 @@ webui_volume_has_data() {
 # left people believing they had closed their chat app when they had not.
 webui_drift() {
   local drifted=() live want
+  # Read the whole environment ONCE, and fail closed on a container that cannot
+  # be read at all: an unanswerable question must not become a list of things
+  # to re-create. Everything below therefore knows the list WAS readable, which
+  # is what makes "this variable is not in it" mean something.
+  #
+  # It means: a container built before that setting existed. Until this line
+  # existed, an absent value was read as agreement — so a chat app created
+  # before this project had a system prompt reported no drift, 'lca apply' said
+  # it already matched .env, and the assistant ran with no instructions at all.
+  # That is the state in which it invents tool calls and claims it edited your
+  # files, which this repo has documented and had already fixed once. Measured
+  # here on a real container built without those variables: drift reported only
+  # the banner and the signup flag, and stayed silent about both the missing
+  # system prompt and the missing starter questions.
+  webui_container_env_list >/dev/null 2>&1 || return 1
   live="$(webui_container_env PORT || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
+  [[ "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
   live="$(webui_container_env DEFAULT_MODELS || true)"
-  [[ -z "${live}" || "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
+  [[ "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
   live="$(webui_container_env ENABLE_SIGNUP || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
+  [[ "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
   # Not cosmetic, and the worst of the set: this is how the chat app reaches
   # Ollama. docs/TROUBLESHOOTING.md tells people to move OLLAMA_HOST to another
   # port and re-run install_ollama.sh — which does not touch the container — so
   # following our own instructions leaves the phone talking to a port nothing
   # listens on, with the drop-in perfectly correct and no error anywhere.
   live="$(webui_container_env OLLAMA_BASE_URL || true)"
-  [[ -z "${live}" || "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
+  [[ "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
   # Cosmetic, but the same silence: renaming the app in .env appears to do
   # nothing at all.
   live="$(webui_container_env WEBUI_NAME || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  [[ "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
   # The assistant's own instructions, and the starter questions beside them.
   # Neither is an .env key — they live in lib.sh and config/ — which is exactly
   # why they were missed: the gate below scanned install_webui.sh for lines
@@ -3053,7 +3086,7 @@ webui_drift() {
       want="$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json" 2>/dev/null || true)"
     fi
     live="$(webui_container_env DEFAULT_PROMPT_SUGGESTIONS || true)"
-    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
+    [[ -z "${want}" || "${live}" == "${want}" ]] \
       || drifted+=("PROMPT_SUGGESTIONS")
     # The banner is baked in at creation like everything else here, so an
     # install that predates it keeps a container with no banner at all and
@@ -3082,8 +3115,13 @@ webui_prompt_drifted() {
   local want live
   have jq || return 1
   want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
+  [[ -n "${want}" ]] || return 1
+  # Readable-but-absent is drift, and it is the most important case here: a
+  # container created before this project had a system prompt has no
+  # DEFAULT_MODEL_PARAMS at all, and reading that as "matches" is how an
+  # assistant with NO instructions was reported as up to date.
+  webui_container_env_list >/dev/null 2>&1 || return 1
   live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
-  [[ -n "${want}" && -n "${live}" ]] || return 1
   [[ "${live}" != "${want}" ]]
 }
 

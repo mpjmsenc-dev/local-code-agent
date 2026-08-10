@@ -39,6 +39,12 @@ cp "${REPO}/.env.example" "${SANDBOX}/"
 # three surfaces share one file would pass on an empty string.
 mkdir -p "${SANDBOX}/config"
 cp "${REPO}/config/CONVENTIONS.md" "${SANDBOX}/config/"
+# ...and the starter questions, for a reason found by a mutant surviving: the
+# drift check treats "this repo has no suggestions file" as "nothing to
+# compare", so without this copy the sandbox's REPO_ROOT had no file, `want`
+# was empty, and the PROMPT_SUGGESTIONS comparison could never fire in ANY
+# test. A gate that cannot reach the code it names is worse than no gate.
+cp "${REPO}/config/prompt-suggestions.json" "${SANDBOX}/config/"
 
 # shellcheck source=../scripts/lib.sh
 source "${SANDBOX}/scripts/lib.sh"
@@ -97,6 +103,14 @@ webui_container_running() {
 }
 webui_container_env() {
   printf 'webui_container_env %s\n' "${1:-}" >> "${LCA_UNSTUBBED_LOG}"; return 1
+}
+# The read underneath it, which is now a seam of its own: webui_drift asks this
+# FIRST to tell "docker cannot be read" from "the container has no such
+# variable". Unstubbed it would answer from whatever containers the machine
+# running this suite happens to have — the exact way a commit passed here and
+# failed CI once already.
+webui_container_env_list() {
+  printf 'webui_container_env_list\n' >> "${LCA_UNSTUBBED_LOG}"; return 1
 }
 # The agent tier adds two more seams onto the same daemon, and they must be
 # stubbed here for the same reason as the two above: guarded_ports asks both,
@@ -358,7 +372,10 @@ check "no probe asks 'is sudo installed' — it would wait on the password" \
 # caller sets LCA_MAY_PROMPT, and silence means the strict answer.
 shared_probes_let_the_caller_decide() {
   local bad=0 name body
-  for name in webui_container_env docker_daemon_reachable webui_container_exists; do
+  # webui_container_env_list rather than webui_container_env: the inspect — and
+  # so the escalation — moved down there when reading the whole environment
+  # became a separate question from reading one key out of it.
+  for name in webui_container_env_list docker_daemon_reachable webui_container_exists; do
     body="$(probe_region scripts/lib.sh "${name}() {" "}")"
     grep -q 'root_for_probe' <<<"${body}" || {
       printf '%s does not delegate to root_for_probe (region empty or renamed?)\n' \
@@ -6730,6 +6747,7 @@ echo "# warm_model() is best-effort and must never fail or block its caller"
 # sits for minutes (a bounded 300s wait was measured timing out with the model
 # still unloaded, which is why this is detached rather than merely patient).
 warm_is_best_effort() {
+  # shellcheck disable=SC2030  # confining both to this subshell is the point
   ( OLLAMA_HOST="127.0.0.1:59999"; MODEL_NAME="not-a-real-model:1b"
     warm_model >/dev/null 2>&1 )
 }
@@ -8121,10 +8139,15 @@ if have jq; then
   # inside it — would read webui_drift's empty one instead of ours. The test
   # then passed the "no drift" cases and failed the one that mattered, for a
   # reason that had nothing to do with the code under test.
+  # READABLE says whether the container's environment could be read at all.
+  # That is now a separate question from whether a given variable is in it, and
+  # keeping them separate is the whole of the bug fixed here.
   drift_says() {
-    local want="$1" stub_live="$2" out
+    local want="$1" stub_live="$2" readable="${3:-yes}" out
     out="$(
+      webui_container_env_list() { [[ "${readable}" == "yes" ]] || return 1; printf 'PORT=3000\n'; }
       webui_container_env() {
+        [[ "${readable}" == "yes" ]] || return 1
         [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
         [[ -n "${stub_live}" ]] || return 1
         printf '%s' "${stub_live}"
@@ -8146,11 +8169,83 @@ if have jq; then
     drift_says none "$(lca_system_prompt | jq -Rsc '{system: .}')"
   check "a container holding a different prompt IS reported as drift" \
     drift_says SYSTEM_PROMPT "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')"
-  # An install predating the setting, or one made without jq, baked in no such
-  # value at all. "Cannot tell" is not "differs" — claiming drift there would
-  # send every one of those users to re-create a container for no reason.
-  check "a container created without the setting is not called drifted" \
-    drift_says none ""
+  # This gate used to assert the opposite, and its reasoning was sound while the
+  # code could not tell two situations apart: an empty answer meant both "the
+  # daemon would not talk to us" and "the container really has no such
+  # variable", so calling that drift would have sent people to re-create a
+  # container over a question nobody could answer.
+  #
+  # They are separable now, and separating them turns the second case into the
+  # most important check here. A container created before this project had a
+  # system prompt has no DEFAULT_MODEL_PARAMS at all — re-creating it is not
+  # "for no reason", it is the entire point, because until then the assistant
+  # runs with NO instructions and that is the state in which it invents tool
+  # calls and claims it edited your files.
+  #
+  # Measured on a real container built without those variables: drift named the
+  # banner and the signup flag and stayed silent about the missing prompt.
+  check "a container that really has no system prompt IS reported as drift" \
+    drift_says SYSTEM_PROMPT ""
+  # ...and the unanswerable question still answers nothing. Fail closed.
+  check "a container that cannot be read is not called drifted" \
+    drift_says none "" no
+
+  # The whole list, not just the prompt. Three mutants survived a suite that
+  # only ever asked about SYSTEM_PROMPT: webui_drift not failing closed, and
+  # the starter questions and the banner each going back to "absent means it
+  # agrees". Same fixture drives all of them.
+  drift_list() {   # READABLE [KEY=VALUE...] -> the drifted keys, one line
+    local readable="$1"; shift
+    local fixture; fixture="$(printf '%s\n' "$@")"
+    (
+      webui_container_env_list() {
+        [[ "${readable}" == "yes" ]] || return 1
+        printf '%s\n' "${fixture}"
+      }
+      webui_container_env() {
+        [[ "${readable}" == "yes" ]] || return 1
+        local v; v="$(sed -n "s/^$1=//p" <<<"${fixture}" | head -1)"
+        [[ -n "${v}" ]] || return 1
+        printf '%s' "${v}"
+      }
+      webui_drift || true
+    ) | tr '\n' ' '
+  }
+  # Everything the installer bakes in, at today's values.
+  # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
+  FULL_FIXTURE=(
+    "PORT=${WEBUI_PORT}"
+    "DEFAULT_MODELS=${MODEL_NAME}"
+    "ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}"
+    "OLLAMA_BASE_URL=$(ollama_url)"
+    "WEBUI_NAME=${WEBUI_NAME}"
+    "DEFAULT_MODEL_PARAMS=$(lca_system_prompt | jq -Rsc '{system: .}')"
+    "DEFAULT_PROMPT_SUGGESTIONS=$(jq -c . "${REPO}/config/prompt-suggestions.json")"
+    "WEBUI_BANNERS=$(lca_webui_banners)"
+  )
+  check "a container carrying every current setting is not drifted" \
+    test -z "$(drift_list yes "${FULL_FIXTURE[@]}" | tr -d ' ')"
+  # Fail closed. A question that could not be asked must not become a list of
+  # things to re-create.
+  check "a container that cannot be read yields no list at all" \
+    test -z "$(drift_list no "${FULL_FIXTURE[@]}" | tr -d ' ')"
+  # ...and each setting the installer bakes in, absent, is drift. An install
+  # that predates a setting is the case these checks exist for; reading its
+  # absence as agreement is what left the first real user with a chat app that
+  # had no banner and nobody told them.
+  drift_without() {   # KEY -> the drift list for a container missing only KEY
+    local drop="$1" kept=() e
+    for e in "${FULL_FIXTURE[@]}"; do [[ "${e}" == "${drop}="* ]] || kept+=("${e}"); done
+    drift_list yes "${kept[@]}"
+  }
+  check "a container with no starter questions is drifted" \
+    grep -q PROMPT_SUGGESTIONS <<<"$(drift_without DEFAULT_PROMPT_SUGGESTIONS)"
+  check "a container with no banner is drifted" \
+    grep -q WEBUI_BANNERS <<<"$(drift_without WEBUI_BANNERS)"
+  check "a container with no system prompt is drifted, in the list too" \
+    grep -q SYSTEM_PROMPT <<<"$(drift_without DEFAULT_MODEL_PARAMS)"
+  check "...and a missing model name is still caught, as it always was" \
+    grep -q MODEL_NAME <<<"$(drift_without DEFAULT_MODELS)"
 else
   echo "skip - jq not installed, cannot exercise the system prompt comparison"
 fi
@@ -9532,11 +9627,17 @@ if have jq; then
       load_env_readonly
       ENABLE_WEBUI="$3"; SKIP_DOCKER=false
       LIVE="$2"
-      if [[ "${LIVE}" == "__unreadable__" ]]; then webui_container_env() { return 1; }
-      else webui_container_env() {
+      if [[ "${LIVE}" == "__unreadable__" ]]; then
+        webui_container_env_list() { return 1; }
+        webui_container_env() { return 1; }
+      else
+        webui_container_env_list() { printf "PORT=3000\n"; }
+        webui_container_env() {
              [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
+             [[ -n "${LIVE}" ]] || return 1
              printf "%s" "${LIVE}"
-           }; fi
+           }
+      fi
       chat_stale_row' _ "${MOTD}" "$1" "${2:-true}" 2>/dev/null || true)"
     if grep -q 'OUT OF DATE' <<<"${out}"; then echo stale; else echo no; fi
   }
@@ -9550,8 +9651,12 @@ if have jq; then
   # app at all, and a banner people learn to skip is worth nothing.
   check "an unreadable container draws no warning" \
     stale_is no    '__unreadable__'
-  check "a container created without the setting draws no warning" \
-    stale_is no    ''
+  # Readable, and the variable genuinely is not there. That container serves the
+  # assistant with NO instructions, which is the exact state this row exists to
+  # catch — and until the read could tell "absent" from "could not look", it was
+  # lumped in with the line above and stayed silent.
+  check "a container that really has no prompt IS called out on the banner" \
+    stale_is stale ''
   # Switched off in .env: there is no chat app to be out of date.
   check "no warning when the chat app is disabled" \
     stale_is no    "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')" false
