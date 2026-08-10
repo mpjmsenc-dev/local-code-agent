@@ -2792,8 +2792,43 @@ check "...and neither is one whose window cannot be read" \
 # The rest of the stack has to know about it too.
 # The CALL, not merely the definition: a mutant that deleted the call and left
 # the function survived a gate that only grepped for the name.
-check "tune rebuilds it when the rung moves" \
+check "tune builds it" \
   grep -qE '^[[:space:]]+refresh_agent_model_after_tune ' "${REPO}/scripts/tune.sh"
+# ...on EVERY tune, not only inside the "something changed" branch. Placed
+# there, a first-time user who set ENABLE_AGENT=true on an already-correct box
+# ran 'sudo lca tune', was told nothing had changed, never got the model, and
+# was then sent back to 'sudo lca tune' by the selftest. A loop with no exit.
+tune_builds_it_unconditionally() {
+  local body call changed
+  body="$(sed -n '/^main()/,$p' "${REPO}/scripts/tune.sh")"
+  call="$(grep -n 'refresh_agent_model_after_tune "' <<<"${body}" | head -1 | cut -d: -f1)"
+  changed="$(grep -n 'Already at the best-available config' <<<"${body}" | head -1 | cut -d: -f1)"
+  [[ -n "${call}" && -n "${changed}" ]] || return 1
+  (( call > changed ))
+}
+check "...on every tune, not only when the rung moved" \
+  tune_builds_it_unconditionally
+# ...and it costs nothing when the model is already right: read from the
+# model's declared parameters, not by loading it, which on a CPU box is minutes
+# and would be paid on every boot.
+check "the cheap check is what runs on every boot" \
+  grep -q 'agent_model_declared_context' "${REPO}/scripts/tune.sh"
+declared_ctx_reads_the_parameter() (
+  # shellcheck disable=SC2317  # called by agent_model_declared_context
+  ollama() { printf 'num_ctx                        16384\nstop  "<|im_end|>"\n'; }
+  [[ "$(agent_model_declared_context m)" == 16384 ]]
+)
+declared_ctx_is_unknown_without_one() (
+  # shellcheck disable=SC2317  # called by agent_model_declared_context
+  ollama() { printf 'stop  "<|im_end|>"\n'; }
+  local out
+  out="$(agent_model_declared_context m)" && return 1
+  [[ -z "${out}" ]]
+)
+check "a declared window is read from the model's parameters" \
+  declared_ctx_reads_the_parameter
+check "...and a model that declares none is unknown, not zero" \
+  declared_ctx_is_unknown_without_one
 check "'lca check' names all three states of it" \
   test "$(grep -cE 'absent\)|context\)' "${REPO}/check-system.sh")" -ge 2
 # Restore must REBUILD, never pull: a derived model was never in a registry, so

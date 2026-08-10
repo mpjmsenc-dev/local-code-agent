@@ -2881,6 +2881,24 @@ stale_agent_models() {
     | grep -E -- '-agent$' | grep -vxF "${keep}" || true
 }
 
+# agent_model_declared_context MODEL — the num_ctx a model CARRIES, read from
+# its parameters without loading it.
+#
+# The cheap half of the question. agent_model_loaded_context is authoritative
+# and costs a model load — minutes on a CPU box — so it is not something to do
+# on every boot. This answers "does it already say the right thing" for free,
+# and the expensive check stays where it belongs: proving a model that was just
+# built.
+agent_model_declared_context() {
+  local model="${1:-}" out
+  [[ -n "${model}" ]] || return 1
+  have ollama || return 1
+  out="$(ollama show "${model}" --parameters 2>/dev/null || true)"
+  out="$(awk '$1 == "num_ctx" { print $2; exit }' <<<"${out}")"
+  [[ "${out}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${out}"
+}
+
 # agent_model_drift — why the derived model is not what it should be, or
 # non-zero when it is fine.
 #

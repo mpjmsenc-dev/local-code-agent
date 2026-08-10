@@ -196,17 +196,30 @@ install_service() {
   ok "Auto-tune will re-run on every boot (resize adapts automatically)."
 }
 
-# refresh_agent_model_after_tune MODEL — rebuild the agent's derived model for
-# the rung just chosen, and say what happened.
+# refresh_agent_model_after_tune MODEL — make sure the agent's derived model
+# exists for this rung and carries the right window.
 #
-# Silent when the agent tier is off: it is the only thing that uses this model,
-# and building a second copy of the weights' manifest for a feature nobody
-# switched on is noise on every boot.
+# Called on EVERY tune, not only when the rung moved, and that placement is the
+# fix for a loop with no exit. Inside the "something changed" block, a first-time
+# user who set ENABLE_AGENT=true on a correctly-tuned box ran 'sudo lca tune',
+# was told nothing had changed, and never got the model — so the selftest failed
+# at link 2 telling them to run 'sudo lca tune', which again did nothing.
+#
+# Silent when the agent tier is off: it is the only thing that uses this model.
+# Silent too when the model already declares the right window — read from its
+# parameters, which costs nothing, rather than by loading it, which on a CPU box
+# is minutes and would be paid on every boot. A rung change needs no special
+# case: the name carries its base, so a new rung means a name that does not
+# exist yet.
 refresh_agent_model_after_tune() {
-  local base="$1" derived rc stale
+  local base="$1" derived rc stale have_ctx
   [[ "${ENABLE_AGENT}" == "true" ]] || return 0
   derived="$(agent_model_name "${base}")"
-  info "Rebuilding the agent's ${derived} at context $(agent_model_context) (the rung changed)..."
+  if have_ctx="$(agent_model_declared_context "${derived}")" \
+     && [[ "${have_ctx}" == "$(agent_model_context)" ]]; then
+    return 0
+  fi
+  info "Building the agent's ${derived} at context $(agent_model_context)..."
   derived="$(ensure_agent_model "${base}")"; rc=$?
   case "${rc}" in
     0) ok "Agent model ${derived} rebuilt and verified at $(agent_model_context) tokens." ;;
@@ -441,7 +454,6 @@ main() {
     # Best effort: this runs from the on-boot oneshot, and a failure to build a
     # convenience model must not fail a tune that has already changed the model
     # the whole stack uses. It is REPORTED, and 'lca check' says so again.
-    refresh_agent_model_after_tune "${chosen_model}"
     restart_ollama
     if [[ "${old_model}" != "${chosen_model}" ]]; then
       info "Old model '${old_model}' was kept on disk as a rollback (remove with: ollama rm ${old_model})."
@@ -471,6 +483,12 @@ main() {
   else
     ok "Already at the best-available config (${chosen_model}, ctx ${TUNE_CTX}); nothing to apply."
   fi
+
+  # The agent's derived model, on every tune rather than only when the ladder
+  # moved. It exits immediately when the model already declares the right
+  # window, so the on-boot oneshot pays one 'ollama show' for it; see the
+  # function for the loop this placement fixes.
+  refresh_agent_model_after_tune "${chosen_model}"
 
   # Last, after any restart_ollama above — a restart drops whatever is loaded,
   # so warming before it would be wasted. This is what makes the first message
