@@ -130,32 +130,56 @@ jobs:
           sleep 1
           curl -fsS --max-time 5 http://127.0.0.1:3000/ >/dev/null && echo "loopback:3000 reachable through the guard (correct)"
           kill %1 2>/dev/null || true
-      - name: The guard must actually DROP a non-loopback connection
+      - name: The guard drops an untrusted path and still admits the stack's own
         # Everything above proves the guard EXISTS and does not block loopback.
         # None of it proves it drops anything: a ruleset with the wrong hook,
         # the wrong priority, or an accept ahead of the drop would still pass.
-        # Docker's bridge gives a genuine non-lo, non-tailscale0 path to the
-        # host, so a container connecting to the host's bridge IP exercises the
-        # same input hook a public client would.
+        #
+        # This used to send the probe over the DEFAULT docker bridge, on the
+        # reasoning that a container is a genuine non-lo, non-tailscale0 path.
+        # That reasoning expired: the guard now accepts iifname docker0 on
+        # purpose, because without it the guard dropped the stack's own
+        # containers — measured, 626 packets, the agent's sandbox unable to
+        # reach Ollama. So the old probe tested a path the design deliberately
+        # allows, and reported the deliberate part as "GUARD INEFFECTIVE".
+        #
+        # A USER-DEFINED network is the honest path. Its bridge is br-<id>,
+        # which is in none of the accept rules, so it reaches the drop the way
+        # a public interface would. And the exception is now pinned too: the
+        # default bridge must still get through, since a guard that drops it
+        # breaks the agent tier while looking stricter.
         run: |
           set -euo pipefail
+          sudo docker network create lca-untrusted >/dev/null
+          UNTRUSTED="$(sudo docker network inspect lca-untrusted -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}')"
           GW="$(sudo docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}')"
-          [ -n "${GW}" ] || { echo "could not determine the docker bridge gateway"; exit 1; }
-          echo "host bridge IP: ${GW}"
+          [ -n "${GW}" ] && [ -n "${UNTRUSTED}" ] \
+            || { echo "could not determine both bridge gateways"; exit 1; }
+          echo "trusted bridge: ${GW}   untrusted bridge: ${UNTRUSTED}"
           # 3000 is guarded; 3999 is not — the control proves we are testing the
           # guard rather than merely failing to reach the host at all.
           python3 -m http.server 3000 --bind 0.0.0.0 >/dev/null 2>&1 &
           python3 -m http.server 3999 --bind 0.0.0.0 >/dev/null 2>&1 &
           sleep 2
-          if sudo docker run --rm --network bridge alpine:3.20 \
-               wget -q -T 3 -O /dev/null "http://${GW}:3999/"; then
-            echo "control: unguarded port 3999 IS reachable from the bridge (correct)"
+          if sudo docker run --rm --network lca-untrusted alpine:3.20 \
+               wget -q -T 3 -O /dev/null "http://${UNTRUSTED}:3999/"; then
+            echo "control: unguarded port 3999 IS reachable from the untrusted bridge (correct)"
           else
-            echo "control failed: the host is unreachable from the bridge, so this test proves nothing"; exit 1
+            echo "control failed: the host is unreachable from that network, so this test proves nothing"; exit 1
           fi
+          # The exception, asserted rather than assumed: the stack's own
+          # containers reach the guarded ports over the default bridge.
           if sudo docker run --rm --network bridge alpine:3.20 \
                wget -q -T 3 -O /dev/null "http://${GW}:3000/"; then
-            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from a non-loopback path"
+            echo "the stack's own bridge still reaches a guarded port (correct — this is what the docker0 accept is for)"
+          else
+            echo "GUARD TOO STRICT: the default docker bridge is being dropped, which is what broke the agent tier before"
+            sudo nft list ruleset || true
+            exit 1
+          fi
+          if sudo docker run --rm --network lca-untrusted alpine:3.20 \
+               wget -q -T 3 -O /dev/null "http://${UNTRUSTED}:3000/"; then
+            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from an untrusted bridge"
             # ...and what the kernel actually had loaded when it happened. This
             # step reported the verdict and nothing else, which is enough to
             # know the guard is wrong and not enough to know how: a missing
@@ -168,9 +192,10 @@ jobs:
             ss -ltn || true
             exit 1
           else
-            echo "guarded port 3000 is DROPPED from the bridge (correct)"
+            echo "guarded port 3000 is DROPPED from an untrusted bridge (correct)"
           fi
           kill %1 %2 2>/dev/null || true
+          sudo docker network rm lca-untrusted >/dev/null 2>&1 || true
       - name: Install boot services and verify the units
         shell: bash
         run: |
