@@ -2492,6 +2492,82 @@ check "...as is a whole other URL"            id_is_unknown '[{"id":"http://else
 check "...as is an id carrying a space"       id_is_unknown '[{"id":"a b"}]'
 check "...as is one carrying a query string"  id_is_unknown '[{"id":"c1?limit=1"}]'
 
+# Which conversation the watcher attaches to, when there is more than one.
+#
+# Not a hypothetical. On a real droplet an earlier 'selftest --keep' left a
+# second sandbox alive; the watcher took the first conversation the listing
+# returned, which was the stale one, and counted its frozen event total for as
+# long as it was left running — with nothing anywhere saying why. "First" is
+# whatever order the server felt like.
+#
+# The newest RUNNING SANDBOX decides instead: it is the container actually doing
+# work, docker orders containers by creation time, and the listing ties each
+# conversation to its sandbox_id. That makes the choice deterministic and about
+# the run the user just started.
+TWO_RUNS='{"items":[{"id":"stale111","sandbox_id":"oh-agent-server-OLD"},
+                    {"id":"fresh222","sandbox_id":"oh-agent-server-NEW"}]}'
+check "the conversation of the newest sandbox is the one picked" \
+  test "$(agent_conversation_pick "${TWO_RUNS}" oh-agent-server-NEW)" = fresh222
+check "...and naming the older sandbox picks the older run" \
+  test "$(agent_conversation_pick "${TWO_RUNS}" oh-agent-server-OLD)" = stale111
+# Nothing rather than a guess: the caller falls back to the first entry only
+# when this cannot answer, and telling those apart is what lets 'watch' say
+# which of the two it did.
+pick_is_unknown() {
+  local out
+  out="$(agent_conversation_pick "$1" "$2" 2>/dev/null)" && return 1
+  [[ -z "${out}" ]]
+}
+check "a sandbox no conversation claims yields nothing" \
+  pick_is_unknown "${TWO_RUNS}" oh-agent-server-GONE
+check "...and so does a listing with no sandbox ids at all" \
+  pick_is_unknown '{"items":[{"id":"only1"}]}' oh-agent-server-NEW
+# The id still has to be URL-safe: it is interpolated into a request.
+check "...and an id that is not an id is refused here too" \
+  pick_is_unknown '{"items":[{"id":"../../etc/passwd","sandbox_id":"oh-agent-server-NEW"}]}' oh-agent-server-NEW
+
+check "two conversations are counted as two" \
+  test "$(agent_conversation_count "${TWO_RUNS}")" = 2
+check "...and one as one" \
+  test "$(agent_conversation_count '{"items":[{"id":"a"}]}')" = 1
+check "...and none as none" \
+  test "$(agent_conversation_count '{"items":[]}')" = 0
+# The warning exists so the ambiguity is stated up front rather than deduced
+# from a count that never moves.
+check "'watch' says when more than one run is alive" \
+  grep -q 'agent_conversation_warning' "${REPO}/scripts/agent-watch.sh"
+# ...and the REF must actually use it. Grepping lib.sh for the chooser's name
+# passed while the ref had gone back to first-wins — the definition satisfies
+# the grep. So this drives the ref with the listing and the sandboxes stubbed,
+# and asks which conversation came back.
+ref_prefers_the_newest_sandbox() (
+  # shellcheck disable=SC2317  # called by agent_conversation_ref, not from here
+  agent_api_base() { printf 'http://127.0.0.1:1'; }
+  # docker ps orders newest first, so this is the newest.
+  # shellcheck disable=SC2317  # ...and this one
+  agent_live_sandboxes() { printf 'oh-agent-server-NEW\noh-agent-server-OLD\n'; }
+  # The listing deliberately returns the STALE run first, which is the shape
+  # that broke a real droplet run.
+  # shellcheck disable=SC2317  # ...and this one
+  curl() { printf '%s' '{"items":[{"id":"stale111","sandbox_id":"oh-agent-server-OLD"},{"id":"fresh222","sandbox_id":"oh-agent-server-NEW"}]}'; }
+  [[ "$(agent_conversation_ref)" == fresh222 ]]
+)
+check "the ref returns the newest sandbox's run, not the listing's first" \
+  ref_prefers_the_newest_sandbox
+# ...and still answers when nothing ties a conversation to a sandbox, because a
+# build that reports no sandbox_id must not leave the watcher with nothing.
+ref_falls_back_when_nothing_matches() (
+  # shellcheck disable=SC2317  # called by agent_conversation_ref, not from here
+  agent_api_base() { printf 'http://127.0.0.1:1'; }
+  # shellcheck disable=SC2317  # ...and this one
+  agent_live_sandboxes() { printf 'oh-agent-server-NEW\n'; }
+  # shellcheck disable=SC2317  # ...and this one
+  curl() { printf '%s' '{"items":[{"id":"only1"}]}'; }
+  [[ "$(agent_conversation_ref)" == only1 ]]
+)
+check "...and falls back to the first entry when no sandbox claims one" \
+  ref_falls_back_when_nothing_matches
+
 # The fetch side, driven against a stubbed curl so the suite stays offline.
 #
 # Two spellings of the events path are in circulation and the search route

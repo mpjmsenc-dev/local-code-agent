@@ -657,10 +657,26 @@ they outlived it holding its stdout open — so `lca agent watch | tee run.log`
 never returned on a run that had already reached its verdict. Measured before
 the fix: indefinite. After: 60s.
 
-**One thing that harness does not prove.** Its event endpoint is a fixture, not
-OpenHands. The watcher's own code — discovery, polling, the verdict, the stop —
-is real on a real socket, but nobody has watched the ceiling fire on counts that
-OpenHands itself produced. That needs an agent, and this is the whole of it:
+**One thing that harness does not prove**, and it is now closed. Its event
+endpoint is a fixture, so the watcher's discovery, polling, verdict and stop are
+real code on a real socket, but the counts are not OpenHands'. Run on the
+droplet against a real agent:
+
+```
+==> Supervising the agent
+[info] Step ceiling: 3   wall clock: 180 min   stuck after: 3 identical failures
+[info] Steps come from the agent's event API (conversation f786c0e9...; 5 event(s)
+       already recorded, and the ceiling counts what happens from here).
+[warn] Stopping the agent: the step ceiling (AGENT_MAX_ITERATIONS) was reached
+[info] Steps seen: 4 (events on the agent API) · failures seen: 0 · run time: 2 min
+[ ok ] Agent stopped. Its workspace is intact in ~/.openhands
+EXIT: 1
+```
+
+Four real OpenHands events in two minutes, ceiling of three, stopped. Every
+limit in this tier has now fired against the thing it is meant to stop.
+
+To repeat it on your own box:
 
 ```bash
 sed -i 's/^AGENT_MAX_ITERATIONS=.*/AGENT_MAX_ITERATIONS=3/' .env \
@@ -669,11 +685,34 @@ sed -i 's/^AGENT_MAX_ITERATIONS=.*/AGENT_MAX_ITERATIONS=3/' .env \
   && sleep 90 && lca agent watch
 ```
 
-Start a task, wait for the sandbox to exist, then supervise with a ceiling of 3
-— a real conversation passes that inside a couple of minutes. Expect
-`Stopping the agent: the step ceiling (AGENT_MAX_ITERATIONS) was reached` and
-`Steps seen: 3 (events on the agent API)`. Put `AGENT_MAX_ITERATIONS` back
-afterwards.
+Put `AGENT_MAX_ITERATIONS` back afterwards.
+
+### If it sits at a number that never moves, this is why
+
+The first attempt at that run did not fire, and the reason is worth knowing
+because nothing announced it. An earlier `selftest --keep` had left a **second
+sandbox alive**. The watcher attached to the *stale* conversation while the new
+task stepped on a different one, so the count sat at 5 for as long as it was
+left running — no error, no warning, just a number that never moved.
+
+Two things changed because of that run:
+
+- **The conversation is now chosen deterministically**, by the **newest running
+  sandbox** rather than by whatever the listing happened to return first.
+  `docker ps` orders by creation time and each conversation carries its
+  `sandbox_id`, so the watcher attaches to the run you just started.
+- **`watch` says when there was a choice to get wrong**, up front:
+
+  ```
+  [warn] More than one run is alive here — this machine has 2 running sandbox(es)
+         and 2 conversation(s). This is watching the one belonging to the NEWEST
+         sandbox (f786c0e9...). If that is not the run you meant, stop the others
+         first: lca agent stop, then remove any leftover oh-agent-server-*
+         containers.
+  ```
+
+It reports rather than resolves: two sandboxes may both be legitimate, and a
+supervisor is not the thing that should decide which of your runs to kill.
 
 **A known limit, not yet closed:** when the container outlives the watcher, one
 `docker logs -f` process is still left behind. It no longer holds the pipe, so

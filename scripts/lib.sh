@@ -2734,17 +2734,98 @@ agent_api_base() {
 # {"detail":[{"type":"missing","loc":["query","ids"]}]} — it wants the ids you
 # are trying to discover. The other two stay as fallbacks for a build that
 # spells it differently, and cost one refused request each.
+# agent_conversation_pick PAYLOAD SANDBOX — the conversation belonging to a
+# named sandbox, or nothing.
+#
+# "Or nothing" matters: the caller falls back to the first entry only when this
+# cannot answer, and knowing which of the two happened is what lets the watcher
+# say so.
+agent_conversation_pick() {
+  local payload="${1:-}" sandbox="${2:-}" id
+  [[ -n "${payload}" && -n "${sandbox}" ]] || return 1
+  have jq || return 1
+  id="$(printf '%s' "${payload}" | jq -r --arg sb "${sandbox}" '
+        [ ( if type == "array" then .[]
+            elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+            else empty end )
+          | objects | select(.sandbox_id == $sb) | .id | strings ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s' "${id}"
+}
+
+# agent_conversation_count PAYLOAD — how many conversations the app is holding.
+#
+# Only interesting when it is more than one, which is the state that made a real
+# run fail silently: an earlier 'selftest --keep' left a sandbox behind, the
+# watcher attached to that older conversation, and the new task stepped on a
+# different one. It sat at "5 events" for ever and nothing anywhere said why.
+agent_conversation_count() {
+  local payload="${1:-}"
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    [ ( if type == "array" then .[]
+        elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+        else empty end ) | objects ] | length' 2>/dev/null || return 1
+}
+
+# agent_live_sandboxes — the running sandbox containers, NEWEST FIRST.
+#
+# docker ps already orders by creation time, newest first, which is the one
+# piece of ordering here that is documented and reliable — the conversation
+# listing carries no timestamp this project could sort on.
+agent_live_sandboxes() {
+  have docker || return 1
+  as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
+}
+
+# agent_conversation_ref — the conversation this run should be counting.
+#
+# Not simply the first one the listing returns, and that distinction cost a real
+# droplet run: with two conversations alive the watcher attached to the stale
+# one, counted its frozen event total for ever, and gave no sign that anything
+# was wrong. "First" is whatever order the server felt like.
+#
+# So the NEWEST RUNNING SANDBOX decides. It is the container actually doing
+# work, docker orders containers by creation time, and the listing ties each
+# conversation to its sandbox_id — which makes the choice deterministic and
+# about the thing the user just started. The first entry is still the fallback
+# for a build that reports no sandbox_id, and 'watch' says which of the two it
+# used.
 agent_conversation_ref() {
-  local base path payload id
+  local base path payload id sandbox
   have curl || return 1
   base="$(agent_api_base)"
-  for path in "/api/v1/app-conversations/search?limit=1" \
+  sandbox="$(agent_live_sandboxes 2>/dev/null | head -1 || true)"
+  for path in "/api/v1/app-conversations/search?limit=20" \
               /api/v1/app-conversations /api/v1/conversations; do
     payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
+    [[ -n "${payload}" ]] || continue
+    if [[ -n "${sandbox}" ]]; then
+      id="$(agent_conversation_pick "${payload}" "${sandbox}" 2>/dev/null || true)"
+      [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
+    fi
     id="$(agent_conversation_id "${payload}" 2>/dev/null || true)"
     [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
   done
   return 1
+}
+
+# agent_conversation_warning — what is ambiguous about this machine right now,
+# or nothing when it is not.
+#
+# Reported rather than resolved. Two sandboxes may both be legitimate, and a
+# supervisor is not the thing that should decide which of a user's runs to kill.
+agent_conversation_warning() {
+  local sandboxes count payload
+  sandboxes="$(agent_live_sandboxes 2>/dev/null | grep -c . || true)"
+  payload="$(curl -fsS --max-time 5 "$(agent_api_base)/api/v1/app-conversations/search?limit=20" 2>/dev/null || true)"
+  count="$(agent_conversation_count "${payload}" 2>/dev/null || true)"
+  [[ "${sandboxes}" =~ ^[0-9]+$ ]] || sandboxes=0
+  [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+  (( sandboxes > 1 || count > 1 )) || return 1
+  printf 'this machine has %s running sandbox(es) and %s conversation(s)' \
+    "${sandboxes}" "${count}"
 }
 
 # agent_event_steps ID — how many events that conversation has, or rc 1.

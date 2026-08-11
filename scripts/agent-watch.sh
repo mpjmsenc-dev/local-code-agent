@@ -239,7 +239,7 @@ main() {
 
   local started iters=0 strikes=0 last_sig="" line sig verdict elapsed now
   local matched_steps=0 matched_fails=0
-  local step_source="log" conv_id="" events_base=0 events_now="" ticks=0
+  local step_source="log" conv_id="" events_base=0 events_now="" ticks=0 ambiguity
   started="$(date +%s)"
 
   # Which stream the ceiling counts, asked now and said out loud.
@@ -257,6 +257,15 @@ main() {
       step_source="events"
       events_base="${events_now}"
       info "Steps come from the agent's event API (conversation ${conv_id}; ${events_now} event(s) already recorded, and the ceiling counts what happens from here)."
+      # Said BEFORE the run rather than deduced from it afterwards. On a real
+      # droplet an earlier 'selftest --keep' left a second sandbox alive, the
+      # watcher attached to that older conversation, and the count never moved
+      # — for as long as it was left running, with nothing anywhere saying why.
+      # The conversation is now chosen by the newest running sandbox, which is
+      # deterministic; this says when there was a choice to get wrong at all.
+      if ambiguity="$(agent_conversation_warning 2>/dev/null)"; then
+        warn "More than one run is alive here — ${ambiguity}. This is watching the one belonging to the NEWEST sandbox (${conv_id}). If that is not the run you meant, stop the others first: lca agent stop, then remove any leftover oh-agent-server-* containers."
+      fi
     elif [[ "${AGENT_STEP_SOURCE}" == "events" ]]; then
       warn "The agent's event API has not answered yet, so the step ceiling is not armed. It arms as soon as a conversation exists; the wall clock and the stuck detector are already on."
     else
