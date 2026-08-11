@@ -3702,6 +3702,69 @@ instructions_reach_the_chat_app() {
     echo "the chat app's prompt has the heading but not the file's content" >&2
     return 1; }
 }
+# The wording in config/CONVENTIONS.md that other gates match on.
+#
+# Two of these were broken while trimming that file to fit the prompt budget.
+# Both were caught, but only because someone was watching the run — the next
+# editor gets a note in the file itself instead, and this is the list it points
+# at. If you must reword one, change it here in the same commit.
+CONVENTIONS_KEYED_PHRASES=(
+  'smallest change that satisfies the request'
+  'kills the script'
+  'swallows the exit status'
+  'SIGPIPEs the writer'
+  'NEXT line only'
+  'passes on the definition'
+)
+conventions_keep_their_keyed_phrases() {
+  local f="${REPO}/config/CONVENTIONS.md" phrase missing=()
+  for phrase in "${CONVENTIONS_KEYED_PHRASES[@]}"; do
+    grep -qF -- "${phrase}" "${f}" || missing+=("${phrase}")
+  done
+  (( ${#missing[@]} == 0 )) || {
+    printf 'config/CONVENTIONS.md lost wording other gates match on:\n' >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    return 1; }
+}
+check "the instructions file keeps the wording other gates match on" \
+  conventions_keep_their_keyed_phrases
+
+# ...and the note in that file must name the same phrases this list does.
+#
+# Otherwise the two drift and the note becomes advice that is quietly wrong —
+# which is worse than no note, because an editor trusts it.
+conventions_note_lists_the_same_phrases() {
+  local f="${REPO}/config/CONVENTIONS.md" note phrase missing=()
+  note="$(awk '/<!--/ { inside = 1 } inside { print } /-->/ { inside = 0 }' "${f}")"
+  [[ -n "${note}" ]] || { echo 'config/CONVENTIONS.md has no editor note at all' >&2; return 1; }
+  for phrase in "${CONVENTIONS_KEYED_PHRASES[@]}"; do
+    grep -qF -- "${phrase}" <<<"${note}" || missing+=("${phrase}")
+  done
+  (( ${#missing[@]} == 0 )) || {
+    printf "the editor note does not warn about wording this suite depends on:\n" >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    return 1; }
+}
+check "...and its editor note names every one of them" \
+  conventions_note_lists_the_same_phrases
+
+# The note is for the editor, never for the model: it is inside an HTML comment
+# and lca_user_instructions strips those. Every byte of this file is re-sent on
+# every message, so a note that leaked would be the user paying for advice
+# addressed to somebody else — and the file has three tokens of headroom.
+note_never_reaches_the_model() {
+  local prompt
+  prompt="$(lca_system_prompt)"
+  if grep -q 'FOR WHOEVER EDITS' <<<"${prompt}"; then
+    echo 'the editor note is being sent to the model on every message' >&2
+    return 1
+  fi
+  # Non-vacuous: the note has to exist for this to be worth anything.
+  grep -q 'FOR WHOEVER EDITS' "${REPO}/config/CONVENTIONS.md"
+}
+check "the editor note is stripped before the model ever sees it" \
+  note_never_reaches_the_model
+
 check "the user's instructions reach the chat app's system prompt" \
   instructions_reach_the_chat_app
 # ...and the built-in part survives. Everything above the append says what that

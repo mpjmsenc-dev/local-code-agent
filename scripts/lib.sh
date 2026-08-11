@@ -2204,7 +2204,20 @@ lca_user_instructions() {
   [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || return 0
   local f="${REPO_ROOT:-}/config/CONVENTIONS.md"
   [[ -r "${f}" ]] || return 0
-  cat "${f}"
+  # HTML comments are stripped, and that is a feature rather than tidiness.
+  #
+  # Every byte of this file is re-sent on every message, so there was nowhere to
+  # put a note FOR THE EDITOR without charging the user's context for it — and
+  # this file badly needs one: several of its phrases are what the test suite
+  # matches on, and two were broken while trimming it to fit the prompt budget.
+  # Both were caught, but the next person will not know they were load-bearing.
+  #
+  # <!-- ... --> now means "for whoever edits this file, not for the model".
+  #
+  # awk rather than perl: perl is not in this project's declared dependency list
+  # and awk is, so a note in the instructions file must not be the thing that
+  # makes the prompt depend on a package nobody installed.
+  awk '/<!--/ { skip = 1 } skip == 0 { print } /-->/ { skip = 0 }' "${f}"
 }
 
 lca_system_prompt() {

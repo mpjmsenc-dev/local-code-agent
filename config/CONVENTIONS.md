@@ -1,3 +1,28 @@
+<!--
+FOR WHOEVER EDITS THIS FILE — this block never reaches the model, so it costs
+you nothing to read and nothing to keep.
+
+Some wording here is LOAD-BEARING: the test suite matches on it, and two of the
+phrases below were broken while trimming this file to fit the prompt budget.
+Both were caught by a failing gate, but only because someone was watching.
+
+Reword these and a gate fails, naming the phrase:
+
+  smallest change that satisfies the request
+  kills the script
+  swallows the exit status
+  SIGPIPEs the writer
+  NEXT line only
+  passes on the definition
+
+That list lives in tests/test-lib.sh, next to the gate that reads it. If you
+genuinely need to reword one, change it there in the same commit.
+
+The file is also budgeted: 'lca check' warns when the whole prompt passes 15%
+of OLLAMA_CONTEXT_LENGTH, and a gate fails if the SHIPPED default would trip
+that warning. There is very little headroom. Trim prose, never a case.
+-->
+
 # Coding conventions
 
 How this stack should behave. Read by **aider** (`lca`), the **chat app** and
