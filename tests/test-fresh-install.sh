@@ -84,8 +84,28 @@ fi
 # same file set a clone would — no .venv, no .env, no build droppings — taken
 # from the working copy.
 mkdir -p /opt/local-code-agent || exit 1
-git -C /src ls-files -z 2>/dev/null | tar -C /src --null -T - -cf - 2>/dev/null \
-  | tar -C /opt/local-code-agent -xf - || { echo "GUEST-FATAL could not copy the checkout"; exit 1; }
+# /src is a bind mount of the host's checkout, and it is not necessarily owned
+# by the user this container runs as. Git refuses to read a repository owned by
+# somebody else — "detected dubious ownership", exit 128 — so this step passed
+# on a machine where the checkout and the container are both root and failed on
+# CI, where the checkout belongs to 'runner' and the container is root. The
+# mount is read-only and all we do with it is list it.
+git config --global --add safe.directory /src >/dev/null 2>&1
+if ! git -C /src ls-files -z 2>/tmp/lsfiles.err \
+     | tar -C /src --null -T - -cf - 2>/tmp/tar.err \
+     | tar -C /opt/local-code-agent -xf - 2>/tmp/untar.err; then
+  # Named, not just reported. The old message said "could not copy the
+  # checkout" and nothing else, and it cost an hour of looking in the wrong
+  # place: git had printed exactly what was wrong and the harness threw it away.
+  echo "GUEST-FATAL could not copy the checkout:"
+  cat /tmp/lsfiles.err /tmp/tar.err /tmp/untar.err 2>/dev/null | head -5
+  exit 1
+fi
+# An empty copy is not a copy. 'tar -T -' on an empty list writes a valid empty
+# archive and both halves of that pipeline succeed, so without this the next
+# failure would be setup.sh "not found" three steps later.
+[ -f /opt/local-code-agent/setup.sh ] || {
+  echo "GUEST-FATAL the copy produced no setup.sh, so nothing was transferred"; exit 1; }
 cd /opt/local-code-agent || exit 1
 [ -f setup.sh ] || { echo "GUEST-FATAL no setup.sh in the copy"; exit 1; }
 cp .env.example .env

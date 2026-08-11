@@ -2956,8 +2956,35 @@ esac
 exit 0
 STUB
   chmod +x "${stub}/ollama"
-  PATH="$(stub_path "${stub}")" bash "${dir}/scripts/tune.sh" "$@" >/dev/null 2>&1 || true
+  local rc=0
+  PATH="$(stub_path "${stub}")" bash "${dir}/scripts/tune.sh" "$@" >"${dir}/out" 2>&1 || rc=$?
+  printf '%s' "${rc}" > "${dir}/rc"
   if grep -q '^create' "${calls}"; then printf 'built'; else printf 'not built'; fi
+}
+# ...and when the answer is the wrong one, say what happened.
+#
+# These four were 'test "$(tune_builds_on_path ...)" = built', which is a fine
+# assertion and a useless failure: the run's output went to /dev/null and its
+# exit status was discarded. Two of them then failed on CI and passed on three
+# separate machines here, and the report said only "FAIL". The exit status is
+# not incidental to this gate either — tune_exit_refresh returns early unless
+# the run exited 0, so the status IS the diagnosis.
+built_on_path() {
+  local got; got="$(tune_builds_on_path "$@")"
+  if [[ "${got}" != "built" ]]; then
+    printf 'tune.sh exited %s and never called "ollama create". Its output:\n%s\n' \
+      "$(cat "${SANDBOX}/tune-run/rc" 2>/dev/null || printf '?')" \
+      "$(cat "${SANDBOX}/tune-run/out" 2>/dev/null || printf '(none captured)')" >&2
+    return 1
+  fi
+}
+builds_nothing_on_path() {
+  local got; got="$(tune_builds_on_path "$@")"
+  if [[ "${got}" != "not built" ]]; then
+    printf 'tune.sh built the agent model on a path where it must not. Its output:\n%s\n' \
+      "$(cat "${SANDBOX}/tune-run/out" 2>/dev/null || printf '(none captured)')" >&2
+    return 1
+  fi
 }
 # The ladder's own pick for THIS machine, so the "already tuned" path is
 # reached deterministically wherever this suite runs — including CI, whose RAM
@@ -2981,26 +3008,26 @@ OLLAMA_CONTEXT_LENGTH=${TUNE_GATE_CTX}
 "
   # The exact path the droplet was on: .env already matches the ladder.
   check "an already-tuned box still gets the agent's model built" \
-    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+    built_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
 ENABLE_AGENT=true
-")" = built
+"
   # ...and the other early exit, which leaves even sooner.
   check "...and so does a box with a manual pin (AUTO_TUNE=false)" \
-    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=false
+    built_on_path "${TUNE_GATE_ENV}AUTO_TUNE=false
 ENABLE_AGENT=true
-")" = built
+"
   # Nothing is built for a tier nobody switched on: this runs from the on-boot
   # oneshot, on every boot, on every machine.
   check "...and nothing is built when the agent is off" \
-    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+    builds_nothing_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
 ENABLE_AGENT=false
-")" = "not built"
+"
   # A dry run says what a real run would do and changes nothing, and that has
   # to keep being true of the newest thing a real run does.
   check "...and a dry run still builds nothing" \
-    test "$(tune_builds_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
+    builds_nothing_on_path "${TUNE_GATE_ENV}AUTO_TUNE=true
 ENABLE_AGENT=true
-" --dry-run)" = "not built"
+" --dry-run
 else
   echo "skip - could not read the ladder from tune.sh, so the tune paths were not driven"
 fi

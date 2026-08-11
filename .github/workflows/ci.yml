@@ -155,7 +155,18 @@ jobs:
           fi
           if sudo docker run --rm --network bridge alpine:3.20 \
                wget -q -T 3 -O /dev/null "http://${GW}:3000/"; then
-            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from a non-loopback path"; exit 1
+            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from a non-loopback path"
+            # ...and what the kernel actually had loaded when it happened. This
+            # step reported the verdict and nothing else, which is enough to
+            # know the guard is wrong and not enough to know how: a missing
+            # rule, the wrong hook, the wrong priority and an accept ahead of
+            # the drop all look identical from here. The ruleset is the evidence
+            # and it costs one command.
+            echo "--- nft ruleset as loaded ---"
+            sudo nft list ruleset || echo "(nft list ruleset failed)"
+            echo "--- what is listening ---"
+            ss -ltn || true
+            exit 1
           else
             echo "guarded port 3000 is DROPPED from the bridge (correct)"
           fi
