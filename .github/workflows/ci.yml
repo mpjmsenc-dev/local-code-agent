@@ -172,6 +172,38 @@ jobs:
             /etc/systemd/system/local-code-agent-backup.timer
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: The relay's units, as systemd reads them
+        # Rendered and checked rather than installed, which is the same shape as
+        # the nft ruleset check above: the artefact is the thing under test and
+        # applying it needs a machine state CI should not depend on.
+        #
+        # ANY OUTPUT FAILS, not just a non-zero exit, and that is the point.
+        # Measured on these units: 'ListenStream=not-an-address' exits 1, but a
+        # typo in a directive NAME — 'FreeBnid=true' — exits 0 with only
+        # "Unknown key name ... ignoring". FreeBind is what lets this socket bind
+        # before docker has created the bridge, so an exit-status check would
+        # wave through the loss of the one line that makes the relay survive a
+        # reboot.
+        #
+        # NOTE: the four units checked in the step above are still judged on
+        # exit status alone and carry that same blind spot. Fixing that needs a
+        # run that can be watched, because it may surface warnings those units
+        # have always had.
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d)"
+          src="$(sed -n '/^render_socket_unit()/,/^}/p;/^render_service_unit()/,/^}/p' scripts/ollama-relay.sh)"
+          ( REPO_ROOT="$PWD"; eval "$src"
+            render_socket_unit "172.17.0.1:11435" > "$d/local-code-agent-ollama-relay.socket"
+            render_service_unit "127.0.0.1:11434" /usr/lib/systemd/systemd-socket-proxyd \
+              > "$d/local-code-agent-ollama-relay.service" )
+          out="$(systemd-analyze verify "$d/local-code-agent-ollama-relay.socket" \
+                                        "$d/local-code-agent-ollama-relay.service" 2>&1)"
+          if [ -n "$out" ]; then
+            echo "FAIL: systemd had something to say about the relay units:"; echo "$out"; exit 1
+          fi
+          echo "systemd parsed both relay units without a word."
       - name: A boot unit pointing at a moved checkout must be reported
         # 'systemctl is-enabled' is an answer about a symlink. It keeps saying
         # "enabled" after the checkout the unit runs from is moved, renamed or

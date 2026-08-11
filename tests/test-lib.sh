@@ -3079,6 +3079,43 @@ check "the units are wired to each other, not started independently" \
 check "no rendered unit binds a wildcard address" \
   test -z "$(grep -E '0\.0\.0\.0|\[::\]' <<<"${UNITS}")"
 
+# ...and systemd itself has to accept them, which nothing checked until now.
+#
+# CI runs 'systemd-analyze verify' on four units and the relay's two were not
+# among them, so these had never been parsed by systemd anywhere — a bad
+# directive would first appear at somebody's next reboot, as a relay that simply
+# is not there and an agent that "cannot reach Ollama".
+#
+# ANY OUTPUT IS FAILURE, not just a non-zero exit, and that distinction is the
+# whole value of this gate. Measured on these very units:
+#
+#   FreeBnid=true                    -> rc 0, "Unknown key name ... ignoring"
+#   ListenStream=not-an-address:x    -> rc 1
+#
+# A typo in a directive NAME exits zero. FreeBind is the line that lets the
+# socket bind before docker has made the bridge, so a gate that watched only the
+# exit status would have waved through the loss of the one setting that makes
+# this survive a reboot.
+relay_units_parse_as_systemd_units() {
+  local dir="${SANDBOX}/relay-units" out src
+  have systemd-analyze || { echo "skip"; return 0; }
+  rm -rf "${dir}"; mkdir -p "${dir}"
+  src="$(sed -n '/^render_socket_unit()/,/^}/p;/^render_service_unit()/,/^}/p' \
+           "${REPO}/scripts/ollama-relay.sh")"
+  [[ -n "${src}" ]] || return 1
+  (
+    REPO_ROOT="${REPO}"; eval "${src}"
+    render_socket_unit "172.17.0.1:11435" > "${dir}/local-code-agent-ollama-relay.socket"
+    render_service_unit "127.0.0.1:11434" /usr/lib/systemd/systemd-socket-proxyd \
+      > "${dir}/local-code-agent-ollama-relay.service"
+  )
+  out="$(systemd-analyze verify "${dir}/local-code-agent-ollama-relay.socket" \
+                                "${dir}/local-code-agent-ollama-relay.service" 2>&1)"
+  [[ -z "${out}" ]] || { printf 'systemd had something to say about the relay units:\n%s\n' "${out}" >&2; return 1; }
+}
+check "systemd parses the relay's units without a word of complaint" \
+  relay_units_parse_as_systemd_units
+
 # ...and the stack has to be able to take it away again. A socket unit left
 # enabled keeps the bind after an uninstall claims the machine is clean.
 relay_is_uninstalled() {
