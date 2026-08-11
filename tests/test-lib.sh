@@ -13447,6 +13447,30 @@ no_ollama_lookup_matches_a_shell() {
 }
 check "...and finds it by process name, so it cannot match the calling shell" \
   no_ollama_lookup_matches_a_shell
+# ...and no message may send the USER into the same trap.
+#
+# The ban above is about what this project runs. This one is about what it TELLS
+# people to run, which is the same hole pointed outward: backup.sh used to say
+# "check with 'ps aux | grep backup.sh'" when a lock was held too long, and that
+# grep matches its own command line every single time. Somebody following it
+# sees a process whether or not one exists, and diagnoses a wedged backup from a
+# command that cannot say otherwise.
+#
+# Comments are stripped first, this file's own explanation included.
+no_message_sends_the_user_into_a_self_match() {
+  local f body hits=""
+  while IFS= read -r f; do
+    body="$(sed 's/#.*//' "${f}")"
+    if grep -qE 'ps [a-z-]+ *\| *grep' <<<"${body}"; then
+      hits+="${f}"$'\n'
+    fi
+  done < <(find "${REPO}" -type f -name '*.sh' -not -path '*/.git/*')
+  [[ -z "${hits}" ]] || {
+    printf 'a message tells the user to run ps|grep, which always matches its own grep:\n%s' "${hits}" >&2
+    return 1; }
+}
+check "...and no message sends the reader into that trap either" \
+  no_message_sends_the_user_into_a_self_match
 # The longest wait in the product is a model load, and both commands that can
 # hit it must say so. 'lca ask' announced it; 'lca' — the one people sit in
 # front of, and the one this project is named for — did not, so the first edit

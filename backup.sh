@@ -54,8 +54,18 @@ acquire_backup_lock() {
   }
   flock -n "${BACKUP_LOCK_FD}" && return 0
   info "Another backup is already running — waiting up to ${wait_s}s for it to finish."
+  # The advice here used to be "check with 'ps aux | grep backup.sh'", and that
+  # is the self-match this project has been bitten by five times: the grep's own
+  # command line contains the pattern, so it ALWAYS prints a match. Somebody
+  # following it sees a hit whether or not a backup is running, and concludes a
+  # wedged process from a command that cannot say otherwise.
+  #
+  # What can answer honestly: the lock file has a holder, and fuser names it.
+  # flock releases the lock even on kill -9, so a lock still held after this
+  # wait really is a live process rather than a stale file — which is the one
+  # thing the reader most needs to know before they go hunting.
   flock -w "${wait_s}" "${BACKUP_LOCK_FD}" \
-    || die "Another backup has held the lock for over ${wait_s}s. It may be stuck: check with 'ps aux | grep backup.sh', then retry."
+    || die "Another backup has held the lock for over ${wait_s}s, and flock releases even on kill -9 — so that really is a running process, not a stale lock file. Find it with: sudo fuser -v ${BACKUP_DIR}/.backup.lock   (or read the scheduled run: journalctl -u local-code-agent-backup.service -n 50)"
 }
 
 do_backup() {
