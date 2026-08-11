@@ -161,15 +161,25 @@ jobs:
           fi
           kill %1 %2 2>/dev/null || true
       - name: Install boot services and verify the units
+        shell: bash
         run: |
+          set -euo pipefail
           sudo scripts/tune.sh --install-service
           sudo ./netmode.sh --install-service
           sudo ./backup.sh --install-timer
-          systemd-analyze verify \
+          # Any output fails, not just a non-zero exit: a typo in a directive
+          # NAME ('FreeBnid=true') exits 0 with only "Unknown key name ...
+          # ignoring", so an exit-status check waves through the silent loss of
+          # a setting. Verified clean on all four before this rule was applied,
+          # by rendering them the way tests/test-lib.sh does.
+          out="$(systemd-analyze verify \
             /etc/systemd/system/local-code-agent-tune.service \
             /etc/systemd/system/local-code-agent-netmode.service \
             /etc/systemd/system/local-code-agent-backup.service \
-            /etc/systemd/system/local-code-agent-backup.timer
+            /etc/systemd/system/local-code-agent-backup.timer 2>&1)"
+          if [ -n "$out" ]; then
+            echo "FAIL: systemd had something to say about the boot units:"; echo "$out"; exit 1
+          fi
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
       - name: The relay's units, as systemd reads them
@@ -184,11 +194,6 @@ jobs:
         # before docker has created the bridge, so an exit-status check would
         # wave through the loss of the one line that makes the relay survive a
         # reboot.
-        #
-        # NOTE: the four units checked in the step above are still judged on
-        # exit status alone and carry that same blind spot. Fixing that needs a
-        # run that can be watched, because it may surface warnings those units
-        # have always had.
         shell: bash
         run: |
           set -euo pipefail

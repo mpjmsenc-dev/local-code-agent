@@ -3116,6 +3116,72 @@ relay_units_parse_as_systemd_units() {
 check "systemd parses the relay's units without a word of complaint" \
   relay_units_parse_as_systemd_units
 
+# ...and the same question for the four units that predate the relay.
+#
+# CI verifies those AFTER installing them, which is a real check and a late one:
+# it needs a machine that can install units, so nothing catches a bad directive
+# before the push. They are rendered here instead — each install function
+# extracted and run with write_root_file redirected — and judged by the same
+# any-output rule, because that is the rule that catches a misspelled directive
+# name.
+#
+# Verified clean at the time of writing, all four, silent. The paths matter:
+# rendered against a SCRIPT_DIR that does not exist, systemd reports "Command
+# ... is not executable" — which is a statement about the fixture, not the unit,
+# so the real checkout is what they are rendered against.
+render_unit_from() {   # SCRIPT FUNC SCRIPT_DIR VAR:PATH...
+  local script="$1" fn="$2" sdir="$3"; shift 3
+  local body kv
+  body="$(sed -n "/^${fn}() {/,/^}/p" "${REPO}/${script}")"
+  [[ -n "${body}" ]] || { printf 'could not extract %s() from %s\n' "${fn}" "${script}" >&2; return 1; }
+  (
+    set +e
+    SCRIPT_DIR="${sdir}"; REPO_ROOT="${REPO}"
+    # shellcheck disable=SC2030  # set for the extracted function to read, inside this subshell only
+    BACKUP_SCHEDULE='*-*-* 03:30:00'
+    # shellcheck disable=SC2317  # the extracted function calls these
+    systemd_available() { return 0; }
+    # shellcheck disable=SC2317  # ...and these
+    as_root() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    info() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    warn() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    ok() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    step() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    die() { :; }
+    # shellcheck disable=SC2317  # ...and these
+    valid_oncalendar() { return 0; }
+    # shellcheck disable=SC2317  # ...and this, which is what captures the unit
+    write_root_file() { cat > "$1"; }
+    for kv in "$@"; do eval "${kv%%:*}='${kv#*:}'"; done
+    eval "${body}"
+    "${fn}" >/dev/null 2>&1
+  )
+}
+boot_units_parse_as_systemd_units() {
+  local dir="${SANDBOX}/boot-units" out
+  have systemd-analyze || { echo "skip"; return 0; }
+  rm -rf "${dir}"; mkdir -p "${dir}"
+  render_unit_from scripts/tune.sh install_service "${REPO}/scripts" \
+    "TUNE_SERVICE:${dir}/local-code-agent-tune.service" || return 1
+  render_unit_from netmode.sh install_service "${REPO}" \
+    "NETMODE_SERVICE:${dir}/local-code-agent-netmode.service" || return 1
+  render_unit_from backup.sh install_timer "${REPO}" \
+    "BACKUP_SERVICE:${dir}/local-code-agent-backup.service" \
+    "BACKUP_TIMER:${dir}/local-code-agent-backup.timer" || return 1
+  # Extraction that silently produced nothing would make this gate vacuous.
+  local n; n="$(find "${dir}" -type f | wc -l)"
+  (( n == 4 )) || { printf 'rendered %s boot units, expected 4\n' "${n}" >&2; return 1; }
+  out="$(systemd-analyze verify "${dir}"/* 2>&1)"
+  [[ -z "${out}" ]] || { printf 'systemd had something to say about the boot units:\n%s\n' "${out}" >&2; return 1; }
+}
+check "...and the four boot units that predate it, by the same rule" \
+  boot_units_parse_as_systemd_units
+
 # ...and the stack has to be able to take it away again. A socket unit left
 # enabled keeps the bind after an uninstall claims the machine is clean.
 relay_is_uninstalled() {
