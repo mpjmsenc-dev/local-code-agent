@@ -2969,13 +2969,50 @@ ENABLE_AGENT=true
 else
   echo "skip - could not read the ladder from tune.sh, so the tune paths were not driven"
 fi
-# ...and it costs nothing when the model is already right: read from the
-# model's declared parameters, not by loading it, which on a CPU box is minutes
-# and would be paid on every boot.
-# The function moved to lib.sh when setup.sh became its second caller, so the
-# question is about the function, not about which file it sits in.
-check "the cheap check is what runs on every boot" \
-  grep -q 'agent_model_declared_context' "${REPO}/scripts/lib.sh"
+# ...and it costs nothing when the model is already right: read from the model's
+# DECLARED parameters, not by loading it, which on a CPU box is minutes and
+# would be paid on every boot.
+#
+# Driven, not grepped. This gate used to be
+#   grep -q 'agent_model_declared_context' "${REPO}/scripts/lib.sh"
+# and lib.sh is where that function is DEFINED, so it passed on its own
+# definition and would have kept passing after every caller was deleted.
+refresh_is_free_when_the_model_is_already_right() (
+  ENABLE_AGENT=true
+  # shellcheck disable=SC2317  # called by refresh_agent_model_after_tune
+  agent_model_declared_context() { agent_model_context; }
+  # shellcheck disable=SC2317  # ...and this, which is the expensive path
+  ensure_agent_model() { printf 'BUILT' >&2; printf 'x'; }
+  # shellcheck disable=SC2317  # ...and these, so nothing reaches a real daemon
+  stale_agent_models() { return 1; }
+  # shellcheck disable=SC2317  # ...and this
+  info() { :; }
+  # shellcheck disable=SC2317  # ...and this
+  ok() { :; }
+  # shellcheck disable=SC2317  # ...and this
+  warn() { :; }
+  [[ -z "$(refresh_agent_model_after_tune qwen2.5-coder:3b 2>&1 >/dev/null)" ]]
+)
+refresh_builds_when_the_window_is_wrong() (
+  ENABLE_AGENT=true
+  # shellcheck disable=SC2317  # called by refresh_agent_model_after_tune
+  agent_model_declared_context() { printf 4096; }
+  # shellcheck disable=SC2317  # ...and this
+  ensure_agent_model() { printf 'BUILT' >&2; printf 'x'; }
+  # shellcheck disable=SC2317  # ...and these
+  stale_agent_models() { return 1; }
+  # shellcheck disable=SC2317  # ...and this
+  info() { :; }
+  # shellcheck disable=SC2317  # ...and this
+  ok() { :; }
+  # shellcheck disable=SC2317  # ...and this
+  warn() { :; }
+  [[ "$(refresh_agent_model_after_tune qwen2.5-coder:3b 2>&1 >/dev/null)" == *BUILT* ]]
+)
+check "a model already declaring the right window is not rebuilt on every boot" \
+  refresh_is_free_when_the_model_is_already_right
+check "...and one declaring the wrong window is" \
+  refresh_builds_when_the_window_is_wrong
 # ...and setup.sh must ensure it AFTER the model pull. It tunes BEFORE pulling,
 # so the tune-time attempt finds no base model on a clean machine and correctly
 # does nothing; without this second call a first install with ENABLE_AGENT=true
@@ -13162,6 +13199,52 @@ no_gate_is_satisfied_by_a_comment() {
 }
 check "no gate is satisfied by the comment explaining what it forbids" \
   no_gate_is_satisfied_by_a_comment
+
+# ...and no gate may be satisfied by the DEFINITION of the name it greps for.
+#
+# Three gates in one session were written as
+#
+#   grep -q 'some_function' "${REPO}/<the file that defines some_function>"
+#
+# and each passed on its own definition: delete every caller and the gate stays
+# green, because the name is still spelled there. Two of them shipped, and were
+# only found by a mutant that removed the call and survived.
+#
+# A name-grep against a file that merely CALLS the function is a different thing
+# and is fine — sixteen of those live here, and each really does prove a call
+# site exists. The trap is only ever "grep the file where it is defined", so
+# that is exactly what this refuses.
+no_gate_passes_on_its_own_definition() {
+  local line name file bad=0 seen=0
+  while IFS= read -r line; do
+    [[ "${line}" =~ grep\ -q[F]?\ \'([a-z_][a-z_0-9]*)\'\ \"\$\{REPO\}/([^\"]+)\" ]] || continue
+    name="${BASH_REMATCH[1]}"; file="${BASH_REMATCH[2]}"
+    # A path built from a variable is a loop over target scripts; those are the
+    # call-site greps and cannot be judged statically.
+    [[ "${file}" == *'$'* ]] && continue
+    [[ -f "${REPO}/${file}" ]] || continue
+    seen=$((seen+1))
+    if grep -qE "^${name}\(\)[[:space:]]*\{" "${REPO}/${file}"; then
+      printf "a gate greps for '%s' in %s, which DEFINES it: that passes on the definition and would survive deleting every caller\n" \
+        "${name}" "${file}" >&2
+      bad=1
+    fi
+  done < <(sed 's/#.*//' "${TESTS_DIR}/test-lib.sh")
+  # Comments stripped first, and that is not tidiness: the paragraph above
+  # quotes the exact bad line as its example, so an unfiltered read finds this
+  # gate's own explanation and fails for ever. The pgrep -f gate in this file
+  # learned the same lesson, and there is a third gate here whose entire job is
+  # catching gates satisfied by their own commentary.
+  #
+  # Non-vacuous: if the pattern stops matching, this has silently stopped
+  # watching and must say so rather than pass.
+  (( seen >= 8 )) || {
+    printf 'the name-grep sweep matched only %s gates — its pattern has stopped finding them\n' "${seen}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "no gate is satisfied by the definition of the name it greps for" \
+  no_gate_passes_on_its_own_definition
 # ...and neither may the pre-push hook. It said it runs "the exact gates CI
 # runs, so a push never opens a red PR", and that is false twice over, both
 # measured on this project:
