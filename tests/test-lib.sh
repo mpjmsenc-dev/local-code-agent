@@ -19,6 +19,41 @@ LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               scripts/selftest.sh scripts/ollama-relay.sh
               scripts/agent-selftest.sh )
 
+# Every document that INSTRUCTS a reader. The prose gates further down apply to
+# this set, and it is named here because they used to spell it out one function
+# at a time — "README.md plus docs/*.md" — which quietly exempted every document
+# at the REPO ROOT from all of them.
+#
+# RESUME.md is what that cost: a handoff a reader opens before anything else,
+# checked by no gate, telling them for three sessions that a shipped safety
+# limit (AGENT_MAX_ITERATIONS) was decoration.
+#
+# Two root files are deliberately NOT here, and the reason is the point rather
+# than an oversight:
+#
+#   CONTRIBUTING.md teaches these very rules by QUOTING the bad examples, so the
+#     gates that hunt for those strings fire on the lines whose whole purpose is
+#     to say the quoted thing is wrong. Measured, with it included: three
+#     failures, all false.
+#   CLAUDE.md instructs the model, not a reader; nothing in it sends a human to
+#     a command.
+#
+# root_docs_are_swept_or_exempt (below) fails if a NEW root document appears in
+# neither list, so the next one is a decision rather than an accident.
+DOC_SURFACES=( "${REPO}/README.md" "${REPO}/RESUME.md" "${REPO}"/docs/*.md )
+DOC_SURFACES_EXEMPT=( CONTRIBUTING.md CLAUDE.md )
+# Checked HERE, before any gate can use it, because an empty list does not make
+# those gates fail — it makes them HANG. 'grep -rn PAT "${DOC_SURFACES[@]}"'
+# with no files left reads stdin and waits for ever. Measured: emptying this
+# list wedged the suite for ten minutes rather than reporting anything, so the
+# non-vacuity check inside the gate below could never run. A suite that hangs is
+# the least useful failure there is.
+(( ${#DOC_SURFACES[@]} >= 3 )) || {
+  printf 'DOC_SURFACES has %s entries, so the prose gates would read stdin and hang\n' \
+    "${#DOC_SURFACES[@]}" >&2
+  exit 1
+}
+
 FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
@@ -6690,7 +6725,7 @@ docs_read_backups_safely() {
     printf 'a doc globs multiple backup archives into one tar invocation:\n  %s\n' \
       "${hit}" >&2
     return 1
-  done < <(grep -rn 'tar .*backup-\*\.tar\.gz' "${REPO}/docs" "${REPO}/README.md" \
+  done < <(grep -rn 'tar .*backup-\*\.tar\.gz' "${DOC_SURFACES[@]}" \
              2>/dev/null | grep -v 'ls -t' || true)
 }
 check "no doc feeds a multi-archive glob to tar" docs_read_backups_safely
@@ -6713,7 +6748,7 @@ docs_copy_one_backup_not_all() {
   # where the migration flow has put exactly the one file they downloaded, and
   # flagging it would be a false positive on correct instructions.
   done < <(grep -rnE 'scp [^ ]*:[^ ]*backup-\*\.tar\.gz' \
-             "${REPO}/docs" "${REPO}/README.md" 2>/dev/null || true)
+             "${DOC_SURFACES[@]}" 2>/dev/null || true)
 }
 check "no doc copies every backup when it means the newest" \
   docs_copy_one_backup_not_all
@@ -7068,7 +7103,7 @@ docs_show_the_prompt_recipe() {
         "${line}" "${want}" >&2
       recipe_mismatch=1
     fi
-  done < <(grep -rhE "${HANDOVER_LINE}" "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null \
+  done < <(grep -rhE "${HANDOVER_LINE}" "${DOC_SURFACES[@]}" 2>/dev/null \
              | sed 's/^[[:space:]]*//' || true)
   return "${recipe_mismatch}"
 }
@@ -8939,7 +8974,7 @@ check "every drift message points at 'lca apply'" drift_messages_name_apply
 # that a restart is not enough.
 no_restart_as_apply_instruction() {
   local f hits bad=0
-  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/README.md "${REPO}"/docs/*.md; do
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${DOC_SURFACES[@]}"; do
     hits="$(sed 's/^[[:space:]]*#.*//' "${f}" \
       | grep -nE '(webui\.sh|lca webui|docker) restart' \
       | grep -vF 'lca apply' || true)"
@@ -9234,7 +9269,7 @@ pairs_env_with_installer() {
 }
 no_installer_as_apply_instruction() {
   local f hits
-  for f in "${REPO}/README.md" "${REPO}"/docs/*.md; do
+  for f in "${DOC_SURFACES[@]}"; do
     hits="$(pairs_env_with_installer "${f}" || true)"
     [[ -z "${hits}" ]] || {
       printf '%s tells the reader to run an installer instead of lca apply:\n%s\n' \
@@ -11998,8 +12033,8 @@ check "and an install where everything worked reports success" \
 advice_names_only_documented_commands() {
   local hits
   hits="$(grep -n -- '--install-service' \
-            "${REPO}/check-system.sh" "${REPO}/bin/lca" "${REPO}/README.md" \
-            "${REPO}"/scripts/install_*.sh "${REPO}"/docs/*.md 2>/dev/null || true)"
+            "${REPO}/check-system.sh" "${REPO}/bin/lca" \
+            "${REPO}"/scripts/install_*.sh "${DOC_SURFACES[@]}" 2>/dev/null || true)"
   [[ -z "${hits}" ]] || {
     printf 'these send a user to the internal --install-service flag:\n%s\n' "${hits}" >&2
     return 1
@@ -12027,7 +12062,7 @@ script_help_text() {  # header comment block + usage() body + any quoted line
        inu || /"/       { print }' "$1"
 }
 every_advised_flag_is_real() {
-  local surfaces=( "${REPO}/README.md" "${REPO}"/docs/*.md "${REPO}/check-system.sh"
+  local surfaces=( "${DOC_SURFACES[@]}" "${REPO}/check-system.sh"
                    "${REPO}/bin/lca" "${REPO}/webui.sh" "${REPO}"/scripts/install_*.sh )
   local script flag path cand text unlisted=()
   while read -r script flag; do
@@ -12547,7 +12582,7 @@ doc_blocks_establish_their_directory() {
     }
     inb && /(^|[[:space:]])\.\/[a-z_-]+\.sh/ { usesrel = 1 }
     inb && /^[[:space:]]*cd /                { hascd = 1 }
-  ' "${REPO}/README.md" "${REPO}"/docs/*.md)"
+  ' "${DOC_SURFACES[@]}")"
   [[ -z "${hits}" ]] || {
     printf 'a reader following these would be in the wrong directory:\n%s\n' "${hits}" >&2
     return 1
@@ -12559,7 +12594,7 @@ doc_blocks_establish_their_directory() {
   # ("`scripts/install_webui.sh` now refuses to start on a taken port") stays
   # legal; it is a statement about the code, not an instruction.
   hits="$(grep -rniE "(run|re-run|check|try|with|usage)['\":\` ]+ ?[a-z][a-z_-]*\.sh" \
-            "${REPO}/README.md" "${REPO}"/docs/*.md 2>/dev/null || true)"
+            "${DOC_SURFACES[@]}" 2>/dev/null || true)"
   [[ -z "${hits}" ]] || {
     printf 'these docs tell the reader to run a name that is not on PATH:\n%s\n' "${hits}" >&2
     return 1
@@ -13308,6 +13343,39 @@ no_gate_passes_on_its_own_definition() {
 }
 check "no gate is satisfied by the definition of the name it greps for" \
   no_gate_passes_on_its_own_definition
+# A document at the repo root is the first one a reader opens and was the one
+# set no prose gate here could see: every sweep spelled out "README.md plus
+# docs/*.md", so RESUME.md — a handoff telling people what to do next — went
+# three sessions saying a shipped safety limit was decoration, with a green
+# suite the whole time.
+#
+# So the surfaces are a named list now, and this is what keeps it honest: a new
+# root document must be swept or exempted, and either way somebody decided.
+# Exemption is not a hole as long as it is a choice with a reason next to it.
+root_docs_are_swept_or_exempt() {
+  local f base skip missing=()
+  for f in "${REPO}"/*.md; do
+    [[ -f "${f}" ]] || continue
+    base="${f##*/}"
+    skip=false
+    for e in "${DOC_SURFACES_EXEMPT[@]}"; do
+      [[ "${base}" == "${e}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    printf '%s\n' "${DOC_SURFACES[@]}" | grep -qxF "${f}" || missing+=("${base}")
+  done
+  (( ${#missing[@]} == 0 )) || {
+    printf 'these root documents are read by no prose gate and are not exempt either: %s\n' \
+      "${missing[*]}" >&2
+    printf 'add them to DOC_SURFACES, or to DOC_SURFACES_EXEMPT with the reason\n' >&2
+    return 1
+  }
+  # Non-vacuous: a list that had drifted to nothing would pass the loop above
+  # while checking no document at all.
+  (( ${#DOC_SURFACES[@]} >= 3 ))
+}
+check "a document at the repo root is swept by the prose gates, or exempt on purpose" \
+  root_docs_are_swept_or_exempt
 # ...and neither may the pre-push hook. It said it runs "the exact gates CI
 # runs, so a push never opens a red PR", and that is false twice over, both
 # measured on this project:
