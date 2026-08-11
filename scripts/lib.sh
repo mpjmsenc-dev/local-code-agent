@@ -37,8 +37,15 @@ LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 ENV_EXAMPLE="${REPO_ROOT}/.env.example"
-OLLAMA_DROPIN_DIR="/etc/systemd/system/ollama.service.d"
-OLLAMA_DROPIN="${OLLAMA_DROPIN_DIR}/local-code-agent.conf"
+# Overridable ONLY so a test can keep tune.sh out of the real /etc. The default
+# is the systemd location and nothing in the product ever sets these; a test
+# that did not have this was writing the machine's actual Ollama drop-in from a
+# unit suite when run as root, and failing with EACCES when not — which is how
+# two gates came to pass on every developer box and fail on every CI run.
+# Nothing reads them from .env: sync_env_keys works from .env.example, and these
+# are not in it.
+OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+OLLAMA_DROPIN="${OLLAMA_DROPIN:-${OLLAMA_DROPIN_DIR}/local-code-agent.conf}"
 NETMODE_DIR="/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
 # Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs

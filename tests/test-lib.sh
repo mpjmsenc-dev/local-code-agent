@@ -2956,8 +2956,45 @@ esac
 exit 0
 STUB
   chmod +x "${stub}/ollama"
+  # ...and systemd, which this path reaches on any machine where systemd is
+  # actually running. Unstubbed, tune.sh restarts the HOST's ollama service
+  # from a unit test.
+  cat > "${stub}/systemctl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "${stub}/systemctl"
+  # ...and the drop-in this .env would render, present and matching, because
+  # that is what "an already-tuned box" MEANS. Without it tune.sh is right and
+  # the harness is wrong: it finds config drift on a box whose drop-in does not
+  # exist, re-renders, restarts, and then waits for an Ollama that a stub cannot
+  # serve — so the run dies on a half-real world of the test's own making rather
+  # than on the path it meant to describe.
+  # Rendered aside and then moved into place: writing it under the same name the
+  # renderer's own OLLAMA_DROPIN points at is a file read and written in one
+  # pipeline, which ShellCheck is right to refuse.
+  mkdir -p "${dir}/etc/ollama.service.d"
+  ( cd "${dir}" && OLLAMA_DROPIN_DIR="${dir}/etc/ollama.service.d" \
+      bash -c 'source scripts/lib.sh; load_env; render_ollama_dropin_content' \
+    ) > "${dir}/dropin.rendered" 2>/dev/null
+  mv "${dir}/dropin.rendered" "${dir}/etc/ollama.service.d/local-code-agent.conf"
   local rc=0
-  PATH="$(stub_path "${stub}")" bash "${dir}/scripts/tune.sh" "$@" >"${dir}/out" 2>&1 || rc=$?
+  # OLLAMA_DROPIN_DIR into the sandbox, and this is not a detail.
+  #
+  # On a box where systemd is running and the drop-in is absent, tune.sh finds
+  # config drift and re-renders it — into /etc/systemd/system. As root that
+  # means a unit test writing the machine's real Ollama configuration; as any
+  # other user it means EACCES, tune.sh exits 1, and the EXIT trap that builds
+  # the agent model never fires because it only fires on a clean exit.
+  #
+  # That is the whole of why these two gates passed on three environments here
+  # and failed on every CI run: none of the three had /run/systemd/system, so
+  # none of them took the branch. Reproduced by creating that directory and
+  # running as a non-root user — identical output, same exit 1.
+  PATH="$(stub_path "${stub}")" \
+    OLLAMA_DROPIN_DIR="${dir}/etc/ollama.service.d" \
+    OLLAMA_DROPIN="${dir}/etc/ollama.service.d/local-code-agent.conf" \
+    bash "${dir}/scripts/tune.sh" "$@" >"${dir}/out" 2>&1 || rc=$?
   printf '%s' "${rc}" > "${dir}/rc"
   if grep -q '^create' "${calls}"; then printf 'built'; else printf 'not built'; fi
 }
