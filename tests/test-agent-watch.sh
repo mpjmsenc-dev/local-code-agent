@@ -75,6 +75,19 @@ start_box() {
 
 box_running() { [[ "$(docker container inspect -f '{{.State.Running}}' "${BOX}" 2>/dev/null)" == "true" ]]; }
 
+# followers_alive — how many 'docker logs -f' processes for our box are still
+# running. The watcher backgrounds one per container it follows, and the
+# question this answers is whether it took them with it.
+#
+# Filtered on the comm field out of ps, never 'ps | grep' or 'pkill -f': those
+# match the calling shell's own command line, which in this project has twice
+# meant a test killing itself. comm is the executable name, so this shell —
+# whose args merely mention docker — cannot match.
+followers_alive() {
+  ps -eo pid=,comm=,args= 2>/dev/null \
+    | awk -v box="${BOX}" '$2 == "docker" && /logs/ && index($0, box) { n++ } END { print n+0 }'
+}
+
 # The watcher reads .env through load_env, which overwrites exported values, so
 # the settings under test are written to a real .env in a throwaway copy of the
 # repo rather than exported and silently lost. That overwrite is a documented
@@ -154,6 +167,31 @@ if grep -q 'dry-run' <<<"${OUT}"; then
   t_ok "...and says so rather than going quiet"
 else
   t_fail "--dry-run stopped nothing and also said nothing: ${OUT}"
+fi
+
+# ------------------------------------------------- the followers came with it
+# This case, and only this case, is the condition the leak needed: the watcher
+# returns while the CONTAINER IS STILL UP, so nothing ever closes a follower's
+# input and it has no reason to die on its own.
+#
+# Measured against the version before the process-group fix, in this exact
+# harness: one 'docker logs -f' survived, reparented to init, invisible to every
+# pid the watcher had recorded. So this number is not a formality — it was 1.
+sleep 1
+LEFTOVERS="$(followers_alive)"
+if (( LEFTOVERS == 0 )); then
+  t_ok "...and left no 'docker logs -f' behind, on the run where the container outlives it"
+else
+  t_fail "${LEFTOVERS} 'docker logs -f' process(es) survived the watcher — the follower leak is back"
+fi
+# WHICH path took them down. The watcher falls back to a pid-by-pid sweep if the
+# followers did not get their own process group, and that sweep is exactly what
+# used to leak; a green count above with this warning present would mean the
+# real fix is dead and the count is luck.
+if grep -q 'did not get a process group of their own' <<<"${OUT}"; then
+  t_fail "the watcher fell back to the pid-by-pid sweep, so the process group never formed: ${OUT}"
+else
+  t_ok "...via the process group, not the fallback sweep that used to leak"
 fi
 
 # ------------------------------------------------------- returns when piped

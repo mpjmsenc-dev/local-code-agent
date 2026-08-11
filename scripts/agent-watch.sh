@@ -93,8 +93,19 @@ AGENT_FAIL_PATTERN="${AGENT_FAIL_PATTERN:-(\"levelname\": \"ERROR\"|Traceback|Co
 # exactly what shipped before, warning included.
 AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
 
-# Where the log followers record themselves, so they can be taken down again.
+# Where the log followers record themselves, so they can be taken down again,
+# and the pipe they write into.
+#
+# A FIFO rather than the '< <(agent_follow_logs)' this used to read from: a
+# process substitution offers no way to ask for a new process group, and a
+# group is what finally closes the follower leak (see stop_followers).
 AGENT_FOLLOWERS="$(mktemp)"
+AGENT_FOLLOWER_FIFO="${AGENT_FOLLOWERS}.fifo"
+# The follower loop's pid, which is also its process-group id because the loop
+# is started under 'set -m'. Empty until then, and empty means "nothing was
+# ever spawned, so there is nothing to stop" — which is the whole of the work
+# on the paths that exit before the loop.
+AGENT_FOLLOWER_PGID=""
 
 # step_source_label SOURCE — what the number next to "Steps seen" actually
 # counted. Named rather than left bare, because the two sources do not count
@@ -161,11 +172,44 @@ agent_follow_logs() {
 
 # stop_followers — take the log followers down with us.
 #
-# Both the recorded pid and its children: 'as_root' is a function, so
+# One signal to their process group, because that is the only handle that still
+# points at the follower this file kept losing. Measured, on a run where the
+# container outlives the watcher ('watch --dry-run'): the pid-by-pid sweep below
+# left exactly one 'docker logs -f' alive every time. The reason is a race it
+# cannot win — killing the parent first reparents its child to init, so the
+# child vanishes from every pid we hold — and the fix is that a reparented
+# process KEEPS its process group. Reproduced outside docker to be sure of both
+# halves before relying on either.
+#
+# The guard is not decoration. If 'set -m' ever failed to split the group, this
+# pgid would be the WATCHER's own, and the group kill would take the watcher
+# down mid-report: a far worse bug than the leak it is closing. When that is
+# what we see, say so and fall back to the sweep that at least cannot do that.
+stop_followers() {
+  local mine
+  if [[ -n "${AGENT_FOLLOWER_PGID}" ]]; then
+    mine="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+    if [[ -n "${mine}" && "${AGENT_FOLLOWER_PGID}" == "${mine}" ]]; then
+      warn "The log followers did not get a process group of their own, so they are being stopped one pid at a time and a stray 'docker logs -f' may survive this run. Nothing you did causes this; it means 'set -m' behaved differently than it does on bash 5.2."
+      stop_followers_by_pid
+    else
+      kill -- -"${AGENT_FOLLOWER_PGID}" 2>/dev/null
+      sleep 0.3
+      kill -9 -- -"${AGENT_FOLLOWER_PGID}" 2>/dev/null
+    fi
+  fi
+  rm -f "${AGENT_FOLLOWERS}" "${AGENT_FOLLOWER_FIFO}"
+  return 0
+}
+
+# stop_followers_by_pid — the degraded path, kept only for a bash that does not
+# put a backgrounded job in its own process group.
+#
+# It works on the pids the loop recorded: 'as_root' is a function, so
 # backgrounding it makes a subshell, and killing that subshell alone would leave
 # the 'docker logs -f' underneath it orphaned. pkill -P, by parent pid — never
 # -f, which in this project has matched the calling shell four separate times.
-stop_followers() {
+stop_followers_by_pid() {
   local pid loop
   [[ -r "${AGENT_FOLLOWERS}" ]] || return 0
   # The SPAWNER first, and dead before anything else is touched.
@@ -193,18 +237,13 @@ stop_followers() {
     pkill -P "${pid}" 2>/dev/null
     kill "${pid}" 2>/dev/null
   done < "${AGENT_FOLLOWERS}"
-  rm -f "${AGENT_FOLLOWERS}"
   # ...and a final sweep by what the survivors ARE, because the passes above are
   # about pids we recorded and one keeps getting away: a follower whose parent
   # died first is reparented to init, and nothing in our list points at it.
   #
-  # HONEST LIMIT: this reduces the leak, it does not close it. Measured on a run
-  # where the container outlives the watcher — 'watch --dry-run' — exactly one
-  # 'docker logs -f' is still alive afterwards. What it DOES fix is the part that
-  # hurt: the script now returns instead of holding its own stdout open for ever,
-  # so piping it works. Closing the last one needs the followers in their own
-  # process group, which is a bigger change than this file should make on the way
-  # past.
+  # HONEST LIMIT of this function: the sweep reduces the leak, it does not close
+  # it, and it can reach a 'docker logs -f' this run never started. That is why
+  # it is the fallback now rather than the plan.
   #
   # Matched on the container name in the command line, from ps, rather than with
   # 'pkill -f' — that flag matches the calling shell's own arguments and has
@@ -289,6 +328,25 @@ main() {
   #
   # rc > 128 is the timeout (nothing to read yet, keep going and re-judge);
   # anything else non-zero is end of stream, which means the container is gone.
+  #
+  # The followers are started HERE, into a FIFO, in a process group of their
+  # own. 'set -m' is the whole of that: a backgrounded job in a script normally
+  # stays in the watcher's own group, which would make the group kill in
+  # stop_followers suicide. Measured on this bash, both halves —
+  #
+  #   without set -m   loop, subshells, docker AND the watcher: one pgid
+  #   with set -m      the loop leads its own group, children inherit it, and
+  #                    'kill -- -PGID' takes all of them and leaves us alive
+  #
+  # The two opens rendezvous, so the writer must be backgrounded before the
+  # loop's redirection opens the read end — which is the order below.
+  mkfifo "${AGENT_FOLLOWER_FIFO}" \
+    || die "Could not create a pipe for the log followers at ${AGENT_FOLLOWER_FIFO}. Is TMPDIR writable?"
+  set -m
+  agent_follow_logs > "${AGENT_FOLLOWER_FIFO}" &
+  AGENT_FOLLOWER_PGID=$!
+  set +m
+
   local rc
   while true; do
     line=""
@@ -366,7 +424,7 @@ main() {
       fi
     fi
     return 0
-  done < <(agent_follow_logs)
+  done < "${AGENT_FOLLOWER_FIFO}"
 
   # The stream ended, which means the container did.
   elapsed=$(( $(date +%s) - started ))

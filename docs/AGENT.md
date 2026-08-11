@@ -714,7 +714,31 @@ Two things changed because of that run:
 It reports rather than resolves: two sandboxes may both be legitimate, and a
 supervisor is not the thing that should decide which of your runs to kill.
 
-**A known limit, not yet closed:** when the container outlives the watcher, one
-`docker logs -f` process is still left behind. It no longer holds the pipe, so
-nothing hangs; closing the last one needs the followers in their own process
-group.
+### The follower that kept getting away
+
+When the container outlived the watcher, exactly one `docker logs -f` was left
+behind after every run. It no longer held the pipe open — that part was fixed
+earlier — but a supervisor that leaks a process per run is still a supervisor
+you have to clean up after.
+
+Killing them one pid at a time could not close it, and the reason is a race that
+sweep cannot win: killing a follower's parent first **reparents its child to
+init**, so the survivor disappears from every pid the watcher recorded. What
+does close it is that a reparented process **keeps its process group**. Measured,
+outside docker, before any of this was relied on:
+
+| | follower loop | its subshells | `docker logs -f` | the watcher |
+|---|---|---|---|---|
+| plain `&` | pgid 21127 | 21127 | 21127 | **21127** |
+| under `set -m` | pgid 21929 | 21929 | 21929 | 21922 |
+
+So the followers now run in a group of their own — `set -m`, a FIFO instead of
+`< <(...)`, and one `kill -- -PGID` on the way out. The first row is why that
+needed proving rather than assuming: without `set -m` the group kill would have
+taken the watcher down with the followers, mid-report.
+
+Measured in the same harness, on the run where the container is still up when
+the watcher returns: **before, 1 survivor (reparented to init); after, 0**.
+`tests/test-agent-watch.sh` counts them and fails if one comes back — and also
+fails if the count is clean for the *wrong* reason, because the watcher says out
+loud when it has fallen back to the old pid-by-pid sweep.
