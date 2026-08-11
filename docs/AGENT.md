@@ -636,3 +636,46 @@ Two things follow, and both are yours to choose:
 - **Set `OLLAMA_KEEP_ALIVE=-1` while you use this tier**, if you can spare the
   RAM — it keeps the model, and its cache, resident. `lca check` warns when the
   agent is on and this is finite, with the numbers above.
+
+---
+
+## Is the supervisor real? Yes, and here is exactly how far that goes
+
+`lca agent watch` is what stops a run while you sleep. `tests/test-agent-watch.sh`
+drives the real script against real containers, over a real `docker logs -f`
+stream, and asserts on what it *did* — not on what it would have decided:
+
+| limit | provoked by | result |
+|---|---|---|
+| wall clock | a container that says **nothing** | fires at 60s, container really stopped |
+| stuck detector | one failure repeated with a new id each round | fires in 3s, signature collapsed to `ERROR build failed in /tmp/N after N retries` |
+| step ceiling | an event endpoint whose count rises | fires at 3, and says it counted *events*, not log lines |
+| `--dry-run` | the same world | reaches a verdict, stops nothing, says so |
+
+It found a bug doing it: the watcher backgrounds `docker logs -f` followers, and
+they outlived it holding its stdout open — so `lca agent watch | tee run.log`
+never returned on a run that had already reached its verdict. Measured before
+the fix: indefinite. After: 60s.
+
+**One thing that harness does not prove.** Its event endpoint is a fixture, not
+OpenHands. The watcher's own code — discovery, polling, the verdict, the stop —
+is real on a real socket, but nobody has watched the ceiling fire on counts that
+OpenHands itself produced. That needs an agent, and this is the whole of it:
+
+```bash
+sed -i 's/^AGENT_MAX_ITERATIONS=.*/AGENT_MAX_ITERATIONS=3/' .env \
+  && lca agent start \
+  && (lca agent selftest --keep >/tmp/lca-task.log 2>&1 &) \
+  && sleep 90 && lca agent watch
+```
+
+Start a task, wait for the sandbox to exist, then supervise with a ceiling of 3
+— a real conversation passes that inside a couple of minutes. Expect
+`Stopping the agent: the step ceiling (AGENT_MAX_ITERATIONS) was reached` and
+`Steps seen: 3 (events on the agent API)`. Put `AGENT_MAX_ITERATIONS` back
+afterwards.
+
+**A known limit, not yet closed:** when the container outlives the watcher, one
+`docker logs -f` process is still left behind. It no longer holds the pipe, so
+nothing hangs; closing the last one needs the followers in their own process
+group.

@@ -93,6 +93,9 @@ AGENT_FAIL_PATTERN="${AGENT_FAIL_PATTERN:-(\"levelname\": \"ERROR\"|Traceback|Co
 # exactly what shipped before, warning included.
 AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
 
+# Where the log followers record themselves, so they can be taken down again.
+AGENT_FOLLOWERS="$(mktemp)"
+
 # step_source_label SOURCE — what the number next to "Steps seen" actually
 # counted. Named rather than left bare, because the two sources do not count
 # the same thing: an event is finer-grained than a reasoning turn (the one
@@ -125,15 +128,28 @@ agent_log_sources() {
 # follow the app container for the whole run and see none of the work.
 #
 # Each follower is backgrounded and writes into this function's stdout, which
-# the caller reads. They are killed with the subshell when the loop returns.
+# the caller reads.
+#
+# Their PIDs are recorded because they do NOT die on their own, and the comment
+# that used to sit here said they did. Measured: after a --dry-run run returned,
+# two 'docker logs -f' processes were still alive — the container was still up,
+# so nothing ever closed their input. The consequences are worse than a stray
+# process: they hold this script's stdout open, so
+#
+#   lca agent watch --dry-run | tee run.log
+#
+# never returns, and neither does anything else that reads the output. That is
+# also why a test harness around this looked like it was hanging.
 agent_follow_logs() {
   local seen="" name
+  printf '%s\n' "${BASHPID}" >> "${AGENT_FOLLOWERS}"
   while true; do
     while read -r name; do
       [[ -n "${name}" ]] || continue
       case " ${seen} " in *" ${name} "*) continue ;; esac
       seen="${seen} ${name}"
       as_root docker logs -f --tail 0 "${name}" 2>&1 &
+      printf '%s\n' "$!" >> "${AGENT_FOLLOWERS}"
     done < <(agent_log_sources)
     # Cheap: a sandbox takes tens of seconds to appear, so polling for one is
     # not a hot loop, and the read -t in the caller keeps the clock honest
@@ -141,6 +157,66 @@ agent_follow_logs() {
     sleep 5
     agent_container_running || break
   done
+}
+
+# stop_followers — take the log followers down with us.
+#
+# Both the recorded pid and its children: 'as_root' is a function, so
+# backgrounding it makes a subshell, and killing that subshell alone would leave
+# the 'docker logs -f' underneath it orphaned. pkill -P, by parent pid — never
+# -f, which in this project has matched the calling shell four separate times.
+stop_followers() {
+  local pid loop
+  [[ -r "${AGENT_FOLLOWERS}" ]] || return 0
+  # The SPAWNER first, and dead before anything else is touched.
+  #
+  # The first line of this file is the follower loop itself; the rest are the
+  # 'docker logs -f' processes it has started. That loop re-checks for new
+  # sandboxes every five seconds, so sweeping the list while it still lives is a
+  # race the loop can win — measured twice, each time with exactly one follower
+  # surviving, reparented to init. Its 'sleep' is killed too, because bash defers
+  # a TERM until the child it is waiting on returns, which would otherwise make
+  # this take five seconds to do what it can do at once.
+  loop="$(head -1 "${AGENT_FOLLOWERS}" 2>/dev/null || true)"
+  if [[ -n "${loop}" ]]; then
+    pkill -P "${loop}" 2>/dev/null
+    kill "${loop}" 2>/dev/null
+    sleep 0.3
+    kill -9 "${loop}" 2>/dev/null
+  fi
+  # Now nothing new can appear, so one sweep is enough. pkill -P, by PARENT pid:
+  # 'as_root' is a function, so backgrounding it makes a subshell and killing
+  # that alone would orphan the docker process under it. Never pkill -f, which
+  # in this project has matched the calling shell four separate times.
+  while read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    pkill -P "${pid}" 2>/dev/null
+    kill "${pid}" 2>/dev/null
+  done < "${AGENT_FOLLOWERS}"
+  rm -f "${AGENT_FOLLOWERS}"
+  # ...and a final sweep by what the survivors ARE, because the passes above are
+  # about pids we recorded and one keeps getting away: a follower whose parent
+  # died first is reparented to init, and nothing in our list points at it.
+  #
+  # HONEST LIMIT: this reduces the leak, it does not close it. Measured on a run
+  # where the container outlives the watcher — 'watch --dry-run' — exactly one
+  # 'docker logs -f' is still alive afterwards. What it DOES fix is the part that
+  # hurt: the script now returns instead of holding its own stdout open for ever,
+  # so piping it works. Closing the last one needs the followers in their own
+  # process group, which is a bigger change than this file should make on the way
+  # past.
+  #
+  # Matched on the container name in the command line, from ps, rather than with
+  # 'pkill -f' — that flag matches the calling shell's own arguments and has
+  # done so four separate times in this project.
+  local args
+  while read -r pid args; do
+    case "${args}" in
+      *"docker logs -f"*"${AGENT_CONTAINER}"*|*"docker logs -f"*oh-agent-server-*)
+        kill "${pid}" 2>/dev/null ;;
+    esac
+  done < <(ps -eo pid,args --no-headers 2>/dev/null || true)
+  return 0
 }
 
 main() {
@@ -307,4 +383,5 @@ main() {
   ok "The agent stopped on its own after $(human_duration "${elapsed}") and ${iters} step(s)."
 }
 
+trap stop_followers EXIT
 main "$@"

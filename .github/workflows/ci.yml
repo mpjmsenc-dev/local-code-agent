@@ -182,6 +182,14 @@ jobs:
           fi
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: The supervisor stops a real container (all three limits)
+        # 'lca agent watch' is what stops a runaway run while nobody is looking.
+        # Its decisions were unit-tested and its loop had never been run to the
+        # point of stopping anything. This drives the real script against real
+        # containers over a real 'docker logs -f' stream. About five minutes,
+        # most of it the two one-minute wall clocks it cannot make shorter.
+        run: bash tests/test-agent-watch.sh
+
       - name: The relay's units, as systemd reads them
         # Rendered and checked rather than installed, which is the same shape as
         # the nft ruleset check above: the artefact is the thing under test and
