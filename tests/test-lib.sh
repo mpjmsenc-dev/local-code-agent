@@ -3532,6 +3532,32 @@ seeds_max_output_as_a_number() {
 }
 check "...and is seeded into the agent's settings as a number" \
   seeds_max_output_as_a_number
+# The wait for one reply. 300 seconds is the client's default and this box takes
+# 901, so every step was thrown away and retried while Ollama kept finishing
+# work nobody was listening for — a run that neither progresses nor errors.
+request_timeout_outlasts_this_hardware() {
+  local out
+  out="$(AGENT_REQUEST_TIMEOUT="" agent_request_timeout)"
+  [[ "${out}" == "1800" ]] || { echo "unset did not default to 1800: ${out}" >&2; return 1; }
+  (( out > 901 )) || { echo "the default is shorter than a measured step on this box" >&2; return 1; }
+  out="$(AGENT_REQUEST_TIMEOUT=3600 agent_request_timeout)"
+  [[ "${out}" == "3600" ]] || { echo "a valid override was not honoured: ${out}" >&2; return 1; }
+  out="$(AGENT_REQUEST_TIMEOUT=soon agent_request_timeout)"
+  [[ "${out}" == "1800" ]] || { echo "a non-number was passed through: ${out}" >&2; return 1; }
+  # A too-small value is the default's own failure wearing a configured look.
+  out="$(AGENT_REQUEST_TIMEOUT=5 agent_request_timeout)"
+  [[ "${out}" == "1800" ]] || { echo "a 5-second timeout was accepted: ${out}" >&2; return 1; }
+}
+check "the agent waits longer for one reply than this hardware takes to give it" \
+  request_timeout_outlasts_this_hardware
+seeds_the_timeout() {
+  # shellcheck disable=SC2016  # the pattern is source text, not an expansion
+  grep -q 'timeout:$tmo' <<<"$(sed -n '/agent_settings_diff/,/}}}/p' "${REPO}/agent.sh" | tr -d '[:space:]')" || {
+    echo 'the seeded settings do not carry a timeout, so the client keeps its 300s default and every step on a CPU box is discarded' >&2
+    return 1; }
+}
+check "...and that wait is seeded into the container's settings" \
+  seeds_the_timeout
 # Which sandboxes may be collected while the app is UP — the question nothing
 # asked, so nothing was ever collected until the tier was stopped.
 reclaimable_sandboxes_reads_the_conversation() {

@@ -342,10 +342,12 @@ seed_agent_settings() {
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         --argjson out "$(agent_max_output_tokens)" \
+        --argjson tmo "$(agent_request_timeout)" \
         '{agent_settings_diff:{agent:"CodeActAgent",
                                llm:{model:$m, base_url:$u, api_key:"local-llm",
                                     native_tool_calling:$native,
-                                    max_output_tokens:$out}}}')"
+                                    max_output_tokens:$out,
+                                    timeout:$tmo}}}')"
   curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
        -d "${body}" >/dev/null 2>&1 || true
   # Read back, because the POST's status code proved nothing. jq's // guards a

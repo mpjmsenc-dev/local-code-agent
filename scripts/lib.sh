@@ -3539,6 +3539,34 @@ agent_model_for_run() {
 # the state that truncated 18,313 tokens to 8,194 — and a value at or above the
 # window would leave no room for the prompt at all. Both fall back to the
 # default instead of being passed on.
+# agent_request_timeout — how long the agent waits for ONE model reply.
+#
+# The client default is 300 seconds. On this rung a single step is not close to
+# that, and the failure it produces looks like nothing at all. Measured on the
+# live run, after the truncation above was fixed:
+#
+#   litellm.Timeout: APITimeoutError - Request timed out.
+#     timeout value=300.0, time taken=901.33 seconds. Attempt #1
+#     ... Attempt #2
+#
+# 901 seconds of CPU inference thrown away at 300, then retried, then thrown
+# away again. Ollama finishes the work every time — the answer simply arrives
+# after nobody is listening — so the run neither progresses nor errors: it sat
+# "running" for 38 minutes having executed nothing, which is exactly the shape
+# of the two droplet runs this project has been chasing.
+#
+# 1800 is three times the longest step measured here, because the number that
+# matters is not "generous" but "longer than this machine takes". A box with a
+# GPU will never reach it; a slower box than this one should raise it. Guarded
+# like the token budget: a non-number or a nonsense value falls back rather than
+# quietly restoring the default that does not work.
+agent_request_timeout() {
+  local want="${AGENT_REQUEST_TIMEOUT:-1800}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=1800
+  (( want >= 60 )) || want=1800
+  printf '%s' "${want}"
+}
+
 agent_max_output_tokens() {
   local want="${AGENT_MAX_OUTPUT_TOKENS:-2048}" ctx="${AGENT_MODEL_CONTEXT:-16384}"
   [[ "${want}" =~ ^[0-9]+$ ]] || want=2048
