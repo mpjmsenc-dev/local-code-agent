@@ -352,6 +352,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/tune.sh` | Auto-tune (also `--dry-run`) |
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 | `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
+| `scripts/agent-setup.sh` | `lca agent setup` — brings the agent tier up from wherever it is, in dependency order, and says what it changed |
 | `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
 | `scripts/ollama-relay.sh` | `lca relay` — the docker-bridge→loopback relay, so containers reach Ollama without it leaving 127.0.0.1 |
 | `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |

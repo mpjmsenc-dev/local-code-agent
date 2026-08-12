@@ -40,13 +40,67 @@ ENABLE_OLLAMA_RELAY=true    # required: see "How the agent reaches the model"
 ```
 
 ```bash
+lca agent setup            # do all of the below, in order, and say what changed
+lca agent selftest         # proves the whole chain on this machine
+lca agent url              # the address to open on your phone, over Tailscale
+```
+
+`lca agent setup` exists because the six commands it replaces have to be run in
+the right order, and getting it wrong is silent every single time.
+
+### The six stops, and why the first run took an hour
+
+Measured on a real machine, bringing this tier up for the first time. Six things
+were wrong, in a chain. None of them printed an error:
+
+| # | what was wrong | what it looked like |
+|---|---|---|
+| 1 | `ENABLE_AGENT=false` | the selftest failing on a tier that is off |
+| 2 | no derived model | `tune` says *"Already tuned. Nothing to do."* — it only builds the agent's model when the tier is **on**, and it was not |
+| 3 | relay not installed | the model is never contacted |
+| 4 | relay installed, `ENABLE_OLLAMA_RELAY` still `false` | identical to 3 |
+| 5 | settings hold the **base** model, not the `-agent` one | runs, at the wrong context window |
+| 6 | port not published on Tailscale | works on the server, refuses on the phone |
+
+Each fix reveals the next failure, which looks the same as the last one. That is
+what turns six small problems into an hour: no message anywhere names the thing
+that is actually wrong.
+
+So `lca agent setup` walks the same chain in dependency order, fixes what it can,
+and stops on what it cannot **with the exact command that clears it**. It is
+idempotent — on a healthy machine it changes nothing and says so — and
+`--dry-run` reports what it would change. The order is not cosmetic and a gate
+holds it: the tier switch must come before the model build, because that is stop
+2 above.
+
+The individual commands still exist and still work:
+
+```bash
 sudo lca apply             # closes its port in the inbound guard
 sudo lca relay install     # the docker-bridge -> loopback forwarder
 sudo lca tune              # builds the agent's own wide-context model
 lca agent start            # creates and starts the container
-lca agent selftest         # proves the whole chain on this machine
-lca agent url              # the address to open on your phone, over Tailscale
 ```
+
+### Who owns a sandbox container
+
+The app creates one `oh-agent-server-*` container per conversation, and until
+now **nothing ever removed them**. Measured on a 7.8 GiB box: three alive at
+once, the oldest thirteen hours old, none of them reachable by anything.
+
+The rule, decided and enforced:
+
+- A sandbox belongs to a **conversation inside the app container**. The app is
+  the only thing that can send it a message.
+- **When the app is not running, every sandbox is an orphan** — there is no way
+  left to reach it, and it goes on holding memory. `lca agent stop` now removes
+  them and says how many it took. A restart is a stop, so restarting collects
+  them too, which is the case that used to accumulate.
+- **While the app is running, nothing is removed automatically.** Deciding that
+  a particular sandbox is idle means trusting a mapping between a container name
+  and a conversation's `sandbox_id`, and being wrong there kills a task somebody
+  is waiting on. That case is *reported* instead — `lca agent watch` warns when
+  more than one run is alive — and never acted on.
 
 `lca agent start` also writes the agent's LLM settings for you. That is not a
 convenience: on a fresh container `GET /api/v1/settings` answers

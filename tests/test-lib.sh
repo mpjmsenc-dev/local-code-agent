@@ -17,7 +17,7 @@ LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               webui.sh agent.sh netmode.sh scripts/tune.sh scripts/apply.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
               scripts/selftest.sh scripts/ollama-relay.sh
-              scripts/agent-selftest.sh )
+              scripts/agent-selftest.sh scripts/agent-setup.sh )
 
 # Every document that INSTRUCTS a reader. The prose gates further down apply to
 # this set, and it is named here because they used to spell it out one function
@@ -3612,6 +3612,77 @@ agent_can_resolve_the_host() {
 }
 check "the agent container can resolve the host it must call the model on" \
   agent_can_resolve_the_host
+
+# The setup chain, which is a PROCEDURE — its order is the thing it gets right.
+#
+# Six silent stops in a row cost an hour on a real machine, and the reason it
+# was an hour rather than six minutes is that each one hid the next. The order
+# is not cosmetic: the tier switch has to come before the model build, because
+# refresh_agent_model_after_tune returns immediately when the tier is off, which
+# is exactly how a box ends up "already tuned" with no agent model at all.
+#
+# Checked on the file because a procedure's order cannot be observed without a
+# machine that has all six faults; what a failing step SAYS is driven below.
+setup_chain_is_in_dependency_order() {
+  local seen
+  # sed, not a second grep: '1/7' contains two digits, so extracting [0-9]
+  # from it read the order as 1727374757677 and failed on correct code.
+  seen="$(sed -n 's/^step "\([0-9]\)\/7 .*/\1/p' "${REPO}/scripts/agent-setup.sh" | tr -d '\n')"
+  [[ "${seen}" == "1234567" ]] || {
+    printf 'agent-setup.sh runs its steps in the order %s, not 1-7\n' "${seen:-none}" >&2
+    return 1; }
+  # The two whose order is load-bearing rather than tidy.
+  local tier model
+  tier="$(grep -n 'step "1/7' "${REPO}/scripts/agent-setup.sh" | cut -d: -f1)"
+  model="$(grep -n 'step "4/7' "${REPO}/scripts/agent-setup.sh" | cut -d: -f1)"
+  (( tier < model )) || {
+    echo 'agent-setup.sh builds the agent model before switching the tier on, so it builds nothing' >&2
+    return 1; }
+}
+check "the setup chain runs in the order its links depend on" \
+  setup_chain_is_in_dependency_order
+# ...and every stop names a command, not a concept. "The relay is not healthy"
+# is the message that cost the hour; "sudo scripts/ollama-relay.sh install" is
+# the one that ends it. Driven from the actual strings rather than asserted
+# about one of them.
+every_setup_stop_names_a_command() {
+  local line bad=0 n=0
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    # A literal command, or a helper whose whole job is to produce the right
+    # one for this machine — ollama_restart_hint knows whether systemd exists,
+    # pull_advice knows the kill switch makes 'ollama pull' useless advice.
+    # Requiring the literal would push both back into hand-written copies,
+    # which is the drift these helpers were extracted to stop.
+    grep -qE 'lca |sudo |ollama pull|ollama-relay\.sh|docker |_hint|_advice' <<<"${line}" || {
+      printf 'this setup stop names no command to run: %s\n' "${line}" >&2
+      bad=1; }
+    # Whole lines, not a quote-bounded match: a stop that interpolates a helper
+    # taking an argument contains an inner quote, and '[^"]+' truncated it
+    # mid-message — which is how this gate first reported a false failure.
+  done < <(grep -F 'blocked "' "${REPO}/scripts/agent-setup.sh" | grep -v '^blocked()')
+  (( n >= 4 )) || {
+    printf 'only %s stops found — the chain has stopped naming its failures\n' "${n}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "...and every stop in it names the command that clears it" \
+  every_setup_stop_names_a_command
+# The sandbox lifecycle, which had no owner: with the app down every sandbox is
+# unreachable, and they do not exit by themselves. Measured on a 7.8 GiB box:
+# three alive at once, the oldest thirteen hours.
+stop_collects_the_sandboxes() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  # In the stop arm specifically — collecting them on 'start' would kill the
+  # run somebody just began.
+  awk '/^    stop\)/ { inb = 1 } inb { print } inb && /^      ;;/ { exit }' <<<"${body}" \
+    | grep -q 'remove_orphan_sandboxes' || {
+    echo 'lca agent stop leaves its sandbox containers running, and nothing else ever removes them' >&2
+    return 1; }
+}
+check "stopping the agent collects the sandboxes nothing else can reach" \
+  stop_collects_the_sandboxes
 
 # The reachability rule itself, driven rather than read, in the exact shape the
 # real bug had: loopback and the bridge listening, the Tailscale address not.

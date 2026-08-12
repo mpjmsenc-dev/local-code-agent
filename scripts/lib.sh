@@ -2831,6 +2831,30 @@ agent_conversation_ref() {
   return 1
 }
 
+# agent_orphan_sandboxes — sandbox containers nothing can drive any more.
+#
+# WHO OWNS A SANDBOX. Decided here and written down in docs/AGENT.md, because
+# until now nothing owned them: a sandbox belongs to a CONVERSATION inside the
+# app container. The app creates it, and the app is the only thing that can send
+# it a message.
+#
+# So when the app is not running, every oh-agent-server-* is an orphan — there
+# is no longer any way to reach it, and it goes on holding memory. Measured on a
+# real 7.8 GiB box: three alive at once, the oldest thirteen hours, none of them
+# reachable by anything.
+#
+# ONLY that case, and the restraint is the point. While the app IS running,
+# deciding that a particular sandbox is idle means trusting a mapping between a
+# container's name and a conversation's sandbox_id, and being wrong about it
+# kills a task somebody is waiting on. That case is reported instead — see
+# agent_conversation_warning — and never acted on.
+agent_orphan_sandboxes() {
+  if agent_container_running; then
+    return 0
+  fi
+  agent_live_sandboxes
+}
+
 # agent_conversation_warning — what is ambiguous about this machine right now,
 # or nothing when it is not.
 #

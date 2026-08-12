@@ -24,6 +24,9 @@ usage() {
 Usage: lca agent <command>       (or agent.sh directly)
 
 Commands:
+  setup     Bring the tier up from wherever it is: switch it on, build the
+            agent's model, install the relay, start it, and say what changed.
+            Start here on a machine that has never run it.
   start     Start the agent (pulls the images on first run — several GB)
   stop      Stop it (its workspace and settings are kept in ~/.openhands)
   restart   Restart it
@@ -370,6 +373,29 @@ seed_agent_settings() {
 # the whole life of this tier it printed a Tailscale address that nothing was
 # ever published on. Same helper as the publication, so the address it advertises
 # and the address it binds cannot drift apart.
+# remove_orphan_sandboxes — collect the sandboxes the app left behind.
+#
+# Says what it took and roughly what it was holding, because "removed 3
+# containers" is the kind of line that is either reassuring or alarming
+# depending on whether you knew they were there. Nobody knew they were there.
+remove_orphan_sandboxes() {
+  local orphans n name
+  orphans="$(agent_orphan_sandboxes 2>/dev/null || true)"
+  [[ -n "${orphans}" ]] || return 0
+  n="$(grep -c . <<<"${orphans}")"
+  step "Cleaning up sandbox containers"
+  info "The app is down, so these cannot be reached by anything any more."
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    if as_root docker rm -f "${name}" >/dev/null 2>&1; then
+      ok "Removed ${name}."
+    else
+      warn "Could not remove ${name} — it is still running. Remove it by hand: sudo docker rm -f ${name}"
+    fi
+  done <<<"${orphans}"
+  info "${n} sandbox container(s) collected. They do not stop on their own, and on a small box they are most of your memory."
+}
+
 agent_url_line() {
   local ip=""
   ip="$(tailscale_ip4 || true)"
@@ -384,6 +410,10 @@ main() {
   local cmd="${1:-}"
   [[ $# -gt 0 ]] && shift
   case "${cmd}" in
+    # setup before start in the list because it is the order a new machine
+    # needs them in: 'start' assumes six things are already true, and setup is
+    # what makes them true and says which one was not.
+    setup)   exec "${SCRIPT_DIR}/scripts/agent-setup.sh" "$@" ;;
     start)   start_agent ;;
     stop)
       require_cmd docker
@@ -395,6 +425,13 @@ main() {
       else
         warn "The agent container was not running."
       fi
+      # ...and its sandboxes, which nothing else was ever going to remove.
+      #
+      # With the app down every sandbox is unreachable by definition, and they
+      # do not exit on their own: measured on a 7.8 GiB box, three alive at
+      # once with the oldest thirteen hours old. Stopping the agent is the
+      # moment they become garbage, so it is the moment to collect them.
+      remove_orphan_sandboxes
       ;;
     restart) main stop || true; main start ;;
     selftest) exec "${SCRIPT_DIR}/scripts/agent-selftest.sh" "$@" ;;
