@@ -497,6 +497,12 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  # The three per-surface switches are deliberately NOT defaulted here. Baking
+  # "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}" at load time freezes the
+  # fallback: AIDER_CONVENTIONS=false set afterwards loses to a CONVENTIONS_CHAT
+  # that load_env already resolved to true, and the old single switch silently
+  # stops working. Two gates caught that within a minute. They resolve at CALL
+  # time instead, in lca_user_instructions.
   AIDER_NO_AUTO_COMMIT="${AIDER_NO_AUTO_COMMIT:-false}"
   LCA_EDIT_FORMAT="${LCA_EDIT_FORMAT:-auto}"
   LCA_ASK_TOKENS="${LCA_ASK_TOKENS:-512}"
@@ -2209,14 +2215,43 @@ restart_ollama() {
 # every caller can append unconditionally. The toggle keeps its name: it is
 # what .env.example has always called this, and renaming a setting to widen it
 # would break the files people already have.
+# lca_user_instructions [SURFACE] — the user's instructions for one surface.
+#
+# SURFACE is chat | aider | agent, and defaults to 'agent' because that is the
+# only caller that passes nothing.
+#
+# WHAT THIS FILE COSTS EACH SURFACE, measured rather than assumed, at the sizes
+# this project actually ships (618 tokens of instructions, 577 of base prompt):
+#
+#   chat   4096-token window on the 3b rung. The file DOUBLES the system
+#          prompt, 577 -> 1211 tokens, and that prompt is re-sent on every
+#          message: 30% of the whole window, permanently, before a word is
+#          typed. It is also the surface the content fits worst — the chat has
+#          no filesystem and no tools, so five bash gotchas and "write files
+#          into the working directory you were given" are instructions it
+#          cannot act on. And the prompt is what a sliding window drops first,
+#          which is the "long chat starts sounding generic" symptom PHONE.md
+#          already documents. This is the surface to switch off first.
+#   aider  same 4096 window, but the content is exactly what aider is for, and
+#          it competes with the repo map rather than with chat history.
+#   agent  16384 window against a ~15,200-token prompt, so 618 tokens is over
+#          half of what headroom remains — and it is also where the two newest
+#          rules were added BECAUSE of measured agent failures. Expensive and
+#          load-bearing at the same time; not a switch to flip casually.
 lca_user_instructions() {
+  local surface="${1:-agent}" enabled
+  case "${surface}" in
+    chat)  enabled="${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS:-true}}" ;;
+    aider) enabled="${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" ;;
+    *)     enabled="${CONVENTIONS_AGENT:-${AIDER_CONVENTIONS:-true}}" ;;
+  esac
+  [[ "${enabled}" == "true" ]] || return 0
   # Defaulted, not bare. This is called from lca_system_prompt, which the login
   # banner reaches through load_env_readonly — a path that does not apply the
   # .env defaults — so a bare ${AIDER_CONVENTIONS} is an unbound variable under
   # 'set -u'. Measured: the banner then computed a prompt WITHOUT this appendix,
   # compared it to the container's, and reported the chat app out of date on a
   # machine where nothing had drifted.
-  [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || return 0
   local f="${REPO_ROOT:-}/config/CONVENTIONS.md"
   [[ -r "${f}" ]] || return 0
   # HTML comments are stripped, and that is a feature rather than tidiness.
@@ -2290,7 +2325,7 @@ The server manages itself through one command, 'lca':
 Only mention these when they are actually relevant to the question.
 EOF
 )"
-  extra="$(lca_user_instructions)"
+  extra="$(lca_user_instructions chat)"
   if [[ -n "${extra}" ]]; then
     printf '%s\n\n--- the owner of this machine also asked for the following ---\n%s\n' \
       "${base}" "${extra}"

@@ -183,6 +183,27 @@ next boot. If you resized for RAM and it got slower, that is why.
   in output quality — on a small local model you cannot spare it.
 - **Running two models at once.** `OLLAMA_MAX_LOADED_MODELS=1` is set on purpose;
   a second resident model competes for the same RAM and cores.
+
+  **This one needs an update now that the agent tier exists, because the stack
+  itself makes a second model.** With `ENABLE_AGENT=true` there are two: your
+  `MODEL_NAME` at `OLLAMA_CONTEXT_LENGTH` for the chat app and aider, and the
+  derived `<model>-agent` at `AGENT_MODEL_CONTEXT` (16384) for the agent. They
+  are separate models to Ollama, with separate KV caches.
+
+  The good news, and the reason the RAM ladder below is still right: with
+  `OLLAMA_MAX_LOADED_MODELS=1` only **one is ever resident**, so the peak is the
+  larger of the two rather than their sum — on the 3b rung, 2.7 GB rather than
+  4.9 GB. The ladder was derived for one model and one model is still what is
+  loaded.
+
+  The cost is not RAM, it is **eviction**. Every switch between surfaces unloads
+  one model and loads the other, and the prefix cache goes with it. That is
+  measured elsewhere in this project and it is not small: the agent's ~15k-token
+  prompt costs 543 s to process cold and 3.6 s warm. So sending one chat message
+  in the middle of an agent session makes that session's next step pay the cold
+  price again. If you are going to use both, use them in blocks rather than
+  alternating — and `OLLAMA_KEEP_ALIVE` does not help, because the eviction is
+  the other model arriving, not the timer expiring.
 - **Swap.** If a model does not fit in RAM it will "work" via swap at
   unusable speed. `check-system.sh` warns about the RAM headroom instead —
   believe it, and take a smaller model.
