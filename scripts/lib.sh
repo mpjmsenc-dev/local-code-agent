@@ -1214,10 +1214,18 @@ input_file_ok() {
 # OLLAMA_MODELS wins if set; otherwise the systemd service account's store,
 # then the invoking user's. The last branch is a best guess rather than a
 # failure, because the answer only feeds a warning.
+#
+# The systemd account's store is a named default rather than a literal, and the
+# name is the only reason the fallback below can be tested at all: it is taken
+# when NEITHER candidate exists, and on every machine this project is actually
+# installed on the first candidate does exist. The test for it therefore passed
+# only on hosts with no Ollama — CI's — and failed on the product, which is the
+# wrong way round for a gate. Overriding this is a test seam; nothing in the
+# stack sets it, and the default is the path that was hardcoded here.
 ollama_models_dir() {
   local d
   if [[ -n "${OLLAMA_MODELS:-}" ]]; then printf '%s' "${OLLAMA_MODELS}"; return 0; fi
-  for d in /usr/share/ollama/.ollama/models "${HOME}/.ollama/models"; do
+  for d in "${OLLAMA_SYSTEM_MODELS_DIR:-/usr/share/ollama/.ollama/models}" "${HOME}/.ollama/models"; do
     [[ -d "${d}" ]] && { printf '%s' "${d}"; return 0; }
   done
   printf '%s' "${HOME}/.ollama/models"
