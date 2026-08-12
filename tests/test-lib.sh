@@ -3494,6 +3494,117 @@ check "...and port 22 is never guarded, whatever AGENT_PORT says" \
 # hardest kind of failure to read from outside it.
 check "the agent addresses Ollama through its OpenAI-compatible endpoint" \
   test "$(agent_llm_model qwen2.5-coder:7b)" = "openai/qwen2.5-coder:7b"
+# The reply budget, which is really the instruction budget. Unset, the client
+# reserved half the window and Ollama truncated the prompt from 18,313 tokens
+# to 8,194 — the agent read under half its own instructions on every step,
+# measured on the first live run this project ever completed.
+max_output_defaults_and_is_guarded() {
+  local out
+  out="$(AGENT_MAX_OUTPUT_TOKENS="" AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
+  [[ "${out}" == "2048" ]] || { echo "unset did not default to 2048: ${out}" >&2; return 1; }
+  out="$(AGENT_MAX_OUTPUT_TOKENS=4096 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
+  [[ "${out}" == "4096" ]] || { echo "a valid override was not honoured: ${out}" >&2; return 1; }
+  # A word here would be sent as JSON null and reserve the client's default
+  # again — the exact state this exists to end, wearing a configured look.
+  out="$(AGENT_MAX_OUTPUT_TOKENS=lots AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
+  [[ "${out}" == "2048" ]] || { echo "a non-number was passed through: ${out}" >&2; return 1; }
+  # Past half the window the reservation is bigger than what it leaves.
+  out="$(AGENT_MAX_OUTPUT_TOKENS=12000 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
+  [[ "${out}" == "2048" ]] || { echo "a reservation larger than half the window was allowed: ${out}" >&2; return 1; }
+  out="$(AGENT_MAX_OUTPUT_TOKENS=0 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
+  [[ "${out}" == "2048" ]] || { echo "zero was allowed, which reserves nothing: ${out}" >&2; return 1; }
+}
+check "the agent's reply budget defaults, and refuses a value that would starve the prompt" \
+  max_output_defaults_and_is_guarded
+# ...and it must reach the container, as a NUMBER. A quoted "2048" round-trips
+# through the settings API looking correct and reserves nothing.
+seeds_max_output_as_a_number() {
+  local body
+  body="$(sed -n '/agent_settings_diff/,/}}}/p' "${REPO}/agent.sh" | sed 's/#.*//')"
+  [[ -n "${body}" ]] || { echo 'could not find the settings payload in agent.sh' >&2; return 1; }
+  grep -q 'max_output_tokens:\$out' <<<"${body//[[:space:]]/}" || {
+    echo 'the seeded settings do not carry max_output_tokens — the client reserves its own default and the prompt is truncated' >&2
+    return 1; }
+  grep -q -- '--argjson out' "${REPO}/agent.sh" || {
+    echo 'max_output_tokens is passed with --arg, so it is seeded as a string and reserves nothing' >&2
+    return 1; }
+}
+check "...and is seeded into the agent's settings as a number" \
+  seeds_max_output_as_a_number
+# Which sandboxes may be collected while the app is UP — the question nothing
+# asked, so nothing was ever collected until the tier was stopped.
+reclaimable_sandboxes_reads_the_conversation() {
+  local out
+  # finished -> collectable; running and idle -> left alone; unclaimed -> collectable.
+  out="$(
+    agent_live_sandboxes() { printf 'oh-agent-server-A\noh-agent-server-B\noh-agent-server-C\noh-agent-server-D\n'; }
+    agent_conversations_payload() {
+      printf '%s' '{"items":[{"id":"1","sandbox_id":"oh-agent-server-A","execution_status":"finished"},
+                             {"id":"2","sandbox_id":"oh-agent-server-B","execution_status":"running"},
+                             {"id":"3","sandbox_id":"oh-agent-server-C","execution_status":"idle"}]}'
+    }
+    agent_reclaimable_sandboxes
+  )"
+  grep -q 'oh-agent-server-A' <<<"${out}" || { echo "a finished conversation's sandbox was not collectable: ${out}" >&2; return 1; }
+  grep -q 'oh-agent-server-D' <<<"${out}" || { echo "a sandbox no conversation claims was not collectable: ${out}" >&2; return 1; }
+  grep -q 'oh-agent-server-B' <<<"${out}" && { echo "a RUNNING conversation's sandbox was offered for removal: ${out}" >&2; return 1; }
+  # idle is a session a person can still resume, and the work lives only inside
+  # the container. Collecting it would delete somebody's unfinished deliverable.
+  grep -q 'oh-agent-server-C' <<<"${out}" && { echo "an IDLE conversation's sandbox was offered for removal: ${out}" >&2; return 1; }
+  # And with no listing to read, "dead" is a guess — a wrong one deletes work.
+  out="$(
+    agent_live_sandboxes() { printf 'oh-agent-server-A\n'; }
+    agent_conversations_payload() { return 1; }
+    agent_reclaimable_sandboxes || true
+  )"
+  [[ -z "${out}" ]] || { echo "sandboxes were offered for removal with no conversation listing to justify it: ${out}" >&2; return 1; }
+  return 0
+}
+check "a sandbox is collectable only when its conversation is over" \
+  reclaimable_sandboxes_reads_the_conversation
+# How long the submitter waits for its own conversation to appear. This is the
+# gate on a number that was wrong by a factor of two and cost the feature its
+# entire purpose: with ten tries of two seconds, identification failed on BOTH
+# live runs (lags of 57s and 43s, measured), so every run fell back to the
+# newest-sandbox guess the id exists to replace.
+submit_waits_longer_than_the_measured_lag() {
+  local body tries
+  body="$(sed -n '/^CID=""/,/^done/p' "${REPO}/scripts/agent-task.sh")"
+  [[ -n "${body}" ]] || { echo 'could not find the identification loop' >&2; return 1; }
+  tries="$(grep -oE 'seq 1 [0-9]+' <<<"${body}" | grep -oE '[0-9]+$' || true)"
+  [[ "${tries}" =~ ^[0-9]+$ ]] || {
+    echo 'the identification loop no longer counts its tries — this gate stopped watching' >&2
+    return 1; }
+  # 60 seconds is the longest lag seen; the window must clear it with room,
+  # because the lag is sandbox creation and a cold image pull is slower still.
+  (( tries * 2 >= 120 )) || {
+    printf 'the submitter waits about %ss for its conversation to appear; the measured lag was 57s on a warm box\n' "$(( tries * 2 ))" >&2
+    return 1; }
+}
+check "the submitter waits out sandbox creation before giving up on its own id" \
+  submit_waits_longer_than_the_measured_lag
+# ...and never names one it cannot attribute. head -1 on a set difference is a
+# coin toss on the one machine where two runs really do overlap, recorded as a
+# fact and then supervised as if it were true.
+submit_refuses_an_ambiguous_id() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-task.sh")"
+  grep -qE 'grep -c \. <<<"\$\{NEW_IDS\}"\) == 1' <<<"${body}" || {
+    echo 'the submitter does not require exactly one new conversation before recording an id' >&2
+    return 1; }
+  grep -q 'agent_conversation_record' <<<"${body}" || {
+    echo 'the submitter no longer records the id at all' >&2; return 1; }
+  # The lock that makes "exactly one" achievable for this command against
+  # itself, and the release before the exec into the watcher.
+  grep -q 'flock 9' <<<"${body}" || {
+    echo 'submissions are not serialised, so two runs each see the other as new' >&2
+    return 1; }
+  grep -q 'exec 9>&-' <<<"${body}" || {
+    echo 'the submit lock is never released, so a --watch run holds it for hours' >&2
+    return 1; }
+}
+check "...and refuses to record an id it cannot attribute to this task" \
+  submit_refuses_an_ambiguous_id
 agent_base_url_is_not_loopback() {
   local u; u="$(agent_llm_base_url)"
   # host.docker.internal, because inside the container 127.0.0.1 is the
@@ -16157,6 +16268,70 @@ no_unsourced_subshell_calls_lib() {
 }
 check "no subshell gate calls a lib function it never sourced" \
   no_unsourced_subshell_calls_lib
+# ...and the same question asked of the SCRIPTS, which is where it actually bit.
+#
+# 'lca agent task' shipped calling agent_model_for_run, which was defined in
+# agent.sh. scripts/agent-task.sh sources lib.sh and nothing else, so on its
+# first live run — the run this whole feature exists for — it died on
+# "agent_model_for_run: command not found" before it could submit anything.
+# ShellCheck does not see across files, every unit test drove the pure helpers
+# directly, and the command was never executed end to end, so nothing looked.
+#
+# The rule: a script may only call a repo helper it can actually reach — one it
+# defines itself, or one in a file it sources. Reported by NAME, because the
+# remedy is always the same and always obvious once said out loud: move the
+# function to lib.sh, beside the ones it is used with.
+no_script_calls_an_unreachable_helper() {
+  local -a files
+  mapfile -t files < <(cd "${REPO}" && ls -1 ./*.sh scripts/*.sh 2>/dev/null)
+  (( ${#files[@]} >= 10 )) || {
+    printf 'only %s scripts found — this gate stopped watching\n' "${#files[@]}" >&2
+    return 1; }
+  # defs_of FILE — the function names FILE defines.
+  defs_of() { grep -oE '^[a-z_][a-z0-9_]*\(\)' "${REPO}/$1" 2>/dev/null | tr -d '()' | sort -u; }
+  local f g s own reach foreign body pat hit bad=0 checked=0
+  for f in "${files[@]}"; do
+    f="${f#./}"
+    own="$(defs_of "${f}")"
+    reach="${own}"
+    # Whatever it sources, by basename — 'source "${SCRIPT_DIR}/lib.sh"' and
+    # 'source "${SCRIPT_DIR}/scripts/tune.sh"' are both in use here.
+    while read -r s; do
+      [[ -n "${s}" ]] || continue
+      for g in "scripts/${s}" "${s}"; do
+        [[ -f "${REPO}/${g}" ]] && { reach+=$'\n'"$(defs_of "${g}")"; break; }
+      done
+    done < <(grep -oE '(source|^[[:space:]]*\.)[[:space:]]+"?[^"]*/([a-z0-9_-]+\.sh)' "${REPO}/${f}" 2>/dev/null \
+             | grep -oE '[a-z0-9_-]+\.sh$' | sort -u)
+    # Everything defined in some OTHER script and not reachable from here.
+    foreign=""
+    for g in "${files[@]}"; do
+      g="${g#./}"
+      [[ "${g}" == "${f}" ]] && continue
+      foreign+=$'\n'"$(defs_of "${g}")"
+    done
+    foreign="$(comm -23 <(printf '%s\n' "${foreign}" | grep -v '^$' | sort -u) \
+                        <(printf '%s\n' "${reach}"   | grep -v '^$' | sort -u))"
+    [[ -n "${foreign}" ]] || continue
+    checked=$((checked+1))
+    # Comments stripped, then matched only where a name is being CALLED: at the
+    # start of a line, or inside a command substitution. A function named in an
+    # error message is prose, not a call.
+    body="$(sed 's/#.*//' "${REPO}/${f}")"
+    pat="(^[[:space:]]*|\\\$\\()($(printf '%s' "${foreign}" | paste -sd'|' -))\\b"
+    hit="$(grep -oE "${pat}" <<<"${body}" | grep -oE "[a-z_][a-z0-9_]*$" | sort -u | tr '\n' ' ' || true)"
+    [[ -n "${hit}" ]] || continue
+    printf '%s calls %s— defined in another script it does not source, so this is command-not-found at runtime. Move it to scripts/lib.sh.\n' \
+      "${f}" "${hit}" >&2
+    bad=1
+  done
+  (( checked > 0 )) || {
+    echo 'this gate compared no scripts at all — the layout it recognises has moved' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "no script calls a helper defined in a script it does not source" \
+  no_script_calls_an_unreachable_helper
 # ...and no lib function may rely on errexit while a caller invokes it where
 # errexit does not apply.
 #

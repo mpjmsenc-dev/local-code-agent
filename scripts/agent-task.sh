@@ -99,17 +99,48 @@ PROMPT="$(agent_task_prompt "${DIR}" "${TASK}")"
 # The two rules from config/CONVENTIONS.md, on the channel OpenHands documents
 # for standing instructions.
 #
-# HONEST STATUS: unverified on this build. agent_settings.tools round-trips
-# through the settings API and is then ignored — 22 tools still load — so a
-# field being accepted here proves nothing about it being used. That is exactly
-# why the same two rules are in the prompt text, where they are known to be
-# read. If the suffix works it is better placed; if it does not, nothing is lost.
+# SETTLED, and the answer is no: this build does not use it. Measured on the
+# first live run, by reading what the agent actually ran with rather than what
+# the API accepted:
+#
+#   SystemPromptEvent      14,640 chars, neither rule present
+#   base_state.json        "system_message_suffix":
+#                            "<HOST>\nhttp://host.docker.internal:3001</HOST>"
+#
+# The app does not merely ignore the field — it OVERWRITES it with its own
+# value, which it needs for the sandbox's host address. So a caller cannot use
+# system_message_suffix on this build at all, and the earlier "unverified"
+# note was too generous: it is not unverified now, it is unavailable.
+#
+# It is still sent. It costs one JSON field, it is correct on any build that
+# does honour it, and the alternative — dropping it — would leave nothing to
+# re-test when OpenHands is upgraded. What has been dropped is the CLAIM: the
+# two rules have exactly one home that works, the prompt text, and everything
+# in this repo that implied two has been corrected to say so.
 SUFFIX="$(agent_task_suffix)"
 
 # --- submit ------------------------------------------------------------------
 # The conversations that exist BEFORE we submit, so ours can be identified by
 # difference rather than by being newest. The POST's own id is not usable: it
 # answers with a start-task id the events API knows nothing about (measured).
+# SERIALISED, because the set difference is only sound while nothing else is
+# creating conversations. Two 'lca agent task' runs overlapping — two terminals,
+# or a script — would each see the other's conversation as "new", and each could
+# record the other's id. The lock makes that case impossible for this command
+# against itself, which is the case a user can actually hit twice by accident.
+#
+# It does NOT cover a conversation started from the web UI at the same moment;
+# nothing here can, because the app offers no way to ask "which conversation did
+# MY post create" — the POST answers with a start-task id the events API does
+# not know. That residual case is handled below by refusing to guess.
+#
+# Released before the exec into agent-watch.sh, or a --watch run would hold it
+# for hours.
+LOCK_FILE="${TMPDIR:-/tmp}/lca-agent-task.lock"
+if exec 9>"${LOCK_FILE}" 2>/dev/null && have flock; then
+  flock 9 2>/dev/null || true
+fi
+
 BEFORE="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
 
 step "Submitting the task"
@@ -122,19 +153,51 @@ curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
   || die "The agent refused the task at ${BASE}/api/v1/app-conversations. Its own log will say why: lca agent logs"
 
 # --- identify it -------------------------------------------------------------
-# Polled rather than assumed: the conversation appears in the listing a moment
-# after the POST returns.
+# Polled rather than assumed: the conversation appears in the listing some time
+# after the POST returns — and "a moment" was wrong by a factor of two.
+#
+# MEASURED, twice, on this box. The POST answers as soon as the task is
+# accepted; the app then provisions a sandbox container before the conversation
+# is visible in the listing at all:
+#
+#   run 1  submitted 18:30:22   conversation created 18:31:19   lag 57s
+#   run 2  submitted 19:01:35   conversation created 19:02:18   lag 43s
+#
+# The loop below was ten tries of two seconds — a window of about 25 seconds,
+# which is not half the shortest lag observed. So it never once succeeded: both
+# live runs printed "its conversation id could not be identified" and fell back
+# to the newest-sandbox guess, which is the exact inference this whole
+# mechanism exists to avoid. Replaying the same set-difference by hand against
+# the same API a minute later identifies the conversation correctly every time;
+# nothing was wrong with the method, only with how long it was given.
+#
+# Three minutes, because the lag is sandbox creation and that is bounded by an
+# image pull on a cold box, not by anything this script controls. It costs
+# nothing when identification succeeds on the first pass, which is the common
+# case once a sandbox image is local.
 CID=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+NEW_IDS=""
+for attempt in $(seq 1 90); do
   AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
   if [[ -n "${AFTER}" ]]; then
     # The ids that were not there before. comm needs both sides sorted, and an
     # empty BEFORE is the normal case on a fresh container.
-    CID="$(comm -13 <(printf '%s\n' "${BEFORE}" | sort -u) \
-                    <(printf '%s\n' "${AFTER}" | sort -u) 2>/dev/null \
-           | grep -E '^[A-Za-z0-9_-]+$' | head -1 || true)"
-    [[ -n "${CID}" ]] && break
+    NEW_IDS="$(comm -13 <(printf '%s\n' "${BEFORE}" | sort -u) \
+                        <(printf '%s\n' "${AFTER}" | sort -u) 2>/dev/null \
+               | grep -E '^[A-Za-z0-9_-]+$' || true)"
+    if [[ -n "${NEW_IDS}" ]]; then
+      # Exactly one, or none of them is ours to name. head -1 was silently
+      # picking whichever sorted first, which on the one machine where two runs
+      # DO overlap is a coin toss recorded as a fact.
+      if (( $(grep -c . <<<"${NEW_IDS}") == 1 )); then
+        CID="${NEW_IDS}"
+      fi
+      break
+    fi
   fi
+  # Said once, when the wait stops looking instant. The lag is sandbox
+  # creation — up to a minute here, longer on a box pulling the image.
+  (( attempt == 5 )) && info "Waiting for the app to register the conversation (it is creating a sandbox first)..."
   sleep 2
 done
 
@@ -142,11 +205,20 @@ if [[ -n "${CID}" ]]; then
   agent_conversation_record "${CID}" \
     || warn "Could not record the conversation id at ${AGENT_CONVERSATION_FILE}; 'lca agent watch' will fall back to picking the newest sandbox."
   ok "Conversation ${CID}"
+elif [[ -n "${NEW_IDS}" ]]; then
+  # Ambiguous rather than unknown, and worth its own sentence: more than one
+  # conversation appeared while ours was being created, so no id here is known
+  # to be ours. Naming them lets the reader settle it in the UI; guessing would
+  # attach the supervisor to somebody else's run and count its steps.
+  warn "More than one conversation appeared while this task was being submitted ($(tr '\n' ' ' <<<"${NEW_IDS}")), so none of them can be attributed to it. Nothing was recorded. Pick the right one in the app, or submit again when no other run is starting."
 else
   # Said plainly rather than left as a silent degradation: the task IS running,
   # and only the identification failed.
   warn "The task was submitted but its conversation id could not be identified, so 'lca agent watch' will fall back to picking the newest sandbox. If more than one run is alive, it may attach to the wrong one."
 fi
+# Before any exec below, so a --watch run does not hold the submit lock for the
+# length of the run.
+exec 9>&- 2>/dev/null || true
 
 info "Follow it: lca agent watch      ·      see what it did: lca agent logs"
 if [[ "${WATCH}" == "true" ]]; then

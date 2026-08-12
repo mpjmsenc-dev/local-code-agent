@@ -190,6 +190,18 @@ if [[ "${ENABLE_AGENT}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
   if [[ "${ENABLE_OLLAMA_RELAY}" != "true" ]]; then
     p_warn "the agent is enabled but ENABLE_OLLAMA_RELAY is false, so it cannot reach Ollama on ${OLLAMA_HOST} — a container's loopback is the container. Set ENABLE_OLLAMA_RELAY=true in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install"
   fi
+  # Sandboxes left running by conversations that are over.
+  #
+  # They do not stop on their own, nothing collected them while the app stayed
+  # up, and on this rung they are most of the memory. Measured here: three
+  # alive, the oldest 15 hours, 1,062 MiB between them — and the agent run under
+  # test had its model OOM-killed twice with them resident. Reported rather than
+  # removed, because a sandbox has no host mount: its filesystem is the only
+  # copy of whatever was built inside it.
+  AGENT_RECLAIM="$(agent_reclaimable_sandboxes 2>/dev/null || true)"
+  if [[ -n "${AGENT_RECLAIM}" ]]; then
+    p_warn "$(grep -c . <<<"${AGENT_RECLAIM}") sandbox container(s) are still running for conversations that have finished, holding memory nothing is using. They are yours to collect (it deletes anything built inside them): sudo ${SCRIPT_DIR}/bin/lca agent gc"
+  fi
 fi
 
 # The agent's derived model: does it exist, and does Ollama really load it at
