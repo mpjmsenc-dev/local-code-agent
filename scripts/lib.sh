@@ -2822,6 +2822,35 @@ agent_conversation_ids() {
         else empty end ) | objects | .id | strings ] | .[]' 2>/dev/null || return 1
 }
 
+# agent_new_conversation BEFORE AFTER — the conversation that appeared between
+# two listings. Three outcomes, and the third is the whole point:
+#
+#   exactly one new id   that is ours — printed, rc 0
+#   none yet             rc 1, so the caller polls again
+#   more than one        rc 2 — something else started a conversation in the
+#                        same moment, and there is NO way to tell which is ours
+#
+# The first version took 'head -1' of the difference. Under a race that picks
+# whichever id sorts first, which is a coin toss dressed as a determination —
+# and it reintroduces the exact failure this mechanism exists to remove: a
+# watcher attached to somebody else's run, reporting its events as yours. This
+# project has already lost a night to that once.
+#
+# Refusing to answer is the honest outcome, because the caller can say so out
+# loud, and a warning the user can act on beats a silent 50% chance.
+agent_new_conversation() {
+  local before="${1:-}" after="${2:-}" new n
+  new="$(comm -13 <(printf '%s\n' "${before}" | grep -E '^[A-Za-z0-9_-]+$' | sort -u) \
+                  <(printf '%s\n' "${after}"  | grep -E '^[A-Za-z0-9_-]+$' | sort -u) \
+         2>/dev/null || true)"
+  n="$(printf '%s' "${new}" | grep -c . || true)"
+  case "${n}" in
+    1) printf '%s' "${new}" ;;
+    0) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # Where 'lca agent task' records the conversation it started, so that watching
 # it is a lookup rather than an inference. Per-user, needs no root, and outlives
 # a /tmp sweep.

@@ -141,7 +141,7 @@ with `sudo lca harden` / `sudo lca status`; `harden` also (re)installs the boot
 service, so one command closes the ports for good rather than until the next
 reboot.
 
-## The second tier: an agent that does the work itself
+## The second tier: an autonomous agent (experimental)
 
 `lca` (aider) edits files in the directory you are standing in, one request at
 a time, and you read the diff. There is a tier above it: you give a task to a

@@ -703,6 +703,29 @@ so a field being *accepted* proves nothing about it being *used*. That is
 precisely why the same rules are in the prompt text, where they are known to be
 read. If the suffix works it is the better home; if it does not, nothing is lost.
 
+**The experiment that settles it**, on a machine where the tier is running. It
+puts an instruction ONLY in the suffix, and nothing about it in the task, so the
+answer is unambiguous either way — a token that could only have come from the
+suffix:
+
+```bash
+curl -fsS -X POST "http://127.0.0.1:${AGENT_PORT:-3001}/api/v1/app-conversations" \
+  -H 'Content-Type: application/json' -d '{
+    "initial_message":{"role":"user","content":[{"type":"text",
+      "text":"Reply with one short sentence naming this directory. Create no files."}]},
+    "agent":{"system_message_suffix":"You MUST begin every message you write with the exact token LCA-SUFFIX-OK."}
+  }' >/dev/null && sleep 240 && lca agent logs 2>&1 | grep -c LCA-SUFFIX-OK
+```
+
+A count above zero means the suffix reaches the model and the two rules are
+better placed there than in the task text. Zero means it is the second field
+this build accepts and ignores, and the prompt text is carrying them alone —
+which is what they are written to survive. Either answer is worth having;
+right now the code assumes the worse one and works regardless.
+
+The 240-second wait is the 3b's first-token latency on a small box, not a
+protocol requirement — on faster hardware the log has the answer sooner.
+
 ### The open question, and the experiment that would answer it
 
 None of this says a bigger model fixes the root cause. Nobody has run these two

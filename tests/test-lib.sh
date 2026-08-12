@@ -3849,14 +3849,43 @@ check "every conversation id is read out of a listing" \
   ids_are_read_from_a_listing
 new_conversation_is_the_difference() {
   local before after new
-  before="$(agent_conversation_ids "${CONV_BEFORE}" | sort -u)"
-  after="$(agent_conversation_ids "${CONV_AFTER}" | sort -u)"
-  new="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${after}"))"
+  before="$(agent_conversation_ids "${CONV_BEFORE}")"
+  after="$(agent_conversation_ids "${CONV_AFTER}")"
+  new="$(agent_new_conversation "${before}" "${after}")" || {
+    echo 'the new conversation was not identified at all' >&2; return 1; }
   [[ "${new}" == "the-new-one" ]] || {
     printf 'the new conversation was identified as "%s"\n' "${new}" >&2; return 1; }
 }
 check "...and the one we just started is the one that was not there before" \
   new_conversation_is_the_difference
+# ...and when TWO appear at once it must refuse rather than pick one.
+#
+# The first version took 'head -1' of the difference, which under a race returns
+# whichever id sorts first — a coin toss dressed as a determination. Demonstrated
+# before this was changed: with 'mine' and 'someone-elses' both new, it returned
+# 'mine' purely because 'm' sorts before 's'. Half the time that is a watcher
+# attached to a stranger's run, reporting their events as yours, which is the
+# exact failure the whole set-difference mechanism exists to remove.
+conversation_race_is_refused_not_guessed() {
+  local before after rc=0
+  before="$(agent_conversation_ids "${CONV_BEFORE}")"
+  after="$(agent_conversation_ids '{"items":[{"id":"old-one"},{"id":"older"},{"id":"mine"},{"id":"someone-elses"}]}')"
+  agent_new_conversation "${before}" "${after}" >/dev/null || rc=$?
+  (( rc == 2 )) || {
+    printf 'two conversations started at once and this answered with rc %s instead of refusing\n' "${rc}" >&2
+    return 1; }
+}
+check "...and two starting at once is refused, not guessed at" \
+  conversation_race_is_refused_not_guessed
+# Nothing new yet is a different answer from an ambiguous one: the caller polls
+# on the first and stops on the second.
+check "...and 'not there yet' is its own answer, so the caller can poll" \
+  test "$(agent_new_conversation 'a
+b' 'a
+b' >/dev/null; echo $?)" = 1
+# The fresh-container case, where there is nothing to differ from.
+check "...and the first conversation on an empty machine is still identified" \
+  test "$(agent_new_conversation '' 'the-only-one')" = "the-only-one"
 check "...and reports nothing once it is published there" \
   test -z "$(promise_gaps_with true "${LISTENERS_FIXED}")"
 # Intent first, the same rule guarded_ports uses: a tier that is switched off

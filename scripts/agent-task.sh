@@ -125,15 +125,21 @@ curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
 # Polled rather than assumed: the conversation appears in the listing a moment
 # after the POST returns.
 CID=""
+AMBIGUOUS=false
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
-  if [[ -n "${AFTER}" ]]; then
-    # The ids that were not there before. comm needs both sides sorted, and an
-    # empty BEFORE is the normal case on a fresh container.
-    CID="$(comm -13 <(printf '%s\n' "${BEFORE}" | sort -u) \
-                    <(printf '%s\n' "${AFTER}" | sort -u) 2>/dev/null \
-           | grep -E '^[A-Za-z0-9_-]+$' | head -1 || true)"
-    [[ -n "${CID}" ]] && break
+  RC=0
+  CID="$(agent_new_conversation "${BEFORE}" "${AFTER}")" || RC=$?
+  if (( RC == 0 )) && [[ -n "${CID}" ]]; then
+    break
+  fi
+  CID=""
+  # rc 2 is "more than one appeared", and polling again cannot unmake that —
+  # both are real conversations now. Stop and say so rather than waiting out
+  # nine more rounds to give the same non-answer.
+  if (( RC == 2 )); then
+    AMBIGUOUS=true
+    break
   fi
   sleep 2
 done
@@ -142,6 +148,11 @@ if [[ -n "${CID}" ]]; then
   agent_conversation_record "${CID}" \
     || warn "Could not record the conversation id at ${AGENT_CONVERSATION_FILE}; 'lca agent watch' will fall back to picking the newest sandbox."
   ok "Conversation ${CID}"
+elif [[ "${AMBIGUOUS}" == "true" ]]; then
+  # The one case where guessing would be worse than admitting it. Two
+  # conversations appeared between the snapshot and the poll, so one of them is
+  # this task and the other is not, and nothing in the listing says which.
+  warn "Your task was submitted and is running — but another conversation started at the same moment, so this cannot tell which of them is yours. Nothing was recorded, deliberately: picking one would be a coin toss, and a watcher on the wrong run reports somebody else's progress as yours. Stop the other run, or read this one directly: lca agent logs"
 else
   # Said plainly rather than left as a silent degradation: the task IS running,
   # and only the identification failed.
