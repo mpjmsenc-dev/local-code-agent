@@ -675,10 +675,30 @@ demonstrate it. The honest position is now:
 - and treat the *size* of that problem as **unmeasured**, because the runs that
   would have measured it were broken in two ways that have since been fixed.
 
-The measurement worth having is a re-run of these two tasks on the fixed code.
-Nobody has done it yet. Until somebody does, this page will not tell you how
-good the 3b is at agent work — only that the plumbing beneath it now delivers
-the whole prompt and waits long enough for the answer.
+#### RESULT PENDING — the re-run that measures this
+
+<!-- PLACEHOLDER: fill this table in from the droplet re-run, then delete this
+     comment. Do not paraphrase the result into the prose above; this table is
+     where it lands, so the finding is recorded once and in one place. -->
+
+The measurement worth having is a re-run of these tasks on the fixed code, with
+the sharpened `config/CONVENTIONS.md` rules, the corrected request timeout and
+an untruncated prompt. It is in progress on the droplet.
+
+| | |
+|---|---|
+| Task | `wordcount.py` — stated output format, error handling, create a test file, run it, show the output |
+| Configuration | `3b-agent` @ 16384, `AGENT_REQUEST_TIMEOUT=1800`, `AGENT_MAX_OUTPUT_TOKENS` set, full prompt delivered |
+| Prompt actually received | *pending* |
+| Did it write to the named directory? | *pending* |
+| Did it run what it built? | *pending* |
+| Wall clock | *pending* |
+| Verdict | *pending* |
+
+**Until that table is filled in, this page does not tell you how good the 3b is
+at agent work.** It tells you the plumbing beneath it now delivers the whole
+prompt and waits long enough for the answer — which is a different claim, and
+the only one currently supported.
 
 Two things changed because of these runs:
 

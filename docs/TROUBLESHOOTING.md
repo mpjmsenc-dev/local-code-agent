@@ -389,6 +389,47 @@ So on the base droplet's rung: ask for one file at a time, keep the tests, and
 expect to fix small logic yourself. From ~12 GB of RAM auto-tune moves you to
 7b and the follow-up loop starts working — at roughly three minutes a round.
 
+## The agent ignored my instructions, wrote files in the wrong place, or sat "running" for forty minutes doing nothing
+
+**Check the configuration below before concluding the model is too small.** All
+three of those symptoms were produced on this project by two configuration
+defects, and all three were misdiagnosed as "the 3b cannot do it" — by the
+people who wrote this page, for days.
+
+| symptom | what it actually was |
+|---|---|
+| wrote its file outside the repo it was given | the prompt was **truncated** before the working-directory rule |
+| ignored explicit instructions in the task | same — it never received that half of the task |
+| sat *"running"* for 38 minutes having executed nothing | every reply was **discarded at 300 s** while the model took 901 s |
+
+**The truncation.** With `max_output_tokens` unset, the client reserved half the
+context window for its own reply. An 18,313-token prompt was cut to 8,194 — the
+agent read **under half** its instructions, and there is no error for this: the
+run proceeds, obeys the part it received, and looks like a model that ignores
+you. `AGENT_MAX_OUTPUT_TOKENS` (default 2048) is the setting; it is capped at
+half the window, because past that the reservation is larger than what it
+leaves.
+
+**The timeout.** The client default of 300 s is shorter than a single step on
+CPU-only hardware — measured at 901 s here. Every step was thrown away
+mid-generation, so the conversation stayed open, the container stayed healthy,
+and nothing ever completed. `AGENT_REQUEST_TIMEOUT` (default 1800) is the
+setting. A slower box should raise it; a box with a GPU will never reach it.
+
+Both defaults are correct now, so this bites you only if you have overridden
+them or are running an older checkout. To check what you actually have:
+
+```bash
+lca check            # validates both, and says what a bad value silently does
+lca agent logs       # a step that was cut off ends mid-generation, with no error
+```
+
+**The general lesson, which is why this entry is first:** on a small local
+model it is always tempting to blame the model, and twice here that was wrong.
+A model that receives half its instructions and has every long reply discarded
+is not being measured. Rule out the plumbing first — it is cheap, and it is
+where both of these lived.
+
 ## The agent said it finished, and the code does not run
 
 This is the failure mode of the agent tier at the small model rungs, and it is
