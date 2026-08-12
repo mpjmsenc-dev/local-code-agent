@@ -104,7 +104,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -135,6 +135,14 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_warn "BACKUP_AGENT_MAX_MB='${value}' is not a whole number, so the agent workspace is skipped rather than risking an unbounded archive. Set a number (or 0 for no ceiling, on purpose) in ${ENV_FILE}." ;;
     AGENT_STUCK_STRIKES)
       p_warn "AGENT_STUCK_STRIKES='${value}' is not a whole number, so a run that keeps failing the same way loops until it hits another limit. Set a number (or 0 to never give up, on purpose) in ${ENV_FILE}." ;;
+    AGENT_MAX_OUTPUT_TOKENS)
+      p_warn "AGENT_MAX_OUTPUT_TOKENS='${value}' is not a positive number, so the agent falls back to 2048. Unset entirely, the client reserved HALF the window for its reply and truncated an 18,313-token prompt to 8,194 — the agent read under half its instructions. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+    AGENT_REQUEST_TIMEOUT)
+      p_warn "AGENT_REQUEST_TIMEOUT='${value}' is not a positive number, so the agent falls back to 1800 seconds. Too low and every step is discarded mid-generation: at the client default of 300 this hardware, measured at 901 s per reply, threw away every step and sat 'running' having executed nothing. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+    # No catch-all arm on purpose: a setting added to the loop above without a
+    # message here prints nothing at all, which is the silent failure this whole
+    # section exists to remove. The gate that guards this loop checks only that
+    # a numeric key is IN the list — not that it says anything when it is wrong.
   esac
 done
 

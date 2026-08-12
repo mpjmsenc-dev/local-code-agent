@@ -537,6 +537,17 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # where the ladder put it; only the agent gets this. Never applied below the
   # server default — see agent_model_context.
   AGENT_MODEL_CONTEXT="${AGENT_MODEL_CONTEXT:-16384}"
+  # Both of these were found on a live droplet and both were the difference
+  # between a run that works and a run that does nothing while looking busy.
+  #
+  # Unset, the client reserved half the window for its reply: an 18,313-token
+  # prompt was truncated to 8,194, so the agent read under half its instructions
+  # — the working-directory rule among the half it never saw.
+  AGENT_MAX_OUTPUT_TOKENS="${AGENT_MAX_OUTPUT_TOKENS:-2048}"
+  # And the default client timeout discarded every reply that took longer than
+  # 300 s while this hardware was measured taking 901 s, so steps were thrown
+  # away mid-generation and the run sat "running" having executed nothing.
+  AGENT_REQUEST_TIMEOUT="${AGENT_REQUEST_TIMEOUT:-1800}"
   # The relay that lets containers reach Ollama without Ollama leaving
   # loopback. Off by default like every other component here; the agent tier is
   # what needs it, and 'lca check' says so when the agent is on without it.

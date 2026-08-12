@@ -643,16 +643,42 @@ It also wrote to `/workspace/wordcount.py` while working in
 `/workspace/project/TestAppOllama1Coding`, so the deliverable landed outside the
 repo entirely.
 
-**The root cause is one thing, and it is not the code quality: the agent
-declares completion without executing its own work.** One execution would have
-caught the `NameError` in a second. Run 1 was the same shape — `touch` plus a
-success claim. Two very different tasks, one failure mode.
+#### These two runs were later explained, and it was not mainly the model
 
-**So, plainly: at the 3b rung this tier writes plausible-looking code and
-reports success without running it.** Treat its output as a draft that has never
-been executed, because that is exactly what it is. The tier is genuinely useful
-for scaffolding and for tasks you were going to review line by line anyway. It
-is not useful for anything you intend to trust unread.
+This section used to read the two runs as evidence that the agent "declares
+completion without executing its own work". **They cannot carry that weight, and
+the correction matters more than the original claim**, because two defects in
+this project's own configuration meant those runs never received the
+instructions they were being judged against:
+
+- **A 300-second client timeout against replies that took 901 seconds.** Every
+  step was discarded at five minutes while the model was still producing it, so
+  a run could sit "running" for half an hour having executed nothing.
+- **`max_output_tokens` unset, so the client reserved half the window for a
+  reply.** An 18,313-token prompt was truncated to 8,194 — **the agent read
+  under half its instructions**, and the working-directory rule was in the half
+  it never saw. That alone explains the file landing in `/workspace`, which this
+  page previously attributed to the model ignoring a directory it had been
+  given.
+
+Both are fixed in code. What that means for the two runs above: **they are no
+longer evidence of anything about the model.** A model that receives half its
+instructions and has every long reply thrown away is not being measured.
+
+**What survives the correction**: the behaviour is *still observed* — the tier
+does declare completion without running what it built, and run 2's code did die
+on its first executed line. What is gone is the claim that these runs
+demonstrate it. The honest position is now:
+
+- treat this tier's output as **a draft that has not been executed**, because at
+  this rung it often has not been;
+- and treat the *size* of that problem as **unmeasured**, because the runs that
+  would have measured it were broken in two ways that have since been fixed.
+
+The measurement worth having is a re-run of these two tasks on the fixed code.
+Nobody has done it yet. Until somebody does, this page will not tell you how
+good the 3b is at agent work — only that the plumbing beneath it now delivers
+the whole prompt and waits long enough for the answer.
 
 Two things changed because of these runs:
 
@@ -679,13 +705,12 @@ lca agent task --watch --dir /workspace/project/myrepo "..."   # and supervise i
 
 What it does that the web UI does not:
 
-- **Names the working directory twice.** In the prompt text, which is
-  demonstrably read, and in `system_message_suffix`, which is the documented
-  home for standing instructions. And it names it as an *instruction* — *"create
-  and edit files ONLY under `<dir>`… do not write to /workspace or any directory
-  above"* — because both failing runs were *given* a working directory and wrote
-  above it anyway. Stating it was not enough; forbidding the alternative is the
-  part that was missing.
+- **Names the working directory in the prompt text**, which is the only place
+  that reaches the model — see the note on `system_message_suffix` below. And it
+  names it as an *instruction* — *"create and edit files ONLY under `<dir>`… do
+  not write to /workspace or any directory above"* — because stating a working
+  directory is demonstrably not enough on its own; forbidding the alternative is
+  the part that was missing.
 - **Carries the two rules with the task**, the same two `config/CONVENTIONS.md`
   holds, from one function so the three surfaces cannot drift apart.
 - **Returns the conversation id**, found by listing conversations before and
@@ -697,34 +722,22 @@ What it does that the web UI does not:
   stop it *before* the task is posted, with the command that fixes them. A task
   accepted by a broken stack looks fine and produces nothing for half an hour.
 
-**Honest status of the suffix**: unverified on this build. `agent_settings.tools`
-round-trips through the settings API and is then ignored — 22 tools still load —
-so a field being *accepted* proves nothing about it being *used*. That is
-precisely why the same rules are in the prompt text, where they are known to be
-read. If the suffix works it is the better home; if it does not, nothing is lost.
+**`system_message_suffix` is not available on this build. Settled, not
+suspected.** It was carried here as "unverified" for a while; the droplet
+answered it. The app **overwrites the field with its own `<HOST>` value**, and
+our text appears nowhere in 390 KB of conversation state. It is not that the
+field is ignored — it is that the field is not ours to set.
 
-**The experiment that settles it**, on a machine where the tier is running. It
-puts an instruction ONLY in the suffix, and nothing about it in the task, so the
-answer is unambiguous either way — a token that could only have come from the
-suffix:
+So there are **not two homes** for these rules, and any wording suggesting there
+are is wrong: `agent_task_prompt` is the only one that works, and it is the only
+one the code relies on. This is the second field on this build that accepts a
+value and does not use it — `agent_settings.tools` round-trips and 22 tools
+still load — which is why nothing here is believed until a run shows it.
 
-```bash
-curl -fsS -X POST "http://127.0.0.1:${AGENT_PORT:-3001}/api/v1/app-conversations" \
-  -H 'Content-Type: application/json' -d '{
-    "initial_message":{"role":"user","content":[{"type":"text",
-      "text":"Reply with one short sentence naming this directory. Create no files."}]},
-    "agent":{"system_message_suffix":"You MUST begin every message you write with the exact token LCA-SUFFIX-OK."}
-  }' >/dev/null && sleep 240 && lca agent logs 2>&1 | grep -c LCA-SUFFIX-OK
-```
-
-A count above zero means the suffix reaches the model and the two rules are
-better placed there than in the task text. Zero means it is the second field
-this build accepts and ignores, and the prompt text is carrying them alone —
-which is what they are written to survive. Either answer is worth having;
-right now the code assumes the worse one and works regardless.
-
-The 240-second wait is the 3b's first-token latency on a small box, not a
-protocol requirement — on faster hardware the log has the answer sooner.
+**That question is now settled and the answer is no**, so the experiment that
+used to be written out here has been removed rather than left for somebody to
+run: the field is overwritten by the app before it reaches the model. See the
+paragraph above.
 
 ### The open question, and the experiment that would answer it
 
