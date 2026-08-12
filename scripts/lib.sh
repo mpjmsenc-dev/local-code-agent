@@ -2818,7 +2818,7 @@ agent_conversation_pick() {
 # for a build that honours the field; it must not be counted as a second place
 # the rules live. The place they live is agent_task_prompt.
 agent_task_suffix() {
-  printf '%s' "Always work inside the working directory you were given, not the sandbox root. Before claiming a task is complete, run what you built and show its real output; never report success on code you have not executed."
+  printf '%s' "Never write outside the working directory you were given, and never report a task complete without executing what you built — exercise what the task named and paste the real output; never report success on code you have not executed. Before finishing, re-read the task and check each requirement against what you did."
 }
 
 # agent_task_prompt DIR TASK — the text a task is actually submitted as.
@@ -2842,7 +2842,22 @@ agent_task_prompt() {
   printf 'Create and edit files ONLY under %s, using absolute paths that start\n' "${dir}"
   printf 'with %s/. Do not write to /workspace or any directory above %s.\n\n' "${dir}" "${dir}"
   printf 'Task: %s\n\n' "${task}"
-  printf '%s\n' "Before you say this is done: run what you built and show its real output. If the task named specific outputs, files or behaviours, exercise them and paste what actually happened. Do not report success on code you have not executed."
+  # Three prohibitions, and they are prohibitions on purpose. The two runs this
+  # command exists because of were both GIVEN the right behaviour and did the
+  # other thing; what worked in the directory rule was forbidding the
+  # alternative, so all three now name what must not happen. Each one is a
+  # different observed failure from the wordcount run, in the order it failed:
+  #
+  #   it never ran the file        (it quoted the code back and said "you can
+  #                                now use this script"; the first executed
+  #                                line raises NameError — no imports at all)
+  #   it wrote above its directory (/workspace/wordcount.py while working in
+  #                                /workspace/project/TestAppOllama1Coding)
+  #   it never checked the task    (a test file and a shown run were asked for
+  #                                in plain words, and neither was attempted)
+  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Do not report success on code you have not executed."
+  printf '%s\n' "Never write outside ${dir}. Not /workspace, not anywhere above it."
+  printf '%s\n' "Before finishing, re-read the task above and check each stated requirement against what you actually did. If any requirement is untouched, the task is not complete."
 }
 
 # agent_conversation_ids PAYLOAD — every conversation id in a listing, one per

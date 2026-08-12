@@ -10,6 +10,9 @@ Reword these and a gate fails, naming the phrase:
 
   Never report success on code you have not executed
   working directory you were given
+  without executing what you built
+  paste the real output
+  check each requirement
   smallest change that satisfies the request
   kills the script
   swallows the exit status
@@ -35,19 +38,21 @@ prose like this before you touch a rule.
 
 # Coding conventions
 
-- Before saying a task is done, RUN what you built and show its real output. If
-  the task named outputs or behaviours, exercise them. Never report success on
-  code you have not executed.
-- Write files into the working directory you were given, not the sandbox root.
+- Never report a task complete without running what you built. If it named
+  outputs or behaviours, exercise them and paste the real output. Code you have
+  not run is a draft. Never report success on code you have not executed.
+- Never write outside the working directory you were given — not the sandbox
+  root, not anywhere above it.
+- Before finishing, re-read the task and check each requirement against what
+  you did. If any is untouched, it is not complete.
 - Make the smallest change that satisfies the request; don't refactor code you
   weren't asked to touch.
 - Match the surrounding file's style, naming and structure.
-- Comment non-obvious intent only. No license or authorship headers.
+- Comment non-obvious intent only. No authorship headers.
 - Preserve existing behavior and public interfaces unless asked to change them.
 - Prefer the stdlib and already-imported deps; call out any new one.
 - In shell: bash-clean under `set -euo pipefail`, and quote your expansions.
-- If the request is ambiguous, take the most conventional reading and state the
-  assumption in one line.
+- If the request is ambiguous, take the conventional reading and say so.
 
 ## Bash gotchas we've hit for real
 
@@ -88,9 +93,8 @@ above the line it excuses, reason above that.
 grep 'x ${VAR}' "$f"
 ```
 
-**5. A test that greps for a NAME passes on the definition.** Three gates here
-were written that way in one day; each stayed green after every caller was
-deleted. Drive the behaviour instead.
+**5. A test that greps for a NAME passes on the definition.** Drive the
+behaviour instead.
 
 ```bash
 grep -q 'helper' lib.sh             # BROKEN: lib.sh defines helper
