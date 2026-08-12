@@ -263,19 +263,11 @@ warn_if_model_unreachable() {
   fi
 }
 
-# agent_model_for_run — the model the agent should actually be pointed at.
-#
-# The derived one when it exists, because that is the only way this tier gets a
-# context bigger than the chat app's: OLLAMA_CONTEXT_LENGTH is server-wide, and
-# Ollama's OpenAI endpoint — the one the agent speaks — ignores a per-request
-# num_ctx entirely. The plain rung when it does not, so a missing derived model
-# degrades to a small window rather than to a 404 on a model that is not there.
-# 'lca check' says which of the two is in force.
-agent_model_for_run() {
-  local derived
-  derived="$(agent_model_name "${MODEL_NAME}")"
-  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${MODEL_NAME}"; fi
-}
+# agent_model_for_run lives in scripts/lib.sh, beside agent_llm_model and
+# agent_model_name — the two it is always used with. It was defined here, and
+# scripts/agent-task.sh sources lib.sh only, so the very first live run of
+# 'lca agent task' died on "agent_model_for_run: command not found" before it
+# could submit anything. See the note on the function itself.
 
 # seed_agent_settings — write the LLM settings the agent needs before it can
 # start ANY conversation.
@@ -341,11 +333,21 @@ seed_agent_settings() {
   # anywhere. Measured on 3b and 7b, through both /api/chat and
   # /v1/chat/completions; and with this false the 3b created the file, ran it
   # and finished the task.
+  # max_output_tokens is seeded for the reason spelled out at
+  # AGENT_MAX_OUTPUT_TOKENS in lib.sh: unset, the client reserved half the
+  # window for output and the prompt was truncated to 8,194 of 18,313 tokens.
+  # It is sent as a number, not a string — the settings API stores what it is
+  # given, and a quoted "2048" round-trips looking correct while reserving
+  # nothing.
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
+        --argjson out "$(agent_max_output_tokens)" \
+        --argjson tmo "$(agent_request_timeout)" \
         '{agent_settings_diff:{agent:"CodeActAgent",
                                llm:{model:$m, base_url:$u, api_key:"local-llm",
-                                    native_tool_calling:$native}}}')"
+                                    native_tool_calling:$native,
+                                    max_output_tokens:$out,
+                                    timeout:$tmo}}}')"
   curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
        -d "${body}" >/dev/null 2>&1 || true
   # Read back, because the POST's status code proved nothing. jq's // guards a
@@ -438,6 +440,52 @@ main() {
       ;;
     restart) main stop || true; main start ;;
     selftest) exec "${SCRIPT_DIR}/scripts/agent-selftest.sh" "$@" ;;
+    # gc — collect the sandboxes of conversations that are over, while the app
+    # stays up. 'stop' has always collected them, but only by taking the whole
+    # tier down with it, so on a machine that keeps the agent running they were
+    # never collected at all. This is that collection, without the outage.
+    #
+    # It ASKS, and the confirmation is not politeness: a sandbox has no host
+    # mount, so its filesystem is the only copy of whatever the agent built in
+    # it. --yes is there for a script that has already decided.
+    gc)
+      require_cmd docker
+      local reclaim="" line name why count=0 assume_yes=false answer=""
+      for arg in ${@+"$@"}; do
+        case "${arg}" in
+          -y|--yes) assume_yes=true ;;
+          -h|--help)
+            printf 'Usage: lca agent gc [--yes]\n\nRemoves running sandbox containers whose conversation has finished.\nIdle conversations are left alone — they are yours to resume.\n'
+            return 0 ;;
+          *) die "Unknown option: ${arg}. Try: lca agent gc --help" ;;
+        esac
+      done
+      reclaim="$(agent_reclaimable_sandboxes 2>/dev/null || true)"
+      if [[ -z "${reclaim}" ]]; then
+        ok "No sandboxes to collect: every running one belongs to a conversation that is still going, or the app could not be asked."
+        return 0
+      fi
+      count="$(grep -c . <<<"${reclaim}")"
+      step "Sandboxes whose conversation is over"
+      while IFS=$'\t' read -r name why; do
+        [[ -n "${name}" ]] || continue
+        info "${name} — ${why}"
+      done <<<"${reclaim}"
+      warn "A sandbox has no host mount: removing it deletes anything the agent built inside it that you have not copied out."
+      if [[ "${assume_yes}" != "true" ]]; then
+        printf 'Remove %s sandbox container(s)? [y/N] ' "${count}"
+        read -r answer || answer=""
+        [[ "${answer}" =~ ^[Yy]$ ]] || { info "Nothing removed."; return 0; }
+      fi
+      while IFS=$'\t' read -r name why; do
+        [[ -n "${name}" ]] || continue
+        if as_root docker rm -f "${name}" >/dev/null 2>&1; then
+          ok "Removed ${name}."
+        else
+          warn "Could not remove ${name} — remove it by hand: sudo docker rm -f ${name}"
+        fi
+      done <<<"${reclaim}"
+      ;;
     status)
       require_cmd docker
       if agent_container_running; then

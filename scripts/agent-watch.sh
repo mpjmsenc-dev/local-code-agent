@@ -257,8 +257,20 @@ main() {
       # — for as long as it was left running, with nothing anywhere saying why.
       # The conversation is now chosen by the newest running sandbox, which is
       # deterministic; this says when there was a choice to get wrong at all.
+      # ...and it must say which basis it ACTUALLY used. Since 'lca agent task'
+      # began recording the conversation it started, agent_conversation_ref
+      # prefers that record and only falls back to the newest sandbox when there
+      # is none — but this sentence went on announcing the fallback either way.
+      # On the first run where identification worked, it named the right
+      # conversation while describing the very inference the record exists to
+      # replace, which is the confidently-wrong shape this file works hardest to
+      # avoid: a reader who is told it guessed has no reason to trust it.
       if ambiguity="$(agent_conversation_warning 2>/dev/null)"; then
-        warn "More than one run is alive here — ${ambiguity}. This is watching the one belonging to the NEWEST sandbox (${conv_id}). If that is not the run you meant, stop the others first: lca agent stop, then remove any leftover oh-agent-server-* containers."
+        if [[ "$(agent_recorded_conversation 2>/dev/null || true)" == "${conv_id}" ]]; then
+          warn "More than one run is alive here — ${ambiguity}. This is watching the conversation 'lca agent task' started and recorded (${conv_id}), not a guess, so it is the right one. The others are only worth tidying if you are done with them: lca agent gc"
+        else
+          warn "More than one run is alive here — ${ambiguity}. Nothing recorded a conversation, so this is watching the one belonging to the NEWEST sandbox (${conv_id}). If that is not the run you meant, stop the others first: lca agent stop, then remove any leftover oh-agent-server-* containers."
+        fi
       fi
     elif [[ "${AGENT_STEP_SOURCE}" == "events" ]]; then
       warn "The agent's event API has not answered yet, so the step ceiling is not armed. It arms as soon as a conversation exists; the wall clock and the stuck detector are already on."

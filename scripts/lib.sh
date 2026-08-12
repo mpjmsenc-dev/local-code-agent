@@ -540,9 +540,28 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # Both of these were found on a live droplet and both were the difference
   # between a run that works and a run that does nothing while looking busy.
   #
-  # Unset, the client reserved half the window for its reply: an 18,313-token
-  # prompt was truncated to 8,194, so the agent read under half its instructions
-  # — the working-directory rule among the half it never saw.
+  # How much of the window the agent may spend on ONE reply. It is not a cap on
+  # verbosity, it is a cap on how much of the window the client RESERVES — and
+  # what is left is the only room the instructions have. Measured with nothing
+  # set, on the very first live run:
+  #
+  #   truncating input prompt   limit=8194  prompt=18313  keep=4  new=8194
+  #
+  # 16384 - 8190 = 8194. The client reserved half the window for output it was
+  # never going to produce, so an 18,313-token prompt was cut to 8,194 and the
+  # agent saw under half of its own instructions on every step — including the
+  # working-directory rule two failed droplet runs were blamed on. No wording
+  # fixes that; it is arithmetic. 2048 is generous for one reply from a coding
+  # agent and buys 6,142 more tokens of instruction back.
+  #
+  # Defaulted HERE, now, and that resolves a limitation the droplet session
+  # wrote down with a date on it: it left the fallback inside
+  # agent_max_output_tokens because every key load_env defaults must also appear
+  # in .env.example and the README's settings table — three files the suite
+  # gates against each other — and the docs were off-limits to that session.
+  # They are not off-limits any more; both keys are in .env.example, in the
+  # README table and validated by 'lca check'. agent_max_output_tokens stays: it
+  # does the clamping against the context window, which a default cannot.
   AGENT_MAX_OUTPUT_TOKENS="${AGENT_MAX_OUTPUT_TOKENS:-2048}"
   # And the default client timeout discarded every reply that took longer than
   # 300 s while this hardware was measured taking 901 s, so steps were thrown
@@ -2832,19 +2851,28 @@ agent_conversation_pick() {
 # Taken from config/CONVENTIONS.md's two measured rules rather than reworded, so
 # the three surfaces cannot drift: what aider is told, what the chat app is told
 # and what a submitted task is told are one decision.
+# NOT A WORKING CHANNEL on this build, and kept anyway — read the note beside
+# SUFFIX in scripts/agent-task.sh before relying on anything here. The app
+# overwrites system_message_suffix with its own value, so nothing this function
+# returns has ever reached an agent. It is sent because it is free and correct
+# for a build that honours the field; it must not be counted as a second place
+# the rules live. The place they live is agent_task_prompt.
 agent_task_suffix() {
   printf '%s' "Always work inside the working directory you were given, not the sandbox root. Before claiming a task is complete, run what you built and show its real output; never report success on code you have not executed."
 }
 
 # agent_task_prompt DIR TASK — the text a task is actually submitted as.
 #
-# Belt and braces, and the belt is the part with evidence. The directory is
-# stated in the PROMPT because that is demonstrably read — the selftest names an
-# absolute path and its file lands there every run, while two runs that named no
-# path wrote to the sandbox root. It is also in the system message suffix, which
-# is the documented home for standing instructions and is unverified on this
-# build: agent_settings.tools round-trips through the API and is then ignored,
-# so acceptance proves nothing about use.
+# The belt, and on this build there is no braces. The directory is stated in the
+# PROMPT because that is demonstrably read — the selftest names an absolute path
+# and its file lands there every run, while two runs that named no path wrote to
+# the sandbox root. This prompt is now the ONLY place the rules reach the agent:
+# the system message suffix they were also put in never arrives, because the app
+# overwrites that field with its own "<HOST>...</HOST>" value (measured on the
+# first live run — see the note beside SUFFIX in scripts/agent-task.sh).
+#
+# So the wording here is not one of two safeguards. It is the safeguard, which
+# is the reason it is a function driven by tests rather than a string typed once.
 #
 # A pure function so the wording can be driven by a test instead of read.
 agent_task_prompt() {
@@ -2966,6 +2994,59 @@ agent_conversation_count() {
 agent_live_sandboxes() {
   have docker || return 1
   as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
+}
+
+# agent_reclaimable_sandboxes — running sandboxes whose conversation is over,
+# one per line as "NAME<TAB>why".
+#
+# WHO OWNS A SANDBOX, settled. agent_orphan_sandboxes answers "nothing can
+# reach these" and is correct only while the APP IS DOWN — it returns nothing
+# at all when the app is up, which is deliberate: with the app running, a
+# sandbox may belong to a conversation somebody is still using. The cost of
+# that caution was never stated: while the app stays up, NOTHING collects a
+# sandbox whose conversation ended, and the app stays up for weeks.
+#
+# Measured on this box, with the app up 15 hours: three sandboxes alive, the
+# oldest 15 hours, holding 1,062 MiB of a 7.9 GiB machine — and the live agent
+# run that was supposed to be under test had its model OOM-killed twice while
+# they sat there. That is the whole bug: memory held by finished work, on the
+# rung where memory is the binding constraint.
+#
+# The app can answer the ownership question, and until now nothing asked it:
+# every conversation record names its sandbox_id and carries an
+# execution_status. So a sandbox is reclaimable when the conversation that owns
+# it has stopped, or when no conversation claims it at all.
+#
+# 'idle' is deliberately NOT reclaimable. It means the agent finished its turn
+# and is waiting for a human — a session somebody can still pick up, and the
+# work lives ONLY inside the container (the sandbox has no host mount, measured:
+# 'docker inspect' shows no Mounts at all). Removing one destroys the
+# deliverable. This function is therefore the input to a command a person runs,
+# never to an automatic sweep.
+#
+# Nothing is returned when the listing cannot be read: without it, "dead" is a
+# guess, and a wrong guess here deletes somebody's work.
+agent_reclaimable_sandboxes() {
+  local payload live name status
+  have jq || return 1
+  live="$(agent_live_sandboxes 2>/dev/null || true)"
+  [[ -n "${live}" ]] || return 1
+  payload="$(agent_conversations_payload 2>/dev/null || true)"
+  [[ -n "${payload}" ]] || return 1
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    status="$(printf '%s' "${payload}" \
+      | jq -r --arg s "${name}" \
+          '[.. | objects | select(.sandbox_id == $s)] | .[0].execution_status // "none"' \
+          2>/dev/null || true)"
+    case "${status}" in
+      # In use, or a human's to resume. Left alone.
+      running|starting|paused|idle) ;;
+      none) printf '%s\tno conversation refers to it\n' "${name}" ;;
+      "")   ;;
+      *)    printf '%s\tits conversation is %s\n' "${name}" "${status}" ;;
+    esac
+  done <<<"${live}"
 }
 
 # agent_conversation_ref — the conversation this run should be counting.
@@ -3458,6 +3539,82 @@ agent_live_port() {
 # spelled out at each call site.
 agent_llm_model() {
   printf 'openai/%s' "${1:-${MODEL_NAME}}"
+}
+
+# agent_model_for_run — the model the agent should actually be pointed at.
+#
+# The derived one when it exists, because that is the only way this tier gets a
+# context bigger than the chat app's: OLLAMA_CONTEXT_LENGTH is server-wide, and
+# Ollama's OpenAI endpoint — the one the agent speaks — ignores a per-request
+# num_ctx entirely. The plain rung when it does not, so a missing derived model
+# degrades to a small window rather than to a 404 on a model that is not there.
+# 'lca check' says which of the two is in force.
+#
+# It lives HERE, and not in agent.sh where it was written, because two scripts
+# need it and only one of them sourced the file that had it. The first live run
+# of 'lca agent task' died on the second line of its own preconditions:
+#
+#   agent-task.sh: line 85: agent_model_for_run: command not found
+#   [FAIL] The agent holds model 'openai/qwen2.5-coder:3b-agent', not
+#          'openai/qwen2.5-coder:3b' ... Fix it: lca agent restart
+#
+# Both halves of that are worth keeping in view. The command was unusable on
+# every box — the submission path this project built to be the way in could
+# never submit. And the message it died with accused the CONTAINER of holding
+# the wrong model, when the container was right and the caller had substituted
+# an empty string into the comparison; the remedy it named would have changed
+# nothing, twice. A missing function that degrades into a confident, wrong
+# diagnosis is worse than one that stops.
+agent_model_for_run() {
+  local derived
+  derived="$(agent_model_name "${MODEL_NAME}")"
+  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${MODEL_NAME}"; fi
+}
+
+# agent_max_output_tokens — the reply budget to seed, always a usable number.
+#
+# Guarded rather than trusted, because this value is subtracted from the
+# context window to decide how much of the prompt survives. A non-number would
+# be sent as JSON null and reserve the client's own default again — which is
+# the state that truncated 18,313 tokens to 8,194 — and a value at or above the
+# window would leave no room for the prompt at all. Both fall back to the
+# default instead of being passed on.
+# agent_request_timeout — how long the agent waits for ONE model reply.
+#
+# The client default is 300 seconds. On this rung a single step is not close to
+# that, and the failure it produces looks like nothing at all. Measured on the
+# live run, after the truncation above was fixed:
+#
+#   litellm.Timeout: APITimeoutError - Request timed out.
+#     timeout value=300.0, time taken=901.33 seconds. Attempt #1
+#     ... Attempt #2
+#
+# 901 seconds of CPU inference thrown away at 300, then retried, then thrown
+# away again. Ollama finishes the work every time — the answer simply arrives
+# after nobody is listening — so the run neither progresses nor errors: it sat
+# "running" for 38 minutes having executed nothing, which is exactly the shape
+# of the two droplet runs this project has been chasing.
+#
+# 1800 is three times the longest step measured here, because the number that
+# matters is not "generous" but "longer than this machine takes". A box with a
+# GPU will never reach it; a slower box than this one should raise it. Guarded
+# like the token budget: a non-number or a nonsense value falls back rather than
+# quietly restoring the default that does not work.
+agent_request_timeout() {
+  local want="${AGENT_REQUEST_TIMEOUT:-1800}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=1800
+  (( want >= 60 )) || want=1800
+  printf '%s' "${want}"
+}
+
+agent_max_output_tokens() {
+  local want="${AGENT_MAX_OUTPUT_TOKENS:-2048}" ctx="${AGENT_MODEL_CONTEXT:-16384}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=2048
+  [[ "${ctx}" =~ ^[0-9]+$ ]] || ctx=16384
+  # Half the window is the most this may claim: past that the reservation is
+  # bigger than what it leaves, which is the shape of the bug it exists to fix.
+  (( want > 0 && want <= ctx / 2 )) || want=2048
+  printf '%s' "${want}"
 }
 
 # agent_llm_base_url — the Ollama endpoint as seen from INSIDE the container.

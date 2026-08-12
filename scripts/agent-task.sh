@@ -11,7 +11,8 @@
 # This is the path where it can be. Everything that made those runs fail is
 # handled here rather than hoped for:
 #
-#   the directory   stated in the prompt AND in the system message suffix
+#   the directory   stated in the prompt (the suffix is sent too and does not
+#                   arrive — the app overwrites it; see the note at SUFFIX)
 #   verification    the "run what you built" rule travels with the task
 #   the id          returned, so watching is a lookup and not a guess
 #   preconditions   checked BEFORE submitting, so a task never goes into a
@@ -89,27 +90,56 @@ GOT_MODEL="$(curl -fsS --max-time 10 "${BASE}/api/v1/settings" 2>/dev/null \
   || die "The agent holds model '${GOT_MODEL:-none}', not '${WANT_MODEL}', so this task would run against the wrong model or none at all. Fix it: lca agent restart"
 
 # --- the prompt --------------------------------------------------------------
-# Belt and braces, deliberately. The directory goes in the PROMPT TEXT because
-# that is the part the model demonstrably reads — the selftest's task names a
-# path and the file lands there — and into the system message suffix below
-# because that is the documented place for standing instructions. Neither alone
-# is trusted: the model ignored the working directory it was actually given.
+# One channel, not two, and this is it. The directory goes in the PROMPT TEXT
+# because that is the part the model demonstrably reads — the selftest's task
+# names a path and the file lands there, and on the first live run through this
+# command the file landed under the named directory with nothing written above
+# it. The suffix below was meant to be the second statement of the same rule and
+# never arrives at all (see the note at SUFFIX), so this text is carrying it
+# alone.
 PROMPT="$(agent_task_prompt "${DIR}" "${TASK}")"
 
 # The two rules from config/CONVENTIONS.md, on the channel OpenHands documents
 # for standing instructions.
 #
-# HONEST STATUS: unverified on this build. agent_settings.tools round-trips
-# through the settings API and is then ignored — 22 tools still load — so a
-# field being accepted here proves nothing about it being used. That is exactly
-# why the same two rules are in the prompt text, where they are known to be
-# read. If the suffix works it is better placed; if it does not, nothing is lost.
+# SETTLED, and the answer is no: this build does not use it. Measured on the
+# first live run, by reading what the agent actually ran with rather than what
+# the API accepted:
+#
+#   SystemPromptEvent      14,640 chars, neither rule present
+#   base_state.json        "system_message_suffix":
+#                            "<HOST>\nhttp://host.docker.internal:3001</HOST>"
+#
+# The app does not merely ignore the field — it OVERWRITES it with its own
+# value, which it needs for the sandbox's host address. So a caller cannot use
+# system_message_suffix on this build at all, and the earlier "unverified"
+# note was too generous: it is not unverified now, it is unavailable.
+#
+# It is still sent. It costs one JSON field, it is correct on any build that
+# does honour it, and the alternative — dropping it — would leave nothing to
+# re-test when OpenHands is upgraded. What has been dropped is the CLAIM: the
+# two rules have exactly one home that works, the prompt text, and everything
+# in this repo that implied two has been corrected to say so.
 SUFFIX="$(agent_task_suffix)"
 
 # --- submit ------------------------------------------------------------------
 # The conversations that exist BEFORE we submit, so ours can be identified by
 # difference rather than by being newest. The POST's own id is not usable: it
 # answers with a start-task id the events API knows nothing about (measured).
+# NOT serialised, deliberately, and it was for one commit. An flock around this
+# section would let two runs of this command take turns instead of both seeing
+# the other's conversation as new — but holding a lock across the submit needs a
+# command-less 'exec 9>FILE', and this suite forbids that for a good reason: a
+# command-less exec with a redirection applies to the SHELL, so the obvious
+# spelling also sends every later warning to /dev/null. The subshell idiom that
+# avoids exec cannot work here either, because the id has to outlive the lock.
+#
+# Nothing is lost in correctness. Two conversations appearing at once is already
+# refused rather than guessed at (agent_new_conversation, rc 2), so the worst
+# outcome of a collision is that neither run records an id and both say so. What
+# a lock would have added is convenience — the second run waiting a moment and
+# then succeeding — and that is not worth either weakening a gate or silencing
+# this script's own error output.
 BEFORE="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
 
 step "Submitting the task"
@@ -122,11 +152,38 @@ curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
   || die "The agent refused the task at ${BASE}/api/v1/app-conversations. Its own log will say why: lca agent logs"
 
 # --- identify it -------------------------------------------------------------
-# Polled rather than assumed: the conversation appears in the listing a moment
-# after the POST returns.
+# Polled rather than assumed: the conversation appears in the listing some time
+# after the POST returns — and "a moment" was wrong by a factor of two.
+#
+# MEASURED, twice, on this box. The POST answers as soon as the task is
+# accepted; the app then provisions a sandbox container before the conversation
+# is visible in the listing at all:
+#
+#   run 1  submitted 18:30:22   conversation created 18:31:19   lag 57s
+#   run 2  submitted 19:01:35   conversation created 19:02:18   lag 43s
+#
+# The loop below was ten tries of two seconds — a window of about 25 seconds,
+# which is not half the shortest lag observed. So it never once succeeded: both
+# live runs printed "its conversation id could not be identified" and fell back
+# to the newest-sandbox guess, which is the exact inference this whole
+# mechanism exists to avoid. Replaying the same set-difference by hand against
+# the same API a minute later identifies the conversation correctly every time;
+# nothing was wrong with the method, only with how long it was given.
+#
+# Three minutes, because the lag is sandbox creation and that is bounded by an
+# image pull on a cold box, not by anything this script controls. It costs
+# nothing when identification succeeds on the first pass, which is the common
+# case once a sandbox image is local.
 CID=""
 AMBIGUOUS=false
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+# 90 tries of two seconds, not ten. The count is the whole difference between a
+# mechanism that works and one that has never once succeeded: the conversation
+# does not reach the listing until the app has built a sandbox for it, which was
+# 57s and 43s on the two live runs measured here, against a window of about 25.
+# Both runs therefore fell back to the newest-sandbox guess this exists to
+# replace, and neither failure was the set difference's fault — replayed by hand
+# a minute later it names the right conversation every time.
+for attempt in $(seq 1 90); do
   AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
   RC=0
   CID="$(agent_new_conversation "${BEFORE}" "${AFTER}")" || RC=$?
@@ -141,6 +198,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     AMBIGUOUS=true
     break
   fi
+  # Said once, when the wait stops looking instant. The lag is sandbox
+  # creation — up to a minute here, longer on a box pulling the image.
+  (( attempt == 5 )) && info "Waiting for the app to register the conversation (it is creating a sandbox first)..."
   sleep 2
 done
 

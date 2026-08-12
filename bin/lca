@@ -43,7 +43,7 @@ Usage: lca [command] [args...]
   lca status              kill-switch + guard status (needs sudo)
   lca harden              re-close ports 3000/11434 now and on every boot (sudo)
   lca webui <cmd>         start|stop|restart|status|url|logs
-  lca agent <cmd>         autonomous agent: start|stop|restart|status|url|logs|watch|selftest
+  lca agent <cmd>         autonomous agent: start|stop|restart|status|url|logs|watch|selftest|task|gc
   lca relay <cmd>         Ollama relay for containers: status|install|remove
   lca help                this text
 
