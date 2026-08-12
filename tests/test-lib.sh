@@ -7871,9 +7871,17 @@ check "free_gb walks up to a directory that exists" \
 check "...and answers for its nearest existing parent" \
   test "$(free_gb /no/such/path/at/all)" = "$(free_gb /)"
 models_dir_with() {  # OLLAMA_MODELS HOME -> the directory chosen
+  # The system candidate is pointed somewhere that does not exist, so both
+  # branches below are decided by this fixture rather than by whether the
+  # machine running the suite happens to have Ollama installed. It does here —
+  # /usr/share/ollama/.ollama/models is real on any box that ran setup.sh — so
+  # the fallback assertion was answered with the system store and failed,
+  # on precisely the machines the product runs on. The seam is documented at
+  # ollama_models_dir; a caller that wants the real path passes nothing.
   bash -c 'source "$1" >/dev/null 2>&1
     OLLAMA_MODELS="$2"; HOME="$3"
-    ollama_models_dir' _ "${SANDBOX}/scripts/lib.sh" "$1" "$2"
+    OLLAMA_SYSTEM_MODELS_DIR="${4:-/no/such/system/models/dir}"
+    ollama_models_dir' _ "${SANDBOX}/scripts/lib.sh" "$1" "$2" "${3:-}"
 }
 check "an explicit OLLAMA_MODELS wins" \
   test "$(models_dir_with /somewhere/else /home/nobody)" = "/somewhere/else"
@@ -7882,6 +7890,15 @@ check "an explicit OLLAMA_MODELS wins" \
 # because free_gb walks up from there — that pairing is the whole fix.
 check "...and without one it falls back to the invoking user's home" \
   test "$(models_dir_with "" /home/nobody)" = "/home/nobody/.ollama/models"
+# ...and the branch that fallback is the tail of: a system store that EXISTS
+# wins over the invoking user's home. That is the branch every real
+# installation takes and nothing had ever asserted it — it was not reachable
+# from a test until the seam above existed, which is the same reason its
+# sibling was being answered by the host instead of by a fixture.
+SYSTEM_MODELS_FIXTURE="${SANDBOX}/system-models"
+mkdir -p "${SYSTEM_MODELS_FIXTURE}"
+check "the systemd account's store wins when it is really there" \
+  test "$(models_dir_with "" /home/nobody "${SYSTEM_MODELS_FIXTURE}")" = "${SYSTEM_MODELS_FIXTURE}"
 
 # Sourcing tune.sh recomputes SCRIPT_DIR from tune.sh's own location, silently
 # repointing the caller's at scripts/. Both callers restore it; if that restore
@@ -13258,13 +13275,25 @@ guard_message_names_only_guarded_ports() {
   # render_inbound_rules REFUSES port 22, and the success line said "WebUI
   # (port 22) ... reachable only via loopback and Tailscale" about a port
   # deliberately left wide open — the one sentence here that must never be
-  # wrong. It builds the list from what was actually guarded now.
+  # wrong. The first fix hand-checked != "22" beside a hand-built list of two
+  # labels, which cured the over-claim and left the under-claim: the drop set
+  # grew to four ports and the sentence still named WebUI and Ollama. That
+  # silence is how the relay gap survived an 'lca apply' that printed success.
+  #
+  # So the property asserted here is no longer "22 is special-cased" but the
+  # stronger one that makes both faults unreachable: the ports named are READ
+  # BACK from the ruleset on its way to nft, every one of them is gated on
+  # being in it, and there is exactly one place that can add a name. The
+  # behaviour itself — all four ports named, 22 never named — is asserted by
+  # running apply_inbound_guard in tests/test-netmode.sh.
   awk '/^apply_inbound_guard\(\) \{/ { inb = 1 }
        inb && /^\}/ { exit }
        inb && /^[[:space:]]*#/ { next }
-       inb && /guard_wp}" != "22"/ { found = 1 }
-       END { exit !found }' "${REPO}/netmode.sh" || {
-    echo 'the guard success message names ports without checking 22 was refused' >&2
+       inb && /guard_dropped=/ && /inbound/ { read_back = 1 }
+       inb && /guard_dropped}" ==/ { gated = 1 }
+       inb && /guarded\+=/ { adds++ }
+       END { exit !(read_back && gated && adds == 1) }' "${REPO}/netmode.sh" || {
+    echo 'the guard success message is not derived from the ruleset it just wrote — it can name a port that was refused, or stay silent about one that was guarded' >&2
     return 1; }
 }
 listing_flags_models_that_do_not_fit() {
@@ -13311,6 +13340,20 @@ STUB
   # 'show TAG' exits 0 only for a tag named in PRESENT; every other subcommand
   # succeeds silently so nothing else in the path dies on it. Quoted heredocs
   # for the fixed parts, so the fake's own $1/$2 need no disable directive.
+  #
+  # The single argument '--all' means every tag is downloaded, and it exists
+  # because the hand-typed alternative drifted from the ladder and took the
+  # suite red on the machines this project actually ships to. A caller that
+  # wanted "every rung is present" listed twelve tags — including 32b, 70b and
+  # 34b, which family_sizes has never offered — and omitted qwen2.5-coder:3b
+  # and qwen3:4b, which are the SMALL rungs, the ones list_recommended picks
+  # below 9 GiB. So on this 8 GiB box the ladder picked 3b, the stub said it
+  # was absent, and a test whose whole subject is "a model already on disk"
+  # ran against a model that was not. It passed only on hosts with >= 9 GiB.
+  # Deriving the list from family_sizes would fix today's drift and leave the
+  # same trap for the next rung; this cannot drift at all.
+  local all_present=false
+  [[ "${1:-}" == "--all" ]] && { all_present=true; shift; }
   {
     cat <<'HEAD'
 #!/bin/sh
@@ -13318,6 +13361,9 @@ case "$1" in
   show)
     case "$2" in
 HEAD
+    if [[ "${all_present}" == "true" ]]; then
+      printf '      *) exit 0 ;;\n'
+    fi
     for tag in "$@"; do printf '      %s) exit 0 ;;\n' "${tag}"; done
     cat <<'TAIL'
       *) exit 1 ;;
@@ -13396,13 +13442,12 @@ listing_is_quiet_when_the_disk_is_ample() {
 listing_does_not_demand_disk_for_a_model_already_here() {
   # Ordering. A model already on disk is not going to be downloaded, so the
   # space needed to download it is not a fact about it — the already-downloaded
-  # arm has to win. Every rung is stubbed present, so whichever one this
-  # machine's RAM picks is covered without the test knowing which.
+  # arm has to win. Every rung really is stubbed present now (see '--all' in
+  # recommend_with), so whichever one this machine's RAM picks is covered
+  # without the test knowing which — which is what the hand-typed list this
+  # replaced claimed to do and did not.
   local out
-  out="$(recommend_with 0 \
-    qwen2.5-coder:7b qwen2.5-coder:14b qwen2.5-coder:32b \
-    qwen3:8b qwen3:14b qwen3:32b \
-    deepseek-coder-v2:16b llama3.1:8b llama3.1:70b codellama:7b codellama:13b codellama:34b)"
+  out="$(recommend_with 0 --all)"
   local line; line="$(qwen_line "${out}")"
   grep -q 'already downloaded' <<<"${line}" || {
     echo "a model already on disk was not reported as such: ${line}" >&2; return 1; }
@@ -13882,6 +13927,18 @@ apply_ollama_run() {  # CASE [BG_CTX] [BG_KEEP] -> output, counters, liveness
   bash -c '
     source "$1" >/dev/null 2>&1
     CASE="$2"; BG_CTX="$3"; BG_KEEP="$4"
+    # .env'"'"'s side of the comparison, pinned AFTER the source — because the
+    # source ran load_env, which read the real /opt/local-code-agent/.env of
+    # whatever machine is running the suite. Both sides of an equality test
+    # were therefore host state: the "drifted" case below starts a server with
+    # context 4096, and on a box whose .env says 4096 (the 8 GiB rung'"'"'s own
+    # auto-tuned value, so: every small deployment) apply_ollama correctly
+    # reported a match and the test called that a bug. Measured here —
+    # "already matches .env (context 4096, keep-alive 30m)", unchecked=0.
+    # The stub above was careful that a running server must not decide the
+    # answer; this is the same care, on the half nobody stubbed.
+    OLLAMA_CONTEXT_LENGTH=8192
+    OLLAMA_KEEP_ALIVE=30m
     have() { return 0; }
     # The /proc read is stubbed, not performed: whether an ollama server is
     # running on the machine executing the tests must not decide the answer.

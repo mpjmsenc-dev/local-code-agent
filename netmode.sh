@@ -146,8 +146,46 @@ agent_port_from_env() {
   if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
     enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_AGENT:-false}" )"
+    # Defaulted to lib.sh's own 3001 for the reason spelled out in
+    # relay_port_from_env below: guarded_ports reads AGENT_PORT after load_env
+    # has defaulted it, so an .env with ENABLE_AGENT=true and no AGENT_PORT
+    # line left this reader silent while guarded_ports asked for 3001 — the
+    # same check-says-stale / apply-says-done loop, reachable by deleting a
+    # line rather than editing one. Not reachable from a stock .env, which
+    # writes the key; a hand-trimmed one gets there, and this file has now
+    # been the site of that loop twice.
     # shellcheck disable=SC1090
-    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${AGENT_PORT:-}" )"
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${AGENT_PORT:-3001}" )"
+  fi
+  [[ "${enabled}" == "true" ]] || return 0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${port}"
+}
+# ...and the relay, on exactly the same terms, for exactly the same reason.
+# guarded_ports has listed "Ollama relay ${OLLAMA_RELAY_PORT}" since the relay
+# existed and this renderer had never heard of it, so enabling the relay put
+# the pair straight back into the loop the comment above describes: 'lca check'
+# reported the guard stale, 'lca apply' re-applied a ruleset without 11435 and
+# reported success, and the next check said stale again. Measured on this box
+# before the fix — three runs, same FAIL, drop set { 3000, 3001, 11434 }.
+#
+# The relay binds only the docker bridge gateway, which is not routable from
+# off this machine, so this closes no hole on its own; the bridge is accepted
+# above the drop rule, so containers still reach it. It is rendered because a
+# port the guard has never heard of is one nobody notices when a later change
+# moves it somewhere routable — the reason guarded_ports asks for it.
+relay_port_from_env() {
+  local enabled="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_OLLAMA_RELAY:-false}" )"
+    # shellcheck disable=SC1090
+    # Defaulted to the same 11435 lib.sh's load_env defaults it to, because
+    # guarded_ports reads its value AFTER that default has been applied. With
+    # the relay on and the key simply absent from .env, an empty answer here
+    # would ask the guard for nothing while guarded_ports asked for 11435 —
+    # the same disagreement this helper exists to end, one config over.
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${OLLAMA_RELAY_PORT:-11435}" )"
   fi
   [[ "${enabled}" == "true" ]] || return 0
   [[ "${port}" =~ ^[0-9]+$ ]] || return 0
@@ -171,11 +209,12 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port agent_port bridge_if p q seen port_list=""
+  local webui_port ollama_port agent_port relay_port bridge_if p q seen port_list=""
   local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
   agent_port="$(agent_port_from_env)"
+  relay_port="$(relay_port_from_env)"
   bridge_if="$(docker_bridge_interface)"
   # ENFORCE the "can never lock you out" invariant below instead of merely
   # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
@@ -184,7 +223,7 @@ render_inbound_rules() {
   # the guard after each reboot: the box would then be reachable only from the
   # provider's recovery console. Refuse to guard 22, and say so on stderr so
   # the ruleset on stdout stays byte-clean for nft.
-  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"}; do
+  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"} ${relay_port:+"${relay_port}"}; do
     [[ "${p}" =~ ^[0-9]+$ ]] || continue
     if (( p == 22 )); then
       warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
@@ -254,18 +293,45 @@ apply_inbound_guard() {
   printf '%s\n' "${inbound}" | write_root_file "${INBOUND_RULES_FILE}" \
     || die "Could not write ${INBOUND_RULES_FILE} (disk full? check 'df -h') — the previous guard ruleset is unchanged."
   as_root nft -f "${INBOUND_RULES_FILE}"
-  # Name only what was actually put in the drop set. render_inbound_rules
-  # REFUSES port 22 — so a WEBUI_PORT of 22 produced "WebUI (port 22) ...
-  # reachable only via loopback and Tailscale" about a port deliberately left
-  # wide open, which is the one sentence that must never be wrong here.
-  local guard_wp guard_op guarded=()
-  guard_wp="$(webui_port_from_env)"
-  guard_op="$(ollama_port_from_env)"
-  if [[ "${guard_wp}" != "22" ]]; then guarded+=("WebUI ${guard_wp}"); fi
-  if [[ "${guard_op}" != "22" ]]; then guarded+=("Ollama ${guard_op}"); fi
+  # Name what was actually put in the drop set — READ BACK from the ruleset
+  # just written, rather than rebuilt from a second list of ports.
+  #
+  # It must not over-claim: render_inbound_rules REFUSES port 22, and a
+  # WEBUI_PORT of 22 once produced "WebUI (port 22) ... reachable only via
+  # loopback and Tailscale" about a port deliberately left wide open. That was
+  # fixed by hand-checking != "22" here, which left the mirror-image fault
+  # standing: this sentence knew about WebUI and Ollama only, so once the agent
+  # and the relay joined the drop set it guarded four ports and named two.
+  #
+  # That is not cosmetic. It is how the relay bug survived. 'lca check' said
+  # the guard did not cover 11435; 'lca apply' ran, printed
+  # "Inbound guard active: WebUI:3000:Ollama:11434", and that line reads as
+  # agreement — so the natural next move is to re-run check and believe the
+  # loop is closing, when the two commands were never talking about the same
+  # set of ports. A sentence derived from the ruleset can be neither wrong in
+  # the way it was fixed for nor silent in the way it stayed.
+  local guard_dropped pair guard_label guard_port guarded=()
+  # The drop set of the ruleset on its way to nft, spaces around every port so
+  # a substring cannot match: " 3000 11434 " must not contain "343".
+  guard_dropped=" $(sed -n 's/.*tcp dport {\([^}]*\)}.*/\1/p' <<<"${inbound}" \
+    | tr ',' ' ' | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//') "
+  for pair in \
+    "WebUI:$(webui_port_from_env)" \
+    "Ollama:$(ollama_port_from_env)" \
+    "Agent:$(agent_port_from_env)" \
+    "Ollama relay:$(relay_port_from_env)"; do
+    guard_label="${pair%:*}"
+    guard_port="${pair##*:}"
+    [[ -n "${guard_port}" ]] || continue
+    # In the ruleset or not named. Port 22 fails this test for free, because
+    # the renderer never let it in — one rule, checked where it is decided.
+    [[ "${guard_dropped}" == *" ${guard_port} "* ]] || continue
+    guarded+=("${guard_label} ${guard_port}")
+  done
   if (( ${#guarded[@]} )); then
-    local joined="${guarded[*]}"
-    ok "Inbound guard active: ${joined// /:} — reachable only via loopback and Tailscale."
+    local joined
+    printf -v joined '%s + ' "${guarded[@]}"
+    ok "Inbound guard active: ${joined% + } — reachable only via loopback and Tailscale."
   else
     warn "Inbound guard loaded but it drops nothing: every configured port is 22, which is never guarded so SSH can never be locked out. Change WEBUI_PORT / OLLAMA_HOST in .env, then: sudo lca harden"
   fi

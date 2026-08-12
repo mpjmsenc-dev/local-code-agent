@@ -370,6 +370,53 @@ else
   t_ok "...and AGENT_PORT=22 is refused too, like every other port 22"
 fi
 
+# The relay port, by the same rule and after the same bug: guarded_ports asked
+# for "Ollama relay 11435" and this renderer had never heard of it, so a box
+# with ENABLE_OLLAMA_RELAY=true sat in the loop the AGENT_PORT block above
+# describes — check says stale, apply re-applies the same ruleset and reports
+# success, check says stale again. Three real runs on the first machine to
+# enable the relay, drop set { 3000, 3001, 11434 } every time.
+RELAY_ON="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_OLLAMA_RELAY=true
+OLLAMA_RELAY_PORT=11435')"
+if grep -qE 'dport \{[^}]*\b11435\b' <<<"${RELAY_ON}"; then
+  t_ok "OLLAMA_RELAY_PORT is guarded when the relay is enabled"
+else
+  t_fail "ENABLE_OLLAMA_RELAY=true but the relay port is not in the drop set — 'lca apply' can never close the gap it reports"
+fi
+RELAY_OFF="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_OLLAMA_RELAY=false
+OLLAMA_RELAY_PORT=11435')"
+if grep -qE 'dport \{[^}]*\b11435\b' <<<"${RELAY_OFF}"; then
+  t_fail "the relay port is guarded even with the relay switched off"
+else
+  t_ok "...and is not, when it is off"
+fi
+# The relay is the one port in the set whose key is routinely absent from .env,
+# because lib.sh defaults it. guarded_ports reads the DEFAULTED value, so an
+# absent key must render the default here or the two disagree again — the same
+# failure, reachable by deleting a line rather than editing one.
+RELAY_DEFAULT="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_OLLAMA_RELAY=true')"
+if grep -qE 'dport \{[^}]*\b11435\b' <<<"${RELAY_DEFAULT}"; then
+  t_ok "...and an absent OLLAMA_RELAY_PORT still guards the default lib.sh applies"
+else
+  t_fail "the relay is on with no port in .env: guarded_ports asks for 11435 and the guard covers nothing"
+fi
+# The SSH invariant, through the newest door.
+RELAY_SSH="$(render_with_env 'WEBUI_PORT=3000
+OLLAMA_HOST="127.0.0.1:11434"
+ENABLE_OLLAMA_RELAY=true
+OLLAMA_RELAY_PORT=22')"
+if grep -qE 'dport \{[^}]*\b22\b' <<<"${RELAY_SSH}"; then
+  t_fail "OLLAMA_RELAY_PORT=22 reached the drop set — this would lock SSH out"
+else
+  t_ok "...and OLLAMA_RELAY_PORT=22 is refused too, like every other port 22"
+fi
+
 echo "# kernel validation via nft --check (nothing is applied)"
 NFT=()
 if command -v nft >/dev/null 2>&1; then
@@ -516,6 +563,39 @@ if grep -q 'Inbound guard active' <<<"${GUARD_OUT}" \
   t_ok "...and names both guarded ports"
 else
   t_fail "the guard message did not name the ports it guarded: ${GUARD_OUT}"
+fi
+# EVERY port it guarded, which is the half the message stayed silent about.
+# With the agent and the relay on, the drop set holds four ports and the
+# sentence named two — and that sentence is what an operator reads after 'lca
+# apply' to decide the guard is now correct. It read like agreement while
+# 'lca check' was still failing the same box for the port it did not mention.
+ALL_OUT="$(guard_run 'WEBUI_PORT=3000
+OLLAMA_HOST=127.0.0.1:11434
+ENABLE_AGENT=true
+AGENT_PORT=3001
+ENABLE_OLLAMA_RELAY=true
+OLLAMA_RELAY_PORT=11435' || true)"
+ALL_MISSING=""
+for p in 3000 11434 3001 11435; do
+  grep -q "${p}" <<<"${ALL_OUT}" || ALL_MISSING="${ALL_MISSING} ${p}"
+done
+if [[ -z "${ALL_MISSING}" ]]; then
+  t_ok "...and names every port in the drop set, not just the first two"
+else
+  t_fail "the guard message guarded four ports and did not name:${ALL_MISSING} — ${ALL_OUT}"
+fi
+# The complement, so "names everything" cannot be satisfied by naming things
+# that were never guarded: with both tiers off, their ports must not appear.
+OFF_OUT="$(guard_run 'WEBUI_PORT=3000
+OLLAMA_HOST=127.0.0.1:11434
+ENABLE_AGENT=false
+AGENT_PORT=3001
+ENABLE_OLLAMA_RELAY=false
+OLLAMA_RELAY_PORT=11435' || true)"
+if grep -qE '3001|11435' <<<"${OFF_OUT}"; then
+  t_fail "the guard message named a port it did not guard: ${OFF_OUT}"
+else
+  t_ok "...and names neither when both tiers are switched off"
 fi
 # render_inbound_rules REFUSES port 22 so SSH can never be locked out, which
 # makes "port 22 is reachable only via loopback and Tailscale" a lie about a
