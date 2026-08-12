@@ -27,6 +27,8 @@ Commands:
   setup     Bring the tier up from wherever it is: switch it on, build the
             agent's model, install the relay, start it, and say what changed.
             Start here on a machine that has never run it.
+  task      Give it a task from here, with the working directory named
+            explicitly — the thing two failed runs did not have
   start     Start the agent (pulls the images on first run — several GB)
   stop      Stop it (its workspace and settings are kept in ~/.openhands)
   restart   Restart it
@@ -414,6 +416,7 @@ main() {
     # needs them in: 'start' assumes six things are already true, and setup is
     # what makes them true and says which one was not.
     setup)   exec "${SCRIPT_DIR}/scripts/agent-setup.sh" "$@" ;;
+    task)    exec "${SCRIPT_DIR}/scripts/agent-task.sh" "$@" ;;
     start)   start_agent ;;
     stop)
       require_cmd docker
