@@ -167,7 +167,7 @@ remove_agent_workspace() {
 # models are NOT touched: they were pulled by the user's choice of ladder rung
 # and are gigabytes they may well want to keep.
 remove_agent_models() {
-  local found name
+  local found name failed=0
   have ollama || return 0
   found="$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -E -- '-agent$' || true)"
   [[ -n "${found}" ]] || return 0
@@ -178,29 +178,104 @@ remove_agent_models() {
       ok "Removed ${name}."
     else
       warn "Could not remove ${name} — it is still listed by 'ollama list'."
+      failed=1
     fi
   done <<<"${found}"
   info "Base models were left alone: they are gigabytes you chose to pull."
+  # The per-model warning above was the whole report: this returned 0 whatever
+  # happened, and the caller discarded even that with '|| true'. Two layers of
+  # nothing between a failed removal and the closing line that summarised it.
+  return "${failed}"
 }
 
-# closing_banner WEBUI_LEFT — the last thing an uninstall says.
+# closing_banner [THING ...] — the last thing an uninstall says.
 #
 # "complete" has to mean it. A warning printed sixty lines earlier is not where
 # anyone looks, and "Uninstall complete" sitting directly above "Kept on
 # purpose: ..." reads as a full accounting of what survived — which is exactly
 # how a machine that still held every account and chat was signed off as done.
 #
-# A function, like report_ollama_removal and remove_webui, so both endings can
+# It took a single flag, for the chat app, and the chat app was the only step
+# whose failure ever reached it. Two removals either side of it were called as
+# 'remove_agent_workspace ... || true' and 'remove_agent_models || true' — the
+# status thrown away on the line that produced it — so a workspace that had
+# just warned "could not be removed and is still on this machine, including
+# anything it checked out" was signed off as complete a screen later. Now every
+# step contributes, and what it contributes is read back off the machine rather
+# than remembered from a return code.
+#
+# A function, like report_ollama_removal and remove_webui, so every ending can
 # be read without uninstalling anything.
 closing_banner() {
-  if (( $1 )); then
-    step "Uninstall finished — but the chat app is still here"
-    warn "The chat app was NOT removed (see above). Everything else was."
+  local thing
+  if (( $# )); then
+    step "Uninstall finished — but $# thing(s) are still on this machine"
+    for thing in "$@"; do
+      warn "${thing}"
+    done
+    info "Everything else was removed."
   else
     step "Uninstall complete"
   fi
   info "Kept on purpose: Docker Engine, Tailscale, git, this repository and .env."
   info "To finish completely:  sudo tailscale logout   and delete this directory:  ${REPO_ROOT}"
+}
+
+# The units this project installs, in ONE array, so the removal below and the
+# gate that proves the removal read the same list rather than two copies of it.
+BOOT_UNITS=(
+  local-code-agent-tune.service
+  local-code-agent-netmode.service
+  local-code-agent-backup.timer
+  local-code-agent-backup.service
+  local-code-agent-ollama-relay.socket
+  local-code-agent-ollama-relay.service
+)
+
+# remove_boot_units — disable, delete, then LOOK. Returns 1 if anything is left.
+#
+# This was five 'systemctl disable --now ... || true' lines, an rm, and then
+# 'ok "Boot services and netmode state removed."' printed no matter what. Units
+# are the worst artefact to leak because they are the one that outlives the
+# reboot: a unit that would not disable keeps starting a stack the user
+# believes they deleted, pointing at a directory they are about to remove.
+#
+# The paths go through SYSTEMD_UNIT_DIR — lib.sh's existing seam for the tests,
+# which cannot write to /etc — because a removal nobody can drive is a removal
+# nobody can prove.
+remove_boot_units() {
+  local dir="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}" unit
+  local -a left=()
+  if systemd_available; then
+    for unit in "${BOOT_UNITS[@]}"; do
+      # The relay is a socket unit, so disabling the socket is what releases
+      # the bind; the service it starts stops on its own once nothing is
+      # connected. Forgiving on purpose — a unit that was never installed must
+      # not make an uninstall fail — which is exactly why the readback below
+      # exists rather than a status check here.
+      as_root systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+    done
+  fi
+  for unit in "${BOOT_UNITS[@]}"; do
+    as_root rm -f "${dir}/${unit}" || true
+  done
+  if systemd_available; then
+    as_root systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  as_root rm -rf "${NETMODE_DIR}" || true
+
+  for unit in "${BOOT_UNITS[@]}"; do
+    if [[ -e "${dir}/${unit}" ]]; then left+=("${dir}/${unit}"); fi
+  done
+  if [[ -e "${NETMODE_DIR}" ]]; then left+=("${NETMODE_DIR}"); fi
+  if (( ${#left[@]} )); then
+    warn "These boot artefacts could not be removed and are still on disk:"
+    printf '    %s\n' "${left[@]}"
+    warn "They start again at the next boot. Remove them as root, then reload systemd: sudo rm -rf ${left[0]} && sudo systemctl daemon-reload"
+    return 1
+  fi
+  ok "Boot services and netmode state removed (checked: no unit file left in ${dir})."
+  return 0
 }
 
 main() {
@@ -247,29 +322,18 @@ main() {
   fi
 
   # 2. Boot services + persisted netmode state.
-  if systemd_available; then
-    as_root systemctl disable --now local-code-agent-tune.service >/dev/null 2>&1 || true
-    as_root systemctl disable --now local-code-agent-netmode.service >/dev/null 2>&1 || true
-    as_root systemctl disable --now local-code-agent-backup.timer >/dev/null 2>&1 || true
-    # The relay is a socket unit, so disabling the socket is what releases the
-    # bind; the service it starts stops on its own once nothing is connected.
-    as_root systemctl disable --now local-code-agent-ollama-relay.socket >/dev/null 2>&1 || true
-    as_root systemctl stop local-code-agent-ollama-relay.service >/dev/null 2>&1 || true
-  fi
-  as_root rm -f /etc/systemd/system/local-code-agent-tune.service \
-                /etc/systemd/system/local-code-agent-netmode.service \
-                /etc/systemd/system/local-code-agent-backup.timer \
-                /etc/systemd/system/local-code-agent-backup.service \
-                /etc/systemd/system/local-code-agent-ollama-relay.socket \
-                /etc/systemd/system/local-code-agent-ollama-relay.service
-  as_root rm -rf "${NETMODE_DIR}"
-  ok "Boot services and netmode state removed."
+  local units_left=0
+  remove_boot_units || units_left=1
 
   # 3. Open WebUI.
   local webui_left=0
   remove_webui "${keep_data}" || webui_left=1
-  remove_agent_workspace "${keep_data}" || true
-  remove_agent_models || true
+  # Not '|| true'. These two threw their status away on the line that produced
+  # it, so a workspace that survived warned once and then never reached the
+  # verdict; the end state is read back below, but the intent is recorded here.
+  local workspace_left=0 models_left=0
+  remove_agent_workspace "${keep_data}" || workspace_left=1
+  remove_agent_models || models_left=1
 
   # Homes to clean. Under sudo, ${HOME} is root's while the files that matter
   # were written by the human's own runs, so both are in scope. Computed here
@@ -370,7 +434,31 @@ main() {
     fi
   done
 
-  closing_banner "${webui_left}"
+  # The verdict, assembled from the machine rather than from what each step
+  # hoped. Where the thing can still be looked at — a directory, a model list —
+  # it is looked at; where it cannot (docker unreachable, so remove_webui could
+  # not even ask), the step's own status stands in, and its message above says
+  # which of the two happened.
+  local -a left_behind=()
+  if (( webui_left )); then
+    left_behind+=("The chat app was NOT removed (see above) — remove it with: sudo docker rm -f ${WEBUI_CONTAINER}")
+  fi
+  if (( units_left )); then
+    left_behind+=("Boot services or netmode state are still on disk (see above) — they start again at the next reboot.")
+  fi
+  local ws
+  ws="$(agent_workspace_dir)"
+  if [[ "${keep_data}" != "true" ]] && [[ -e "${ws}" ]]; then
+    left_behind+=("The agent's workspace ${ws} is still here, including anything it checked out — remove it with: sudo rm -rf ${ws}")
+  elif (( workspace_left )); then
+    left_behind+=("The agent's workspace could not be removed (see above).")
+  fi
+  # Only worth saying if Ollama itself survived: step 4 takes the model store
+  # with it, so on a normal run there is nothing left for these to be in.
+  if (( models_left )) && have ollama; then
+    left_behind+=("One or more of the agent's derived models could not be removed and are still listed by: ollama list")
+  fi
+  closing_banner "${left_behind[@]}"
 }
 
 # Sourceable so report_ollama_removal can be tested without uninstalling

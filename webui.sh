@@ -286,6 +286,21 @@ main() {
             warn "System prompt drift: the running chat app still has the assistant instructions it was created with, and this repo now has different ones. Until it is re-created the chat keeps the OLD behaviour — including anything a repo update was meant to fix. Apply it with: sudo lca apply" ;;
           PROMPT_SUGGESTIONS)
             warn "Starter question drift: the chat app's empty-screen suggestions are the ones it was created with, not the ones in config/prompt-suggestions.json. Apply them with: sudo lca apply" ;;
+          WEBUI_BANNERS)
+            warn "Banner drift: the chat app is not showing this repo's warning banner — the one that tells whoever opens it that the chat box cannot read or write files. Whoever opens it will be told nothing. Apply it with: sudo lca apply" ;;
+          # A key with no arm of its own printed NOTHING and fell straight
+          # through to the green /health line below. That is how WEBUI_BANNERS
+          # — detected by webui_drift since the day it shipped — was reported
+          # by 'lca check' and 'lca apply' and stayed silent here, under an
+          # "answering on port 3000" that read as all-clear.
+          #
+          # The comment above says the message stays specific per key, and it
+          # still does; this arm is the floor under that, so an eighth key is
+          # imprecise rather than invisible. The gate that should have caught
+          # the seventh-to-eighth step was seven checks written out by hand,
+          # and it now derives its list from webui_drift itself.
+          *)
+            warn "Config drift: '${key}' differs between the running chat app and this repo, and this build has no specific message for it. Apply it with: sudo lca apply" ;;
         esac
       done < <(webui_drift || true)
       if webui_responds; then

@@ -525,46 +525,74 @@ echo "# a number that is not a number must be named, not absorbed"
 #   BACKUP_KEEP=abc            backups_to_prune refuses to act, so retention
 #     never runs and the disk fills.
 #   LCA_EDIT_FORMAT=whole-file 'lca' dies in forty lines of aider usage text.
+# Both gates below used to assert MEMBERSHIP: that a setting's name appeared in
+# the loop's list. That is not the question. check-system.sh validates in one
+# case and prints in a second, and the second has no '*)' arm on purpose — so a
+# key IN the loop with no message arm of its own is rejected in total silence,
+# passing both gates while telling the reader nothing. Membership was never
+# what anybody wanted to know; being NAMED when it is wrong is.
+#
+# So the loop is extracted and RUN, with every setting it iterates set to a
+# value that is not a number, and the output has to name each one.
+numeric_block() {
+  sed -n '/^for setting in OLLAMA_CONTEXT_LENGTH/,/^done$/p' "${REPO}/check-system.sh"
+}
+numeric_keys() {
+  numeric_block | head -1 | sed 's/^for setting in //; s/; do$//' | tr ' ' '\n' | grep -v '^$'
+}
+# What check-system.sh says when every one of them is 'abc'. Run under the same
+# 'set -euo pipefail' the real file uses, so the block is exercised as it ships
+# and not in a friendlier shell.
+numeric_complaints() {
+  bash -c '
+    set -euo pipefail
+    k=""
+    while read -r k; do
+      [[ -n "${k}" ]] || continue
+      export "${k}=abc"
+    done <<<"$2"
+    ENV_FILE=/etc/lca.env
+    SCRIPT_DIR=/opt/local-code-agent
+    p_pass() { :; }
+    p_warn() { printf "%s\n" "$*"; }
+    p_fail() { printf "%s\n" "$*"; }
+    eval "$1"
+  ' _ "$(numeric_block)" "$(numeric_keys)" 2>&1
+}
+check "the numeric loop is still where this reads it from" \
+  test "$(numeric_keys | grep -c .)" -ge 8
 numeric_settings_are_checked() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
-  # The LIST it iterates, not just a mention of the name: the first version of
-  # this grepped the whole file, and every one of these also appears in the
-  # message printed about it — so dropping a setting from the loop left the
-  # gate green.
-  local k loop
-  loop="$(grep -oE 'for setting in [A-Z_ ]+; do' <<<"${body}" \
-    | grep OLLAMA_CONTEXT_LENGTH | head -1)"
-  [[ -n "${loop}" ]] || {
-    echo "check-system.sh no longer loops over the numeric settings" >&2; return 1; }
-  for k in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP; do
-    grep -qF "${k}" <<<"${loop}" || {
-      printf 'check-system.sh does not check %s\n' "${k}" >&2; return 1; }
-  done
-  grep -q 'is not a number' <<<"${body}" || {
+  local out k
+  out="$(numeric_complaints)"
+  # Every setting the loop iterates has to come back named. A key with no arm
+  # in the message case produces nothing at all, and this is what sees that.
+  while read -r k; do
+    [[ -n "${k}" ]] || continue
+    grep -qF "${k}=" <<<"${out}" || {
+      printf "check-system.sh validates %s and then says nothing about it when it is wrong — the reader is told a number is bad without being told which\n" "${k}" >&2
+      return 1
+    }
+  done < <(numeric_keys)
+  grep -q 'is not a number' <<<"${out}" || {
     echo "check-system.sh never says a number is not a number" >&2; return 1; }
   # The message has to say what actually happens, or it is a scolding rather
   # than a diagnosis.
-  grep -q 'silently truncated' <<<"${body}" || {
+  grep -q 'silently truncated' <<<"${out}" || {
     echo "the context-length message does not say what goes wrong" >&2; return 1; }
 }
-check "'lca check' names a setting that should be a number and is not" \
+check "'lca check' names every setting that should be a number and is not" \
   numeric_settings_are_checked
-# ...and the list it iterates is written by hand, so a numeric setting added to
-# .env.example tomorrow is validated by nothing and nobody finds out.
+# ...and a numeric setting shipped in .env.example tomorrow must not be
+# validated by nothing at all. This half stays a list comparison, because the
+# question really is membership: a key nothing iterates is a key nothing can
+# say anything about, and there is no output to look for. The half above is
+# what proves the iterating leads anywhere.
 #
-# The boolean half does not have this problem: boolean_settings() reads
-# .env.example, and check-system.sh's comment says why — "a new switch is
-# covered the day it ships". The numeric half names three settings inline, and
-# the test above names the same three, so both move together and neither
-# notices a fourth.
-#
-# A gate rather than a derived list on purpose. These four need four different
-# rules — WEBUI_PORT is a port, BACKUP_KEEP may be 0, the others must be
-# positive — and four different consequences, and the check above rightly
-# insists the message say what actually goes wrong. A generic loop could not.
-# So this asks a human to write that sentence, rather than writing a worse one
-# for them.
+# A gate rather than a derived list on purpose. These need different rules —
+# WEBUI_PORT is a port, BACKUP_KEEP may be 0, the others must be positive — and
+# different consequences, and the check above rightly insists the message say
+# what actually goes wrong. A generic loop could not. So this asks a human to
+# write that sentence, rather than writing a worse one for them.
 every_numeric_setting_is_guarded() {
   local body lists k seen=0 bad=0
   body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
@@ -3397,12 +3425,64 @@ check "...and the four boot units that predate it, by the same rule" \
 
 # ...and the stack has to be able to take it away again. A socket unit left
 # enabled keeps the bind after an uninstall claims the machine is clean.
+#
+# This gate used to be two greps for the unit names in uninstall.sh, which is
+# the same non-check as grepping for a function's own definition: the names
+# appear in the file whatever the file does with them. Driven now — uninstall.sh
+# is sourceable for exactly this — through SYSTEMD_UNIT_DIR, lib.sh's existing
+# seam for tests that cannot write to /etc.
+#
+# MODE=real removes for real. MODE=lying replaces 'rm' with a no-op that
+# reports success, which is the state this is really about: every removal in
+# that function ends in '|| true', so the only thing standing between a unit
+# that survived and "Boot services and netmode state removed" is the readback.
+drive_remove_boot_units() {   # MODE UNIT... -> the output, then RC: and LEFT:
+  local mode="$1"; shift
+  local dir="${SANDBOX}/boot-remove" nm="${SANDBOX}/boot-remove-netmode" u
+  rm -rf "${dir}" "${nm}"; mkdir -p "${dir}" "${nm}"
+  for u in "$@"; do : > "${dir}/${u}"; done
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    # uninstall.sh sets -e when sourced, so a function of it that RETURNS 1 —
+    # the whole point of the lying case — would kill this driver before it
+    # could report. Every other test of this file happens to call functions
+    # that return 0, which is why nothing noticed.
+    set +e
+    SYSTEMD_UNIT_DIR="$3"; NETMODE_DIR="$4"
+    systemd_available() { return 0; }
+    systemctl() { return 0; }
+    as_root() { "$@"; }
+    if [[ "$2" == lying ]]; then rm() { return 0; }; fi
+    remove_boot_units 2>&1
+    printf "RC:%s\n" "$?"
+    printf "LEFT:%s\n" "$(find "$3" -type f 2>/dev/null | wc -l)"
+  ' _ "${REPO}/uninstall.sh" "${mode}" "${dir}" "${nm}"
+}
 relay_is_uninstalled() {
-  local u="${REPO}/uninstall.sh"
-  grep -q 'disable --now local-code-agent-ollama-relay.socket' "${u}" || return 1
-  grep -q 'local-code-agent-ollama-relay.service' "${u}"
+  local out
+  out="$(drive_remove_boot_units real \
+           local-code-agent-ollama-relay.socket \
+           local-code-agent-ollama-relay.service)"
+  grep -q '^LEFT:0$' <<<"${out}" || {
+    printf 'uninstall left the relay units on disk:\n%s\n' "${out}" >&2; return 1; }
+  grep -q '^RC:0$' <<<"${out}" || {
+    printf 'the relay units were removed and it still reported failure:\n%s\n' "${out}" >&2; return 1; }
 }
 check "uninstall removes the relay's units and its bind" relay_is_uninstalled
+relay_survival_is_reported() {
+  local out
+  out="$(drive_remove_boot_units lying \
+           local-code-agent-ollama-relay.socket \
+           local-code-agent-ollama-relay.service)"
+  grep -q '^RC:1$' <<<"${out}" || {
+    printf 'a unit that survived removal was reported as removed:\n%s\n' "${out}" >&2; return 1; }
+  grep -q 'local-code-agent-ollama-relay.socket' <<<"${out}" || {
+    printf 'the surviving unit is not named in the message:\n%s\n' "${out}" >&2; return 1; }
+  ! grep -qi 'services and netmode state removed' <<<"${out}" || {
+    printf 'it still printed the removal line over units that are still there:\n%s\n' "${out}" >&2; return 1; }
+}
+check "...and a unit that survives is reported, not announced as removed" \
+  relay_survival_is_reported
 # Every installer call in setup.sh's main() must be GUARDED, so that one
 # failing installer cannot take the rest of the install with it.
 #
@@ -6116,17 +6196,34 @@ echo "# every systemd unit this project installs must also be uninstalled"
 # Same shape as the gate for settings baked into the WebUI container: derive
 # the list from what the installers actually create, rather than maintaining a
 # second copy of it here.
+# The list is derived from the installers, as it always was. What changed is
+# what it does with each name: it used to grep uninstall.sh for the string,
+# which passes on any file that so much as mentions the unit — in a comment, in
+# a message, in a list it never acts on. A grep for a name is not a check that
+# the thing happens. So each derived unit is now put on disk and uninstall.sh's
+# own removal is made to run over it.
+installed_units() {
+  grep -rhoE 'local-code-agent[a-z-]*\.(service|timer|socket)' \
+    "${REPO}/setup.sh" "${REPO}"/scripts/*.sh "${REPO}/netmode.sh" \
+    "${REPO}/backup.sh" 2>/dev/null | sort -u
+}
+check "the installers still name the units this derives from" \
+  test "$(installed_units | grep -c .)" -ge 4
 every_installed_unit_is_removed() {
-  local unit leaked=0
-  while read -r unit; do
-    [[ -n "${unit}" ]] || continue
-    grep -qF "${unit}" "${REPO}/uninstall.sh" || {
-      printf 'something installs %s but uninstall.sh never removes it\n' "${unit}" >&2
+  local -a units=()
+  mapfile -t units < <(installed_units)
+  local out unit leaked=0
+  out="$(drive_remove_boot_units real "${units[@]}")"
+  for unit in "${units[@]}"; do
+    if [[ -e "${SANDBOX}/boot-remove/${unit}" ]]; then
+      printf 'something installs %s and uninstall.sh leaves it on disk — it starts again at the next boot\n' "${unit}" >&2
       leaked=1
-    }
-  done < <(grep -rhoE 'local-code-agent[a-z-]*\.(service|timer)' \
-             "${REPO}/setup.sh" "${REPO}"/scripts/*.sh "${REPO}/netmode.sh" \
-             "${REPO}/backup.sh" 2>/dev/null | sort -u)
+    fi
+  done
+  grep -q '^RC:0$' <<<"${out}" || {
+    printf 'removal of the installed units reported failure:\n%s\n' "${out}" >&2
+    leaked=1
+  }
   return "${leaked}"
 }
 check "uninstall.sh removes every systemd unit the installers create" \
@@ -6277,17 +6374,17 @@ check "an uninstall that could not reach docker says the chat app is still here"
 # read. "Uninstall complete" directly above "Kept on purpose: ..." is a full
 # accounting of what survived, and it was signed off on a machine still holding
 # every account and chat.
-closing_banner_run() {  # WEBUI_LEFT -> the closing lines
-  bash -c 'source "$1" >/dev/null 2>&1; closing_banner "$2" 2>&1' \
-    _ "${REPO}/uninstall.sh" "$1"
+closing_banner_run() {  # THING... -> the closing lines
+  bash -c 'source "$1" >/dev/null 2>&1; shift; closing_banner "$@" 2>&1' \
+    _ "${REPO}/uninstall.sh" "$@"
 }
 uninstall_closing_line_matches_what_happened() {
   local out
-  out="$(closing_banner_run 0)"
+  out="$(closing_banner_run)"
   grep -q 'Uninstall complete' <<<"${out}" || {
     printf 'a clean uninstall no longer reads as complete: %s\n' "${out}" >&2
     return 1; }
-  out="$(closing_banner_run 1)"
+  out="$(closing_banner_run 'The chat app was NOT removed')"
   ! grep -q 'Uninstall complete' <<<"${out}" || {
     printf 'an uninstall that left the chat app behind still says complete: %s\n' "${out}" >&2
     return 1; }
@@ -6297,6 +6394,45 @@ uninstall_closing_line_matches_what_happened() {
 }
 check "...and the closing line stops saying 'complete' when it is not" \
   uninstall_closing_line_matches_what_happened
+# ...for every step, not only the chat app. It took a single flag, and the two
+# removals either side of it were called with their status discarded — so a
+# workspace that had just said "could not be removed and is still on this
+# machine, including anything it checked out" was signed off as complete.
+uninstall_closing_line_carries_every_leftover() {
+  local out
+  out="$(closing_banner_run "The agent's workspace /root/.openhands is still here" \
+                            "One or more of the agent's derived models could not be removed")"
+  ! grep -q 'Uninstall complete' <<<"${out}" || {
+    printf 'two things survived and it still says complete: %s\n' "${out}" >&2
+    return 1; }
+  grep -q "workspace /root/.openhands" <<<"${out}" || {
+    printf 'the workspace that survived is not named at the end: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'derived models' <<<"${out}" || {
+    printf 'the models that survived are not named at the end: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and it names every step that left something behind, not just one" \
+  uninstall_closing_line_carries_every_leftover
+# ...and main has to actually FEED them to it. The banner taking a list is no
+# use if the caller still throws each status away on the line that produced it.
+uninstall_feeds_every_step_to_the_verdict() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
+  local call
+  for call in remove_agent_workspace remove_agent_models remove_boot_units remove_webui; do
+    grep -qE "^ *(local [a-z_]+=[0-9] )?${call}[^|]*\|\| *[a-z_]+=1" <<<"${body}" || {
+      printf '%s is called without its status reaching the verdict\n' "${call}" >&2
+      return 1
+    }
+  done
+  grep -qE 'closing_banner "\$\{left_behind\[@\]\}"' <<<"${body}" || {
+    echo 'the closing banner is no longer given the list of what survived' >&2
+    return 1
+  }
+}
+check "...and every removal step's status reaches that verdict" \
+  uninstall_feeds_every_step_to_the_verdict
 
 echo "# ...and every removal an uninstall makes must be able to make it"
 # Step 5 removed the virtualenv with a bare 'rm -rf' while all nine other
@@ -6315,7 +6451,13 @@ echo "# ...and every removal an uninstall makes must be able to make it"
 # right by accident.
 uninstall_removals_can_reach_root() {
   local body bare escalated
-  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
+  # Comments AND double-quoted strings stripped. This read the raw file, so the
+  # advice 'remove it with: sudo rm -rf <dir>' inside a warn() was scored as an
+  # unescalated removal — a message about rm is not an rm. Stripping strings
+  # keeps every real removal visible ('as_root rm -f "${dir}/${unit}"' still
+  # reads as 'as_root rm -f ') while taking the false ones out, so this is
+  # narrower by accident and not by design.
+  body="$(sed 's/#.*//; s/"[^"]*"//g' "${REPO}/uninstall.sh")"
   # 'as_root' must come BEFORE the rm on the line — 'as_root docker rm -f' is
   # escalated, a trailing '&& as_root something-else' is not.
   escalated="$(grep -cE 'as_root( +[^ ]+)* +rm +-' <<<"${body}" || true)"
@@ -9092,30 +9234,73 @@ echo "# every setting baked into the WebUI container must be drift-checked"
 # changed in .env and silently not take effect. Port and model drift were
 # already reported; signup drift was not — and that is the one where the
 # silence means "you think signups are locked and they are open".
-drift_checked() {
-  local var="$1"
-  # Read out of the container in exactly ONE place (lib.sh's webui_container_env
-  # / webui_drift). It used to be written out per key inline in webui.sh, and
-  # the third key — signups — was simply never added, which is the whole reason
-  # the comparison now lives in one function.
-  grep -qF "webui_container_env ${var}" "${REPO}/scripts/lib.sh" || {
-    printf 'lib.sh never reads %s out of the running container\n' "${var}" >&2; return 1
-  }
-  # ...while the message stays specific per key: "PORT differs" and "anyone can
-  # still register an account" are not the same news.
-  grep -qiE "warn \"${2} drift" "${REPO}/webui.sh" || {
-    printf 'nothing warns specifically about %s (%s) drift\n' "${var}" "${2}" >&2; return 1
+#
+# This gate used to be seven 'check' lines naming seven keys by hand, and
+# webui_drift grew an eighth. Nothing noticed. WEBUI_BANNERS was compared on
+# every run, reported by 'lca check' and 'lca apply', and printed NOTHING in
+# 'lca webui status' — where it fell through a case with no arm for it into a
+# green "/health answering on port 3000". A hand-written list of the things a
+# derived list produces is the same mistake as grepping for a name and calling
+# it a check: it passes on the day it is written and cannot fail afterwards.
+#
+# So the list is DERIVED from webui_drift's own 'drifted+=("KEY")' lines. Add a
+# key there tomorrow and this fails until webui.sh has something to say about
+# it.
+drift_keys() {
+  sed -n '/^webui_drift() {/,/^}/p' "${REPO}/scripts/lib.sh" \
+    | grep -oE 'drifted\+=\("[A-Z_]+"\)' \
+    | grep -oE '"[A-Z_]+"' | tr -d '"' | sort -u
+}
+# The case that turns those keys into sentences — read from webui.sh, never
+# from lib.sh, so neither side can satisfy this gate alone.
+drift_case_block() {
+  # shellcheck disable=SC2016  # a literal sed range, not a string to expand
+  sed -n '/case "${key}" in/,/^        esac$/p' "${REPO}/webui.sh"
+}
+drift_arms() {
+  drift_case_block | grep -oE '^ +[A-Z_]+\)' | tr -d ' )' | sort -u
+}
+# Non-vacuity, checked where the lists are built rather than assumed: an empty
+# derived list would make every assertion below pass over nothing at all, which
+# is exactly the failure this gate exists to stop.
+check "the drift keys are read from webui_drift itself" \
+  test "$(drift_keys | grep -c .)" -ge 8
+check "...and the sentences are read from webui.sh" \
+  test "$(drift_arms | grep -c .)" -ge 8
+every_drift_key_is_reported() {
+  local key bad=0
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qxF "${key}" <<<"$(drift_arms)" || {
+      printf 'webui_drift can report %s and "lca webui status" has nothing to say about it — it falls through to the health line and reads as all-clear\n' \
+        "${key}" >&2
+      bad=1
+    }
+  done < <(drift_keys)
+  return "${bad}"
+}
+check "every key webui_drift can emit is named in 'lca webui status'" \
+  every_drift_key_is_reported
+# ...and a floor under the whole thing, because the gate above can only see
+# keys that exist today. A '*)' arm makes an unknown key imprecise; without one
+# it is invisible, and invisible under a green line is worse than absent.
+check "an unknown drift key still warns rather than vanishing" \
+  grep -qE '^ +\*\)$' <<<"$(drift_case_block)"
+# The specific sentences still have to be specific: this is what stops the
+# catch-all above from becoming the answer to everything.
+drift_says_something_specific() {
+  grep -qiE "warn \"${1} drift" "${REPO}/webui.sh" || {
+    printf 'nothing warns specifically about %s drift\n' "${1}" >&2; return 1
   }
 }
-check "webui.sh reports PORT drift"          drift_checked PORT Port
-check "webui.sh reports DEFAULT_MODELS drift" drift_checked DEFAULT_MODELS Model
-check "webui.sh reports ENABLE_SIGNUP drift"  drift_checked ENABLE_SIGNUP Signup
-check "webui.sh reports OLLAMA_BASE_URL drift" drift_checked OLLAMA_BASE_URL "Ollama address"
-check "webui.sh reports WEBUI_NAME drift"      drift_checked WEBUI_NAME Name
-check "webui.sh reports system prompt drift" \
-  drift_checked DEFAULT_MODEL_PARAMS "System prompt"
-check "webui.sh reports starter question drift" \
-  drift_checked DEFAULT_PROMPT_SUGGESTIONS "Starter question"
+check "webui.sh reports PORT drift"            drift_says_something_specific Port
+check "webui.sh reports model drift"           drift_says_something_specific Model
+check "webui.sh reports signup drift"          drift_says_something_specific Signup
+check "webui.sh reports Ollama address drift"  drift_says_something_specific "Ollama address"
+check "webui.sh reports name drift"            drift_says_something_specific Name
+check "webui.sh reports system prompt drift"   drift_says_something_specific "System prompt"
+check "webui.sh reports starter question drift" drift_says_something_specific "Starter question"
+check "webui.sh reports banner drift"          drift_says_something_specific Banner
 # Every setting the installer bakes in from .env must be compared. The three
 # telemetry flags are constants, so they cannot drift; everything else can, and
 # "the ones we happened to think of" is how OLLAMA_BASE_URL — the address the

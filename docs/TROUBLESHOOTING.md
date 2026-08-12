@@ -523,6 +523,34 @@ API answered on the new one, on every interface, and `lca apply` said
 `check-system.sh` warns when the configured model drifts from the tune
 recommendation.
 
+## `lca update` and my edits to `config/CONVENTIONS.md`
+
+That file is tracked by git and this project tells you to edit it — it is the
+one file that steers aider, the chat app and the agent together. So sooner or
+later a release changes it while your version is still sitting in the checkout.
+
+`lca update` handles that now, and says so as it goes:
+
+```
+[warn] You have local modifications to tracked files:
+    config/CONVENTIONS.md
+[warn] The update changes config/CONVENTIONS.md too, so your version and the new one are about to meet.
+[info] Your edits will be set aside, the new code applied, and your edits replayed on top — automatically, in that order. Nothing is discarded.
+```
+
+Three endings, and only the last one needs you:
+
+| What you see | What happened |
+|---|---|
+| `Your edits to config/CONVENTIONS.md are back, on top of the new code.` | Done. Your rules and the new ones are both in the file. |
+| `The update does not touch any of them, so they carry straight over.` | The release changed other files. Your edits were never at risk and were never moved. |
+| `could not be replayed on top of it — the same lines changed on both sides` | You and the release edited the same lines. **Nothing is lost.** The file now holds both versions between `<<<<<<<` markers — `Updated upstream` is the new code, `Stashed changes` is yours. Keep what you want, then `git -C /opt/local-code-agent stash drop`. To take the new file as it ships instead, the message prints the one command that does it. |
+
+If you are reading this after an older `lca update` dead-ended with *"you have
+local commits or conflicting edits"*: that message was wrong about the cause —
+you had neither — and `git stash` on its own would have thrown your edits away.
+`git stash list` still has them; `git stash pop` brings them back.
+
 ## A script died mid-install (network blip, Ctrl-C, reboot)
 
 Just run `./setup.sh` again. Every installer is idempotent — finished pieces are

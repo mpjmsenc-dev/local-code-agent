@@ -264,7 +264,31 @@ main() {
   # /opt. Symlink rather than copy, so it always tracks this checkout.
   if can_root; then
     if as_root ln -sfn "${SCRIPT_DIR}/bin/lca" /usr/local/bin/lca 2>/dev/null; then
-      ok "'lca' is on your PATH — try: lca help"
+      # 'ln exited 0' is not 'lca runs', and this claimed the second from the
+      # first. Two things it did not check: the chmod +x at the top of this
+      # script is '|| true', so bin/lca can be left unrunnable and the link
+      # then points at a file nobody can execute; and a link created over
+      # someone else's /usr/local/bin/lca resolves somewhere else entirely.
+      # The login-banner block immediately below already reads back with
+      # [[ -x ]] and carries a comment about exactly this — the two were
+      # written a day apart and only one of them learned.
+      local lca_link=""
+      lca_link="$(readlink -f /usr/local/bin/lca 2>/dev/null || true)"
+      if [[ "${lca_link}" != "${SCRIPT_DIR}/bin/lca" ]]; then
+        warn "/usr/local/bin/lca does not resolve to ${SCRIPT_DIR}/bin/lca — it resolves to '${lca_link:-nothing at all}'. Use ${SCRIPT_DIR}/bin/lca directly, or remove the other one and re-run."
+        setup_ok=false
+      elif [[ ! -x /usr/local/bin/lca ]]; then
+        warn "/usr/local/bin/lca points at ${SCRIPT_DIR}/bin/lca but that file is not executable, so running 'lca' answers 'Permission denied'. Fix it with: sudo chmod +x ${SCRIPT_DIR}/bin/lca"
+        setup_ok=false
+      else
+        case ":${PATH}:" in
+          *:/usr/local/bin:*)
+            ok "'lca' is on your PATH and runnable — try: lca help" ;;
+          *)
+            ok "'lca' installed at /usr/local/bin/lca and runnable."
+            warn "/usr/local/bin is not on the PATH this install ran with, so 'lca' may not be found by name. Use ${SCRIPT_DIR}/bin/lca, or add it: export PATH=\"/usr/local/bin:\${PATH}\"" ;;
+        esac
+      fi
     else
       warn "Could not create /usr/local/bin/lca — use ${SCRIPT_DIR}/bin/lca directly."
     fi
