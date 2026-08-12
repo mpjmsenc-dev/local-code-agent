@@ -383,6 +383,56 @@ So on the base droplet's rung: ask for one file at a time, keep the tests, and
 expect to fix small logic yourself. From ~12 GB of RAM auto-tune moves you to
 7b and the follow-up loop starts working — at roughly three minutes a round.
 
+## The agent said it finished, and the code does not run
+
+This is the failure mode of the agent tier at the small model rungs, and it is
+**expected behaviour to check for**, not a fault to hunt: it declares completion
+without executing its own work. Measured twice on a real droplet at the 3b rung,
+on unrelated tasks. One produced a script that uses `sys` with no import — dead
+on its first executed line — and reported success.
+
+There is no fix to apply. There is a habit:
+
+```bash
+lca agent logs          # what it actually did, action by action
+```
+
+Run what it produced before believing any of it. If the task asked for outputs,
+check they exist. The tier is useful for scaffolding and for work you were going
+to read anyway; it is not useful for anything you intend to trust unread. Full
+detail, including both runs and what changed because of them:
+[AGENT.md](AGENT.md).
+
+## The agent wrote its file somewhere unexpected
+
+Both failed runs wrote to `/workspace` — the sandbox root — while working in a
+repo underneath it, so the deliverable landed outside the project. Naming the
+directory is what fixes it, and this project has its own way in that always
+does:
+
+```bash
+lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
+```
+
+Tasks typed into the OpenHands web UI do not get the directory named, because
+that UI never passes it through this project. If you use the web UI, say the
+absolute path in the task text yourself.
+
+## The agent UI will not load on my phone
+
+Until recently nothing was ever published on the Tailscale interface, so the
+address `lca agent url` printed was refused by every phone while looking
+perfectly healthy from the server. If it still refuses:
+
+```bash
+lca agent restart       # Tailscale probably came up after the container did
+lca check               # says outright when a documented address is not listening
+```
+
+`lca check` compares the addresses the docs send you to against what is actually
+listening, and fails when they disagree — the whole point being that this gap is
+invisible from the machine that has it.
+
 ## I changed a setting in .env and nothing happened
 
 Some settings are read fresh every run (`MODEL_NAME`, `LCA_ASK_TOKENS`,

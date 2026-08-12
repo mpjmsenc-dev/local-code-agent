@@ -31,7 +31,12 @@ mkdir -p ~/my-project && cd ~/my-project && lca
 
 `lca chat` prints that SSH address as a QR code next to the chat one, so the
 phone can reach both. Note `lca ask` is *not* it — that is one-shot text, the
-same as the chat. What the chat is genuinely good at: explaining an error,
+same as the chat.
+
+There is also a second tier that **can** build from the phone — the agent, in a
+browser, off by default. It is not a better answer to this question yet: at the
+model size a small droplet runs, it reports success on code it never executed.
+See [AGENT.md](AGENT.md) before switching it on. What the chat is genuinely good at: explaining an error,
 reviewing a snippet you paste, writing one complete file you copy, and
 answering questions about this box.
 
