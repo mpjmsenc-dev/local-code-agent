@@ -3339,6 +3339,92 @@ agent_web_url() {
   printf 'http://host.docker.internal:%s' "${AGENT_PORT}"
 }
 
+# --- what the docs promise, against what is actually listening ---------------
+#
+# A service can be up, healthy, guarded and answering on this machine while
+# being unreachable from the one place the documentation tells you to open it.
+#
+# That is not hypothetical. 'lca agent url' has always printed
+# http://<tailscale-ip>:3001 and docs/AGENT.md calls it "the address to open on
+# your phone", while the container published 127.0.0.1 and the docker bridge
+# and nothing else. Every check passed, because every check asked the host —
+# where loopback answers and everything looks right. From the phone it refused,
+# and it had never once worked.
+#
+# The gap is invisible from the machine that has it, so the promise itself has
+# to be the thing under test.
+
+# tailscale_ip4 — this machine's Tailscale IPv4 address, or nothing (rc 1).
+# One copy: agent.sh and check-system.sh had each grown their own.
+tailscale_ip4() {
+  local ip
+  have tailscale || return 1
+  ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  [[ "${ip}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+  printf '%s' "${ip}"
+}
+
+# host_listeners — the listening TCP sockets, as 'ss -ltn' prints them. Split
+# out from the reader below so the reader can be driven with a fixture: the
+# whole point of this check is addresses a developer's box does not have.
+host_listeners() {
+  have ss || return 1
+  ss -ltn 2>/dev/null
+}
+
+# port_open_at ADDR PORT LISTENERS — true when something in LISTENERS would
+# accept a connection to ADDR:PORT.
+#
+# The cases are the kernel's, not a guess about them:
+#   0.0.0.0 / *   every IPv4 address on this machine
+#   ::            dual-stack, so IPv4 connections land on it too
+#   an address    that address ALONE, which is the case that bit us
+port_open_at() {
+  local addr="${1:-}" port="${2:-}" listeners="${3:-}" la lp
+  [[ -n "${addr}" && -n "${port}" ]] || return 1
+  while read -r la; do
+    [[ -n "${la}" ]] || continue
+    lp="${la##*:}"
+    [[ "${lp}" == "${port}" ]] || continue
+    la="${la%:*}"
+    la="${la#\[}"; la="${la%\]}"
+    case "${la}" in
+      "0.0.0.0"|"*"|"::"|"${addr}") return 0 ;;
+    esac
+  done < <(printf '%s\n' "${listeners}" | awk '$1 == "LISTEN" { print $4 }')
+  return 1
+}
+
+# tailscale_promised_ports — every port this project's own messages send the
+# user to at their Tailscale address, as "description port" lines.
+#
+# Intent, not sockets: a tier that is switched off promises nothing. The
+# reachability question is asked separately, by the caller.
+tailscale_promised_ports() {
+  if [[ "${ENABLE_WEBUI}" == "true" ]] && valid_port "${WEBUI_PORT}"; then
+    printf 'the chat app %s\n' "${WEBUI_PORT}"
+  fi
+  if [[ "${ENABLE_AGENT}" == "true" ]] && valid_port "${AGENT_PORT}"; then
+    printf "the agent's UI %s\n" "${AGENT_PORT}"
+  fi
+  return 0
+}
+
+# tailscale_promise_gaps TSIP LISTENERS — the promised ports that are NOT
+# reachable at the Tailscale address. Empty output is the good answer.
+tailscale_promise_gaps() {
+  local tsip="${1:-}" listeners="${2:-}" name port line
+  [[ -n "${tsip}" ]] || return 1
+  while read -r line; do
+    [[ -n "${line}" ]] || continue
+    port="${line##* }"
+    name="${line% *}"
+    port_open_at "${tsip}" "${port}" "${listeners}" \
+      || printf '%s %s\n' "${name}" "${port}"
+  done < <(tailscale_promised_ports)
+  return 0
+}
+
 # webui_volume_has_data — true when the chat app's volume exists AND has
 # something in it, i.e. there is something in there to lose.
 #

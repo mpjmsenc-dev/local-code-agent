@@ -619,7 +619,34 @@ fi
 step "Tailscale"
 if have tailscale; then
   if tailscale status >/dev/null 2>&1; then
-    p_pass "tailscale is logged in (IPv4: $(tailscale ip -4 2>/dev/null | head -1))"
+    p_pass "tailscale is logged in (IPv4: $(tailscale_ip4 || echo unknown))"
+    # ...and the addresses this project SENDS you to must actually answer
+    # there. This is a failure, not a warning: the documentation names a URL,
+    # and a URL that refuses is a broken instruction rather than a missing
+    # nicety.
+    #
+    # It exists because the agent's UI was never published on the Tailscale
+    # interface at all, for as long as the tier has existed, while 'lca agent
+    # url' printed that exact address and docs/AGENT.md called it the one to
+    # open on your phone. Nothing on this machine could see it: loopback
+    # answered, the guard reported the port covered, 'lca check' was green. The
+    # only way to find it was to be holding the phone.
+    TSIP="$(tailscale_ip4 || true)"
+    if [[ -z "${TSIP}" ]]; then
+      info "no Tailscale IPv4 address yet, so the addresses the docs point at could not be checked"
+    elif ! have ss; then
+      info "ss is not installed, so the addresses the docs point at could not be checked"
+    else
+      GAPS="$(tailscale_promise_gaps "${TSIP}" "$(host_listeners || true)" || true)"
+      if [[ -z "${GAPS}" ]]; then
+        p_pass "every address the docs send you to answers on ${TSIP}"
+      else
+        while read -r gap_name gap_port; do
+          [[ -n "${gap_port}" ]] || continue
+          p_fail "${gap_name} is documented at http://${TSIP}:${gap_port} but nothing is listening on that address — from your phone it will refuse. It is up on this machine, which is why nothing else reports it. Restart it so it publishes there: lca agent restart (or, for the chat app, sudo lca apply)"
+        done <<<"${GAPS}"
+      fi
+    fi
   else
     p_warn "tailscale installed but not logged in — run: sudo tailscale up"
   fi

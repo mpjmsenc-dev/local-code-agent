@@ -107,6 +107,13 @@ start_agent() {
   # lets it start its own sandbox containers; that is also why this tier is
   # opt-in, and docs/AGENT.md says so in those words.
   #
+  # Load-bearing, and it fails in the worst possible way. Without it the
+  # container cannot resolve the relay, so every LLM call fails to connect —
+  # and LiteLLM's num_retries=5 with long backoffs swallows that. Measured: the
+  # sandbox up, the settings correct, the conversation open, and the model
+  # never contacted once, with no error surfacing anywhere. Nothing tells you;
+  # it just sits there. A gate holds this flag in place.
+  #
   # OH_SANDBOX_HOST_PORT is the other half of publishing on a non-default port,
   # and leaving it out cost this project a whole verification run.
   #
@@ -139,20 +146,44 @@ start_agent() {
   # which answers 405 rather than refusing. Naming the kind we are already
   # using makes the port setting take.
   #
-  # And the second -p is the other half again: naming the right port is no use
-  # if nothing can dial it. Publishing ONLY on 127.0.0.1 puts the agent behind
-  # the host's loopback, where a sandbox container — which reaches this machine
-  # as the bridge gateway, never as 127.0.0.1 — cannot reach it at all.
+  # And the publications are the other half again: naming the right port is no
+  # use if nothing can dial it. Publishing ONLY on 127.0.0.1 puts the agent
+  # behind the host's loopback, where a sandbox container — which reaches this
+  # machine as the bridge gateway, never as 127.0.0.1 — cannot reach it at all.
   # Measured from inside a live sandbox: both the MCP URL and the app's root
   # answered 000, connection refused, on a container that was up and healthy.
   #
-  # So it is published twice, on two addresses that are both private: the
-  # host's loopback, for the human and for 'lca agent status', and the docker
-  # bridge gateway, for the sandboxes. What that DOES widen is honest and worth
-  # stating: any container on the default bridge can now reach the agent's UI.
-  # What it does not do is put it on a public interface — the gateway address
-  # is routable only from this host and its containers, guarded_ports still
-  # covers AGENT_PORT, and docs/AGENT.md says all of this in the same words.
+  # THREE addresses, all private, and the third one is why the phone never
+  # worked. 'lca agent url' prints http://<tailscale-ip>:AGENT_PORT and
+  # docs/AGENT.md calls it "the address to open on your phone" — but nothing
+  # was ever published there, so the documented phone path had never once
+  # worked. From this machine it was invisible: loopback answered, the guard
+  # reported the port covered, every check passed.
+  #
+  #   127.0.0.1        you, and 'lca agent status'
+  #   <bridge gateway> the agent's own sandboxes
+  #   <tailscale ip>   your phone
+  #
+  # Three SPECIFIC addresses, deliberately, rather than one 0.0.0.0. They do
+  # not collide with each other — only 0.0.0.0 collides, because it already
+  # covers the others, and adding it alongside the bridge publication fails
+  # with "address already in use". Publishing on 0.0.0.0 would also put the
+  # most dangerous port this project opens on every interface including a
+  # public one, and lean on the inbound guard to take it back; naming the three
+  # addresses that should reach it needs no such argument. docs/AGENT.md
+  # carries the full reasoning.
+  #
+  # When Tailscale is not up yet there is no address to publish on, so the
+  # agent starts without it and says so — a restart picks it up. That is also
+  # what 'lca check' reports, rather than leaving it to be discovered from a
+  # phone that will not connect.
+  local tailscale_pub=() tsip=""
+  if tsip="$(tailscale_ip4)"; then
+    tailscale_pub=( -p "${tsip}:${AGENT_PORT}:3000" )
+  else
+    warn "No Tailscale address yet, so the agent is being published on this machine only. Your phone will not reach it until Tailscale is up and you run: lca agent restart"
+  fi
+
   local extra_env=()
   if [[ -n "${instructions}" ]]; then
     # LLM_SYSTEM_PROMPT_SUFFIX is not a documented OpenHands variable, so this
@@ -180,6 +211,7 @@ start_agent() {
     -v "${HOME}/.openhands:/.openhands" \
     -p "127.0.0.1:${AGENT_PORT}:3000" \
     -p "${bridge_gw}:${AGENT_PORT}:3000" \
+    ${tailscale_pub[@]+"${tailscale_pub[@]}"} \
     --add-host host.docker.internal:host-gateway \
     "${AGENT_IMAGE}" >/dev/null \
     || die "Could not start the agent container. Its own output: lca agent logs"
@@ -334,11 +366,13 @@ seed_agent_settings() {
   fi
 }
 
+# The URL this prints is a promise, and 'lca check' now holds it to one: for
+# the whole life of this tier it printed a Tailscale address that nothing was
+# ever published on. Same helper as the publication, so the address it advertises
+# and the address it binds cannot drift apart.
 agent_url_line() {
   local ip=""
-  if have tailscale; then
-    ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-  fi
+  ip="$(tailscale_ip4 || true)"
   if [[ -n "${ip}" ]]; then
     printf 'http://%s:%s' "${ip}" "${AGENT_PORT}"
   else

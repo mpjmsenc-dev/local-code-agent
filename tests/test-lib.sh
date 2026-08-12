@@ -3513,9 +3513,26 @@ check "...and agent.sh passes the flag that makes that name resolve" \
 # Published on loopback only. The guard is the real defence, but a container
 # published on 0.0.0.0 is reachable the instant the guard is not loaded — and
 # this box has been in exactly that state twice today, after a restart.
-agent_publishes_on_loopback() {
+# agent_run_block — the actual 'docker run' invocation, comments stripped: from
+# the run line to the image argument that ends it.
+#
+# The gates below assert against THIS rather than against the whole file, and a
+# mutant is why. Deleting the line that passes the Tailscale publication to
+# docker left the array still being built three lines above, so a whole-file
+# grep matched the construction and passed on code where the flag never reached
+# docker at all. Built and passed are two claims; only the second one runs.
+#
+# Captured first, then matched: the awk below exits at the image line, and a
+# reader that leaves early SIGPIPEs the sed feeding it — gotcha 3, which this
+# suite has a gate for. It caught this the first time it was written as a pipe.
+agent_run_block() {
   local body
   body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  awk '/docker run -d/ { inb = 1 } inb { print } inb && /AGENT_IMAGE/ { exit }' <<<"${body}"
+}
+agent_publishes_on_loopback() {
+  local body
+  body="$(agent_run_block)"
   grep -qE '\-p "127\.0\.0\.1:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
     echo 'agent.sh publishes its port on all interfaces, so it is exposed whenever the guard is not loaded' >&2
     return 1; }
@@ -3528,14 +3545,15 @@ check "the agent's port is published on loopback, not on every interface" \
 # refused. Measured from inside a live sandbox: 000 for the MCP URL and 000 for
 # the app's root, on a container that was up and healthy.
 agent_publishes_on_the_bridge_too() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  local body file
+  body="$(agent_run_block)"
+  file="$(sed 's/#.*//' "${REPO}/agent.sh")"
   grep -qE '\-p "\$\{bridge_gw\}:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
     echo 'agent.sh publishes only on loopback, which its own sandboxes cannot reach — MCP tool listing will time out in init' >&2
     return 1; }
   # The address must be DISCOVERED, not written down: 172.17.0.1 is only the
   # usual gateway, and a daemon with a custom bip has another.
-  grep -q 'docker_bridge_gateway' <<<"${body}" || {
+  grep -q 'docker_bridge_gateway' <<<"${file}" || {
     echo 'agent.sh hardcodes a bridge address instead of asking docker for it' >&2
     return 1; }
   # And it must not have reached for 0.0.0.0 to solve the same problem.
@@ -3544,6 +3562,116 @@ agent_publishes_on_the_bridge_too() {
 }
 check "...and on the docker bridge, which is the only address its sandboxes have" \
   agent_publishes_on_the_bridge_too
+# ...and on the Tailscale address, which is the one the docs actually send the
+# user to and the one nothing was ever published on.
+#
+# A source assertion, deliberately, and this is the case where that is the right
+# check rather than the lazy one: these are arguments handed to 'docker run',
+# there is no way to observe them without starting the real container, and the
+# failure they guard is invisible from this machine — loopback answers, the
+# guard reports the port covered, every check passes, and the phone refuses.
+# The BEHAVIOUR of the reachability rule is driven separately, below.
+agent_publishes_on_the_tailscale_address() {
+  local body file
+  body="$(agent_run_block)"
+  file="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  grep -qE '\-p "\$\{tsip\}:\$\{AGENT_PORT\}:3000"' <<<"${file}" || {
+    echo "agent.sh never publishes on the Tailscale address, so 'lca agent url' prints a URL that refuses" >&2
+    return 1; }
+  # ...and it reaches docker. Building the flag and passing it are two claims.
+  grep -q 'tailscale_pub\[@\]' <<<"${body}" || {
+    echo 'agent.sh builds the Tailscale publication and never passes it to docker, so the phone still cannot reach it' >&2
+    return 1; }
+  # Discovered, not configured, and from the one helper — agent.sh and
+  # check-system.sh each had their own 'tailscale ip -4 | head -1'.
+  grep -q 'tailscale_ip4' <<<"${file}" || {
+    echo 'agent.sh hardcodes or re-derives the Tailscale address instead of asking for it' >&2
+    return 1; }
+  # Absence must be said out loud. A container started before Tailscale is up
+  # cannot publish there, and the user finds out from a phone that will not
+  # connect unless something tells them to restart.
+  grep -q 'agent restart' <<<"${file}" || {
+    echo 'agent.sh publishes nothing on Tailscale when it is down and says nothing about it' >&2
+    return 1; }
+}
+check "...and on the Tailscale address, which is the one the docs send you to" \
+  agent_publishes_on_the_tailscale_address
+# The flag whose absence produces no error at all.
+#
+# Without --add-host the container cannot resolve host.docker.internal, so it
+# cannot reach the relay, so every LLM call fails to connect — and LiteLLM's
+# num_retries=5 with long backoffs swallows exactly that. Measured: sandbox up,
+# settings correct, conversation open, model never contacted once, nothing
+# reported anywhere. It is one flag between working and silently doing nothing.
+agent_can_resolve_the_host() {
+  local body
+  body="$(agent_run_block)"
+  grep -q -- '--add-host host.docker.internal:host-gateway' <<<"${body}" || {
+    echo 'agent.sh drops --add-host, so the container cannot resolve the relay and every LLM call retries silently forever' >&2
+    return 1; }
+}
+check "the agent container can resolve the host it must call the model on" \
+  agent_can_resolve_the_host
+
+# The reachability rule itself, driven rather than read, in the exact shape the
+# real bug had: loopback and the bridge listening, the Tailscale address not.
+LISTENERS_WITH_THE_BUG="State  Recv-Q Send-Q Local Address:Port  Peer Address:Port
+LISTEN 0      4096       127.0.0.1:3001       0.0.0.0:*
+LISTEN 0      4096      172.17.0.1:3001       0.0.0.0:*
+LISTEN 0      4096         0.0.0.0:3000       0.0.0.0:*
+LISTEN 0      4096            [::]:22            [::]:*"
+LISTENERS_FIXED="${LISTENERS_WITH_THE_BUG}
+LISTEN 0      4096     100.64.0.1:3001       0.0.0.0:*"
+
+check "a port bound only to loopback is not reachable at the Tailscale address" \
+  test "$(port_open_at 100.64.0.1 3001 "${LISTENERS_WITH_THE_BUG}" && echo yes || echo no)" = no
+check "...and one bound to 0.0.0.0 is" \
+  test "$(port_open_at 100.64.0.1 3000 "${LISTENERS_WITH_THE_BUG}" && echo yes || echo no)" = yes
+check "...and one bound to that address itself is" \
+  test "$(port_open_at 100.64.0.1 3001 "${LISTENERS_FIXED}" && echo yes || echo no)" = yes
+# A dual-stack listener takes IPv4 connections too, so calling [::] a gap would
+# report every ssh daemon on earth as unreachable.
+check "...and a dual-stack listener is not reported as a gap" \
+  test "$(port_open_at 100.64.0.1 22 "${LISTENERS_WITH_THE_BUG}" && echo yes || echo no)" = yes
+check "...and a port nothing is listening on is not reachable" \
+  test "$(port_open_at 100.64.0.1 9999 "${LISTENERS_WITH_THE_BUG}" && echo yes || echo no)" = no
+# Loopback still answers, which is the whole reason this was invisible: every
+# check that asked THIS machine got the right answer to the wrong question.
+check "...while loopback answers for the very same port, as it always did" \
+  test "$(port_open_at 127.0.0.1 3001 "${LISTENERS_WITH_THE_BUG}" && echo yes || echo no)" = yes
+
+# promise_gaps_with AGENT_ON LISTENERS — the gaps, with the tiers set here.
+#
+# 'local', not assignments inside a command substitution: bash is dynamically
+# scoped so the callee sees these, nothing leaks back, and it does not read as
+# the "modification is local to the subshell" mistake — which is a real one, and
+# ShellCheck is right to refuse to tell it apart from a deliberate use.
+promise_gaps_with() {
+  local agent_on="$1" listeners="$2"
+  local ENABLE_WEBUI=true WEBUI_PORT=3000 AGENT_PORT=3001
+  local ENABLE_AGENT="${agent_on}"
+  tailscale_promise_gaps 100.64.0.1 "${listeners}"
+}
+promise_gaps_name_the_agent_ui() {
+  local out
+  out="$(promise_gaps_with true "${LISTENERS_WITH_THE_BUG}")"
+  grep -q "the agent's UI 3001" <<<"${out}" || {
+    printf 'the agent UI was unreachable at the documented address and was not reported: %s\n' "${out}" >&2
+    return 1; }
+  # ...and the chat app, which IS reachable there, must not be reported. A
+  # check that cries about a working service gets switched off.
+  ! grep -q 'chat app' <<<"${out}" || {
+    printf 'the chat app is reachable on 0.0.0.0 and was still reported as a gap: %s\n' "${out}" >&2
+    return 1; }
+}
+check "the check names the port the docs promise and nothing is listening on" \
+  promise_gaps_name_the_agent_ui
+check "...and reports nothing once it is published there" \
+  test -z "$(promise_gaps_with true "${LISTENERS_FIXED}")"
+# Intent first, the same rule guarded_ports uses: a tier that is switched off
+# promises the user nothing, so an unpublished port is not a broken promise.
+check "...and a tier that is switched off promises nothing" \
+  test -z "$(promise_gaps_with false "${LISTENERS_WITH_THE_BUG}")"
 # The three variables that decide whether a sandbox can call back into the app
 # at all. Without them OpenHands advertises its CONTAINER-side port 3000, which
 # on this stack is Open WebUI — and Open WebUI hangs rather than refusing, so

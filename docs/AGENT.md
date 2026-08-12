@@ -319,17 +319,43 @@ it can start its own sandboxes.
 Two things protect it, and both are checked:
 
 1. **It is published on private addresses only** — never `0.0.0.0`. There are
-   two of them, and the second one is not decoration: `127.0.0.1:AGENT_PORT`
-   for you, and `<docker-bridge-gateway>:AGENT_PORT` for the agent's own
-   sandbox containers, which reach this machine as the bridge gateway and can
-   never reach its loopback. Measured: with the loopback publish alone, a live
-   sandbox got `000` — connection refused — for both the MCP URL it must list
-   its tools from and the app's own root, and the run died in init.
+   **three**, and each one exists because something could not reach it:
 
-   What that widens, stated plainly: **any container on the default docker
-   bridge can now reach the agent's UI.** What it does not do is put it on a
-   public interface — a bridge gateway is routable only from this host and its
-   containers.
+   | address | who needs it |
+   |---|---|
+   | `127.0.0.1:AGENT_PORT` | you, and `lca agent status` |
+   | `<docker-bridge-gateway>:AGENT_PORT` | the agent's own sandbox containers |
+   | `<tailscale-ip>:AGENT_PORT` | your phone |
+
+   Measured for the second: with the loopback publish alone, a live sandbox got
+   `000` — connection refused — for both the MCP URL it must list its tools
+   from and the app's own root, and the run died in init.
+
+   The third was missing for the entire life of this tier. `lca agent url`
+   printed `http://<tailscale-ip>:AGENT_PORT`, this file called it the address
+   to open on your phone, and **nothing was ever published there** — so the
+   documented phone path had never once worked. It was invisible from the
+   server: loopback answered, the guard reported the port covered, `lca check`
+   was green. The only way to see it was to be holding the phone. `lca check`
+   now compares what the docs promise against what is actually listening, and
+   fails when they disagree.
+
+   **Why three specific addresses and not one `0.0.0.0`.** Two reasons, and the
+   first is mechanical: you cannot add `0.0.0.0` alongside them. It already
+   covers the bridge address, so docker refuses the pair with *address already
+   in use*. The second is the point of this section — `0.0.0.0` would put the
+   most dangerous port this project opens on every interface, including a public
+   one, and then rely on the inbound guard to take it back. Naming the three
+   addresses that should reach it needs no such argument.
+
+   What the bridge publication widens, stated plainly: **any container on the
+   default docker bridge can reach the agent's UI.** What none of the three do
+   is put it on a public interface.
+
+   One operational consequence, worth knowing before it surprises you: a
+   container started **before** Tailscale is up has no Tailscale address to
+   publish on. `lca agent start` says so at the time, and `lca check` reports it
+   afterwards. The fix is `lca agent restart`.
 2. **The inbound guard covers its port**, by exactly the rule the chat app
    taught this project: `ENABLE_AGENT` is a statement of intent, a listening
    socket is a fact. A container still running after you set `ENABLE_AGENT=false`
