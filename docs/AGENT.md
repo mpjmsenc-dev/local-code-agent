@@ -617,6 +617,68 @@ the run they came from.
 The practical rule: the only trustworthy answer for a box is that box's own
 `lca agent selftest`.
 
+### What the 3b actually produces: two real tasks, both failed
+
+The selftest passing is a real result and it is a narrow one — it asks for one
+file containing one function, and it names the exact path to write it to. Two
+larger tasks were then run on the droplet at the same rung (`3b-agent` @ 16384),
+and **both failed in the same way**. This is what a user should expect here.
+
+| | task | what it did | verdict |
+|---|---|---|---|
+| run 1 | create a README | `touch README.md`, then *"successfully created"* | empty file, reported as done |
+| run 2 | a `wordcount.py` CLI with a stated output format, error handling, a test file, run it, show the output | one write, then 25 minutes later a message quoting the code back and *"You can now use this script"*, `execution_status: finished` | code that cannot run, in the wrong directory, none of the three requested steps done |
+
+Run 2's code had three defects, and the first is fatal:
+
+- **It uses `os`, `sys` and `re` with no imports at all.** Verified by executing
+  it: `python wordcount.py t.txt` fails immediately with
+  `NameError: name 'sys' is not defined`. **The first executed line crashes.**
+- It indexes `sys.argv[1]` with no guard, so the missing-argument case the task
+  explicitly asked for raises `IndexError` instead of exiting 1 with a message.
+- It never ran the file, never created the test file, and never showed output —
+  all three explicitly requested.
+
+It also wrote to `/workspace/wordcount.py` while working in
+`/workspace/project/TestAppOllama1Coding`, so the deliverable landed outside the
+repo entirely.
+
+**The root cause is one thing, and it is not the code quality: the agent
+declares completion without executing its own work.** One execution would have
+caught the `NameError` in a second. Run 1 was the same shape — `touch` plus a
+success claim. Two very different tasks, one failure mode.
+
+**So, plainly: at the 3b rung this tier writes plausible-looking code and
+reports success without running it.** Treat its output as a draft that has never
+been executed, because that is exactly what it is. The tier is genuinely useful
+for scaffolding and for tasks you were going to review line by line anyway. It
+is not useful for anything you intend to trust unread.
+
+Two things changed because of these runs:
+
+1. **`config/CONVENTIONS.md` now carries two rules**, and both are keyed so they
+   cannot be quietly dropped: run what you built and show its real output before
+   claiming a task is done, and write files into the working directory you were
+   given rather than the sandbox root. That file feeds all three surfaces.
+2. **Naming the absolute path works, and this project's own selftest is the
+   evidence.** Its task text says *"Create a file
+   `/workspace/project/lca_selftest.py`"* — and the file lands there, every run.
+   The two failing runs named no path and the file went to the sandbox root.
+
+On the harness question that follows from 2 — could the working directory be
+stated at submission time rather than hoped for? **For tasks this project
+submits, yes, and it already is.** For tasks submitted through the OpenHands web
+UI, no: the working directory is chosen in that UI per conversation and never
+passes through this project, so there is nothing here to inject it into. The
+honest options are the prompt rule above, or a submission command of our own
+that always names the directory. The second is not built.
+
+A caveat worth keeping in view: none of this says a bigger model fixes it.
+Nobody has run these two tasks at a larger rung, so "the 3b is too small" is a
+hypothesis, not a measurement. What *is* measured is that the 7b fails the
+tool-call channel exactly as the 3b does, so a straight swap is not the
+experiment it sounds like.
+
 ### So: is `ENABLE_AGENT=true` an honest default now?
 
 This file used to answer **no, and the reason is time** — that on the hardware

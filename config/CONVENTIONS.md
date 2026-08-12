@@ -8,6 +8,8 @@ Both were caught by a failing gate, but only because someone was watching.
 
 Reword these and a gate fails, naming the phrase:
 
+  Never report success on code you have not executed
+  working directory you were given
   smallest change that satisfies the request
   kills the script
   swallows the exit status
@@ -21,16 +23,22 @@ genuinely need to reword one, change it there in the same commit.
 The file is also budgeted: 'lca check' warns when the whole prompt passes 15%
 of OLLAMA_CONTEXT_LENGTH, and a gate fails if the SHIPPED default would trip
 that warning. There is very little headroom. Trim prose, never a case.
+
+WHAT THIS FILE IS, which used to be the first paragraph below and cost 75
+tokens of budget to tell the model things it cannot act on. It is read by
+aider ('lca'), the chat app and the agent; AIDER_CONVENTIONS=false switches it
+off for all three. It is APPENDED to the chat app's prompt, never substituted —
+that part tells the model it has no filesystem and no tools. Short on purpose:
+it is re-sent on every message. If you need to make room again, look for more
+prose like this before you touch a rule.
 -->
 
 # Coding conventions
 
-How this stack should behave. Read by **aider** (`lca`), the **chat app** and
-the **agent**; `AIDER_CONVENTIONS=false` switches it off for all three. It is
-*appended* to the chat app's prompt, never substituted — that part tells the
-model it has no filesystem and no tools. Short on purpose: it is re-sent on
-every message.
-
+- Before saying a task is done, RUN what you built and show its real output. If
+  the task named outputs or behaviours, exercise them. Never report success on
+  code you have not executed.
+- Write files into the working directory you were given, not the sandbox root.
 - Make the smallest change that satisfies the request; don't refactor code you
   weren't asked to touch.
 - Match the surrounding file's style, naming and structure.

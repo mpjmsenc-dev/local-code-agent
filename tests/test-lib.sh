@@ -3767,6 +3767,25 @@ promise_gaps_name_the_agent_ui() {
 }
 check "the check names the port the docs promise and nothing is listening on" \
   promise_gaps_name_the_agent_ui
+# The selftest's task must name an ABSOLUTE path, and that is a measurement
+# rather than a preference.
+#
+# Two droplet runs whose tasks named no path wrote their deliverable to
+# /workspace — the sandbox root — while working in a repo under
+# /workspace/project. The selftest names the full path and the file lands there
+# every time. That is the only evidence this project has that stating the
+# directory works, so the thing carrying the evidence should not be quietly
+# simplified into a relative filename.
+selftest_task_names_an_absolute_path() {
+  local task
+  task="$(sed -n "s/^TASK_TEXT='\(.*\)'$/\1/p" "${REPO}/scripts/agent-selftest.sh")"
+  [[ -n "${task}" ]] || { echo 'could not read the selftest task text' >&2; return 1; }
+  grep -q '/workspace/project/' <<<"${task}" || {
+    printf 'the selftest asks for a file without saying where, which is the shape that wrote to the sandbox root: %s\n' "${task}" >&2
+    return 1; }
+}
+check "the selftest tells the agent the absolute path to write to" \
+  selftest_task_names_an_absolute_path
 check "...and reports nothing once it is published there" \
   test -z "$(promise_gaps_with true "${LISTENERS_FIXED}")"
 # Intent first, the same rule guarded_ports uses: a tier that is switched off
@@ -4037,6 +4056,13 @@ instructions_reach_the_chat_app() {
 # editor gets a note in the file itself instead, and this is the list it points
 # at. If you must reword one, change it here in the same commit.
 CONVENTIONS_KEYED_PHRASES=(
+  # Both measured on a real droplet run, twice, on unrelated tasks: the agent
+  # wrote plausible code, never executed it, and reported success. One run's
+  # code raised NameError on its first line. The other wrote its deliverable to
+  # the sandbox root instead of the repo it had been given. These two lines are
+  # the whole of what this file can do about that, so they are keyed.
+  'Never report success on code you have not executed'
+  'working directory you were given'
   'smallest change that satisfies the request'
   'kills the script'
   'swallows the exit status'
@@ -4045,9 +4071,23 @@ CONVENTIONS_KEYED_PHRASES=(
   'passes on the definition'
 )
 conventions_keep_their_keyed_phrases() {
-  local f="${REPO}/config/CONVENTIONS.md" phrase missing=()
+  local body phrase missing=()
+  # The MODEL-FACING text — editor note stripped, whitespace collapsed — and
+  # not the raw file. Both halves are load-bearing:
+  #
+  # The note LISTS every keyed phrase, one per line, so grepping the file found
+  # each phrase in the note and passed even when the rule itself was gone.
+  # Measured: a mutant that deleted a rule outright died in silence, and every
+  # phrase here had been protected by nothing since the note was added. That is
+  # gotcha 5 — a check satisfied by the definition of the thing it looks for —
+  # in the very file that documents gotcha 5.
+  #
+  # Whitespace collapsed because a rule that wraps across two lines is still the
+  # rule; requiring it to fit on one line would make the gate a formatter.
+  body="$(awk '/<!--/ { skip = 1 } skip == 0 { print } /-->/ { skip = 0 }' \
+            "${REPO}/config/CONVENTIONS.md" | tr '\n' ' ' | tr -s ' ')"
   for phrase in "${CONVENTIONS_KEYED_PHRASES[@]}"; do
-    grep -qF -- "${phrase}" "${f}" || missing+=("${phrase}")
+    grep -qF -- "${phrase}" <<<"${body}" || missing+=("${phrase}")
   done
   (( ${#missing[@]} == 0 )) || {
     printf 'config/CONVENTIONS.md lost wording other gates match on:\n' >&2
