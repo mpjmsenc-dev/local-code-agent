@@ -3683,6 +3683,36 @@ stop_collects_the_sandboxes() {
 }
 check "stopping the agent collects the sandboxes nothing else can reach" \
   stop_collects_the_sandboxes
+# The one branch of stop_followers that must kill NOTHING.
+#
+# It runs when the followers turned out to share the watcher's own process
+# group, and the whole reason it exists is that signalling that group kills the
+# watcher in the middle of reporting why it stopped a run. A pid-by-pid fallback
+# used to sit here and was removed: unreachable on bash 5.2, therefore never
+# executed by any test, measured to leak one follower every time it did run, and
+# its last resort could kill a 'docker logs -f' the run never started.
+#
+# So the property to hold is simple and worth holding: in that arm, no kill.
+same_group_branch_kills_nothing() {
+  local body arm
+  # Captured, then matched. Written as 'sed | awk' with an early exit the first
+  # time, which SIGPIPEs the sed — the same gotcha this file gates against, hit
+  # twice in one sitting. index(), not a regex, because the marker is full of
+  # characters awk and the shell would both want to escape.
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
+  arm="$(awk 'index($0, "== \"${mine}\"") { inb = 1 } inb { print } inb && /else/ { exit }' <<<"${body}")"
+  [[ -n "${arm}" ]] || {
+    echo 'stop_followers no longer guards against killing the watcher own process group' >&2
+    return 1; }
+  # A COMMAND, not the word. This arm's whole output is a message telling the
+  # user to "kill the pids it prints", and a bare word match failed on correct
+  # code because of its own remedy text.
+  ! grep -qE '^[[:space:]]*(kill|pkill)\b' <<<"${arm}" || {
+    printf 'the same-group arm of stop_followers signals something, which kills the watcher mid-report:\n%s\n' "${arm}" >&2
+    return 1; }
+}
+check "the branch that would kill the watcher kills nothing at all" \
+  same_group_branch_kills_nothing
 
 # The reachability rule itself, driven rather than read, in the exact shape the
 # real bug had: loopback and the bridge listening, the Tailscale address not.

@@ -174,24 +174,35 @@ agent_follow_logs() {
 #
 # One signal to their process group, because that is the only handle that still
 # points at the follower this file kept losing. Measured, on a run where the
-# container outlives the watcher ('watch --dry-run'): the pid-by-pid sweep below
-# left exactly one 'docker logs -f' alive every time. The reason is a race it
-# cannot win — killing the parent first reparents its child to init, so the
+# container outlives the watcher ('watch --dry-run'): a pid-by-pid sweep left
+# exactly one 'docker logs -f' alive every time. The reason is a race it cannot
+# win — killing a follower's parent first reparents its child to init, so the
 # child vanishes from every pid we hold — and the fix is that a reparented
-# process KEEPS its process group. Reproduced outside docker to be sure of both
-# halves before relying on either.
+# process KEEPS its process group. Both halves were reproduced outside docker
+# before either was relied on.
 #
-# The guard is not decoration. If 'set -m' ever failed to split the group, this
-# pgid would be the WATCHER's own, and the group kill would take the watcher
-# down mid-report: a far worse bug than the leak it is closing. When that is
-# what we see, say so and fall back to the sweep that at least cannot do that.
+# THE GUARD IS NOT DECORATION, and it is the only branch here. If 'set -m' ever
+# failed to split the group, this pgid would be the WATCHER's own and the group
+# kill would take the watcher down mid-report — a far worse bug than the leak it
+# closes. So in that case it kills nothing and says what is left behind.
+#
+# There used to be a pid-by-pid fallback here for that case. It is gone, and
+# deliberately: it was unreachable on the bash this project targets (5.2 splits
+# the group — measured), it was therefore never executed by any test, it was
+# measured to leak one follower every time it ran, and its last resort was a
+# sweep by command line that could kill a 'docker logs -f' this run never
+# started. Untested code whose only measured behaviour is "leaks, and sometimes
+# kills something else" is not a safety net. Leaving the followers and naming
+# them is worse in one way and better in every other.
 stop_followers() {
   local mine
   if [[ -n "${AGENT_FOLLOWER_PGID}" ]]; then
     mine="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
     if [[ -n "${mine}" && "${AGENT_FOLLOWER_PGID}" == "${mine}" ]]; then
-      warn "The log followers did not get a process group of their own, so they are being stopped one pid at a time and a stray 'docker logs -f' may survive this run. Nothing you did causes this; it means 'set -m' behaved differently than it does on bash 5.2."
-      stop_followers_by_pid
+      # Never 'pkill -f docker logs' as the remedy: that pattern matches the
+      # user's own command line and this project has watched it kill the
+      # calling shell four separate times. List, then kill by pid.
+      warn "The log followers ended up in this script's own process group, so nothing was killed — signalling that group would have killed this watcher in the middle of its report. A few 'docker logs -f' processes are still running and will not stop on their own. List them with: ps -eo pid,comm,args | awk '\$2 == \"docker\" && /logs -f/'   then kill the pids it prints."
     else
       kill -- -"${AGENT_FOLLOWER_PGID}" 2>/dev/null
       sleep 0.3
@@ -199,62 +210,6 @@ stop_followers() {
     fi
   fi
   rm -f "${AGENT_FOLLOWERS}" "${AGENT_FOLLOWER_FIFO}"
-  return 0
-}
-
-# stop_followers_by_pid — the degraded path, kept only for a bash that does not
-# put a backgrounded job in its own process group.
-#
-# It works on the pids the loop recorded: 'as_root' is a function, so
-# backgrounding it makes a subshell, and killing that subshell alone would leave
-# the 'docker logs -f' underneath it orphaned. pkill -P, by parent pid — never
-# -f, which in this project has matched the calling shell four separate times.
-stop_followers_by_pid() {
-  local pid loop
-  [[ -r "${AGENT_FOLLOWERS}" ]] || return 0
-  # The SPAWNER first, and dead before anything else is touched.
-  #
-  # The first line of this file is the follower loop itself; the rest are the
-  # 'docker logs -f' processes it has started. That loop re-checks for new
-  # sandboxes every five seconds, so sweeping the list while it still lives is a
-  # race the loop can win — measured twice, each time with exactly one follower
-  # surviving, reparented to init. Its 'sleep' is killed too, because bash defers
-  # a TERM until the child it is waiting on returns, which would otherwise make
-  # this take five seconds to do what it can do at once.
-  loop="$(head -1 "${AGENT_FOLLOWERS}" 2>/dev/null || true)"
-  if [[ -n "${loop}" ]]; then
-    pkill -P "${loop}" 2>/dev/null
-    kill "${loop}" 2>/dev/null
-    sleep 0.3
-    kill -9 "${loop}" 2>/dev/null
-  fi
-  # Now nothing new can appear, so one sweep is enough. pkill -P, by PARENT pid:
-  # 'as_root' is a function, so backgrounding it makes a subshell and killing
-  # that alone would orphan the docker process under it. Never pkill -f, which
-  # in this project has matched the calling shell four separate times.
-  while read -r pid; do
-    [[ -n "${pid}" ]] || continue
-    pkill -P "${pid}" 2>/dev/null
-    kill "${pid}" 2>/dev/null
-  done < "${AGENT_FOLLOWERS}"
-  # ...and a final sweep by what the survivors ARE, because the passes above are
-  # about pids we recorded and one keeps getting away: a follower whose parent
-  # died first is reparented to init, and nothing in our list points at it.
-  #
-  # HONEST LIMIT of this function: the sweep reduces the leak, it does not close
-  # it, and it can reach a 'docker logs -f' this run never started. That is why
-  # it is the fallback now rather than the plan.
-  #
-  # Matched on the container name in the command line, from ps, rather than with
-  # 'pkill -f' — that flag matches the calling shell's own arguments and has
-  # done so four separate times in this project.
-  local args
-  while read -r pid args; do
-    case "${args}" in
-      *"docker logs -f"*"${AGENT_CONTAINER}"*|*"docker logs -f"*oh-agent-server-*)
-        kill "${pid}" 2>/dev/null ;;
-    esac
-  done < <(ps -eo pid,args --no-headers 2>/dev/null || true)
   return 0
 }
 
