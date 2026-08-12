@@ -665,19 +665,60 @@ Two things changed because of these runs:
    `/workspace/project/lca_selftest.py`"* — and the file lands there, every run.
    The two failing runs named no path and the file went to the sandbox root.
 
-On the harness question that follows from 2 — could the working directory be
-stated at submission time rather than hoped for? **For tasks this project
-submits, yes, and it already is.** For tasks submitted through the OpenHands web
-UI, no: the working directory is chosen in that UI per conversation and never
-passes through this project, so there is nothing here to inject it into. The
-honest options are the prompt rule above, or a submission command of our own
-that always names the directory. The second is not built.
+3. **`lca agent task` exists**, because the web UI cannot be reached but this
+   can. It is the answer to "could the working directory be stated at
+   submission time rather than hoped for" — for tasks submitted through the
+   OpenHands web UI it still cannot, since that directory is chosen in the UI
+   per conversation and never passes through this project. So this project
+   grew its own way in.
 
-A caveat worth keeping in view: none of this says a bigger model fixes it.
-Nobody has run these two tasks at a larger rung, so "the 3b is too small" is a
-hypothesis, not a measurement. What *is* measured is that the 7b fails the
-tool-call channel exactly as the 3b does, so a straight swap is not the
-experiment it sounds like.
+```bash
+lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
+lca agent task --watch --dir /workspace/project/myrepo "..."   # and supervise it
+```
+
+What it does that the web UI does not:
+
+- **Names the working directory twice.** In the prompt text, which is
+  demonstrably read, and in `system_message_suffix`, which is the documented
+  home for standing instructions. And it names it as an *instruction* — *"create
+  and edit files ONLY under `<dir>`… do not write to /workspace or any directory
+  above"* — because both failing runs were *given* a working directory and wrote
+  above it anyway. Stating it was not enough; forbidding the alternative is the
+  part that was missing.
+- **Carries the two rules with the task**, the same two `config/CONVENTIONS.md`
+  holds, from one function so the three surfaces cannot drift apart.
+- **Returns the conversation id**, found by listing conversations before and
+  after and taking the difference — not by picking the newest sandbox, which is
+  the guess that once attached a watcher to a stale run for an entire night. It
+  records the id, and `lca agent watch` prefers it over any inference.
+- **Refuses to submit into a stack that cannot run the task**: tier off,
+  container down, API not answering, or settings holding the wrong model each
+  stop it *before* the task is posted, with the command that fixes them. A task
+  accepted by a broken stack looks fine and produces nothing for half an hour.
+
+**Honest status of the suffix**: unverified on this build. `agent_settings.tools`
+round-trips through the settings API and is then ignored — 22 tools still load —
+so a field being *accepted* proves nothing about it being *used*. That is
+precisely why the same rules are in the prompt text, where they are known to be
+read. If the suffix works it is the better home; if it does not, nothing is lost.
+
+### The open question, and the experiment that would answer it
+
+None of this says a bigger model fixes the root cause. Nobody has run these two
+tasks at a larger rung, so **"the 3b is too small" is a hypothesis, not a
+measurement** — and it is the most tempting wrong conclusion available here.
+
+A straight swap is *not* the experiment, because the 7b fails the tool-call
+channel exactly as the 3b does — measured, through both `/api/chat` and
+`/v1/chat/completions`. The real experiment is **the same two tasks at a larger
+rung with the prompt-parsed channel** (`AGENT_NATIVE_TOOL_CALLING=false`), which
+is what makes this tier work at all here.
+
+That needs a bigger box than the droplet: the agent runs at a 16384 window, where
+a 7b needs 5.9 GB and leaves under 2 GiB for everything else on 7.8 GiB. So it is
+recorded here as the open question rather than guessed at. Anyone with the
+hardware can settle it in an afternoon and bring the numbers.
 
 ### So: is `ENABLE_AGENT=true` an honest default now?
 

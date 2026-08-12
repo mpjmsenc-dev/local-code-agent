@@ -17,7 +17,8 @@ LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               webui.sh agent.sh netmode.sh scripts/tune.sh scripts/apply.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
               scripts/selftest.sh scripts/ollama-relay.sh
-              scripts/agent-selftest.sh scripts/agent-setup.sh )
+              scripts/agent-selftest.sh scripts/agent-setup.sh
+              scripts/agent-task.sh )
 
 # Every document that INSTRUCTS a reader. The prose gates further down apply to
 # this set, and it is named here because they used to spell it out one function
@@ -3786,6 +3787,76 @@ selftest_task_names_an_absolute_path() {
 }
 check "the selftest tells the agent the absolute path to write to" \
   selftest_task_names_an_absolute_path
+
+# 'lca agent task' — the submission path this project controls. Driven, not
+# read: the prompt is built by a function precisely so the wording that failed
+# twice on a real droplet can be asserted here.
+TASK_PROMPT="$(agent_task_prompt /workspace/project/myrepo 'add a --json flag')"
+check "the submitted prompt names the working directory" \
+  grep -q '/workspace/project/myrepo' <<<"${TASK_PROMPT}"
+# The directory has to be an INSTRUCTION, not a mention. Both failing runs were
+# given a working directory and wrote above it anyway, so the prompt says what
+# to do with it rather than merely stating it.
+check "...and forbids writing above it, which is where both failed runs wrote" \
+  grep -q 'Do not write to /workspace' <<<"${TASK_PROMPT}"
+check "...and carries the task itself" \
+  grep -q 'add a --json flag' <<<"${TASK_PROMPT}"
+# The rule that addresses the actual root cause: it declared completion without
+# executing anything. One run's code died on its first line with a NameError.
+check "...and tells it to run what it built before saying it is done" \
+  grep -q 'run what you built and show its real output' <<<"${TASK_PROMPT}"
+check "...and to show what actually happened, not what it expects" \
+  grep -q 'paste what actually happened' <<<"${TASK_PROMPT}"
+# A prompt with nothing to do, or nowhere to do it, is a bug rather than an
+# empty task: it would submit a run that cannot mean anything.
+check "a prompt with no directory is refused" \
+  test -z "$(agent_task_prompt '' 'do a thing' 2>/dev/null || true)"
+check "...and one with no task is refused too" \
+  test -z "$(agent_task_prompt /workspace/project '' 2>/dev/null || true)"
+
+# The system-message suffix must carry the SAME two rules the instructions file
+# does, because three surfaces saying three things is how they drift. Keyed on
+# the phrases config/CONVENTIONS.md is already held to.
+suffix_carries_the_conventions_rules() {
+  local suffix
+  suffix="$(agent_task_suffix)"
+  grep -qF 'working directory you were given' <<<"${suffix}" || {
+    echo 'the task suffix does not carry the working-directory rule' >&2; return 1; }
+  grep -qF 'never report success on code you have not executed' \
+    <<<"${suffix,,}" || {
+    echo 'the task suffix does not carry the run-what-you-built rule' >&2; return 1; }
+}
+check "the task's system message carries the same two rules as the conventions" \
+  suffix_carries_the_conventions_rules
+
+# Identifying the conversation by SET DIFFERENCE rather than by being newest.
+CONV_BEFORE='{"items":[{"id":"old-one"},{"id":"older"}]}'
+CONV_AFTER='{"items":[{"id":"old-one"},{"id":"older"},{"id":"the-new-one"}]}'
+# Membership and count, not a joined string: 'old-one' and 'older' sort in
+# different orders under different locales, and a gate that depends on that is
+# testing the machine's collation rather than the reader.
+ids_are_read_from_a_listing() {
+  local ids id
+  ids="$(agent_conversation_ids "${CONV_AFTER}")"
+  [[ "$(grep -c . <<<"${ids}")" == "3" ]] || {
+    printf 'expected 3 ids, got: %s\n' "${ids}" >&2; return 1; }
+  for id in old-one older the-new-one; do
+    grep -qx -- "${id}" <<<"${ids}" || {
+      printf 'the listing reader lost the id %s\n' "${id}" >&2; return 1; }
+  done
+}
+check "every conversation id is read out of a listing" \
+  ids_are_read_from_a_listing
+new_conversation_is_the_difference() {
+  local before after new
+  before="$(agent_conversation_ids "${CONV_BEFORE}" | sort -u)"
+  after="$(agent_conversation_ids "${CONV_AFTER}" | sort -u)"
+  new="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${after}"))"
+  [[ "${new}" == "the-new-one" ]] || {
+    printf 'the new conversation was identified as "%s"\n' "${new}" >&2; return 1; }
+}
+check "...and the one we just started is the one that was not there before" \
+  new_conversation_is_the_difference
 check "...and reports nothing once it is published there" \
   test -z "$(promise_gaps_with true "${LISTENERS_FIXED}")"
 # Intent first, the same rule guarded_ports uses: a tier that is switched off

@@ -2781,6 +2781,92 @@ agent_conversation_pick() {
   printf '%s' "${id}"
 }
 
+# agent_task_suffix — the standing rules a task carries with it.
+#
+# Taken from config/CONVENTIONS.md's two measured rules rather than reworded, so
+# the three surfaces cannot drift: what aider is told, what the chat app is told
+# and what a submitted task is told are one decision.
+agent_task_suffix() {
+  printf '%s' "Always work inside the working directory you were given, not the sandbox root. Before claiming a task is complete, run what you built and show its real output; never report success on code you have not executed."
+}
+
+# agent_task_prompt DIR TASK — the text a task is actually submitted as.
+#
+# Belt and braces, and the belt is the part with evidence. The directory is
+# stated in the PROMPT because that is demonstrably read — the selftest names an
+# absolute path and its file lands there every run, while two runs that named no
+# path wrote to the sandbox root. It is also in the system message suffix, which
+# is the documented home for standing instructions and is unverified on this
+# build: agent_settings.tools round-trips through the API and is then ignored,
+# so acceptance proves nothing about use.
+#
+# A pure function so the wording can be driven by a test instead of read.
+agent_task_prompt() {
+  local dir="${1:-}" task="${2:-}"
+  [[ -n "${dir}" && -n "${task}" ]] || return 1
+  printf 'Working directory: %s\n\n' "${dir}"
+  printf 'Create and edit files ONLY under %s, using absolute paths that start\n' "${dir}"
+  printf 'with %s/. Do not write to /workspace or any directory above %s.\n\n' "${dir}" "${dir}"
+  printf 'Task: %s\n\n' "${task}"
+  printf '%s\n' "Before you say this is done: run what you built and show its real output. If the task named specific outputs, files or behaviours, exercise them and paste what actually happened. Do not report success on code you have not executed."
+}
+
+# agent_conversation_ids PAYLOAD — every conversation id in a listing, one per
+# line. The building block for identifying a conversation by SET DIFFERENCE:
+# list before submitting, list after, and the new id is the one we just made.
+#
+# That is how 'lca agent task' knows which conversation is its own, and it is
+# deliberate. The POST that starts a task answers with its own start-task id,
+# and the events API returns nothing for that id — measured. Taking the newest
+# sandbox instead is a guess, and it is the guess that attached a watcher to a
+# stale conversation on a real droplet and sat at "5 events" for ever.
+agent_conversation_ids() {
+  local payload="${1:-}"
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    [ ( if type == "array" then .[]
+        elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+        else empty end ) | objects | .id | strings ] | .[]' 2>/dev/null || return 1
+}
+
+# Where 'lca agent task' records the conversation it started, so that watching
+# it is a lookup rather than an inference. Per-user, needs no root, and outlives
+# a /tmp sweep.
+AGENT_CONVERSATION_FILE="${AGENT_CONVERSATION_FILE:-${HOME}/.lca-agent-conversation}"
+
+# agent_conversation_record ID — remember which conversation we started.
+agent_conversation_record() {
+  local id="${1:-}"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s\n' "${id}" > "${AGENT_CONVERSATION_FILE}" 2>/dev/null || return 1
+}
+
+# agent_recorded_conversation — the conversation this machine started, if it is
+# still one the app knows about.
+#
+# The liveness test matters: a recorded id from yesterday's run would otherwise
+# outrank a conversation started since, and re-create the exact failure this
+# whole mechanism exists to remove — a watcher attached to a run that is over.
+agent_recorded_conversation() {
+  local id payload
+  [[ -r "${AGENT_CONVERSATION_FILE}" ]] || return 1
+  id="$(head -1 "${AGENT_CONVERSATION_FILE}" 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  payload="$(agent_conversations_payload 2>/dev/null || true)"
+  [[ -n "${payload}" ]] || return 1
+  agent_conversation_ids "${payload}" 2>/dev/null | grep -qxF "${id}" || return 1
+  printf '%s' "${id}"
+}
+
+# agent_conversations_payload — the conversation listing, or nothing. One copy:
+# three call sites had grown their own curl with their own path and timeout.
+agent_conversations_payload() {
+  have curl || return 1
+  curl -fsS --max-time 5 \
+    "$(agent_api_base)/api/v1/app-conversations/search?limit=50" 2>/dev/null
+}
+
 # agent_conversation_count PAYLOAD — how many conversations the app is holding.
 #
 # Only interesting when it is more than one, which is the state that made a real
@@ -2823,6 +2909,13 @@ agent_live_sandboxes() {
 agent_conversation_ref() {
   local base path payload id sandbox
   have curl || return 1
+  # A conversation we STARTED outranks anything inferred, because it is known
+  # rather than deduced. 'lca agent task' records its own id; only when nothing
+  # did, or the recorded run is over, does the sandbox heuristic below get a
+  # say. This is the difference between attaching to the right run and
+  # attaching to whichever one looks newest.
+  id="$(agent_recorded_conversation 2>/dev/null || true)"
+  [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
   base="$(agent_api_base)"
   sandbox="$(agent_live_sandboxes 2>/dev/null | head -1 || true)"
   for path in "/api/v1/app-conversations/search?limit=20" \
