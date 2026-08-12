@@ -521,7 +521,9 @@ the cost of the per-change trail. Full example and reasoning in
 [DO](docs/DO.md) · [PHONE](docs/PHONE.md) · [MIGRATE](docs/MIGRATE.md) ·
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
 [PERFORMANCE](docs/PERFORMANCE.md) · [GPU](docs/GPU.md) · [BACKUPS](docs/BACKUPS.md) ·
-[AGENT (the autonomous tier)](docs/AGENT.md) · [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
+[AGENT (the autonomous tier)](docs/AGENT.md) ·
+[DESKTOP (a Mac/Windows client — design only, not built)](docs/DESKTOP.md) ·
+[CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 
 ## License
 
