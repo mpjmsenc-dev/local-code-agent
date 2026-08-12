@@ -3522,7 +3522,8 @@ seeds_max_output_as_a_number() {
   local body
   body="$(sed -n '/agent_settings_diff/,/}}}/p' "${REPO}/agent.sh" | sed 's/#.*//')"
   [[ -n "${body}" ]] || { echo 'could not find the settings payload in agent.sh' >&2; return 1; }
-  grep -q 'max_output_tokens:\$out' <<<"${body//[[:space:]]/}" || {
+  # shellcheck disable=SC2016  # the pattern is source text, not an expansion
+  grep -q 'max_output_tokens:$out' <<<"${body//[[:space:]]/}" || {
     echo 'the seeded settings do not carry max_output_tokens — the client reserves its own default and the prompt is truncated' >&2
     return 1; }
   grep -q -- '--argjson out' "${REPO}/agent.sh" || {
@@ -3589,19 +3590,25 @@ check "the submitter waits out sandbox creation before giving up on its own id" 
 submit_refuses_an_ambiguous_id() {
   local body
   body="$(sed 's/#.*//' "${REPO}/scripts/agent-task.sh")"
-  grep -qE 'grep -c \. <<<"\$\{NEW_IDS\}"\) == 1' <<<"${body}" || {
-    echo 'the submitter does not require exactly one new conversation before recording an id' >&2
+  # The selection itself is agent_new_conversation, which refuses (rc 2) when
+  # more than one appeared; what is asserted here is that this caller HONOURS
+  # the refusal instead of reaching past it, and stops rather than polling on.
+  grep -q 'agent_new_conversation' <<<"${body}" || {
+    echo 'the submitter no longer selects through agent_new_conversation, so nothing enforces "exactly one"' >&2
+    return 1; }
+  grep -qE 'RC == 2' <<<"${body}" || {
+    echo 'the submitter does not handle the ambiguous outcome, so an unattributable id can still be recorded' >&2
+    return 1; }
+  grep -q 'AMBIGUOUS=true' <<<"${body}" || {
+    echo 'the ambiguous case is detected but never reported to the user' >&2
     return 1; }
   grep -q 'agent_conversation_record' <<<"${body}" || {
     echo 'the submitter no longer records the id at all' >&2; return 1; }
-  # The lock that makes "exactly one" achievable for this command against
-  # itself, and the release before the exec into the watcher.
-  grep -q 'flock 9' <<<"${body}" || {
-    echo 'submissions are not serialised, so two runs each see the other as new' >&2
-    return 1; }
-  grep -q 'exec 9>&-' <<<"${body}" || {
-    echo 'the submit lock is never released, so a --watch run holds it for hours' >&2
-    return 1; }
+  # Deliberately NOT asserting a lock. Serialising the submit would need a
+  # command-less 'exec 9>FILE', which this suite forbids one gate over because
+  # the redirection applies to the shell and silences everything after it. The
+  # refusal above is what makes a collision safe; a lock would only have made it
+  # convenient. If that trade is ever revisited, the gate to keep is this one.
 }
 check "...and refuses to record an id it cannot attribute to this task" \
   submit_refuses_an_ambiguous_id

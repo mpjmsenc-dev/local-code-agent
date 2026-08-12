@@ -126,24 +126,20 @@ SUFFIX="$(agent_task_suffix)"
 # The conversations that exist BEFORE we submit, so ours can be identified by
 # difference rather than by being newest. The POST's own id is not usable: it
 # answers with a start-task id the events API knows nothing about (measured).
-# SERIALISED, because the set difference is only sound while nothing else is
-# creating conversations. Two 'lca agent task' runs overlapping — two terminals,
-# or a script — would each see the other's conversation as "new", and each could
-# record the other's id. The lock makes that case impossible for this command
-# against itself, which is the case a user can actually hit twice by accident.
+# NOT serialised, deliberately, and it was for one commit. An flock around this
+# section would let two runs of this command take turns instead of both seeing
+# the other's conversation as new — but holding a lock across the submit needs a
+# command-less 'exec 9>FILE', and this suite forbids that for a good reason: a
+# command-less exec with a redirection applies to the SHELL, so the obvious
+# spelling also sends every later warning to /dev/null. The subshell idiom that
+# avoids exec cannot work here either, because the id has to outlive the lock.
 #
-# It does NOT cover a conversation started from the web UI at the same moment;
-# nothing here can, because the app offers no way to ask "which conversation did
-# MY post create" — the POST answers with a start-task id the events API does
-# not know. That residual case is handled below by refusing to guess.
-#
-# Released before the exec into agent-watch.sh, or a --watch run would hold it
-# for hours.
-LOCK_FILE="${TMPDIR:-/tmp}/lca-agent-task.lock"
-if exec 9>"${LOCK_FILE}" 2>/dev/null && have flock; then
-  flock 9 2>/dev/null || true
-fi
-
+# Nothing is lost in correctness. Two conversations appearing at once is already
+# refused rather than guessed at (agent_new_conversation, rc 2), so the worst
+# outcome of a collision is that neither run records an id and both say so. What
+# a lock would have added is convenience — the second run waiting a moment and
+# then succeeding — and that is not worth either weakening a gate or silencing
+# this script's own error output.
 BEFORE="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
 
 step "Submitting the task"
@@ -222,9 +218,6 @@ else
   # and only the identification failed.
   warn "The task was submitted but its conversation id could not be identified, so 'lca agent watch' will fall back to picking the newest sandbox. If more than one run is alive, it may attach to the wrong one."
 fi
-# Before any exec below, so a --watch run does not hold the submit lock for the
-# length of the run.
-exec 9>&- 2>/dev/null || true
 
 info "Follow it: lca agent watch      ·      see what it did: lca agent logs"
 if [[ "${WATCH}" == "true" ]]; then

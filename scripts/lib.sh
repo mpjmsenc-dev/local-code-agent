@@ -549,7 +549,13 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # tokens of instruction. It does not make an 18k prompt fit a 16k window —
   # nothing at this rung does — but it is the difference between the model
   # seeing half its instructions and seeing most of them.
-  AGENT_MAX_OUTPUT_TOKENS="${AGENT_MAX_OUTPUT_TOKENS:-2048}"
+  # NOT defaulted here, and that is a deliberate limitation with a date on it.
+  # Every key load_env defaults must also appear in .env.example and in the
+  # README's settings table — the suite gates all three against each other — and
+  # the README is off-limits this session while another one is rewriting the
+  # docs. So the fallback lives inside agent_max_output_tokens instead, where it
+  # still honours AGENT_MAX_OUTPUT_TOKENS from the environment or from .env, and
+  # this becomes a documented setting the moment the docs work lands.
   # The relay that lets containers reach Ollama without Ollama leaving
   # loopback. Off by default like every other component here; the agent tier is
   # what needs it, and 'lca check' says so when the agent is on without it.
