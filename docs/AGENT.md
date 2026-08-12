@@ -672,33 +672,40 @@ demonstrate it. The honest position is now:
 
 - treat this tier's output as **a draft that has not been executed**, because at
   this rung it often has not been;
-- and treat the *size* of that problem as **unmeasured**, because the runs that
-  would have measured it were broken in two ways that have since been fixed.
+- and take the *size* of that problem from the clean re-run below rather than
+  from these two, which were broken in two ways that have since been fixed.
 
-#### RESULT PENDING — the re-run that measures this
+#### RESULT — the re-run that measures this
 
-<!-- PLACEHOLDER: fill this table in from the droplet re-run, then delete this
-     comment. Do not paraphrase the result into the prose above; this table is
-     where it lands, so the finding is recorded once and in one place. -->
-
-The measurement worth having is a re-run of these tasks on the fixed code, with
-the sharpened `config/CONVENTIONS.md` rules, the corrected request timeout and
-an untruncated prompt. It is in progress on the droplet.
+Measured on the droplet with the request timeout fixed and the prompt no longer
+truncated: the same `wordcount.py` task, on the same rung, against the sharpened
+`config/CONVENTIONS.md` rules.
 
 | | |
 |---|---|
 | Task | `wordcount.py` — stated output format, error handling, create a test file, run it, show the output |
 | Configuration | `3b-agent` @ 16384, `AGENT_REQUEST_TIMEOUT=1800`, `AGENT_MAX_OUTPUT_TOKENS` set, full prompt delivered |
-| Prompt actually received | *pending* |
-| Did it write to the named directory? | *pending* |
-| Did it run what it built? | *pending* |
-| Wall clock | *pending* |
-| Verdict | *pending* |
+| Did it write to the named directory? | **Fixed.** `/workspace/project/wordcount.py`, and nothing above it. |
+| Is the code it wrote working? | **Fixed.** Imports present in both branches and the file runs. Line/word/character logic correct, `FileNotFoundError` handled to stderr with exit 1, a missing argument handled. |
+| Did it run what it built? | **Not fixed.** Zero terminal actions after sandbox init. No test file was created, the script was never executed, and no output was shown — all three explicitly requested. |
+| What it said at the end | *"Great! The wordcount.py script has been successfully created and saved at /workspace/project/wordcount.py… If you have any questions or need further assistance, feel free to ask!"* |
+| Remaining defect in the code | The usage message on a missing argument goes to stdout rather than stderr. |
 
-**Until that table is filled in, this page does not tell you how good the 3b is
-at agent work.** It tells you the plumbing beneath it now delivers the whole
-prompt and waits long enough for the answer — which is a different claim, and
-the only one currently supported.
+**The two that moved are the two the truncation fix predicts.** It can now read
+its whole instruction, and the directory rule is inside what it reads. The third
+did not move, with the rule read, worded as a prohibition, and present three
+times over.
+
+So, stated as narrowly as the measurement allows: **at this rung, "verify before
+claiming done" appears not to be reachable by instruction.** That is a
+measurement of the 3b and nothing else. It says nothing about a larger model,
+and the same re-run at a higher rung is the open experiment.
+
+What this page can now tell you: the plumbing delivers the whole prompt and
+waits long enough for the answer, the directory rule lands, and the code that
+comes out of a 3b on a task this size runs. What it still cannot tell you is
+whether anything at this rung will execute its own work before reporting
+success — and on this evidence, it does not.
 
 Two things changed because of these runs:
 
