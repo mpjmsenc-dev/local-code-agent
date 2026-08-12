@@ -11,7 +11,8 @@
 # This is the path where it can be. Everything that made those runs fail is
 # handled here rather than hoped for:
 #
-#   the directory   stated in the prompt AND in the system message suffix
+#   the directory   stated in the prompt (the suffix is sent too and does not
+#                   arrive — the app overwrites it; see the note at SUFFIX)
 #   verification    the "run what you built" rule travels with the task
 #   the id          returned, so watching is a lookup and not a guess
 #   preconditions   checked BEFORE submitting, so a task never goes into a
@@ -89,11 +90,13 @@ GOT_MODEL="$(curl -fsS --max-time 10 "${BASE}/api/v1/settings" 2>/dev/null \
   || die "The agent holds model '${GOT_MODEL:-none}', not '${WANT_MODEL}', so this task would run against the wrong model or none at all. Fix it: lca agent restart"
 
 # --- the prompt --------------------------------------------------------------
-# Belt and braces, deliberately. The directory goes in the PROMPT TEXT because
-# that is the part the model demonstrably reads — the selftest's task names a
-# path and the file lands there — and into the system message suffix below
-# because that is the documented place for standing instructions. Neither alone
-# is trusted: the model ignored the working directory it was actually given.
+# One channel, not two, and this is it. The directory goes in the PROMPT TEXT
+# because that is the part the model demonstrably reads — the selftest's task
+# names a path and the file lands there, and on the first live run through this
+# command the file landed under the named directory with nothing written above
+# it. The suffix below was meant to be the second statement of the same rule and
+# never arrives at all (see the note at SUFFIX), so this text is carrying it
+# alone.
 PROMPT="$(agent_task_prompt "${DIR}" "${TASK}")"
 
 # The two rules from config/CONVENTIONS.md, on the channel OpenHands documents
@@ -176,24 +179,28 @@ curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
 # nothing when identification succeeds on the first pass, which is the common
 # case once a sandbox image is local.
 CID=""
-NEW_IDS=""
+AMBIGUOUS=false
+# 90 tries of two seconds, not ten. The count is the whole difference between a
+# mechanism that works and one that has never once succeeded: the conversation
+# does not reach the listing until the app has built a sandbox for it, which was
+# 57s and 43s on the two live runs measured here, against a window of about 25.
+# Both runs therefore fell back to the newest-sandbox guess this exists to
+# replace, and neither failure was the set difference's fault — replayed by hand
+# a minute later it names the right conversation every time.
 for attempt in $(seq 1 90); do
   AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
-  if [[ -n "${AFTER}" ]]; then
-    # The ids that were not there before. comm needs both sides sorted, and an
-    # empty BEFORE is the normal case on a fresh container.
-    NEW_IDS="$(comm -13 <(printf '%s\n' "${BEFORE}" | sort -u) \
-                        <(printf '%s\n' "${AFTER}" | sort -u) 2>/dev/null \
-               | grep -E '^[A-Za-z0-9_-]+$' || true)"
-    if [[ -n "${NEW_IDS}" ]]; then
-      # Exactly one, or none of them is ours to name. head -1 was silently
-      # picking whichever sorted first, which on the one machine where two runs
-      # DO overlap is a coin toss recorded as a fact.
-      if (( $(grep -c . <<<"${NEW_IDS}") == 1 )); then
-        CID="${NEW_IDS}"
-      fi
-      break
-    fi
+  RC=0
+  CID="$(agent_new_conversation "${BEFORE}" "${AFTER}")" || RC=$?
+  if (( RC == 0 )) && [[ -n "${CID}" ]]; then
+    break
+  fi
+  CID=""
+  # rc 2 is "more than one appeared", and polling again cannot unmake that —
+  # both are real conversations now. Stop and say so rather than waiting out
+  # nine more rounds to give the same non-answer.
+  if (( RC == 2 )); then
+    AMBIGUOUS=true
+    break
   fi
   # Said once, when the wait stops looking instant. The lag is sandbox
   # creation — up to a minute here, longer on a box pulling the image.
@@ -205,12 +212,11 @@ if [[ -n "${CID}" ]]; then
   agent_conversation_record "${CID}" \
     || warn "Could not record the conversation id at ${AGENT_CONVERSATION_FILE}; 'lca agent watch' will fall back to picking the newest sandbox."
   ok "Conversation ${CID}"
-elif [[ -n "${NEW_IDS}" ]]; then
-  # Ambiguous rather than unknown, and worth its own sentence: more than one
-  # conversation appeared while ours was being created, so no id here is known
-  # to be ours. Naming them lets the reader settle it in the UI; guessing would
-  # attach the supervisor to somebody else's run and count its steps.
-  warn "More than one conversation appeared while this task was being submitted ($(tr '\n' ' ' <<<"${NEW_IDS}")), so none of them can be attributed to it. Nothing was recorded. Pick the right one in the app, or submit again when no other run is starting."
+elif [[ "${AMBIGUOUS}" == "true" ]]; then
+  # The one case where guessing would be worse than admitting it. Two
+  # conversations appeared between the snapshot and the poll, so one of them is
+  # this task and the other is not, and nothing in the listing says which.
+  warn "Your task was submitted and is running — but another conversation started at the same moment, so this cannot tell which of them is yours. Nothing was recorded, deliberately: picking one would be a coin toss, and a watcher on the wrong run reports somebody else's progress as yours. Stop the other run, or read this one directly: lca agent logs"
 else
   # Said plainly rather than left as a silent degradation: the task IS running,
   # and only the identification failed.

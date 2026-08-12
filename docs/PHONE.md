@@ -190,14 +190,16 @@ model.
 
 ## Running the coding agent from the phone
 
-The terminal agent (aider) runs over SSH:
+There are two, and they are reached differently.
+
+### aider, over SSH
 
 - **iOS/Android SSH app** (Termius, Blink, JuiceSSH...): connect to the server's
   Tailscale IP as usual, then:
 
   ```bash
   cd ~/your-project
-  /opt/local-code-agent/run-agent.sh
+  lca
   ```
 
 - **No SSH app?** The DigitalOcean web console (Droplet → Access → Launch Droplet
@@ -206,10 +208,36 @@ The terminal agent (aider) runs over SSH:
 The internet kill switch is also phone-friendly — over that same SSH session:
 
 ```bash
-sudo /opt/local-code-agent/netmode.sh offline    # or online / status
+sudo lca offline    # or: sudo lca online / sudo lca status
 ```
 
 (Tailscale SSH keeps working in offline mode by design.)
+
+### The agent tier, in the phone's browser
+
+The second tier is the one actually designed for this: you type a task into a
+browser on your phone and it carries the work out on the server. It is **off by
+default** — about 7 GB of images, and it can run anything on the machine. On the
+server:
+
+```bash
+lca agent setup     # brings it up and says what it changed
+lca agent url       # the address to open on your phone
+```
+
+Two things worth knowing before you rely on it, both measured rather than
+assumed:
+
+- **This path did not work until recently.** The agent's port was never
+  published on the Tailscale interface, so the URL printed above was refused by
+  every phone that tried it while looking perfectly healthy from the server. If
+  it still refuses, Tailscale probably came up after the container did:
+  `lca agent restart`, and `lca check` reports it either way.
+- **At the 3b rung it reports success on code it never ran.** Two real tasks
+  failed that way. Treat what it produces as a draft that has not been executed.
+
+Both are covered properly in [AGENT.md](AGENT.md), which is also where the
+timings and the limits for an unattended run live.
 
 ## Speed expectations
 

@@ -11,19 +11,20 @@ lines.
 
 ---
 
-## Read this first: three things below are out of date
+## Read this first: some of what follows is out of date
 
 Everything under the next divider is the record of that night, unchanged and
 worth keeping. But a file called RESUME.md is where somebody looks to find out
-what to do next, and three of its statements have been overtaken — including one
-that would tell you an unattended run is unprotected when it is not.
+what to do next, and several of its statements have been overtaken — including
+one that would tell you an unattended run is unprotected when it is not.
 
 | What the record says | What is true now |
 |---|---|
 | `AGENT_MAX_ITERATIONS` is decoration; the log cannot carry steps | **The step ceiling is enforced**, from the app's event API rather than the log. It fired against real OpenHands events on the droplet: four events, a ceiling of three, run stopped. `AGENT_STEP_SOURCE=auto` uses the API and falls back to the log. |
 | One decision still open: how the agent tier reaches Ollama | **Decided and shipped.** `OLLAMA_HOST` stays on loopback; a `systemd-socket-proxyd` relay carries the bridge, is covered by the inbound guard, survives reboots, and is part of setup, `lca check` and uninstall (`lca relay status\|install\|remove`). |
 | Give the tier a bigger model before judging it again | **Measured instead of assumed, and the answer was no.** A 7b *fits* — 5.1 GB resident at 4096 — but it is 1.9× slower to think, 2.2× slower to generate, and it fails the tool-call channel exactly as the 3b does. What unblocked the tier was `AGENT_NATIVE_TOOL_CALLING=false`, not more parameters. |
-| The tier completes a loop without doing the work | **It does the work.** One real task, end to end on the droplet, in 12 minutes: 19.6 tok/s reading, 8.5 tok/s writing, a file actually written to the workspace. `lca agent selftest` is that run, as one command. |
+| The app is published on two private addresses | **Three.** Loopback for you, the docker bridge for its own sandboxes, and the Tailscale address for your phone. The third was missing for the tier's whole life, so `lca agent url` printed an address nothing was ever bound to and the documented phone path had never once worked. |
+| The tier completes a loop without doing the work | **Half true, and the half that matters is still open.** The selftest works: one real task, end to end on the droplet, 12 minutes, 19.6 tok/s reading and 8.5 writing, a file actually written. Two LARGER tasks then failed the same way — the agent declares completion without running its own work. This line said "It does the work" for a while; the two runs corrected it. |
 
 `ENABLE_AGENT` still defaults to `false`, and the reason changed: not "too slow
 to be useful" — that was a projection and the measurement refuted it — but ~7 GB
@@ -499,18 +500,25 @@ at the top of this file says what replaced them.
 
 What is genuinely open, in order:
 
-1. **The first prompt is ~15k tokens before the agent's first output token**,
+1. **The agent declares completion without executing its own work.** Measured
+   twice, on unrelated tasks, at the 3b rung: one produced a script that dies on
+   its first executed line and reported success. Two rules now travel with every
+   task this project submits, and `lca agent task` names the working directory —
+   but neither has been re-measured against a real run. **That is the next
+   experiment, and it needs a droplet.**
+2. **Is the rung the cause?** Unproven, and the most tempting wrong conclusion
+   available. A straight swap to a 7b is *not* the experiment, because the 7b
+   fails the tool-call channel identically. The real one is the same two tasks
+   at a larger rung with `AGENT_NATIVE_TOOL_CALLING=false` — which needs a
+   bigger box than 7.8 GiB, since the agent runs at a 16384 window where a 7b
+   takes 5.9 GB.
+3. **The first prompt is ~15k tokens before the agent's first output token**,
    and most of that is OpenHands' own framing rather than the task. It is the
    single change that would make every step cheaper on every box. Upstream of
    this project; an issue is open about the related finding that
    `agent_settings.tools` round-trips and is then ignored.
-2. **Nobody has run `lca agent selftest` with a 7b on 7.8 GiB.** The ladder
-   keeps anything under 9 GiB on the 3b, and the remaining argument for that is
-   memory alone: the agent tier runs at a 16384 window, where a 7b needs 5.9 GB
-   and leaves under 2 GiB for everything else. That is now a twenty-minute
-   experiment rather than an argument — anyone who wants the ladder changed
-   should bring the number.
 
-Neither blocks anyone today. Turn the tier on, run `lca agent selftest`, and it
-reports your own box's figure in about a quarter of an hour.
+None of them blocks anyone today. Turn the tier on with `lca agent setup`, run
+`lca agent selftest`, and it reports your own box's figure in about a quarter of
+an hour — then read docs/AGENT.md before trusting it with anything larger.
 

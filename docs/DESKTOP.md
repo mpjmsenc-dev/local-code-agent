@@ -138,7 +138,8 @@ commands.
 
 So the design needs a second layer, and it should be boring:
 
-- **A token per client**, generated on the droplet (`lca client add <name>`),
+- **A token per client**, generated on the droplet by a command that does not
+  exist yet (`lca client add <name>` is a proposed name, not a shipped one),
   stored in the laptop's keychain, sent on every request. Revocable
   individually, so a lost laptop is one command.
 - **Tailscale ACLs** as the coarse layer: restrict the agent's port to tagged

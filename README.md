@@ -141,7 +141,7 @@ with `sudo lca harden` / `sudo lca status`; `harden` also (re)installs the boot
 service, so one command closes the ports for good rather than until the next
 reboot.
 
-## The second tier: an agent that does the work itself
+## The second tier: an autonomous agent (experimental)
 
 `lca` (aider) edits files in the directory you are standing in, one request at
 a time, and you read the diff. There is a tier above it: you give a task to a
@@ -153,28 +153,48 @@ It is **off by default**, and that is deliberate: it can run anything on the
 machine, and its images are about 7 GB.
 
 ```bash
-# in .env
-ENABLE_AGENT=true
-ENABLE_OLLAMA_RELAY=true
-
-sudo lca apply && sudo lca relay install && sudo lca tune
-lca agent start
+lca agent setup         # switch it on, build its model, install the relay, start it
 lca agent selftest      # one real task, end to end, with the timing
 ```
 
-That last command is the point. This tier spent most of its life *starting*
-successfully while being unable to execute a single tool call — runs finished,
-reported success, and left an empty workspace. `lca agent selftest` runs one
-small real task, asserts a file actually appeared, and reports the wall clock
-and this machine's speed, so "is it usable here?" has a number rather than an
+`lca agent setup` is one command because the six things it does have to happen
+in the right order, and getting it wrong is silent every time — a first run once
+cost an hour of diagnosis for six small problems, each hiding the next. It fixes
+what it can and stops on what it cannot with the exact command that clears it.
+
+`lca agent selftest` runs one small real task, asserts a file actually appeared,
+and reports the wall clock, so "is it usable here?" has a number rather than an
 opinion. Measured: **12 minutes** on a 4 vCPU / 7.8 GiB droplet running the 3b,
 11 minutes on a 16 GB box running the 7b. Reading is where the hardware shows;
 the model size barely moves it.
 
+**Read this before you trust it with anything.** The selftest passing is a real
+result and a narrow one — one file, one function, and the task names the exact
+path to write it to. Two larger tasks were then run on the droplet at the 3b
+rung and **both failed the same way: the agent declares completion without
+running its own work.** One produced a `wordcount.py` that uses `sys` with no
+import, so it dies on its first executed line — reported as finished, never
+executed once. Treat this tier's output as **a draft that has never been run**,
+because at this rung that is exactly what it is. It is genuinely useful for
+scaffolding and for work you were going to read line by line anyway; it is not
+useful for anything you intend to trust unread.
+
+Two things follow, and both are honest rather than reassuring. `lca agent task`
+is this project's own way in, because it names the working directory explicitly —
+the failing runs wrote outside the repo they were given:
+
+```bash
+lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
+```
+
+And **"the 3b is too small" is a hypothesis, not a measurement.** Nobody has run
+those tasks at a larger rung, and a straight swap is not the experiment: the 7b
+fails the tool-call channel exactly as the 3b does.
+
 It stays off by default for what it costs to fetch and what it can do, not
-because it is too slow — that distinction, why `AGENT_NATIVE_TOOL_CALLING`
-defaults to `false`, and the numbers above are all in
-[docs/AGENT.md](docs/AGENT.md).
+because it is too slow. That distinction, the two failed runs in full, why
+`AGENT_NATIVE_TOOL_CALLING` defaults to `false`, and the experiment that would
+settle the rung question are all in [docs/AGENT.md](docs/AGENT.md).
 
 ## Updating
 
@@ -224,9 +244,10 @@ offline because the models are local.
 - The encrypted Tailscale tunnel still uses the network as transport —
   "offline" means the AI stack can't reach the internet, not that the NIC is
   dead.
-- The inbound guard is targeted (it blocks the two sensitive ports on
-  non-private interfaces), not a full default-drop firewall; it assumes you do
-  not expose other services.
+- The inbound guard is targeted, not a full default-drop firewall; it assumes
+  you do not expose other services. It covers the ports this stack itself opens
+  — the chat app, Ollama, and, when the agent tier is on, its UI and the relay
+  — on non-private interfaces.
 - **Offline mode still permits DNS (UDP/TCP port 53) and STUN (UDP 3478) to any
   host, the WireGuard port 41641, and — link-local only — DHCP (UDP 67/68/547)
   and ICMPv6 neighbour discovery, so the VM can keep its lease and its IPv6
@@ -262,7 +283,8 @@ offline because the models are local.
 - Create the **first** WebUI account promptly, then set
   `WEBUI_ENABLE_SIGNUP=false` and run `sudo lca apply`.
 - **Never** add a cloud/host firewall rule exposing 3000 or 11434 to the
-  internet, and keep `OLLAMA_HOST` on loopback.
+  internet — nor 3001 and the relay port when the agent tier is on, which is the
+  more dangerous of the two — and keep `OLLAMA_HOST` on loopback.
 - Verify the posture any time with `lca check` and
   `sudo lca status`. On DigitalOcean, the **Recovery Console** is the
   unbrick path if you ever lock yourself out (see [docs/DO.md](docs/DO.md)).
