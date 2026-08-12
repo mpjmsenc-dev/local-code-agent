@@ -3403,6 +3403,66 @@ relay_is_uninstalled() {
   grep -q 'local-code-agent-ollama-relay.service' "${u}"
 }
 check "uninstall removes the relay's units and its bind" relay_is_uninstalled
+# Every installer call in setup.sh's main() must be GUARDED, so that one
+# failing installer cannot take the rest of the install with it.
+#
+# This lesson was learned once and lost. setup.sh's own comment at the Tailscale
+# call says the guard is there so a failure does not abort "before the 'lca'
+# command, the login banner, the boot services and the inbound guard" — and
+# install_python.sh and install_ollama.sh sat bare two lines above it. Walking
+# the README in a clean container found the consequence: a pip failure left a
+# machine with no 'lca' on PATH, while the README's next sentence says "verify
+# with lca check", and with no inbound guard, which the README calls always-on.
+#
+# Two calls are deliberately exempt and named here rather than skipped
+# silently: install_dependencies.sh and install_git.sh are hard prerequisites —
+# nothing after them can work without curl, git and jq — so stopping is the
+# honest outcome there, and the EXIT trap's guidance is what makes that
+# survivable. Adding a third name to this list should be an argument somebody
+# has to make in a diff.
+every_installer_call_in_setup_is_guarded() {
+  local body line n=0 bad=0
+  body="$(sed 's/#.*//' "${REPO}/setup.sh" | awk '/^main\(\) \{/,/^\}/')"
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    n=$(( n + 1 ))
+    case "${line}" in
+      *install_dependencies.sh*|*install_git.sh*) continue ;;
+    esac
+    grep -qE '^[[:space:]]*if ! ' <<<"${line}" || {
+      printf 'this installer call is unguarded, so its failure aborts everything after it:\n  %s\n' \
+        "${line}" >&2
+      bad=1; }
+  done < <(grep -E '^[[:space:]]*(if ! )?"\$\{SCRIPT_DIR\}/scripts/install_[a-z_]+\.sh"' <<<"${body}")
+  # Non-vacuous: setup.sh runs seven installers, and a sweep that stopped
+  # matching them would otherwise pass by finding nothing to complain about.
+  (( n >= 5 )) || {
+    printf 'the installer sweep matched only %s calls in setup.sh main()\n' "${n}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "no installer failure in setup.sh can abort the rest of the install" \
+  every_installer_call_in_setup_is_guarded
+# ...and when it does stop early, it must say what is missing rather than leave
+# the reader at the README's next instruction, which is 'lca check' — a command
+# that may not exist yet, because the symlink is made near the end of main().
+setup_failure_path_tells_the_reader_what_to_do() {
+  local body
+  body="$(sed -n '/^partial_install_guidance()/,/^}/p' "${REPO}/setup.sh")"
+  [[ -n "${body}" ]] || { echo 'setup.sh has no guidance for a partial install' >&2; return 1; }
+  grep -q 'check-system.sh' <<<"${body}" || {
+    echo 'the partial-install guidance never says how to see what is missing' >&2; return 1; }
+  grep -q 'bin/lca' <<<"${body}" || {
+    echo 'the guidance does not give the full path to lca, which may not be on PATH yet' >&2; return 1; }
+  grep -q 'inbound guard' <<<"${body}" || {
+    echo 'the guidance is silent about the inbound guard, which is the one absence that is a security question' >&2; return 1; }
+  # ...and it has to be reachable: the EXIT trap is the only thing that runs on
+  # an aborted install.
+  grep -q 'partial_install_guidance' <<<"$(sed -n '/^verdict_on_exit()/,/^}/p' "${REPO}/setup.sh")" || {
+    echo 'the guidance exists but the EXIT trap never calls it' >&2; return 1; }
+}
+check "...and says what is missing and what to run when it stops early" \
+  setup_failure_path_tells_the_reader_what_to_do
 check "setup installs the relay when .env asks for it" \
   grep -q 'ollama-relay.sh" install' "${REPO}/setup.sh"
 
@@ -8841,7 +8901,7 @@ appliers_check_the_scripts_they_call() {
 check "no applier runs a sub-script without checking it worked" \
   appliers_check_the_scripts_they_call
 
-echo "# setup.sh may only die on the four steps without which there is no stack"
+echo "# setup.sh may only die on the two steps that leave nothing able to run"
 # Same rule, one script over. setup.sh already knows the distinction — it
 # guards Docker, the chat app and Tailscale with "continuing without it" and
 # says so in a comment — but three other steps were bare: the initial
@@ -8851,10 +8911,27 @@ echo "# setup.sh may only die on the four steps without which there is no stack"
 # failure in any of them ended a first-boot install with the ports unguarded
 # and nothing verified, having already done everything else correctly.
 #
-# Bare and fatal is right for exactly four: base packages, git, the venv that
-# holds aider, and Ollama. Without any one of them there is no stack.
+# THIS RULE CHANGED, and the reason is a measurement rather than a preference.
+#
+# It used to be four: base packages, git, the venv that holds aider, and Ollama
+# — "without any one of them there is no stack". True as far as it goes, and it
+# missed what else is downstream. Walking the README in a clean container found
+# it: a pip failure aborted setup.sh at install_python.sh, and everything after
+# it never ran — including the 'lca' symlink, which the README's very next
+# sentence tells the reader to use ("Then verify with lca check"), and the
+# INBOUND GUARD, which the same README calls always-on.
+#
+# So aborting to avoid pretending the stack works also skipped the thing that
+# closes the ports. Both concerns are real and they are not in conflict:
+# carrying on sets setup_ok=false, so the verdict line still says the install
+# did not succeed and the exit status is still non-zero — nothing is pretended
+# — while the guard, the banner and the 'lca' command still get installed, and
+# the EXIT trap now names what is missing.
+#
+# Bare and fatal is right for exactly two: base packages and git. Nothing after
+# them can run at all — not even the scripts that would install the guard.
 setup_only_dies_on_core_steps() {
-  local core='install_dependencies|install_git|install_python|install_ollama'
+  local core='install_dependencies|install_git'
   local bare found
   # Lines that START with the quoted path and carry no '||' fallback.
   bare="$(grep -nE '^[[:space:]]*"[$][{]SCRIPT_DIR[}]/[^"]*"' "${REPO}/setup.sh" \
@@ -8864,8 +8941,8 @@ setup_only_dies_on_core_steps() {
     return 1
   }
   found="$(grep -cE "^[[:space:]]*\"[$][{]SCRIPT_DIR[}]/scripts/(${core})[.]sh\"" "${REPO}/setup.sh")"
-  [[ "${found}" == "4" ]] || {
-    printf 'expected the 4 core installers to run bare, found %s — this gate stopped watching\n' "${found}" >&2
+  [[ "${found}" == "2" ]] || {
+    printf 'expected the 2 core installers to run bare, found %s — this gate stopped watching\n' "${found}" >&2
     return 1
   }
 }

@@ -110,6 +110,12 @@ smarter but slower per token. First response after idle is slower (model loads
 into RAM; `OLLAMA_KEEP_ALIVE` controls how long it stays warm). Want
 faster/smarter? Resize to more RAM/CPU — auto-tune handles the rest.
 
+**If it was fast and then suddenly was not**, and you have the agent tier on,
+the likely cause is the two models evicting each other: one chat message in the
+middle of an agent session makes the agent's next step reprocess its whole
+~15,000-token prompt — 543 s cold against 3.6 s warm. See
+[PERFORMANCE.md](PERFORMANCE.md#why-it-randomly-gets-slow-the-two-models-evict-each-other).
+
 ## The model ignores earlier context or instructions in a long session
 
 Everything the model sees — system prompt, chat history, open files, aider's
