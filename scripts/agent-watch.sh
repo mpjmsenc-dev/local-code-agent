@@ -28,8 +28,15 @@ load_env
 usage() {
   cat <<EOF
 Usage: lca agent watch [--dry-run]
+       lca agent watch --live [--once|--full|--from FILE|--dump]
 
-Follows the running agent and stops it when one of the limits in .env is hit:
+--live is the VIEW: it prints each turn as it lands — what the agent is
+thinking, which tool it called with what arguments, what came back, and how
+long the step took, with the elapsed time on the current step ticking live.
+It is read-only and enforces nothing (scripts/agent-view.sh, --live --help).
+
+Without --live this is the SUPERVISOR. It follows the running agent and stops
+it when one of the limits in .env is hit:
 
   AGENT_MAX_ITERATIONS=${AGENT_MAX_ITERATIONS}   steps before it is stopped (0 = no limit)
   AGENT_TIMEOUT_MINUTES=${AGENT_TIMEOUT_MINUTES}   wall-clock minutes (0 = no limit)
@@ -215,8 +222,20 @@ stop_followers() {
 
 main() {
   local dry_run=false arg
+  # --live hands over to the viewer, whole, before this file does anything at
+  # all. 'exec' rather than a call: the viewer must not inherit a supervisor
+  # that has already opened a FIFO, spawned log followers and armed a stop
+  # path, because the one guarantee it makes is that it cannot disturb the run.
+  # Handing over here means the read-only claim is about a process, not a
+  # branch. It is the first thing checked, so no option this file understands
+  # can be consumed on the way.
+  if [[ "${1:-}" == "--live" ]]; then
+    shift
+    exec "${SCRIPT_DIR}/agent-view.sh" "$@"
+  fi
   while [[ $# -gt 0 ]]; do
     case "${1}" in
+      --live) shift; exec "${SCRIPT_DIR}/agent-view.sh" "$@" ;;
       --dry-run) dry_run=true; shift ;;
       -h|--help) usage; exit 0 ;;
       *) arg="$1"; usage >&2; die "Unknown option: ${arg}" ;;

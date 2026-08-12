@@ -3150,6 +3150,271 @@ agent_event_steps() {
   return 1
 }
 
+# --- reading the event stream as something a person can watch ----------------
+#
+# The same stream the ceiling counts also carries what the agent is thinking,
+# which tool it called with what arguments, what came back and when. Nothing
+# rendered it, so following a run meant cat-ing raw JSON out of a container —
+# which is how the shape below is known, and it is worth being precise about
+# how well it is known.
+#
+# THIS IS SOMEBODY ELSE'S FORMAT AND IT IS NOT A DOCUMENTED INTERFACE. The same
+# caveat AGENT_STEP_PATTERN carries, for the same reason: a field name that
+# silently matches nothing would render an empty screen that looks exactly like
+# a quiet agent. So every accessor below tries the spellings that have been
+# seen, in order — and when none of them match, the event is still printed, raw
+# and whole, rather than dropped. An unreadable event is a thing the watcher
+# says out loud; it is never a thing it hides.
+#
+# jq's '//' is used only where the alternatives are strings. It treats FALSE as
+# absent — the bug that made agent_stored_native_tool_calling a function — so
+# anything boolean or numeric below is tested explicitly.
+
+# agent_event_lines PAYLOAD — one compact JSON object per line.
+#
+# The search route answers {"items":[...]}, the older one answered a bare array,
+# and two more spellings are in circulation. Returns rc 1 for a payload that
+# holds no events at all, so a caller can tell "nothing yet" from "unreadable".
+agent_event_lines() {
+  local payload="${1:-}" out
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  # Captured, then tested for emptiness, and this is not a style choice. jq
+  # exits 0 for a filter that matches nothing, so the first version returned
+  # SUCCESS with no output for a payload holding no events at all — and the
+  # caller that asked "are there events here?" was told yes and then rendered
+  # an empty screen. An empty screen is what this whole view exists to stop
+  # meaning "nothing happened".
+  #
+  # No 'head' in the pipeline either: a reader that exits early SIGPIPEs jq,
+  # which under pipefail fails the assignment. The search route this reads is
+  # already limited by its own query.
+  out="$(jq -c '
+    ( .. | objects | select(has("items")) | .items ),
+    ( .. | objects | select(has("events")) | .events ),
+    ( .. | objects | select(has("results")) | .results ),
+    ( .. | objects | select(has("data")) | .data ),
+    ( select(type == "array") )
+    | select(type == "array") | .[]' <<<"${payload}" 2>/dev/null)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s\n' "${out}"
+}
+
+# agent_event_at JSON — the event's own time, in epoch seconds, or nothing.
+agent_event_at() {
+  local raw
+  have jq || return 1
+  raw="$(jq -r '[ .timestamp?, .time?, .created_at?, .asctime?,
+                  .event?.timestamp?, .action?.timestamp? ]
+                | map(select(type == "string")) | .[0] // empty' <<<"${1:-}" 2>/dev/null)"
+  [[ -n "${raw}" ]] || return 1
+  # Already epoch seconds in some builds; ISO 8601 in others.
+  if [[ "${raw}" =~ ^[0-9]{9,11}(\.[0-9]+)?$ ]]; then
+    printf '%s' "${raw%%.*}"
+    return 0
+  fi
+  date -d "${raw}" +%s 2>/dev/null || return 1
+}
+
+# agent_event_class JSON — what KIND of thing just happened, in one word.
+#
+# This is the word the status line is built from, so it answers the question a
+# person actually has: is it thinking, is it running something, or has it
+# stopped. Everything unrecognised is 'unknown', which prints rather than
+# vanishing.
+agent_event_class() {
+  local kind
+  have jq || { printf 'unknown'; return 0; }
+  kind="$(jq -r '[ .kind?, .type?, .event_type?, ._type?, .event?.kind? ]
+                 | map(select(type == "string")) | .[0] // ""' <<<"${1:-}" 2>/dev/null)"
+  # Errors first: an error that also matches "observation" must not be filed as
+  # a routine result. Tonight's 300-second failure looked identical to working,
+  # and that is the whole reason this ordering is deliberate.
+  if agent_event_is_error "${1:-}"; then printf 'error'; return 0; fi
+  # A finish is an action, and telling them apart is the difference between a
+  # status line that says "running" for ever and one that says the agent
+  # believes it is done. Which, on this tier, is a claim worth showing rather
+  # than trusting: the measured re-run in docs/AGENT.md finished exactly this
+  # way having executed nothing.
+  case "$(agent_event_tool "${1:-}" 2>/dev/null || true)" in
+    *Finish*|*finish*) printf 'finished'; return 0 ;;
+  esac
+  case "${kind}" in
+    *Action*|*action*)        printf 'action' ;;
+    *Observation*|*observation*) printf 'observation' ;;
+    *Message*|*message*)      printf 'message' ;;
+    *Error*|*error*)          printf 'error' ;;
+    *)                        printf 'unknown' ;;
+  esac
+}
+
+# agent_event_tool_label TOOLNAME — the short word a person reads.
+#
+# 'ExecuteBashAction' and 'result of ExecuteBashObservation' are what the wire
+# says; 'bash' is what the reader wants, and the difference between those two
+# is most of why this view exists rather than a cat of the JSON. Unmapped names
+# keep their own spelling minus the Action/Observation suffix, so a tool nobody
+# here has heard of still reads as a tool.
+agent_event_tool_label() {
+  local raw="${1:-}" base="${1:-}"
+  base="${base%Action}"; base="${base%Observation}"; base="${base%Event}"
+  case "${base}" in
+    ExecuteBash|Bash|Terminal|Cmd*) printf 'bash' ;;
+    FileEditor|StrReplaceEditor|Edit*) printf 'edit' ;;
+    Read|View|FileRead)   printf 'read' ;;
+    Write|FileWrite)      printf 'write' ;;
+    Think|Reason*)        printf 'think' ;;
+    TaskTracker|Task*)    printf 'tasks' ;;
+    Finish)               printf 'finish' ;;
+    Browser|Browse*)      printf 'browse' ;;
+    '')                   printf '%s' "${raw}" ;;
+    *)                    printf '%s' "${base}" ;;
+  esac
+}
+
+# agent_event_arg JSON — the short argument that belongs ON the headline: the
+# command, the path, the thing being acted on. Separate from agent_event_body
+# so 'edit · create /workspace/project/wordcount.py' reads as one line instead
+# of a bare 'create' under a heading.
+agent_event_arg() {
+  local out
+  have jq || return 1
+  out="$(jq -r '
+    [ ( if (.action?.command? | type) == "string" and (.action?.path? | type) == "string"
+        then (.action.command + " " + .action.path) else empty end ),
+      .action?.command?, .command?, .action?.path?, .path?, .action?.file_path? ]
+    | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null)"
+  # One line only — a headline that wraps is not a headline.
+  printf '%s' "${out%%$'\n'*}"
+}
+
+# agent_event_is_error JSON — true when this event is a failure.
+#
+# Numeric and boolean fields, so tested explicitly rather than through '//'.
+agent_event_is_error() {
+  have jq || return 1
+  jq -e '
+    ( [ .error?, .error_message?, .exception? ]
+      | map(select(type == "string" and length > 0)) | length > 0 )
+    or ( [ .exit_code?, .observation?.exit_code?, .extras?.exit_code? ]
+         | map(select(type == "number")) | map(select(. != 0)) | length > 0 )
+    or ( .success == false )
+    or ( [ .kind?, .type?, .levelname? ]
+         | map(select(type == "string"))
+         | map(select(test("Error|ERROR|Rejected|Failed"))) | length > 0 )
+  ' <<<"${1:-}" >/dev/null 2>&1
+}
+
+# agent_event_tool JSON — the tool or action name, or nothing.
+agent_event_tool() {
+  have jq || return 1
+  jq -r '[ .action?.kind?, .tool_name?, .action?.name?, .name?,
+           .observation?.kind?, .tool?, .action? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_thought JSON — what it said it was thinking, or nothing.
+agent_event_thought() {
+  have jq || return 1
+  jq -r '[ .thought?, .reasoning_content?, .llm_message?.content?,
+           .message?.content?, .content?, .action?.thought? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_body JSON — the detail worth printing under the headline: the
+# command it ran, the text it wrote, or what came back.
+agent_event_body() {
+  have jq || return 1
+  jq -r '[ .action?.command?, .command?, .action?.code?,
+           .observation?.output?, .output?, .stdout?, .result?, .text?,
+           .observation?.content?, .error?, .error_message?,
+           .action?.path?, .action?.file_text? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_headline JSON — one line: what this event IS, at a glance.
+#
+# Falls back through progressively weaker descriptions and never to silence:
+# the last resort names the event's raw kind, and if even that is unreadable it
+# says so. A line a person cannot read is still a line they can see.
+agent_event_headline() {
+  local json="${1:-}" class tool first
+  class="$(agent_event_class "${json}")"
+  tool="$(agent_event_tool "${json}" || true)"
+  local arg label
+  arg="$(agent_event_arg "${json}" 2>/dev/null || true)"
+  label=""
+  [[ -n "${tool}" ]] && label="$(agent_event_tool_label "${tool}")"
+  case "${class}" in
+    action|finished)
+      if [[ -n "${label}" && -n "${arg}" ]]; then printf '%s · %s' "${label}" "${arg}"
+      elif [[ -n "${label}" ]]; then printf '%s' "${label}"
+      else printf 'an action'; fi ;;
+    observation)
+      if [[ -n "${label}" ]]; then printf '%s returned' "${label}"; else printf 'a result'; fi ;;
+    message)   printf 'message' ;;
+    error)
+      if [[ -n "${label}" ]]; then printf 'ERROR from %s' "${label}"; else printf 'ERROR'; fi ;;
+    *)
+      first=""
+      if have jq; then
+        first="$(jq -r '[ .kind?, .type?, .event_type? ]
+                  | map(select(type == "string")) | .[0] // empty' <<<"${json}" 2>/dev/null || true)"
+      fi
+      if [[ -n "${first}" ]]; then printf 'unrecognised event: %s' "${first}"
+      else printf 'unreadable event (printed raw below)'; fi ;;
+  esac
+}
+
+# agent_view_state CLASS SECONDS_SINCE — the one word at the top of the screen.
+#
+# The question this whole view exists to answer is "is it working or stuck",
+# and on this hardware a step takes 10-25 minutes, so silence is normal and
+# indistinguishable from failure by eye. The rule:
+#
+#   the last thing that happened was an ACTION      -> a tool is running
+#   the last thing was a result, a message, nothing -> it is thinking
+#   an error                                        -> error, and it stays said
+#   a finish action                                 -> finished
+#   nothing at all for longer than the stall window -> stalled, said plainly
+#
+# STALL_SECONDS is the one number here that is a judgement rather than a
+# measurement, so it is a parameter with the reasoning attached: the longest
+# single reply measured on this hardware was 901 s, so anything under about
+# twenty minutes is still ordinary. It is not an error, and this does not call
+# it one — it says nothing has arrived, which is a fact.
+agent_view_state() {
+  local class="${1:-unknown}" since="${2:-0}" stall="${3:-1500}"
+  [[ "${since}" =~ ^[0-9]+$ ]] || since=0
+  [[ "${stall}" =~ ^[0-9]+$ ]] || stall=1500
+  case "${class}" in
+    finished) printf 'finished'; return 0 ;;
+    error)    printf 'error';    return 0 ;;
+  esac
+  if (( since > stall )); then printf 'stalled'; return 0; fi
+  case "${class}" in
+    action) printf 'running' ;;
+    *)      printf 'thinking' ;;
+  esac
+}
+
+# agent_view_state_words STATE — what that word means, for the first time a
+# reader sees it. Kept beside the state so the two cannot drift apart.
+agent_view_state_words() {
+  case "${1:-}" in
+    running)  printf 'a tool is running' ;;
+    thinking) printf 'waiting for the model' ;;
+    stalled)  printf 'nothing has arrived for a long time' ;;
+    finished) printf 'the agent says it is done' ;;
+    error)    printf 'the last event was a failure' ;;
+    *)        printf 'no events yet' ;;
+  esac
+}
+
 # agent_stored_native_tool_calling PAYLOAD — 'true' | 'false' | 'unset', out of
 # a settings response.
 #

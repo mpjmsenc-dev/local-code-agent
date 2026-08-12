@@ -2879,6 +2879,129 @@ check "a permanently resident model is not flagged"  cache_safe true -1
 check "...and nothing is said when the agent is off" cache_safe false 30m
 check "'lca check' warns about it"                   grep -q 'agent_prompt_cache_at_risk' "${REPO}/check-system.sh"
 
+echo "# watching a run: the view has to say working-or-stuck, and never nothing"
+# The event stream already carried thoughts, tool calls, observations and
+# timestamps; nothing rendered them, so following a run meant cat-ing raw JSON
+# out of a container. 'lca agent watch --live' renders it.
+#
+# Driven, not grepped: the whole point of this view is what it PRINTS, and a
+# gate that checked for the presence of a field name would pass on a screen
+# that shows nothing — which is the exact failure the view exists to remove.
+# --from is the seam, and it is a real feature rather than a test hook: it is
+# how you look at a run after the fact.
+VIEW_FIXTURE="${SANDBOX}/events.json"
+cat > "${VIEW_FIXTURE}" <<'VIEWJSON'
+{"items":[
+ {"kind":"MessageEvent","source":"user","timestamp":"2026-08-12T14:30:00Z","message":{"content":"Write wordcount.py in /workspace/project."}},
+ {"kind":"ActionEvent","source":"agent","timestamp":"2026-08-12T14:32:05Z","thought":"Look at the directory first.","action":{"kind":"ExecuteBashAction","command":"ls -la /workspace/project"}},
+ {"kind":"ObservationEvent","source":"environment","timestamp":"2026-08-12T14:33:41Z","observation":{"kind":"ExecuteBashObservation","exit_code":0,"output":"l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10"}},
+ {"kind":"ActionEvent","source":"agent","timestamp":"2026-08-12T14:33:44Z","action":{"kind":"FileEditorAction","command":"create","path":"/workspace/project/wordcount.py"}},
+ {"kind":"ObservationEvent","source":"environment","timestamp":"2026-08-12T14:41:31Z","observation":{"kind":"ExecuteBashObservation","exit_code":1,"output":"Traceback: FileNotFoundError"}},
+ {"kind":"SomethingUpstreamAddedLater","source":"agent","timestamp":"2026-08-12T14:42:00Z","payload":{"a":1}},
+ {"no_kind_at_all":true,"weird":"a shape nothing here has seen"}
+]}
+VIEWJSON
+view_render() { bash "${REPO}/scripts/agent-view.sh" --from "${VIEW_FIXTURE}" "$@" 2>&1; }
+VIEW_OUT="$(view_render || true)"
+check "the view renders the fixture at all" test -n "${VIEW_OUT}"
+check "...naming the tool a person knows it by, not the wire's" \
+  grep -qF 'bash · ls -la /workspace/project' <<<"${VIEW_OUT}"
+check "...with the thought that produced it" \
+  grep -qF 'Look at the directory first.' <<<"${VIEW_OUT}"
+check "...and the file it edited, path included" \
+  grep -qF 'edit · create /workspace/project/wordcount.py' <<<"${VIEW_OUT}"
+# The clock is the point. A step here takes 10-25 minutes and the reader's only
+# question is whether that is normal, so every gap is timed AND labelled by
+# which way round it was: an action after a result is the model thinking, a
+# result after an action is the tool running.
+check "a gap before an action is called thinking time" \
+  grep -qE 'thought for [0-9]' <<<"${VIEW_OUT}"
+check "...and a gap before a result is called run time" \
+  grep -qE 'ran for [0-9]' <<<"${VIEW_OUT}"
+check "...and each turn carries the wall-clock time it happened at" \
+  grep -qE '^1[0-9]:[0-9]{2}:[0-9]{2} ' <<<"${VIEW_OUT}"
+# The failure that started all this looked identical to working. It may never
+# be folded away, and it must say it is a failure.
+check "a non-zero exit is rendered as an error, not as a result" \
+  grep -qF '! ERROR' <<<"${VIEW_OUT}"
+check "...with what came back on screen" \
+  grep -qF 'Traceback: FileNotFoundError' <<<"${VIEW_OUT}"
+# The two that matter most, because this is somebody else's format and it will
+# change: an event this build has never seen must still appear.
+check "an event kind nothing here knows is still printed" \
+  grep -qF 'SomethingUpstreamAddedLater' <<<"${VIEW_OUT}"
+check "...and one with no recognisable field at all is printed raw" \
+  grep -qF 'a shape nothing here has seen' <<<"${VIEW_OUT}"
+view_prints_every_event() {
+  local n
+  n="$(grep -cE '^(--|[0-9]{2}):' <<<"${VIEW_OUT}" || true)"
+  (( n == 7 )) || {
+    printf 'the fixture holds 7 events and the view drew %s of them — an event that renders as nothing is indistinguishable from an agent doing nothing\n' "${n}" >&2
+    return 1
+  }
+}
+check "...so every event in the stream reaches the screen" view_prints_every_event
+# A payload holding no events must SAY so. jq exits 0 for a filter that matches
+# nothing, so the first version answered "yes, there are events" and then drew
+# an empty screen — the precise thing this view was built to stop meaning
+# "nothing is happening".
+view_reports_an_empty_payload() {
+  local out
+  out="$(printf '{"nothing":"here"}' | bash "${REPO}/scripts/agent-view.sh" --from - 2>&1 || true)"
+  grep -qi 'no events' <<<"${out}" || {
+    printf 'a payload with no events rendered as silence: %s\n' "${out}" >&2
+    return 1
+  }
+}
+check "a payload with no events says so instead of drawing nothing" \
+  view_reports_an_empty_payload
+event_lines_refuses_an_empty_payload() {
+  ! agent_event_lines '{"nothing":"here"}' >/dev/null 2>&1
+}
+check "...and agent_event_lines refuses it rather than returning success" \
+  event_lines_refuses_an_empty_payload
+# Folding is a convenience and must never be silent about what it hid.
+check "long output is folded, and says how much it folded" \
+  grep -qE '\(2 more line\(s\)' <<<"${VIEW_OUT}"
+check "...and --full shows it all" \
+  test "$(view_render --full | grep -c '^ *l10$')" -eq 1
+# The status word, which is the answer to the only question anyone has.
+view_state_is() {   # WANT CLASS SECONDS [STALL]
+  local got; got="$(agent_view_state "$2" "$3" "${4:-1500}")"
+  [[ "${got}" == "$1" ]] || { printf 'state(%s,%s) = %s, wanted %s\n' "$2" "$3" "${got}" "$1" >&2; return 1; }
+}
+check "an action just landed -> a tool is running"    view_state_is running     action 5
+check "a result just landed -> waiting for the model" view_state_is thinking    observation 5
+check "four minutes of silence is still normal here"  view_state_is thinking    observation 240
+check "...but forty is not, and it says so"           view_state_is stalled     observation 2400
+check "a finish is finished, however long ago"        view_state_is finished    finished 9999
+check "an error stays an error, however recent"       view_state_is error       error 1
+check "...and silence does not overwrite an error"    view_state_is error       error 9999
+check "every state has a plain-English gloss" \
+  test -n "$(agent_view_state_words stalled)"
+# Read-only is a property of the file, not a promise in its header. agent-watch
+# can stop a run; the viewer is a different process reached by exec, and it has
+# no way to reach one.
+view_cannot_touch_the_run() {
+  local body bad
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-view.sh")"
+  # '-d ' alone was too wide and matched 'date -d "@${at}"' — a gate that fires
+  # on a clock is a gate people learn to ignore. The write verbs are what this
+  # is about, so curl's body flags are matched on curl.
+  bad="$(grep -nE '(docker (rm|kill|stop|exec|restart|start)|systemctl (start|stop|restart)|\bkill\b|pkill|rm +-|-X *(POST|PUT|DELETE)|curl[^|;]*(--data|--upload|-T |-d ))' <<<"${body}" || true)"
+  [[ -z "${bad}" ]] || {
+    printf 'the viewer can disturb the run it is watching:\n%s\n' "${bad}" >&2
+    return 1
+  }
+  grep -qE 'curl -fsS' <<<"${body}" || {
+    echo 'the viewer no longer reads the event API at all' >&2; return 1; }
+}
+check "the viewer has no way to alter the run it watches" view_cannot_touch_the_run
+check "'lca agent watch --live' hands over to it" \
+  grep -qE 'exec "\$\{SCRIPT_DIR\}/agent-view.sh"' "${REPO}/scripts/agent-watch.sh"
+check "...and 'lca agent watch' still says the view exists" \
+  grep -qF -- '--live' "${REPO}/agent.sh"
+
 echo "# the agent's own derived model: a bigger window for one tier, not for all"
 # OLLAMA_CONTEXT_LENGTH is server-wide and Ollama's OpenAI endpoint — the one
 # the agent speaks — ignores a per-request num_ctx. Measured:

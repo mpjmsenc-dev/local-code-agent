@@ -377,6 +377,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/agent-task.sh` | `lca agent task` — submits a task with the working directory named explicitly, and returns the conversation id |
 | `scripts/agent-setup.sh` | `lca agent setup` — brings the agent tier up from wherever it is, in dependency order, and says what it changed |
 | `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
+| `scripts/agent-view.sh` | `lca agent watch --live` — the read-only view of a run in progress: thoughts, tool calls, results, and the clock on the current step |
 | `scripts/ollama-relay.sh` | `lca relay` — the docker-bridge→loopback relay, so containers reach Ollama without it leaving 127.0.0.1 |
 | `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 
@@ -442,7 +443,7 @@ local-code-agent/
 │   ├── logs.sh · speed.sh · motd.sh · prompt-bench.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
-│   ├── agent-watch.sh
+│   ├── agent-watch.sh · agent-view.sh
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md

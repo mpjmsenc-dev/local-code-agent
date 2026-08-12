@@ -430,6 +430,27 @@ A model that receives half its instructions and has every long reply discarded
 is not being measured. Rule out the plumbing first — it is cheap, and it is
 where both of these lived.
 
+## Is the agent working, or is it stuck?
+
+Run `lca agent watch --live`. It prints each turn as it lands — what the agent
+is thinking, which tool it called with what arguments, what came back — and the
+clock on the current step, ticking live. It is read-only; it cannot stop or
+change the run.
+
+The word at the bottom is the answer:
+
+| | What to do |
+|---|---|
+| `thinking` | Nothing. A single step here is 10–25 minutes. |
+| `running` | Nothing. A tool is running; its output appears when it finishes. |
+| `stalled` | Nothing has arrived for 25 minutes. Check `lca agent status`, then `lca logs`. If `AGENT_REQUEST_TIMEOUT` is low, see the entry above about the agent doing nothing for forty minutes. |
+| `error` | The last event failed and the failure is on screen above the status line. |
+| `finished` | It says it is done. On a small model that is a claim — check the files before believing it. |
+
+To read a run after it is over, or one you captured earlier:
+`lca agent watch --live --from events.json`. To get the raw JSON out without
+reading it by hand: `lca agent watch --live --dump > events.json`.
+
 ## The agent said it finished, and the code does not run
 
 This is the failure mode of the agent tier at the small model rungs, and it is

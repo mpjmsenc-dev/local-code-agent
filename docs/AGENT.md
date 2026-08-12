@@ -885,6 +885,88 @@ Two things follow, and both are yours to choose:
 
 ---
 
+## Watching a run: `lca agent watch --live`
+
+The supervisor below and this are two different jobs, and they are two different
+processes on purpose. `lca agent watch` **enforces** — it can stop your run.
+`lca agent watch --live` **shows** — and it cannot do anything at all to the run
+it is looking at. `--live` hands over to `scripts/agent-view.sh` with `exec`
+before the supervisor opens so much as a pipe, so "read-only" is a property of
+which program is running rather than a promise in a comment. A gate in
+`tests/test-lib.sh` fails if that file ever grows a way to stop, restart, exec
+into or POST at anything.
+
+```
+14:32:05  > bash · ls -la /workspace/project
+            Look at the directory first so I write the file in the right place.
+            thought for 2 min
+
+14:33:41  < bash returned
+            total 8
+            drwxr-xr-x 2 root root 4096 Aug 12 14:20 .
+            (7 more line(s) — --full shows them)
+            ran for 2 min
+
+14:33:44  > edit · create /workspace/project/wordcount.py
+            thought for 3s
+
+14:41:20  < edit returned
+            File created successfully.
+            ran for 8 min
+
+- thinking · waiting for the model · step 8 · 4 min on this step · 47 min total
+```
+
+Everything on that screen already existed in the conversation event stream —
+the same stream the step ceiling counts. Nothing rendered it, so following a run
+meant `cat`-ing raw JSON out of a container.
+
+**Why the clock is on every line.** A step here takes ten to twenty-five
+minutes. A display that has not moved for four minutes is normal; the same
+display frozen for forty is a dead run, and nothing else on screen tells those
+apart. So the elapsed time on the current step ticks every second — live, on its
+own one-second timer rather than on the poll, because a clock that only moves
+when the network answers stops exactly when it matters. And the gap between two
+events is labelled by which way round they are: an action arriving after a
+result is **the model thinking**, a result arriving after an action is **the
+tool running**. On this box one of those is twenty minutes and the other is a
+second.
+
+**The status word answers the only question anyone has:**
+
+| | |
+|---|---|
+| `running` | a tool is running |
+| `thinking` | waiting for the model — normal here for 10–25 minutes |
+| `stalled` | nothing at all for 25 minutes; worth looking at. Not called an error, because it is not one — it is a fact about the clock |
+| `finished` | the agent says it is done. On this tier that is a claim, not a result — see the measured re-run above |
+| `error` | the last event was a failure. It stays on screen, and the spinner stops |
+
+The spinner only spins while something is genuinely expected to move. A spinning
+cursor over a dead run is the thing this was written against: the 300-second
+timeout failure looked exactly like working.
+
+**What it cannot see, and why that is said out loud.** The event format is
+OpenHands', not ours, and not a documented interface. Every field is read
+through accessors that try the spellings that have been seen — and when none of
+them match, **the event is printed raw rather than dropped**. That fallback is
+the design. A view that silently rendered nothing would be indistinguishable
+from an agent quietly working, which is the confusion it replaces. The same goes
+for a payload with no events in it: it says so, rather than drawing an empty
+screen.
+
+| flag | |
+|---|---|
+| `--once` | print everything so far and exit |
+| `--from FILE` | render a saved payload — `-` reads stdin. How you look at a run after it is over, and how the suite tests the renderer without a container |
+| `--dump` | the raw event JSON, which is what you would otherwise be extracting by hand |
+| `--full` | do not fold long tool output |
+| `--interval N` | seconds between polls (default 3) |
+
+Piped to a file it drops the ANSI status line and prints a plain state change
+per line, so a log of a run is readable rather than a screenful of carriage
+returns.
+
 ## Is the supervisor real? Yes, and here is exactly how far that goes
 
 `lca agent watch` is what stops a run while you sleep. `tests/test-agent-watch.sh`

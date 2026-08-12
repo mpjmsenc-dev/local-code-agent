@@ -36,7 +36,10 @@ Commands:
   url       The address to open on your phone, over Tailscale
   logs      Follow the agent's logs (Ctrl-C to stop)
   watch     Supervise a run in progress: stop it at the step ceiling, the
-            wall-clock limit, or when the same failure keeps repeating
+            wall-clock limit, or when the same failure keeps repeating.
+            'watch --live' is the read-only view instead: each turn as it
+            lands — thoughts, tool calls, results, and the clock on the
+            current step, which is how you tell working from stuck here
   selftest  Run one small real task end to end, assert a file appeared, and
             report the timing — the honest answer to "is this usable here?"
 
