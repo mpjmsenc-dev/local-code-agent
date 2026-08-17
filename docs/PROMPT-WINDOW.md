@@ -224,9 +224,11 @@ prompt fits its window.
 
 There is still headroom worth taking, and it is worth knowing where it is,
 because the margin is 2,409 tokens and a user's `config/CONVENTIONS.md` lands
-in `REPO_CONTEXT` inside it. 56% of what remains is tool JSON, and of the 25
-tools, 14 drive a headless browser and 5 open pull requests on GitHub, GitLab,
-Bitbucket and Azure DevOps. On this box none of those 19 can do anything.
+in `REPO_CONTEXT` inside it. Tool JSON is now **72.5%** of the prompt — 10,134
+of 13,975, a larger share than before precisely because everything around it
+got smaller — and of the 25 tools, 14 drive a headless browser and 5 open pull
+requests on GitHub, GitLab, Bitbucket and Azure DevOps. On this box none of
+those 19 can do anything.
 
 ### What the tools are worth
 
