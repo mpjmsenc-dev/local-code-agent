@@ -334,9 +334,19 @@ Every route was checked and all but one is closed:
 | `enable_switch_llm_tool: false` | **works** — read by `create_agent()` and honoured | `sdk/settings/model.py:1099` |
 | `agent_type: plan` | **wrong tool** — the only other agent type swaps in `get_planning_tools()`, which is a planning agent, not one that executes | `app_conversation_models.py:44` |
 
-So **one** of the 25 tools can be declined through supported configuration, and
-it is worth ~329 tokens. That is the honest total: 2.4% of the prompt, against
-the 30% those 19 tools represent.
+So **one** of the 25 tools can be declined through supported configuration.
+Applied and measured live rather than estimated — settings seeded with
+`enable_switch_llm_tool: false`, agent restarted, a fresh run inspected:
+
+    tools in the prompt          25 -> 24   (switch_llm gone)
+    prompt, hello task           13,975     (25 tools, 165-token task)
+    prompt, wordcount task       13,796     (24 tools, 240-token task)
+    saving = 13,975 − 13,796 + 75 =  254 tokens
+
+**254 tokens, 1.8% of the prompt** — against the 30% those 19 remaining tools
+represent. That is the honest total. (My estimate from the reconstruction said
+~329; it was 29% high, which is about what apportioning a re-serialised schema
+deserves. The live difference is the number to keep.)
 
 This confirms, and explains, what docs/AGENT.md already recorded the hard way:
 posting an explicit `tools` list saved **0 tokens** and left 57 browser

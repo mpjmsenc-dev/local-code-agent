@@ -344,8 +344,9 @@ seed_agent_settings() {
   #
   # enable_switch_llm_tool is the ONE tool this stack can decline. It is read
   # by create_agent() and honoured, unlike the 'tools' list, which the app
-  # overwrites with its own defaults on every conversation. Worth ~329 tokens,
-  # and the tool lets the agent switch to another model on a box that has one.
+  # overwrites with its own defaults on every conversation. Worth 254 tokens,
+  # measured live by differencing two runs and subtracting the task-length
+  # change — the tool lets the agent switch to another model on a box with one.
   # docs/PROMPT-WINDOW.md has the rest of the tool budget and why it is stuck.
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
