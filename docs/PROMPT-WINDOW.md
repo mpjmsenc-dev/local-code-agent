@@ -488,6 +488,53 @@ Wrong is still wrong. But "called the right tool with a bad argument, and was
 told so" is a recoverable failure inside a loop that has 100 iterations, where
 "produced prose and declared victory" is not.
 
+The rest of the run, and it did not recover:
+
+| | | |
+|---|---|---|
+| 16:32:40 | *(framework)* | `Parameter 'command' is expected to be one of […]` — injected as a **user** message |
+| 16:33:27 | `TerminalAction` | `cd /workspace/project && pwd` → `/workspace/project`, exit 0 |
+| 16:34:40 | agent message | *"Sure, I'm ready to help! Could you please describe the task in detail…"* |
+| 16:34:40 | | `execution_status: finished` |
+
+It asked to be told the task. The task was in its prompt in full, and it had
+plainly read it — the same message ends *"the task of writing a Python
+command-line program and running it"*. It simply did not do it.
+
+**Answering the three questions for this task, honestly:**
+
+| | verdict |
+|---|---|
+| right directory | **no violation** — it `cd`'d into the directory it was given and never wrote above it. But it wrote nothing at all, so this is the absence of a failure, not a success. The old run wrote to `/workspace/wordcount.py`, outside its directory. |
+| runs its own work | **not demonstrated here.** It executed a terminal command successfully, so the channel works, but it built nothing to run. (On the smaller task it did build, run, and quote real output.) |
+| declares completion without running | **this moved.** The old run declared `finished` over code that dies on its first executed line, with *"You can now use this script"*. This run declared nothing. It stopped and asked for instructions. |
+
+So the third question moved, and it moved by the failure changing shape: from
+**false completion** to **no attempt**. For a user those are not equal — a run
+that visibly fails to start is worth more than one that reports success over
+code that has never been executed. It is still a failed task.
+
+### What this is not: a measurement
+
+Two runs is not a result, and this project's own tooling says so out loud.
+`scripts/prompt-bench.sh` warns that six samples "have pointed the WRONG WAY"
+and tells you to use `-n 20` before acting on anything. I have `n = 1` per
+task. On that basis docs/AGENT.md's measured-behaviour section has **not** been
+rewritten, and should not be until someone runs both tasks enough times to
+know. Each run costs 20–40 minutes on this box, most of it prompt evaluation.
+
+What *is* established, and needs no sampling, is mechanical: the prompt fits,
+nothing is truncated, and the tool definitions the agent needs are now in its
+context. Whether the 3b can use them reliably is the open question, and it is
+now a fair test of the model rather than a test of a prompt with its front cut
+off.
+
+One confound worth naming for whoever runs it properly: the parameter-validation
+error arrives as a **user** message. After it, the model's view of the
+conversation is a long task, a rejected call, a terse complaint apparently from
+the user, and a `pwd`. Losing the thread there is a plausible 3b failure, and it
+would be an artifact of the error channel rather than of the task.
+
 ### The margin is per-conversation, not per-prompt
 
 The 2,409 tokens of headroom are not a standing reserve — they are consumed as
