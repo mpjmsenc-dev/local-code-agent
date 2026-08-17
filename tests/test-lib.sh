@@ -8922,7 +8922,7 @@ if have jq; then
     # edit that moves it to the end would turn a passing check into a failing
     # one with nothing to see.
     local want="${n}"
-    if (( n <= 300 )); then want="${words[n]}"; fi
+    if (( n <= 299 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
       printf 'PHONE.md claims %s starter questions; the file has %s\n' \
         "${claimed}" "${n}" >&2
@@ -17283,7 +17283,13 @@ readonly_load() {   # -> "CREATED|MODEL"
   cp "${REPO}/scripts/lib.sh" "${dir}/scripts/"
   cp "${REPO}/.env.example" "${dir}/"
   local model
-  model="$(bash -c 'source "$1/scripts/lib.sh" >/dev/null 2>&1
+  # 'env -u MODEL_NAME', because the suite's own load_env exported it under
+  # 'set -a' and the child inherits it. Without this the assertion could not
+  # tell a value the function loaded from one that was already in the
+  # environment — and it could not: the mutation sweep stubbed
+  # load_env_readonly to nothing and this still passed.
+  model="$(bash -c 'unset MODEL_NAME
+                    source "$1/scripts/lib.sh" >/dev/null 2>&1
                     load_env_readonly; printf "%s" "${MODEL_NAME:-unset}"' _ "${dir}" 2>/dev/null)"
   printf '%s|%s' "$( [[ -e "${dir}/.env" ]] && echo created || echo untouched )" "${model}"
 }
@@ -17316,13 +17322,19 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
       # as that function body — which quietly corrupted every verdict after the
       # first one-liner, this list included. Found by mutating the gate.
       if ($0 ~ /\}[[:space:]]*$/) {
-        if ($0 ~ /\$\{REPO\}\//  && $0 ~ /(grep|awk|sed|cat |head |tail )/) print fn
+        if ($0 ~ /\$\{REPO\}\// && $0 ~ /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
         inb=0; next
       }
       inb=1; next
     }
+    # Comments are skipped, and the tools are matched as words. Without both,
+    # prose classified the gate: a comment ending "and this still passed."
+    # contains "sed", so writing that sentence turned a driven test into a
+    # source grep. A classifier that reads text and draws conclusions from it
+    # is the very thing this section exists to stop.
+    inb && /^[[:space:]]*#/ { next }
     inb && /\$\{REPO\}\// { src=1 }
-    inb && /(grep|awk|sed|cat |head |tail )/ { tool=1 }
+    inb && /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
     inb && /^\}/ { if (src && tool) print fn; inb=0 }
   ' "$1" | sort -u
 }
@@ -17405,7 +17417,7 @@ check "a new gate that greps source says why it cannot drive instead" \
 baseline_has_not_grown() {
   local n
   n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
-  (( n <= 300 )) || {
+  (( n <= 299 )) || {
     printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

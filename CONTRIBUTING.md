@@ -571,7 +571,7 @@ gpu_probe_reads_the_largest_card() { ... }
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
 `tests/source-grep-baseline.txt`, and carries no `SOURCE-GREP:` line, fails the
-suite. The baseline is the 300 that existed when the rule was written — it is a
+suite. The baseline is the 299 that existed when the rule was written — it is a
 record of debt, not permission, and the honest direction for it is down.
 
 The meta-gate is itself the kind of thing that becomes decoration, so it is
