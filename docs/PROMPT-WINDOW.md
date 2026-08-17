@@ -555,6 +555,22 @@ is supposed to intervene before that, and on a task that ends in two or three
 turns none of this is reached — but a long run is still racing the window, and
 the failure at the end of that race is the silent one documented above.
 
+## What was verified before any of this was believed
+
+- `make test` — **1,200 passed, 0 failed**, including three new gates on the
+  skills cut.
+- `shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh` — clean.
+- `tests/live-verify.sh`, driven against real docker, real Ollama and the real
+  app after every change here — **42 passed, 0 failed, 0 asserting the wrong
+  thing, 0 skipped.** `OH_WEB_URL`, `OH_SANDBOX_KIND` and `OH_SANDBOX_HOST_PORT`
+  still on the running container, the relay still answering, the derived model
+  still resident at `context_length 16384`.
+
+One earlier live-verify run was killed at 21/0 rather than allowed to finish:
+it blocks on a model probe, and that probe evicts Ollama's prompt cache, which
+would have corrupted the agent measurement running at the time. Recorded
+because "I stopped the test suite" deserves a reason.
+
 ## A correction, and how it was caught
 
 `scripts/lib.sh` carried this reasoning next to `AGENT_MAX_OUTPUT_TOKENS`:
