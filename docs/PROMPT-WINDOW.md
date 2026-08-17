@@ -117,13 +117,60 @@ templating them, and that transformation is not reproducible from outside. The
 subtraction does not depend on knowing it: the other three blocks are verbatim,
 so whatever is left is tools plus scaffolding, exactly.
 
+## The window is not the window: Ollama gives a prompt half of it
+
+The warning does not say `limit=16384`. It says `limit=8194`, and that number
+is not derived from `max_output_tokens` (2,048 here) or from anything this
+project sets. Measured directly, by asking Ollama for a context it honours and
+overflowing it on purpose:
+
+| `num_ctx` requested | `num_predict` | `limit` Ollama used |
+|---:|---:|---:|
+| 512 | 1 | 258 |
+| 1,024 | 200 | 514 |
+| 16,384 | litellm's | 8,194 |
+
+    limit = num_ctx / 2 + 2
+
+Independent of `num_predict` — 1 and 200 give the same rule. Ollama 0.32.5,
+`llama_server.go:314`. **A prompt may occupy at most half the context window.**
+
+So the agent tier's real prompt budget at `num_ctx=16384` is **8,194 tokens**,
+not 16,384. And `keep=4` means that when the prompt overflows, Ollama keeps the
+first four tokens and then the *tail*: the role, the security policy, the
+filesystem rules and most of the tool definitions are the part discarded. The
+model is left holding the end of the tool list and the task.
+
+This is measurable in the agent's own bookkeeping. Accumulated `prompt_tokens`
+across the conversation went 425 → 8,619, so the big call was charged
+**8,194** — exactly the limit, not the 18,353 that was sent. 10,159 tokens
+were dropped on the floor, silently, and nothing in OpenHands reported it.
+
+That reframes every previous failure in this tier. The runs that wrote outside
+their working directory and reported success on code they never executed were
+not ignoring their instructions. **They never received them.**
+
 ## The cut that fits
 
     18,353 − 4,232 (SKILLS) = 14,121 tokens
 
-Under 16,384, with 2,263 to spare — and no other single cut does it. This is
-the first configuration in this project's history where the agent's prompt fits
-its window.
+Against the *nominal* 16,384 window that clears it with 2,263 to spare, and no
+other single cut does. Against the **real** 8,194 budget it does not come
+close, and it is worth being blunt about that: cutting skills is necessary and
+it is not sufficient. It removes 41% of the overflow. The prompt would still be
+truncated, and still be truncated from the front.
+
+Two things fix the rest, and they are not alternatives — the first is free:
+
+1. **Raise `AGENT_MODEL_CONTEXT` to 32768.** The budget becomes 16,386, and
+   14,121 fits with room. This is the honest fix and it costs RAM: the KV cache
+   doubles, which is what this box does not have (see docs/AGENT.md on the
+   3.4 GB allocation that made a 32768 run generate at 0.59 tok/s).
+2. **Cut the tools too.** 56% of the prompt is tool JSON, and of the 26 tools,
+   14 drive a headless browser and 5 open pull requests on GitHub, GitLab,
+   Bitbucket and Azure DevOps. On this box none of the 19 can do anything.
+
+Only both together put the prompt under 8,194 on the RAM this project targets.
 
 The skills being dropped are OpenHands' built-in catalogue: `release-notes`,
 `iterate`, `linear`, `code-review`, `datadog`, `discord`, `deno`,
