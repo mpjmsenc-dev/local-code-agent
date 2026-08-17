@@ -110,8 +110,17 @@ Inside `system_prompt`, the largest of sixteen sections are
 `VERSION_CONTROL` 272, `SELF_DOCUMENTATION` 253. None is individually large;
 the whole file is 3,037.
 
-**The task is 0.9% of the prompt.** Everything else is preamble, and 56% of it
-is tool JSON.
+**The task is 0.9% of the prompt.** 165 tokens out of 18,353. Everything else
+is preamble, and 56% of it is tool JSON.
+
+> **Retraction.** An earlier note in this project's working history put the
+> task at **12.3%** of the prompt. That figure is wrong and is withdrawn; the
+> measured value is 0.9%. The likely source of the error is next door in the
+> same table: the prompt overshoots its window by 1,969 tokens, which is
+> **12.0%** of 16,384. Two numbers about the same prompt, one of them about the
+> task and one about the overshoot, and they were transposed. Recorded here so
+> that nobody meets 12.3% again and tries to reconstruct which quantity it
+> measured — it measured nothing.
 
 ### On the tool figure
 
@@ -160,9 +169,45 @@ The agent's own bookkeeping shows the charge. Accumulated `prompt_tokens` went
 not the 18,353 that was sent. 10,159 tokens were dropped on the floor, and
 nothing in OpenHands said a word about it.
 
+### Which 10,159 tokens, exactly
+
+"The front" is not a figure of speech. `keep=4` plus `new=8194` means the model
+saw tokens 0–3 and then tokens 10,163–18,352, and the prompt's layout is known,
+so the boundary can be placed:
+
+| region | tokens | fate |
+|---|---|---|
+| `system_prompt` (role, security policy, filesystem rules) | ~4–3,037 | **all discarded** |
+| `dynamic_context` (skills, repo context, host) | ~3,037–7,908 | **all discarded** |
+| `terminal` — *the tool that runs commands* | ~7,953–9,128 | **all discarded** |
+| `file_editor` — *the tool that writes files* | ~9,128–10,289 | **cut mid-definition** |
+| `task_tracker`, 14 × `browser_*`, 5 × `create_*_pr`, `finish`, `think`, `switch_llm`, `invoke_skill` | 10,289–18,233 | kept |
+| the task, including its three prohibitions | 18,233–18,398 | kept |
+
+The tool boundaries are apportioned from the reconstruction and carry its ~18%
+under-count, so treat `file_editor`'s exact cut point as approximate. The
+conclusion for `terminal` is not sensitive to that: it ends more than a
+thousand tokens before the boundary at any plausible scaling.
+
+**So the model kept every tool it could not use and lost the two it needed.**
+Fourteen browser tools and five pull-request tools survived intact on a box
+with no browser use and no forge credentials, while the definition of
+`terminal` — the only way to execute anything — was deleted outright, and
+`file_editor` was severed halfway through its schema.
+
+And the prohibitions survived. They sit at the very end of the prompt, and the
+tail is what `keep=4` keeps.
+
+That inverts the conclusion this project drew from those runs. The agent that
+"read a prohibition three times and still declared completion without running
+its work" **did** read the prohibition — three times, exactly as recorded. It
+had no `terminal` definition to run anything with. It was not ignoring an
+instruction it had been given; it was being asked to execute with the tool
+description for executing removed from its context.
+
 That reframes every previous failure in this tier. The runs that wrote outside
 their working directory and reported success on code they never executed were
-not ignoring their instructions. **They never received them.**
+not ignoring their instructions. **They were missing their tools.**
 
 ## Reproducing any of this
 
