@@ -394,7 +394,8 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | Context window in tokens |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
-| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context). Per surface: set `CONVENTIONS_CHAT`, `CONVENTIONS_AIDER` or `CONVENTIONS_AGENT` to `false` to switch off just one — each falls back to this. On a 4096-context box `CONVENTIONS_CHAT=false` is what brings the prompt back inside its budget |
+| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only for **aider and the agent** — the two surfaces that edit files (tighter edits; costs a little context). `false` switches all three surfaces off at once. |
+| `CONVENTIONS_CHAT` | `false` | The chat app does **not** get that file by default: it is 618 tokens of file-editing advice re-sent on every message, to a box with no filesystem — double the whole prompt budget on the 4096-token rung. Set `true` to include it, then `sudo lca apply` (the prompt is baked into the container). `CONVENTIONS_AIDER` / `CONVENTIONS_AGENT` default to `AIDER_CONVENTIONS` |
 | `AIDER_NO_AUTO_COMMIT` | `false` | Stop aider committing each edit. You then review a dirty tree yourself — and lose the one-commit-per-change trail that makes `git revert <sha>` precise |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |

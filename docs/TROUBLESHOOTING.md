@@ -440,6 +440,32 @@ A model that receives half its instructions and has every long reply discarded
 is not being measured. Rule out the plumbing first — it is cheap, and it is
 where both of these lived.
 
+## The chat ignores my `config/CONVENTIONS.md`
+
+It is not being sent it. **The chat app does not get that file by default** —
+`CONVENTIONS_CHAT=false` in `.env`, deliberately:
+
+- It is **618 tokens**, re-sent on every message for the whole conversation.
+  The chat's own product prompt is ~577. On the 4096-token 3b rung, `lca check`
+  budgets 614 tokens for this stack's text and the two together are ~1,211 —
+  double the budget. That was a permanent warning on every small box.
+- The chat box has **no filesystem, no shell and no tools**, which its own
+  prompt tells it three lines earlier. `CONVENTIONS.md` is about editing files,
+  keeping diffs small and committing cleanly: advice it cannot act on.
+
+`lca` (aider) and the agent both edit files, and both still get it by default.
+
+To include it in the chat anyway:
+
+```bash
+# in .env
+CONVENTIONS_CHAT=true
+sudo lca apply     # the prompt is baked in at container creation
+```
+
+The `sudo lca apply` is not optional: editing `.env` alone changes nothing for
+a container that already exists. `lca check` reports that drift until you do.
+
 ## Is the agent working, or is it stuck?
 
 Run `lca agent watch --live`. It prints each turn as it lands — what the agent

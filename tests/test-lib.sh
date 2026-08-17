@@ -4547,7 +4547,11 @@ echo "# one instructions file, respected on every surface"
 # THIS STACK to behave, and had to say it in three places to get it.
 instructions_reach_the_chat_app() {
   local out
-  out="$(lca_system_prompt)"
+  # CONVENTIONS_CHAT=true, because the chat is now the one surface this file is
+  # off for by default — see lca_user_instructions for the arithmetic. What
+  # this gate is for is unchanged: when it IS on, the file must reach the chat
+  # app's prompt and reach it whole.
+  out="$(CONVENTIONS_CHAT=true lca_system_prompt)"
   grep -qF 'the owner of this machine also asked for the following' <<<"${out}" || {
     echo "the chat app's system prompt does not carry config/CONVENTIONS.md" >&2
     return 1; }
@@ -4629,7 +4633,7 @@ check "...and its editor note names every one of them" \
 # addressed to somebody else — and the file has three tokens of headroom.
 note_never_reaches_the_model() {
   local prompt
-  prompt="$(lca_system_prompt)"
+  prompt="$(CONVENTIONS_CHAT=true lca_system_prompt)"
   if grep -q 'FOR WHOEVER EDITS' <<<"${prompt}"; then
     echo 'the editor note is being sent to the model on every message' >&2
     return 1
@@ -4640,15 +4644,31 @@ note_never_reaches_the_model() {
 check "the editor note is stripped before the model ever sees it" \
   note_never_reaches_the_model
 
-check "the user's instructions reach the chat app's system prompt" \
+check "the user's instructions reach the chat app's system prompt when asked for" \
   instructions_reach_the_chat_app
+# ...and are NOT there unless asked for. The default is the decision: 618
+# tokens of file-editing advice, re-sent on every message, to a box with no
+# filesystem — on the 4096 rung that is double the whole budget 'lca check'
+# allows this stack's own text.
+chat_default_leaves_the_file_out() {
+  local out
+  out="$(lca_system_prompt)"
+  ! grep -qF 'the owner of this machine also asked for the following' <<<"${out}" || {
+    echo 'the chat prompt carries CONVENTIONS.md by default again — that is the permanent prompt-budget warning coming back' >&2
+    return 1; }
+  # ...while the surfaces that can act on it still get it by default.
+  [[ -n "$(lca_user_instructions aider)" && -n "$(lca_user_instructions agent)" ]] || {
+    echo 'aider or the agent lost the instructions file, which was never the intent' >&2
+    return 1; }
+}
+check "...and the chat does without it unless asked" chat_default_leaves_the_file_out
 # ...and the built-in part survives. Everything above the append says what that
 # chat box IS — no filesystem, no shell, no tools, and 'lca' is the thing that
 # writes files. A persona must not be able to cost the user that, because a
 # model claiming it just edited their project is the bug this branch opened on.
 instructions_do_not_replace_the_product_prompt() {
   local out
-  out="$(lca_system_prompt)"
+  out="$(CONVENTIONS_CHAT=true lca_system_prompt)"
   grep -qF 'no filesystem, no shell' <<<"${out}" || {
     echo 'the user instructions replaced the description of what the chat box is' >&2
     return 1; }
@@ -4672,7 +4692,7 @@ instructions_respect_the_toggle() {
   [[ -z "${off}" ]] || { echo 'AIDER_CONVENTIONS=false does not switch the instructions off' >&2; return 1; }
   # ...and off must mean the chat prompt loses only the appendix.
   local prompt_off
-  prompt_off="$(AIDER_CONVENTIONS=false lca_system_prompt)"
+  prompt_off="$(CONVENTIONS_CHAT=true AIDER_CONVENTIONS=false lca_system_prompt)"
   grep -qF 'no filesystem, no shell' <<<"${prompt_off}" || return 1
   ! grep -qF 'the owner of this machine also asked' <<<"${prompt_off}"
 }

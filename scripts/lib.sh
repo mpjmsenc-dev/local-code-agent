@@ -497,6 +497,13 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  # Defaulted to a LITERAL false, which is what makes this safe to do at load
+  # time. The comment below is about "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}"
+  # — a default that captures the master switch freezes the fallback, so an
+  # AIDER_CONVENTIONS=false set afterwards loses. This captures nothing:
+  # lca_user_instructions still applies the master switch on top, so off still
+  # means off everywhere.
+  CONVENTIONS_CHAT="${CONVENTIONS_CHAT:-false}"
   # The three per-surface switches are deliberately NOT defaulted here. Baking
   # "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}" at load time freezes the
   # fallback: AIDER_CONVENTIONS=false set afterwards loses to a CONVENTIONS_CHAT
@@ -2271,7 +2278,31 @@ restart_ollama() {
 lca_user_instructions() {
   local surface="${1:-agent}" enabled
   case "${surface}" in
-    chat)  enabled="${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS:-true}}" ;;
+    # The chat is the one surface this file is OFF for by default, and the
+    # arithmetic is the reason. Measured on this checkout: CONVENTIONS.md is
+    # 2,472 chars (~618 tokens) and the chat's own product prompt is ~593, so
+    # together they are ~1,211. 'lca check' budgets 15% of the context window
+    # for this stack's own text: at 8192 that cap is 1,228 and it just fits; at
+    # 4096 — the 3b rung, the smallest this project ships — the cap is 614 and
+    # the prompt is DOUBLE it, re-sent on every message, for the life of the
+    # conversation.
+    #
+    # And the chat is the surface that can act on none of it. The file is about
+    # editing files, keeping diffs small and committing cleanly; the chat box
+    # has no filesystem, no shell and no tools, which its own prompt says three
+    # lines above this appendix. aider and the agent both edit files, so both
+    # keep it.
+    #
+    # This was a permanent warning from 'lca check' on every small box — a
+    # decision the project could make, left to the user as a message. Now it is
+    # made, and CONVENTIONS_CHAT=true takes it back.
+    chat)
+      enabled="${CONVENTIONS_CHAT:-false}"
+      # ...and the old single switch still turns all three off at once, which
+      # three gates hold this file to. An explicit CONVENTIONS_CHAT=true does
+      # not survive AIDER_CONVENTIONS=false: off means off.
+      [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || enabled=false
+      ;;
     aider) enabled="${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" ;;
     *)     enabled="${CONVENTIONS_AGENT:-${AIDER_CONVENTIONS:-true}}" ;;
   esac
