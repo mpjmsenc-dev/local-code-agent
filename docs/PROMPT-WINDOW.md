@@ -35,8 +35,9 @@ tokenizer is the one that will count the real prompt. Free, local, exact.
 |---|---|
 | `AGENT_MODEL_CONTEXT`, the derived model's `num_ctx` | **16,384** |
 
-Prompt and generation share it — but not evenly, and not the way this project
-assumed. See "The window is not the window" below: a prompt may have half.
+Prompt and generation share it, and a prompt may use all of it — but overshoot
+it by a token and Ollama does not trim, it halves. See "Overflowing the window"
+below.
 
 ## Where the prompt comes from
 
@@ -170,8 +171,15 @@ Nothing here needs a paid tokenizer, a library, or a second model. Four steps.
 **1. Find the runner and confirm it is the right model.** The port is
 ephemeral; never hardcode it.
 
-    PORT=$(ss -lntp | awk '/ollama/ && !/11434/ {split($4,a,":"); print a[2]; exit}')
-    curl -s 127.0.0.1:$PORT/props | jq '.default_generation_settings.n_ctx'
+    for p in $(ss -lnt | awk '$4 ~ /^127\.0\.0\.1:/ {split($4,a,":"); print a[2]}'); do
+      [ "$p" = 11434 ] && continue
+      curl -sf -m 2 "127.0.0.1:$p/props" -o /dev/null && PORT=$p && break
+    done
+    curl -s "127.0.0.1:$PORT/props" | jq '.default_generation_settings.n_ctx'
+
+Probe for `/props` rather than grepping for the name: the runner does not
+reliably appear as `ollama` in `ss -lntp`, and answering `/props` is what
+actually identifies it.
 
 **2. Count tokens exactly.**
 
@@ -187,9 +195,15 @@ inside the runtime container:
       | jq -r '.system_prompt.text'    # and .dynamic_context.text, and .tools
 
 **4. Read what Ollama made of it.** This is the number that matters, and it is
-only ever in the log:
+only ever in the log. Two lines to look for, because a prompt that *fits*
+produces no warning at all — which is exactly the state to confirm after a cut:
 
-    journalctl -u ollama | grep 'truncating input prompt'
+    journalctl -u ollama | grep 'truncating input prompt'   # over the window
+    journalctl -u ollama -o cat | grep 'new prompt, n_ctx_slot'   # every prompt
+
+The second prints `n_ctx_slot = 16384 … task.n_tokens = 13975` whether or not
+truncation happened, so it is the one to trust. Silence from the first is the
+result you want.
 
 The agent's own accounting is in the same conversation's event stream —
 `.value.usage_to_metrics.agent.accumulated_token_usage.prompt_tokens` on the
@@ -273,6 +287,32 @@ untouched to the token, which is what makes the comparison worth anything.
 `invoke_skill` on its own once the catalogue is empty, because a tool whose
 only job is to invoke a skill has nothing left to invoke. That is ~156 tokens
 nobody had to ask for.
+
+### And what Ollama made of it
+
+The measurement that decides it, in Ollama's own words:
+
+    slot operator(): id 0 | task 4 | new prompt, n_ctx_slot = 16384,
+                                     n_keep = 4, task.n_tokens = 13975
+
+**13,975 tokens, and no truncation warning at all** — not in that run, not
+anywhere in the log since. It then processed all 13,975 of them, straight
+through, `progress = 0.07 … 0.51 …` at ~20 tok/s.
+
+| | before | after |
+|---|---:|---:|
+| prompt Ollama was sent | 18,353 | **13,975** |
+| prompt the model actually read | 8,194 | **13,975** |
+| thrown away, unreported | 10,159 | **0** |
+
+The middle row is the point. The saving on the wire is 4,378 tokens; the saving
+in *instructions the model receives* is 5,781, because the tokens that were
+being discarded were the ones this project had written.
+
+For the first time in this tier's history the agent is reading its whole
+prompt: its role, its security policy, its filesystem rules, the
+working-directory rule that two failed droplet runs were blamed on, and all 25
+tool definitions.
 
 ## A correction, and how it was caught
 
