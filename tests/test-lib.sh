@@ -3813,11 +3813,48 @@ request_timeout_outlasts_this_hardware() {
 }
 check "the agent waits longer for one reply than this hardware takes to give it" \
   request_timeout_outlasts_this_hardware
+# Driven, not grepped. This asserted that the literal 'timeout:$tmo' appears
+# in agent.sh's jq program — which stays true if the payload is never built,
+# never sent, or built with the field as a STRING, and the string case is the
+# one that has already bitten here: the settings API stores what it is given,
+# and a quoted "2048" round-trips looking correct while reserving nothing.
+#
+# So the payload is built for real and read back with jq. agent.sh runs main at
+# the bottom, so it cannot be sourced; the one statement that builds the body
+# is extracted and evaluated with the real lib.sh behind it.
+# SOURCE-GREP: this reads agent.sh in order to RUN a statement out of it, which
+# is the opposite of the problem — the assertion below is on the JSON that
+# statement produces. What it cannot check is that the extraction still finds
+# the right statement, so it fails loudly when the block comes back empty
+# rather than asserting over nothing.
+seeded_settings_payload() {
+  local stmt
+  stmt="$(awk '/^  body="\$\(jq -nc/ { inb=1 } inb { print } inb && /\)"$/ { exit }' \
+            "${REPO}/agent.sh")"
+  [[ -n "${stmt}" ]] || { echo "could not find agent.sh's settings payload" >&2; return 1; }
+  bash -c 'set -uo pipefail
+           source "$1" >/dev/null 2>&1
+           load_env >/dev/null 2>&1
+           model=m; base_url=http://x/v1
+           eval "$2"
+           printf "%s" "${body}"' _ "${REPO}/scripts/lib.sh" "${stmt}"
+}
 seeds_the_timeout() {
-  # shellcheck disable=SC2016  # the pattern is source text, not an expansion
-  grep -q 'timeout:$tmo' <<<"$(sed -n '/agent_settings_diff/,/}}}/p' "${REPO}/agent.sh" | tr -d '[:space:]')" || {
-    echo 'the seeded settings do not carry a timeout, so the client keeps its 300s default and every step on a CPU box is discarded' >&2
+  local body tmo out
+  body="$(seeded_settings_payload)" || return 1
+  # A number, and the number agent_request_timeout actually decides — not
+  # merely a field that exists.
+  tmo="$(jq -r '.agent_settings_diff.llm.timeout' <<<"${body}" 2>/dev/null)"
+  [[ "${tmo}" =~ ^[0-9]+$ ]] || {
+    printf 'the seeded settings carry no numeric timeout (got %s), so the client keeps its 300s default and every step on a CPU box is discarded\n' \
+      "${tmo:-nothing}" >&2
     return 1; }
+  out="$(jq -r '.agent_settings_diff.llm.max_output_tokens' <<<"${body}" 2>/dev/null)"
+  [[ "${out}" =~ ^[0-9]+$ ]] || {
+    printf 'max_output_tokens is not a number (got %s) — a quoted value round-trips looking correct while reserving nothing\n' \
+      "${out:-nothing}" >&2
+    return 1; }
+  jq -e '.agent_settings_diff.llm.timeout | type == "number"' <<<"${body}" >/dev/null 2>&1
 }
 check "...and that wait is seeded into the container's settings" \
   seeds_the_timeout
@@ -4912,14 +4949,51 @@ check "no card, no driver, and ollama says GPU -> still none" \
 # gpu_state_for_placement is classify_gpu plus this machine's card and driver,
 # taking a placement the caller has already read — so one 'ollama ps' each, and
 # the string a message quotes is the one that was classified.
+# SOURCE-GREP: same extraction, same reason — the GPU verdict is a case at the
+# top level of check-system.sh. What it cannot check is that the extraction
+# still finds the case; an empty one fails.
+placement_verdict_for() {   # CLASS -> the line check-system would print
+  local block
+  block="$(awk '/^case "\$\(gpu_state_for_placement/ { inb=1 } inb { print } inb && /^esac$/ { exit }' \
+            "${REPO}/check-system.sh")"
+  [[ -n "${block}" ]] || { echo "could not extract check-system.sh's placement case" >&2; return 1; }
+  bash -c 'set -uo pipefail
+    source "$3" >/dev/null 2>&1
+    CLASS="$2"
+    MODEL_NAME=m; GPU_PROC="13%/87% CPU/GPU"; VRAM_FIT=""; VRAM_MIB=""
+    # The classification is forced; the RAW string stays the one a CPU-only
+    # host really prints, so a case that went back to matching it would give
+    # the same answer three times.
+    gpu_state_for_placement() { printf "%s" "${CLASS}"; }
+    placement_summary() { printf "placement"; }
+    gpu_vram_mib() { return 1; }
+    largest_model_for_vram() { return 1; }
+    has_nvidia_gpu() { return 1; }
+    p_pass() { printf "PASS %s\n" "$*"; }
+    p_warn() { printf "WARN %s\n" "$*"; }
+    p_fail() { printf "FAIL %s\n" "$*"; }
+    info() { printf "INFO %s\n" "$*"; }
+    eval "$1"' _ "${block}" "$1" "${REPO}/scripts/lib.sh" 2>&1
+}
 check_classifies_the_placement() {
-  awk '/^[[:space:]]*#/ { next }
-       /gpu_state_for_placement/ { seen = NR }
-       /only partially on the GPU/ {
-         if (seen == 0 || NR - seen > 20) { print "unclassified GPU verdict at line " NR; bad = 1 }
-         found = 1
-       }
-       END { exit (bad || !found || !seen) }' "${REPO}/check-system.sh"
+  local a i s
+  # The whole point: the SAME raw processor string ("13%/87% CPU/GPU", which a
+  # CPU-only host really prints) must produce different verdicts according to
+  # the CLASSIFICATION, not according to the string. If the case ever went back
+  # to matching the string, all three of these would say the same thing.
+  a="$(placement_verdict_for active)" || return 1
+  i="$(placement_verdict_for idle)"   || return 1
+  s="$(placement_verdict_for split)"  || return 1
+  grep -qi 'running on the GPU' <<<"${a}" || {
+    printf 'a classified-active placement is not reported as on the GPU: %s\n' "${a}" >&2; return 1; }
+  grep -qi 'running on the CPU' <<<"${i}" || {
+    printf 'a driver with the model on the CPU is not reported as such: %s\n' "${i}" >&2; return 1; }
+  grep -qi 'only partially on the GPU' <<<"${s}" || {
+    printf 'a split placement is not reported as a split: %s\n' "${s}" >&2; return 1; }
+  # ...and a split is a WARNING, because it looks like success and runs at
+  # close to CPU speed.
+  grep -q '^WARN' <<<"${s}" || {
+    printf 'a split is not warned about, and a split looks like success: %s\n' "${s}" >&2; return 1; }
 }
 check "'lca check' classifies placement instead of matching the string" \
   check_classifies_the_placement
@@ -8942,7 +9016,7 @@ if have jq; then
     # edit that moves it to the end would turn a passing check into a failing
     # one with nothing to see.
     local want="${n}"
-    if (( n <= 299 )); then want="${words[n]}"; fi
+    if (( n <= 295 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
       printf 'PHONE.md claims %s starter questions; the file has %s\n' \
         "${claimed}" "${n}" >&2
@@ -10715,19 +10789,51 @@ check "both 'lca chat' and the banner check for tailscale before naming it" \
 # names the command. That run tolerates a failed Tailscale install by design —
 # "Tailscale did not install — continuing without private phone access" — and
 # then finished by telling the reader to run 'sudo tailscale up'. It knew.
+# SOURCE-GREP: extracts setup.sh's closing advice in order to RUN it — setup.sh
+# installs a stack when sourced. What it cannot check is that the extraction
+# still finds the block; an empty one fails.
+next_steps_with() {   # HAVE_TAILSCALE SKIP_TAILSCALE -> the advice printed
+  local block
+  block="$(awk '/^  step "Next steps"/ { inb=1; next } inb && /VERDICT_PRINTED/ { exit } inb' \
+            "${REPO}/setup.sh")"
+  [[ -n "${block}" ]] || { echo "could not extract setup.sh's Next steps" >&2; return 1; }
+  bash -c 'set -uo pipefail
+    source "$4" >/dev/null 2>&1
+    HAS="$2"; SKIP_TAILSCALE="$3"
+    SCRIPT_DIR=/opt/lca; WEBUI_PORT=3000; ENABLE_AGENT=false; AGENT_PORT=3001
+    ts_ip=""; REPO_ROOT=/opt/lca; ENABLE_WEBUI=true; ENABLE_OLLAMA_RELAY=false
+    have() { [[ "$1" != tailscale || "${HAS}" == yes ]]; }
+    tailscale() { printf "100.64.0.5\n"; }
+    tailscale_ip4() { printf "100.64.0.5"; }
+    info() { printf "%s\n" "$*"; }
+    warn() { printf "%s\n" "$*"; }
+    ok()   { printf "%s\n" "$*"; }
+    step() { :; }
+    eval "$1"' _ "${block}" "$1" "$2" "${REPO}/scripts/lib.sh" 2>&1
+}
 setup_next_steps_check_for_tailscale() {
-  local body
-  body="$(awk '/^  step "Next steps"/ { inb = 1; next }
-               inb && /VERDICT_PRINTED/ { exit }
-               inb' "${REPO}/setup.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo 'could not find setup.sh Next steps — this gate stopped watching' >&2; return 1; }
-  grep -q 'tailscale up' <<<"${body}" || return 0   # no suggestion, nothing to guard
-  grep -q 'have tailscale' <<<"${body}" || {
-    echo "setup.sh's closing advice offers 'tailscale up' without checking it installed" >&2
+  local yes no skipped
+  yes="$(next_steps_with yes false)"    || return 1
+  no="$(next_steps_with no false)"      || return 1
+  skipped="$(next_steps_with no true)"  || return 1
+  # The command is only offered when it exists. This same run tolerates a
+  # failed Tailscale install by design, so the unconditional version handed the
+  # reader a command setup.sh had just finished failing to provide.
+  grep -qF 'tailscale up' <<<"${yes}" || {
+    printf 'setup.sh no longer tells an installed Tailscale how to log in: %s\n' "${yes}" >&2
     return 1; }
-  grep -qi 'did not install' <<<"${body}" || {
-    echo "setup.sh checks for tailscale but says nothing when the install it just ran failed" >&2
+  ! grep -qF 'tailscale up' <<<"${no}" || {
+    printf "setup.sh offers 'sudo tailscale up' on a box where Tailscale did not install: %s\n" "${no}" >&2
+    return 1; }
+  grep -qi 'did not install' <<<"${no}" || {
+    printf 'setup.sh says nothing about the Tailscale install it just failed: %s\n' "${no}" >&2
+    return 1; }
+  # ...and a deliberate skip is not reported as a failure.
+  ! grep -qi 'did not install' <<<"${skipped}" || {
+    printf 'SKIP_TAILSCALE=true is reported as a failed install: %s\n' "${skipped}" >&2
+    return 1; }
+  grep -qi 'skipped' <<<"${skipped}" || {
+    printf 'SKIP_TAILSCALE=true is not acknowledged at all: %s\n' "${skipped}" >&2
     return 1; }
 }
 check "...and so does setup.sh's closing advice" \
@@ -12100,11 +12206,48 @@ check "check-system.sh rejects an unknown flag with exit 2" rejects_unknown_flag
 # The generation probe must sit UNDER the guard, not merely somewhere in the
 # same file. Asserted on the block so that moving the probe out from under the
 # branch fails here even though both strings still appear.
+# SOURCE-GREP: extracts check-system.sh's model block in order to RUN it —
+# check-system.sh cannot be sourced, it runs top to bottom. What it cannot
+# check is that the extraction still finds the block, so an empty one fails.
+model_block_says() {   # QUICK -> what the block printed, with model_responds traced
+  local block
+  block="$(awk '/^step "Model \(/ { inb=1; next } inb && /^# --- / { exit } inb' \
+            "${REPO}/check-system.sh")"
+  [[ -n "${block}" ]] || { echo "could not extract check-system.sh's model block" >&2; return 1; }
+  # lib.sh is sourced before the stubs, not skipped: a subshell that defines
+  # only what it happens to need is one command-not-found away from a silent
+  # pass, and this suite has a gate saying so.
+  bash -c 'set -uo pipefail
+    source "$3" >/dev/null 2>&1
+    QUICK="$2"; MODEL_NAME=m; OLLAMA_API_UP=true; ENV_FILE=/etc/x; SCRIPT_DIR=/opt/x
+    have() { return 0; }
+    model_present() { return 0; }
+    model_responds() { printf "PROBE RAN\n"; return 0; }
+    model_silence_reason() { printf "reason"; }
+    ollama_processor() { return 1; }
+    p_pass() { printf "PASS %s\n" "$*"; }
+    p_warn() { printf "WARN %s\n" "$*"; }
+    p_fail() { printf "FAIL %s\n" "$*"; }
+    info() { printf "INFO %s\n" "$*"; }
+    step() { :; }
+    eval "$1"' _ "${block}" "$1" "${REPO}/scripts/lib.sh" 2>&1
+}
 quick_guards_the_generation_probe() {
-  awk '/\{QUICK\}" == "true" \]\]; then/ { inblock=1; next }
-       inblock && /^# --- / { exit }
-       inblock && /model_responds/ { found=1 }
-       END { exit !found }' "${REPO}/check-system.sh"
+  local q n
+  q="$(model_block_says true)"  || return 1
+  n="$(model_block_says false)" || return 1
+  # --quick must not pay for a generation...
+  ! grep -qF 'PROBE RAN' <<<"${q}" || {
+    echo "'lca check --quick' still runs the real-generation probe, which is the expensive thing --quick exists to skip" >&2
+    return 1; }
+  # ...and must say it skipped rather than counting a pass it did not earn.
+  grep -qiF 'skipping the real-generation probe' <<<"${q}" || {
+    printf "--quick skipped the probe without saying so: %s\n" "${q}" >&2
+    return 1; }
+  # ...while a full run still does it.
+  grep -qF 'PROBE RAN' <<<"${n}" || {
+    echo 'a full check no longer probes the model at all, so nothing proves inference works' >&2
+    return 1; }
 }
 check "the slow generation probe sits under the --quick guard" \
   quick_guards_the_generation_probe
@@ -17485,7 +17628,7 @@ check "a new gate that greps source says why it cannot drive instead" \
 baseline_has_not_grown() {
   local n
   n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
-  (( n <= 299 )) || {
+  (( n <= 295 )) || {
     printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

@@ -568,10 +568,20 @@ is allowed, and it must say so:
 gpu_probe_reads_the_largest_card() { ... }
 ```
 
+**Extract-to-drive is not a source grep**, and it is the shape to reach for
+when a script cannot be sourced (`agent.sh` and `check-system.sh` both run
+`main` at the bottom). Pull the block out with `awk`, `eval` it with the world
+stubbed, and assert on what it *did* — `numeric_complaints`,
+`seeded_settings_payload` and `drift_case_block` all work this way. It still
+reads source, so it still carries a `SOURCE-GREP:` marker, and the marker says
+the one thing such a helper genuinely cannot check: that the extraction still
+finds the right block. Every one of them fails loudly on an empty block, which
+is what stops it asserting over nothing.
+
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
 `tests/source-grep-baseline.txt`, and carries no `SOURCE-GREP:` line, fails the
-suite. The baseline is the 299 that existed when the rule was written — it is a
+suite. The baseline is the 295 that existed when the rule was written — it is a
 record of debt, not permission, and the honest direction for it is down.
 
 The meta-gate is itself the kind of thing that becomes decoration, so it is
