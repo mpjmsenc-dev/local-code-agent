@@ -553,18 +553,23 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   #   num_ctx 512   num_predict 1     limit 258   (NumCtx-NumPredict predicts 511)
   #   num_ctx 1024  num_predict 200   limit 514   (predicts 824)
   #
-  #   limit = num_ctx / 2 + 2, whatever num_predict says.   (ollama 0.32.5)
+  # 'limit' in that line is not the threshold. It is the size Ollama cuts the
+  # prompt DOWN TO. Truncation fires when the prompt exceeds num_ctx, and when
+  # it fires the prompt is cut to num_ctx/2 + 2 with keep=4. Confirmed by this
+  # project's own agent after the skills cut: 13,975 tokens at num_ctx 16384,
+  # well above 8,194, processed in full with no warning at all.
   #
-  # The product's own data says the same: the run of 2026-08-17 carried
-  # max_output_tokens=2048 and was still cut to 8194, where a reservation of
-  # 2048 would have left 14,336.
+  # The product's own data says the same about the reservation: the run of
+  # 2026-08-17 carried max_output_tokens=2048 and was still cut to 8194, where
+  # a reservation of 2048 would have left 14,336.
   #
-  # So this setting does NOT buy instruction room — half the window is reserved
-  # no matter what is asked for, and 8,194 is the whole prompt budget at
-  # AGENT_MODEL_CONTEXT=16384. It remains worth setting as a cap on one reply,
-  # which is what it says on the tin. What actually buys instruction room is
-  # cutting the prompt (see agent_sandbox_env) or doubling the window, and
-  # docs/PROMPT-WINDOW.md has the measurement for both.
+  # So this setting does NOT buy instruction room. Nothing is held back from
+  # the prompt for output; the budget is the whole 16,384. What IS brutal is
+  # the penalty for going over it — 18,353 exceeded the window by 1,969 tokens
+  # and lost 10,159, because Ollama halves rather than trims. It remains worth
+  # setting as a cap on one reply, which is what it says on the tin. What
+  # actually buys room is cutting the prompt (see agent_sandbox_env), and
+  # docs/PROMPT-WINDOW.md has the measurement.
   # NOT defaulted here, and that is a deliberate limitation with a date on it.
   # Every key load_env defaults must also appear in .env.example and in the
   # README's settings table — the suite gates all three against each other — and

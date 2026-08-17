@@ -172,10 +172,13 @@ of dynamic context, 3,037 of system prompt, and 165 for the task itself. At the
 agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at least 16384, and
 32768 if the RAM is there, or do not enable this tier.
 
-And 16384 is not as much headroom as it reads: **Ollama gives a prompt half the
-window**, measured as `num_ctx/2 + 2` on 0.32.5, so the agent's real prompt
-budget at `AGENT_MODEL_CONTEXT=16384` is 8,194. Every number above, the
-truncation rule, and what was cut to fix it are in docs/PROMPT-WINDOW.md.
+And going over the window is punished out of proportion: Ollama does not trim
+an over-long prompt to fit, it **cuts it to `num_ctx/2 + 2`, keeping the first
+4 tokens and then the tail**. At 16384 that meant an 18,353-token prompt lost
+10,159 tokens — the role, the security policy and the filesystem rules — to
+overshoot by 1,969. Cutting the skills catalogue brought it to 13,975, which
+fits. Every number, the truncation rule and what was cut are in
+docs/PROMPT-WINDOW.md.
 
 **The 3b model finishes the loop without doing the work.** This is the one to
 read before enabling the tier on a small droplet. Measured end to end: the

@@ -121,34 +121,43 @@ templating them, and that transformation is not reproducible from outside. The
 subtraction does not depend on knowing it: the other three blocks are verbatim,
 so whatever is left is tools plus scaffolding, exactly.
 
-## The window is not the window: Ollama gives a prompt half of it
+## Overflowing the window does not cost you the overflow. It costs you half.
 
-The warning does not say `limit=16384`. It says `limit=8194`, and that number
-is not derived from `max_output_tokens` (2,048 here) or from anything this
-project sets. Measured directly, by asking Ollama for a context it honours and
-overflowing it on purpose:
+The warning does not say `limit=16384`. It says `limit=8194`, and the tempting
+reading — that a prompt may only ever have half the window — is wrong. `limit`
+is not the threshold at which Ollama truncates. It is the size it truncates
+*down to*.
 
-| `num_ctx` requested | `num_predict` | `limit` Ollama used |
-|---:|---:|---:|
-| 512 | 1 | 258 |
-| 1,024 | 200 | 514 |
-| 16,384 | litellm's | 8,194 |
+Measured, by overflowing contexts Ollama honours and then by watching a real
+prompt that sits between the two candidate thresholds:
 
-    limit = num_ctx / 2 + 2
+| `num_ctx` | prompt | truncated? | cut down to |
+|---:|---:|:--|---:|
+| 512 | 2,319 | yes | 258 |
+| 1,024 | 3,519 | yes | 514 |
+| 16,384 | 18,353 | yes | 8,194 |
+| 16,384 | **13,975** | **no** | — |
 
-Independent of `num_predict` — 1 and 200 give the same rule. Ollama 0.32.5,
-`llama_server.go:314`. **A prompt may occupy at most half the context window.**
+That last row is the one that settles it, and it is not a synthetic probe — it
+is this project's own agent after the cut below. 13,975 is comfortably above
+8,194 and was processed **in full**, all 13,975 tokens of it. So:
 
-So the agent tier's real prompt budget at `num_ctx=16384` is **8,194 tokens**,
-not 16,384. And `keep=4` means that when the prompt overflows, Ollama keeps the
-first four tokens and then the *tail*: the role, the security policy, the
-filesystem rules and most of the tool definitions are the part discarded. The
+    truncation fires when   prompt > num_ctx
+    and when it fires       the prompt is cut to num_ctx / 2 + 2, keep = 4
+
+Ollama 0.32.5, `llama_server.go:314`. The budget really is the whole 16,384.
+What is brutal is the penalty: exceeding it by 1,969 tokens did not cost 1,969
+tokens, it cost **10,159**, because Ollama does not trim to fit — it halves.
+
+And `keep=4` says which half. The first four tokens survive and the rest of
+what is kept is the *tail*, so the role, the security policy, the filesystem
+rules and most of the tool definitions are precisely the part discarded. The
 model is left holding the end of the tool list and the task.
 
-This is measurable in the agent's own bookkeeping. Accumulated `prompt_tokens`
-across the conversation went 425 → 8,619, so the big call was charged
-**8,194** — exactly the limit, not the 18,353 that was sent. 10,159 tokens
-were dropped on the floor, silently, and nothing in OpenHands reported it.
+The agent's own bookkeeping shows the charge. Accumulated `prompt_tokens` went
+425 → 8,619 across the conversation, so the big call was billed **8,194** —
+not the 18,353 that was sent. 10,159 tokens were dropped on the floor, and
+nothing in OpenHands said a word about it.
 
 That reframes every previous failure in this tier. The runs that wrote outside
 their working directory and reported success on code they never executed were
@@ -192,23 +201,18 @@ suggesting it.
 
     18,353 − 4,232 (SKILLS) = 14,121 tokens
 
-Against the *nominal* 16,384 window that clears it with 2,263 to spare, and no
-other single cut does. Against the **real** 8,194 budget it does not come
-close, and it is worth being blunt about that: cutting skills is necessary and
-it is not sufficient. It removes 41% of the overflow. The prompt would still be
-truncated, and still be truncated from the front.
+Under 16,384, with 2,263 to spare — and no other single cut does it. Measured
+after the fact the real figure came out slightly better still, 13,975, because
+removing the catalogue also removed the tool that reads it.
 
-Two things fix the rest, and they are not alternatives — the first is free:
+This is the first configuration in this project's history where the agent's
+prompt fits its window.
 
-1. **Raise `AGENT_MODEL_CONTEXT` to 32768.** The budget becomes 16,386, and
-   14,121 fits with room. This is the honest fix and it costs RAM: the KV cache
-   doubles, which is what this box does not have (see docs/AGENT.md on the
-   3.4 GB allocation that made a 32768 run generate at 0.59 tok/s).
-2. **Cut the tools too.** 56% of the prompt is tool JSON, and of the 26 tools,
-   14 drive a headless browser and 5 open pull requests on GitHub, GitLab,
-   Bitbucket and Azure DevOps. On this box none of the 19 can do anything.
-
-Only both together put the prompt under 8,194 on the RAM this project targets.
+There is still headroom worth taking, and it is worth knowing where it is,
+because the margin is 2,409 tokens and a user's `config/CONVENTIONS.md` lands
+in `REPO_CONTEXT` inside it. 56% of what remains is tool JSON, and of the 25
+tools, 14 drive a headless browser and 5 open pull requests on GitHub, GitLab,
+Bitbucket and Azure DevOps. On this box none of those 19 can do anything.
 
 ### What the tools are worth
 
@@ -222,16 +226,19 @@ absolute counts (the reconstruction under-counts the whole by ~18%):
 | `invoke_skill` | 1 | 1.9% | ~195 |
 | **removable here** | **20** | **52.5%** | **~5,394** |
 
-`invoke_skill` joins them once the catalogue is gone: it is the tool whose only
-purpose is to invoke a skill from a list that is now empty.
+`invoke_skill` has already gone — OpenHands dropped it by itself when the
+catalogue emptied, which is where ~150 of the 4,378 actually saved came from.
+The remaining 19 are still being sent.
 
-So the full arithmetic, if both cuts are made:
+Dropping the browser and forge tools as well would take the prompt to roughly
 
-    18,353 − 4,232 (skills) − ~5,394 (20 dead tools) ≈ 8,727
+    13,975 − ~5,200 ≈ 8,800
 
-Still ~500 over 8,194, closed by dropping `CUSTOM_SECRETS` (395) and the
-`BROWSER_TOOLS` (163) and `PULL_REQUESTS` (139) sections of the system prompt,
-which describe tools that would no longer exist.
+which is not needed to fit the window and would be worth doing anyway: it is
+the difference between an agent that reads its instructions in 11 minutes and
+one that reads them in 7. `browser_tool_set` is one entry in the agent spec's
+`tools` list, so the lever exists; it was left alone here because the measured
+task was the skills cut and one change at a time is how this was kept honest.
 
 ## After the cut, measured the same way
 
@@ -288,9 +295,17 @@ The reservation theory is out. And the product's own data had already said so:
 the run measured here carried `max_output_tokens=2048` and was still cut to
 8,194, where a 2,048-token reservation would have left 14,336.
 
-`AGENT_MAX_OUTPUT_TOKENS` buys no instruction room at all. It is still worth
-setting as what it claims to be — a cap on one reply — but the 6,142 tokens it
-was believed to buy were never there.
+`AGENT_MAX_OUTPUT_TOKENS` buys no instruction room at all. Nothing is reserved
+from the prompt for output: the threshold is `num_ctx` whatever the client
+asks for, and `num_ctx/2 + 2` is where an over-long prompt lands, not where it
+is allowed to start. The setting is still worth what it claims to be — a cap on
+one reply — but the 6,142 tokens it was believed to buy were never there.
+
+Two wrong readings of one warning line, in one day, an hour apart: first that
+the reservation explained it, then that a prompt only ever gets half the
+window. Both fitted `limit=8194` perfectly. What separated them was varying an
+input rather than admiring a coincidence — `num_predict` for the first, and a
+prompt that lands *between* the two candidate thresholds for the second.
 
 The skills being dropped are OpenHands' built-in catalogue: `release-notes`,
 `iterate`, `linear`, `code-review`, `datadog`, `discord`, `deno`,
