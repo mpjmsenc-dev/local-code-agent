@@ -9016,7 +9016,7 @@ if have jq; then
     # edit that moves it to the end would turn a passing check into a failing
     # one with nothing to see.
     local want="${n}"
-    if (( n <= 295 )); then want="${words[n]}"; fi
+    if (( n <= 288 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
       printf 'PHONE.md claims %s starter questions; the file has %s\n' \
         "${claimed}" "${n}" >&2
@@ -17526,6 +17526,15 @@ echo "# ...and the rule that stops the list growing back"
 # whether a gate that DOES drive drives the right thing.
 source_grep_gates() {   # FILE -> functions that read repo source with a text tool
   awk '
+    # A quoted heredoc is DATA, not this file\x27s code. Without this the
+    # fixture below — which deliberately contains functions that read source —
+    # was scanned as if those were real gates. Third time this scanner has been
+    # fooled by text about itself; see CONTRIBUTING.md.
+    !inhd && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/) {
+      hd=substr($0, RSTART+3, RLENGTH-4); inhd=1; next
+    }
+    inhd && $0 == hd { inhd=0; next }
+    inhd { next }
     /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn); src=0; tool=0
       # A one-line definition opens and closes on the same line. Without this
@@ -17557,6 +17566,15 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
 # only reason it is not still true.
 justified_gates() {   # FILE -> functions carrying a SOURCE-GREP: justification
   awk '
+    # A quoted heredoc is DATA, not this file\x27s code. Without this the
+    # fixture below — which deliberately contains functions that read source —
+    # was scanned as if those were real gates. Third time this scanner has been
+    # fooled by text about itself; see CONTRIBUTING.md.
+    !inhd && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/) {
+      hd=substr($0, RSTART+3, RLENGTH-4); inhd=1; next
+    }
+    inhd && $0 == hd { inhd=0; next }
+    inhd { next }
     /^[[:space:]]*# SOURCE-GREP: ./ && !inb { just=1; next }
     /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn)
@@ -17574,12 +17592,31 @@ justified_gates() {   # FILE -> functions carrying a SOURCE-GREP: justification
 }
 # Driven over a fixture, both directions, before it is trusted on the real file.
 SG_FIXTURE="${SANDBOX}/sg-fixture.sh"
+# The fixture holds the three shapes that actually got through, one each:
+#   - a ONE-LINE definition, which an earlier scanner treated as an
+#     unterminated body and used to swallow the rest of the file;
+#   - a comment that MENTIONS a text tool ("passed" contains "sed"), which
+#     reclassified a driven test as a source grep;
+#   - a comment that explains what a marker is for, which an earlier justifier
+#     accepted AS a marker.
+# A scanner that is only tested on the tidy cases is a scanner that will be
+# fooled by prose about itself again.
 cat > "${SG_FIXTURE}" <<'SGFIX'
 drives_the_behaviour() {
   out="$(some_function arg)"
+  # this ran and the assertion still passed.
   [[ "${out}" == expected ]]
 }
+drives_it_on_one_line() { out="$(some_function arg)"; [[ "${out}" == ok ]]; }
+still_reads_source_after_the_one_liner() {
+  grep -q 'something' "${REPO}/scripts/lib.sh"
+}
 reads_the_source_with_no_excuse() {
+  grep -q 'something' "${REPO}/scripts/lib.sh"
+}
+# Write a SOURCE-GREP: comment when you cannot drive it — this sentence is
+# about the rule, not an excuse for the function below.
+explains_the_rule_but_claims_nothing() {
   grep -q 'something' "${REPO}/scripts/lib.sh"
 }
 # SOURCE-GREP: needs a GPU, which no runner has.
@@ -17597,6 +17634,24 @@ check "the justification reader finds the excuse where there is one" \
   grep -qx 'reads_the_source_and_says_why' <<<"$(justified_gates "${SG_FIXTURE}")"
 no_excuse_is_not_invented() { ! grep -qx 'reads_the_source_with_no_excuse' <<<"$(justified_gates "${SG_FIXTURE}")"; }
 check "...and does not invent one where there is none" no_excuse_is_not_invented
+# The three shapes that got through, each asserted directly.
+one_liner_does_not_swallow_the_file() {
+  # If the one-line definition is read as an unterminated body, everything
+  # after it is attributed to it and the function below vanishes from the list.
+  grep -qx 'still_reads_source_after_the_one_liner' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "a one-line definition does not swallow the rest of the file" \
+  one_liner_does_not_swallow_the_file
+prose_does_not_reclassify_a_driven_test() {
+  ! grep -qx 'drives_the_behaviour' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "...a comment ending 'passed.' is not a call to sed" \
+  prose_does_not_reclassify_a_driven_test
+prose_about_the_rule_is_not_an_excuse() {
+  ! grep -qx 'explains_the_rule_but_claims_nothing' <<<"$(justified_gates "${SG_FIXTURE}")"
+}
+check "...and prose explaining the marker is not a marker" \
+  prose_about_the_rule_is_not_an_excuse
 # Non-vacuity, on the real file: a classifier that has stopped matching would
 # make every assertion below pass over nothing.
 check "the classifier still recognises this suite's source greps" \
@@ -17628,7 +17683,7 @@ check "a new gate that greps source says why it cannot drive instead" \
 baseline_has_not_grown() {
   local n
   n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
-  (( n <= 295 )) || {
+  (( n <= 288 )) || {
     printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

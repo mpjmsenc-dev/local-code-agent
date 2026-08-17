@@ -589,6 +589,41 @@ driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
 
+## A tool that parses source must tell code from commentary about code
+
+Three times in one session the tooling was fooled by text *about itself*, and
+all three were the same mistake wearing different clothes:
+
+| What happened | Why |
+|---|---|
+| A gate's `SOURCE-GREP:` marker was matched anywhere in the comment block above it — so the section's own prose *explaining what a marker is for* justified the function underneath it. Deleting that function's real marker changed nothing. | the scanner did not require the marker to *begin* a comment line, so an explanation counted as an excuse |
+| A scanner treated a one-line `f() { …; }` as an unterminated body and attributed **the entire rest of the file** to it. The baseline generated from it was wrong by ~90 entries. | the scanner handled one shape of the thing it parses and met another |
+| A driven test was reclassified as a source grep because a comment in it ends *"and this still passed."* — which contains `sed`. | the scanner matched substrings, in comments, and drew a conclusion about code from prose |
+
+The rule that falls out:
+
+- **Strip or skip comments before drawing a conclusion about code.** A comment
+  mentioning `grep` is not a grep; a comment naming a function is not a call.
+  Several gates here already do `sed 's/#.*//'` first and say why — that is the
+  habit, not a flourish.
+- **Match tokens as tokens.** `sed` inside "passed" is not a call to `sed`.
+- **Handle every shape of the construct you parse,** especially the one-liner.
+  If your scanner finds function bodies by looking for a line that is `}`, a
+  `f() { …; }` will silently swallow the file.
+- **Drive the scanner over a fixture containing the shapes that would fool it.**
+  This is the only one of the four that catches the case you did not think of,
+  and it is why `source_grep_gates` and `justified_gates` are run over
+  `SG_FIXTURE` — which now holds a one-liner, a prose mention of `sed`, and a
+  comment explaining the marker, because those are the three that got through.
+
+The same applies to anything that *edits* source. The mutation harness patches
+function bodies by regex, and `ok()   { … }` — three spaces before the brace —
+did not match the fixed-string shapes it started with. It reported
+`UNPATCHABLE` rather than lying, which is the difference between a harness that
+can be trusted and one that cannot; but the list of functions it sweeps is now
+derived from the same pattern that patches them, so the two cannot disagree
+about what a definition looks like.
+
 ## What only a real machine can settle, and how to settle it
 
 A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
