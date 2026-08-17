@@ -3643,9 +3643,14 @@ agent_llm_base_url() {
 # ~/.openhands/cache/skills/public-skills and lists what it finds in a <SKILLS>
 # block in the system prompt. Measured on this box: 59 skills cached, 57 in the
 # prompt, 4,232 tokens — 23% of an 18,353-token prompt against a window that
-# only ever grants a prompt 8,194 (see docs/PROMPT-WINDOW.md). They are
+# had to fit in 16,384 and did not (see docs/PROMPT-WINDOW.md). They are
 # release-notes, linear, datadog, discord, azure-devops, bitbucket and the
-# like. On a private box with no forge credentials not one of them can run.
+# like — capabilities this tier is not for, on a rung whose model has never
+# successfully emitted a native tool call.
+#
+# Not "none of them can run": this box has a GitHub token registered, so the
+# GitHub-shaped ones had a credential. The reason to drop them is that they
+# cost 23% of a prompt that did not fit, not that they were all impossible.
 #
 # There is no setting for it. agent_context.load_public_skills is false in this
 # stack's own settings and it makes no difference: the app server calls its

@@ -4075,9 +4075,11 @@ check "the agent tells its sandboxes the port it is really published on" \
 #
 # The agent-server clones github.com/OpenHands/extensions on startup and lists
 # what it finds in a <SKILLS> block. Measured with the model's own tokenizer:
-# 57 skills, 4,232 tokens, 23% of an 18,353-token prompt — against a window
-# that grants a prompt 8,194. They are linear, datadog, discord, azure-devops,
-# bitbucket and the rest, and this box has credentials for none of them.
+# 57 skills, 4,232 tokens, 23% of an 18,353-token prompt that had to fit in
+# 16,384 and did not. They are linear, datadog, discord, azure-devops,
+# bitbucket and the rest — capabilities this tier is not for. (Not "none of
+# them can run": a GitHub token IS registered here. They cost a quarter of a
+# prompt that did not fit; that is the reason, and it is enough.)
 #
 # There is no setting: load_public_skills is already false here and the app
 # server calls its loader with load_public=True hardcoded anyway. The ref is

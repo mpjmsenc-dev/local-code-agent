@@ -189,10 +189,10 @@ under-count, so treat `file_editor`'s exact cut point as approximate. The
 conclusion for `terminal` is not sensitive to that: it ends more than a
 thousand tokens before the boundary at any plausible scaling.
 
-**So the model kept every tool it could not use and lost the two it needed.**
-Fourteen browser tools and five pull-request tools survived intact on a box
-with no browser use and no forge credentials, while the definition of
-`terminal` — the only way to execute anything — was deleted outright, and
+**So the model kept the tools it had no use for and lost the two it needed.**
+Fourteen browser tools and five pull-request tools survived intact — on a box
+whose agent tier exists to edit local files — while the definition of
+`terminal`, the only way to execute anything, was deleted outright, and
 `file_editor` was severed halfway through its schema.
 
 And the prohibitions survived. They sit at the very end of the prompt, and the
@@ -268,12 +268,24 @@ This is the first configuration in this project's history where the agent's
 prompt fits its window.
 
 There is still headroom worth taking, and it is worth knowing where it is,
-because the margin is 2,409 tokens and a user's `config/CONVENTIONS.md` lands
-in `REPO_CONTEXT` inside it. Tool JSON is now **72.5%** of the prompt — 10,134
-of 13,975, a larger share than before precisely because everything around it
-got smaller — and of the 25 tools, 14 drive a headless browser and 5 open pull
-requests on GitHub, GitLab, Bitbucket and Azure DevOps. On this box none of
-those 19 can do anything.
+because the margin is 2,409 tokens. Tool JSON is now **72.5%** of the prompt —
+10,134 of 13,975, a larger share than before precisely because everything
+around it got smaller — and of the 25 tools, 14 drive a headless browser and 5
+open pull requests on GitHub, GitLab, Bitbucket and Azure DevOps.
+
+How many of those 19 are actually dead here is a question worth answering
+before cutting anything, and the answer is fewer than it looks:
+
+| | verdict | evidence |
+|---|---|---|
+| 14 × `browser_*` | **would work** | `chromium` is installed in the runtime image |
+| `create_pr` (GitHub) | **would work** | `provider_tokens_set: {"github": ""}` — a GitHub token is registered, and the conversation carries a `GITHUB_TOKEN` secret |
+| `create_mr`, 2 × Bitbucket, Azure DevOps | **cannot work** | no tokens for those providers |
+
+So exactly **four** of the 25 tools are incapable of running on this box. The
+other fifteen are capable and merely unused by what this tier is for. That is a
+weaker argument for cutting them than "they cannot work", and it is the true
+one.
 
 ### What the tools are worth
 
@@ -396,7 +408,14 @@ prompt that lands *between* the two candidate thresholds for the second.
 
 The skills being dropped are OpenHands' built-in catalogue: `release-notes`,
 `iterate`, `linear`, `code-review`, `datadog`, `discord`, `deno`,
-`azure-devops`, `bitbucket`, and dozens more. On a private, self-hosted box
-with no forge credentials and no network egress to any of those services, not
-one of them can run.
+`azure-devops`, `bitbucket`, and dozens more.
+
+**Corrected:** an earlier draft of this file said none of them could run here
+"with no forge credentials". That is wrong — `provider_tokens_set` shows a
+GitHub token registered, so the GitHub-shaped skills had a credential. The
+accurate statement is narrower and still sufficient: the catalogue was 4,232
+tokens advertising capabilities this tier is not for, on a rung whose model has
+never successfully emitted a native tool call, in a prompt that did not fit.
+Cutting them cost nothing and bought the window. It did not cost nothing
+because they were all impossible.
 
