@@ -233,6 +233,40 @@ Still ~500 over 8,194, closed by dropping `CUSTOM_SECRETS` (395) and the
 `BROWSER_TOOLS` (163) and `PULL_REQUESTS` (139) sections of the system prompt,
 which describe tools that would no longer exist.
 
+## After the cut, measured the same way
+
+`AGENT_EXTENSIONS_REF` set to a ref that does not resolve, agent restarted, the
+*same* task submitted (`hello.py`, in `/workspace/project`), conversation
+`0f38875470b34832ababe26ab3b95a06`.
+
+First, that the cut reached where it had to. Inside the new sandbox:
+
+    $ docker inspect oh-agent-server-... | grep EXTENSIONS_REF
+    EXTENSIONS_REF=lca-public-skills-disabled
+    $ ls /home/openhands/.openhands/cache/skills/public-skills
+    (no such directory — the clone never happened)
+
+Then the prompt itself. Event 0 fell from 65,098 bytes to 44,766.
+
+| | before | after | Δ |
+|---|---:|---:|---:|
+| `system_prompt` | 3,037 | 3,037 | — |
+| `dynamic_context` | 4,871 | **639** | **−4,232** |
+| ⤷ `SKILLS` | 4,232 | *gone* | −4,232 |
+| ⤷ `CUSTOM_SECRETS` | 395 | 395 | — |
+| ⤷ `REPO_CONTEXT` | 181 | 181 | — |
+| ⤷ `CURRENT_DATETIME` | 46 | 46 | — |
+| ⤷ `HOST` | 17 | 17 | — |
+| tool count | 26 | **25** | −1 |
+
+Exactly the 4,232 predicted, and nothing else moved — the system prompt is
+untouched to the token, which is what makes the comparison worth anything.
+
+**One saving was not predicted.** The tool count fell to 25: OpenHands drops
+`invoke_skill` on its own once the catalogue is empty, because a tool whose
+only job is to invoke a skill has nothing left to invoke. That is ~156 tokens
+nobody had to ask for.
+
 ## A correction, and how it was caught
 
 `scripts/lib.sh` carried this reasoning next to `AGENT_MAX_OUTPUT_TOKENS`:
