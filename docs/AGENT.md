@@ -626,42 +626,73 @@ the run they came from.
 The practical rule: the only trustworthy answer for a box is that box's own
 `lca agent selftest`.
 
-### What the 3b actually produces: two real tasks, both failed
+### What the 3b actually produces — rewritten 2026-08-17, because the prompt was broken
 
-The selftest passing is a real result and it is a narrow one — it asks for one
-file containing one function, and it names the exact path to write it to. Two
-larger tasks were then run on the droplet at the same rung (`3b-agent` @ 16384),
-and **both failed in the same way**. This is what a user should expect here.
+**This section used to say the 3b declares completion without executing its own
+work, and that conclusion was drawn against a prompt that was being truncated.**
+Ollama was cutting the agent's 18,353-token prompt down to 8,194 and keeping the
+*tail*, which deleted the definition of `terminal` outright and severed
+`file_editor` halfway through its schema. The model was being asked to execute
+with the description of the tool that executes removed from its context. See
+docs/PROMPT-WINDOW.md for the measurement and the boundary arithmetic.
+
+The prompt now fits (13,796 tokens, nothing truncated). The tasks were re-run.
+Both the old and the new results are kept below, because the difference is the
+point.
+
+#### What it did before, with a truncated prompt
 
 | | task | what it did | verdict |
 |---|---|---|---|
 | run 1 | create a README | `touch README.md`, then *"successfully created"* | empty file, reported as done |
 | run 2 | a `wordcount.py` CLI with a stated output format, error handling, a test file, run it, show the output | one write, then 25 minutes later a message quoting the code back and *"You can now use this script"*, `execution_status: finished` | code that cannot run, in the wrong directory, none of the three requested steps done |
 
-Run 2's code had three defects, and the first is fatal:
+Run 2's code used `os`, `sys` and `re` **with no imports at all**, so
+`python wordcount.py t.txt` died on its first executed line with
+`NameError: name 'sys' is not defined`. It indexed `sys.argv[1]` with no guard.
+It never ran the file, never created the test file, never showed output. And it
+wrote to `/workspace/wordcount.py` while working in
+`/workspace/project/TestAppOllama1Coding` — outside its directory entirely.
 
-- **It uses `os`, `sys` and `re` with no imports at all.** Verified by executing
-  it: `python wordcount.py t.txt` fails immediately with
-  `NameError: name 'sys' is not defined`. **The first executed line crashes.**
-- It indexes `sys.argv[1]` with no guard, so the missing-argument case the task
-  explicitly asked for raises `IndexError` instead of exiting 1 with a message.
-- It never ran the file, never created the test file, and never showed output —
-  all three explicitly requested.
+#### What it does now, with the whole prompt
 
-It also wrote to `/workspace/wordcount.py` while working in
-`/workspace/project/TestAppOllama1Coding`, so the deliverable landed outside the
-repo entirely.
+Same `wordcount.py` task, same rung, prompt verified intact first — all three
+prohibitions present, no truncation:
 
-**The root cause is one thing, and it is not the code quality: the agent
-declares completion without executing its own work.** One execution would have
-caught the `NameError` in a second. Run 1 was the same shape — `touch` plus a
-success claim. Two very different tasks, one failure mode.
+| | |
+|---|---|
+| created `/workspace/project/wordcount.py` | **inside** the directory it was given |
+| created `/workspace/project/test.txt` | the test file the task asked for |
+| ran `python3 wordcount.py test.txt` | **executed its own work** |
+| got `IndentationError` back | and reported the failure rather than success |
 
-**So, plainly: at the 3b rung this tier writes plausible-looking code and
-reports success without running it.** Treat its output as a draft that has never
-been executed, because that is exactly what it is. The tier is genuinely useful
-for scaffolding and for tasks you were going to review line by line anyway. It
-is not useful for anything you intend to trust unread.
+Every named defect above is gone. `import sys` is present. `sys.argv[1]` is
+guarded, with usage on stderr and `exit 1`, exactly as asked. The test file
+exists. The program was executed. Both files landed inside the working
+directory. What remains is **one wrong space on line 15** — seven where eight
+were needed.
+
+**The failure mode has moved, and it is now a smaller one: it cannot repair
+what it wrote.** Four attempts, all malformed — `str_replace` with a quoted
+string literal as `old_str` so it never matched, then `create` on a path that
+already existed, three times — and then it claimed it could not "interact
+directly with a file system", on a run where it had already created two files
+and executed one.
+
+**So, plainly, at the 3b rung today:** it writes broadly correct code to the
+right place and runs it, catches its own errors by running them, and does not
+claim success it has not earned. It then gets stuck fixing what it found. Treat
+its output as **a first draft that has been executed once** — which is a
+materially better thing than the never-executed draft this section used to
+describe, and still not something to trust unread.
+
+**On evidence strength, honestly:** this is `n = 2` on `wordcount` and `n = 1`
+on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
+derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
+asked to be told the task, and wrote nothing. So the *rate* is unmeasured and
+this section does not claim one. What is not in doubt is the mechanism: a model
+cannot call a tool whose description was cut out of its prompt, and that is what
+was happening.
 
 Two things changed because of these runs:
 
@@ -777,13 +808,23 @@ because of what it can do and what it costs to fetch, which is the same reason
 
 What would still improve it, in order:
 
-1. **A smaller first prompt.** ~15k tokens before the first output token is most
-   of what a step costs, and most of that is OpenHands' own framing rather than
-   the task. This is the one change that would make every step cheaper on every
-   box.
-2. **Images that are not 7 GB.**
+1. **A smaller first prompt.** This was listed here as upstream and out of
+   reach. **Partly wrong, and it has since been done:** the prompt was 18,353
+   tokens, 4,232 of them a catalogue of OpenHands skills fetched from GitHub
+   that this tier cannot use, and cutting it brought the prompt to 13,796 —
+   under the window for the first time, so it is no longer truncated. That was
+   in this project's gift all along. See `AGENT_EXTENSIONS_REF` and
+   docs/PROMPT-WINDOW.md.
+2. **A smaller tool set.** What remains genuinely *is* upstream, and this has
+   been checked route by route rather than assumed: 72.5% of the prompt is tool
+   JSON, 19 of the 24 tools are a headless browser and forge integrations this
+   tier does not use, and OpenHands exposes no supported way to decline them —
+   the `tools` setting is overwritten at conversation creation, `enable_browser`
+   is hardcoded, and `filter_tools_regex` is never forwarded. Exactly one tool
+   can be declined (`enable_switch_llm_tool`, worth 254 tokens, now off).
+3. **Images that are not 7 GB.**
 
-Both are upstream of this project. Neither blocks anyone today: turn it on, run
+2 and 3 are upstream. Neither blocks anyone today: turn it on, run
 `lca agent selftest`, and you get your own box's number in about a quarter of an
 hour.
 
