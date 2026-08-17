@@ -462,6 +462,32 @@ and a small one, and the honest reading is not "the 3b is fixed" — it is that
 the agent was previously being asked to execute with the description of
 `terminal` removed from its context, and it no longer is.
 
+### The harder task, re-run: the failure mode has changed
+
+The `wordcount.py` task that docs/AGENT.md records as run 2 — a CLI with a
+stated output format, error handling, a test file, run it, show the output —
+re-submitted with the cut in place. Verified before drawing any conclusion:
+
+    prompt                13,796 tokens, n_ctx_slot 16384, no truncation
+    tools                 24 (invoke_skill and switch_llm both gone)
+    the three prohibitions   present in the user message, all three
+
+Turn 1, after 17.9 minutes of prompt evaluation at 12.9 tok/s, produced a
+**tool call** — and the framework rejected it:
+
+    Parameter 'command' is expected to be one of
+    ['view', 'create', 'str_replace', 'insert', 'undo_edit'].
+
+That is a different failure from the one on record. The old run emitted no tool
+call at all and finished by quoting code back with *"You can now use this
+script"*. This one reached for `file_editor` — the tool whose schema used to be
+severed halfway through — and got an enum value wrong, which OpenHands caught
+and fed back as a correction.
+
+Wrong is still wrong. But "called the right tool with a bad argument, and was
+told so" is a recoverable failure inside a loop that has 100 iterations, where
+"produced prose and declared victory" is not.
+
 ### The margin is per-conversation, not per-prompt
 
 The 2,409 tokens of headroom are not a standing reserve — they are consumed as
