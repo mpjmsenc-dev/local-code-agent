@@ -137,6 +137,13 @@ templating them, and that transformation is not reproducible from outside. The
 subtraction does not depend on knowing it: the other three blocks are verbatim,
 so whatever is left is tools plus scaffolding, exactly.
 
+It also does not depend on knowing how the schemas *travel*. This stack runs
+`AGENT_NATIVE_TOOL_CALLING=false`, so litellm renders the tool definitions into
+the message rather than sending them in the API's `tools` field — which is why
+`system_prompt.text` contains no schemas even though 26 tools are listed in the
+event. Wire format aside, 10,280 tokens of tool description reach the model,
+and that is what the window has to hold.
+
 ## Overflowing the window does not cost you the overflow. It costs you half.
 
 The warning does not say `limit=16384`. It says `limit=8194`, and the tempting
