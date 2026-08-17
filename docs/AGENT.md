@@ -707,6 +707,45 @@ comes out of a 3b on a task this size runs. What it still cannot tell you is
 whether anything at this rung will execute its own work before reporting
 success — and on this evidence, it does not.
 
+#### A third run, and a different failure: the imagined directory
+
+All of the above is one file. A multi-file task fails somewhere else entirely,
+so it is recorded separately rather than folded into the run above.
+
+Measured on the droplet, same rung, same fixed configuration. Task: an Expo app
+shell — four files, named: `app.json`, `package.json`, `App.js`, `.gitignore`.
+
+| | |
+|---|---|
+| Events | **28** — more than twice the 12-event `wordcount` runs. It tried hard. |
+| Files created | **none** |
+| Create actions used | **none, not once** |
+| What it did first | An **edit** against a path nobody had mentioned — *"Invalid `path` parameter: /workspace/project/TestAppOllama1Coding/src/utils/config.js. The path does not exist."* |
+| What it did next | Listed the directory. Saw one file, `README.md`. |
+| What it concluded | *"It seems there was a misunderstanding or an issue with accessing the /workspace/project directory… Let's try exploring other directories instead."* |
+
+The shape, stated as narrowly as the measurement allows: **at this rung, given a
+task that asks for several files, the agent may edit against paths it has
+invented, and read "file not found" as a fault in the environment rather than as
+a signal to create.** It had the evidence in hand — its own `ls` showed one
+`README.md` — and drew the opposite conclusion from it.
+
+Two things follow, and neither is the finding above:
+
+- This is **not** the run-what-you-built problem. That run wrote a correct file
+  and would not execute it; this one never wrote anything, and the volume of
+  activity — 28 events — is exactly what makes it hard to see from outside. A
+  run that is busy inventing paths looks, on any progress display that counts
+  steps, more alive than one that is working.
+- It appears on **multi-file** tasks. Every earlier measurement here is a
+  single-file task, so "it can do a small task" does not generalise to "it can
+  do a small task four times".
+
+If you are watching a run like this, `lca agent watch --live` shows it: the
+tool calls are edits against paths that do not exist, and the errors are on
+screen rather than folded into a spinner. That is the case the view was built
+for, and it is the case a step counter cannot tell you about.
+
 Two things changed because of these runs:
 
 1. **`config/CONVENTIONS.md` now carries two rules**, and both are keyed so they

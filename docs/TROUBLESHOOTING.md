@@ -401,6 +401,16 @@ people who wrote this page, for days.
 | wrote its file outside the repo it was given | the prompt was **truncated** before the working-directory rule |
 | ignored explicit instructions in the task | same — it never received that half of the task |
 | sat *"running"* for 38 minutes having executed nothing | every reply was **discarded at 300 s** while the model took 901 s |
+| worked hard, created nothing, then said it could not access the directory | **not** a configuration fault — see below |
+
+**The last row is the one with no setting behind it.** Measured on a four-file
+task: 28 events, no file created, no create action used once. It edited against
+a path it had invented, got *"The path does not exist"*, listed the directory,
+saw the one file really there — and concluded the environment was broken.
+Nothing in `.env` changes that. Watch it with `lca agent watch --live`: the
+tool calls are edits against paths that were never mentioned, which is visible
+immediately and invisible to anything that counts steps. Full measurement in
+[docs/AGENT.md](AGENT.md).
 
 **The truncation.** With `max_output_tokens` unset, the client reserved half the
 context window for its own reply. An 18,313-token prompt was cut to 8,194 — the

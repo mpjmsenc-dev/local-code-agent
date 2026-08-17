@@ -659,6 +659,43 @@ jobs:
         # live Ollama -> generation -> aider round-trip. WebUI is disabled in
         # this job, so its step 4 skips rather than fails.
         run: ./scripts/selftest.sh
+      - name: update.sh's apply-and-verify half, with the REAL acceptance test
+        # The one path in this project nothing had ever executed. The job above
+        # proves selftest.sh works; the lint job proves 'update.sh --check'
+        # detects and touches nothing. Between them sits the branch that
+        # decides whether an update is REPORTED as verified, and no container
+        # walk has ever reached it — a container has no network, so every walk
+        # dies at setup, three steps earlier.
+        #
+        # A scratch clone whose setup.sh is a no-op, because setup has already
+        # run in this job and re-running it buys no coverage for several
+        # minutes. Everything after that is real: the real update.sh, the real
+        # scripts/selftest.sh, against the live stack this job built. The venv
+        # is symlinked rather than rebuilt for the same reason — selftest
+        # resolves aider from its own REPO_ROOT, and it is the same machine.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/upd-verify /tmp/upd-verify-origin
+          git init -q --bare /tmp/upd-verify-origin
+          git clone -q "${GITHUB_WORKSPACE}" /tmp/upd-verify
+          cd /tmp/upd-verify
+          cp "${GITHUB_WORKSPACE}/.env" .env
+          ln -s "${GITHUB_WORKSPACE}/.venv" .venv
+          printf '#!/usr/bin/env bash\necho "setup: no-op, this job already ran the real one"\n' > setup.sh
+          chmod +x setup.sh
+          git -c user.email=ci@example.com -c user.name=ci commit -qam "no-op setup for the verify check"
+          git remote set-url origin /tmp/upd-verify-origin
+          git push -q origin HEAD:refs/heads/main
+          git branch -M main
+          git branch --set-upstream-to=origin/main main
+          out="$(./update.sh --yes --no-backup 2>&1)" || {
+            printf '%s\n' "${out}"; echo "FAIL: update.sh did not complete its apply-and-verify path"; exit 1; }
+          printf '%s\n' "${out}" | tail -25
+          grep -q 'SELF-TEST PASSED' <<<"${out}" \
+            || { echo "FAIL: the real acceptance test never ran inside update.sh"; exit 1; }
+          grep -q 'Update complete and verified' <<<"${out}" \
+            || { echo "FAIL: the self-test passed and update.sh still did not report the update verified"; exit 1; }
+          echo "update.sh apply -> re-run setup -> real self-test -> verdict: ran end to end"
       - name: lca speed measures a real generation and reaches a verdict
         # speed.sh is new and does real arithmetic on Ollama's timing counters.
         # A small num_predict keeps it quick while still exercising the warm-up

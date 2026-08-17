@@ -6909,24 +6909,82 @@ echo "# 'lca update' must re-run setup even when the checkout is already current
 # apply/update, so by the time update runs, 'behind' is already 0. Skipping
 # setup in that case would read as an obvious optimisation and would silently
 # break the exact path the docs send people down.
-update_reruns_setup_unconditionally() {
-  # Two spaces of indent: at the top level of main(), not nested inside the
-  # 'behind != 0' branch (which would put it at four).
-  grep -qE '^  step "Re-running setup"' "${REPO}/update.sh" || {
-    echo "update.sh only re-runs setup conditionally — a hand-pulled fix would not be applied" >&2
-    return 1
-  }
-  # ...and the verification after it must be the self-test, which since today
-  # is what notices a stale assistant prompt.
-  awk '/step "Re-running setup"/ { seen = 1 }
-       seen && /selftest\.sh/ { found = 1 }
-       END { exit !found }' "${REPO}/update.sh" || {
-    echo "update.sh does not verify with selftest.sh after re-running setup" >&2
-    return 1
-  }
+# Driven, not grepped — and this one had never been RUN, by anything, anywhere.
+#
+# The gate here used to be two source greps: 'step "Re-running setup"' appears
+# at two spaces of indent, and 'selftest.sh' appears somewhere after it. Both
+# are satisfied by a file that mentions those strings and does nothing with
+# them, which is the same non-check as grepping for a function's own name. It
+# sat on a path nothing has ever executed: CI covers 'update.sh --check' and
+# covers selftest.sh on its own, and every container walk of a real update dies
+# earlier, at setup, because a container has no network. So the apply-and-
+# verify half of 'lca update' — the half that decides whether an update is
+# reported as verified — has never run in this project's history.
+#
+# It runs now. A scratch checkout with a real origin, the real update.sh and
+# the real lib.sh, and stand-ins for the two things a unit test cannot do for
+# real: setup.sh and selftest.sh, each with the exit status the case needs.
+# What is under test is update.sh's own wiring and its verdicts — which is
+# exactly what was untested. (The REAL selftest.sh runs through this same path
+# in CI's end-to-end job, where a working stack exists.)
+drive_update() {   # SETUP_RC SELFTEST_RC -> output, then RC:<status>
+  local root="${SANDBOX}/upd" work="${SANDBOX}/upd/work" origin="${SANDBOX}/upd/origin.git"
+  rm -rf "${root}"; mkdir -p "${root}"
+  git init -q --bare "${origin}"
+  git init -q "${work}"
+  mkdir -p "${work}/scripts"
+  cp "${REPO}/update.sh" "${work}/update.sh"
+  cp "${REPO}/scripts/lib.sh" "${work}/scripts/lib.sh"
+  cp "${REPO}/.env.example" "${work}/.env.example"
+  printf '#!/usr/bin/env bash\necho "SETUP RAN"\nexit %s\n' "$1" > "${work}/setup.sh"
+  printf '#!/usr/bin/env bash\necho "SELFTEST RAN"\nexit %s\n' "$2" > "${work}/scripts/selftest.sh"
+  chmod +x "${work}/update.sh" "${work}/setup.sh" "${work}/scripts/selftest.sh"
+  git -C "${work}" add -A >/dev/null
+  git -C "${work}" -c user.email=t@t -c user.name=t commit -qm base >/dev/null
+  git -C "${work}" branch -M main >/dev/null 2>&1
+  git -C "${work}" remote add origin "${origin}"
+  git -C "${work}" push -q origin main 2>/dev/null
+  git -C "${work}" branch --set-upstream-to=origin/main main >/dev/null 2>&1
+  local out rc=0
+  out="$(cd "${work}" && ./update.sh --yes --no-backup </dev/null 2>&1)" || rc=$?
+  printf '%s\nRC:%s\n' "${out}" "${rc}"
 }
-check "'lca update' re-runs setup unconditionally, then self-tests" \
-  update_reruns_setup_unconditionally
+UPDATE_OK="$(drive_update 0 0)"
+# Unconditional is load-bearing rather than wasteful: the documented recovery
+# for a stale chat is a hand 'git pull' followed by update, so by the time this
+# runs 'behind' is already 0. Skipping setup then would read as an obvious
+# optimisation and would silently break the path the docs send people down.
+check "'lca update' re-runs setup even with no new commits" \
+  grep -qF 'SETUP RAN' <<<"${UPDATE_OK}"
+check "...then actually runs the self-test after it" \
+  grep -qF 'SELFTEST RAN' <<<"${UPDATE_OK}"
+check "...and only then says the update is verified" \
+  grep -qF 'Update complete and verified' <<<"${UPDATE_OK}"
+check "...exiting 0" grep -qF 'RC:0' <<<"${UPDATE_OK}"
+# The branch that decides whether 'verified' means anything.
+UPDATE_SELFTEST_FAILED="$(drive_update 0 1)"
+not_reported_as_verified() { ! grep -qF 'Update complete and verified' <<<"${UPDATE_SELFTEST_FAILED}"; }
+check "a self-test that fails is not reported as a verified update" \
+  not_reported_as_verified
+check "...it says the stack updated but did not pass" \
+  grep -qF 'self-test did not pass' <<<"${UPDATE_SELFTEST_FAILED}"
+check "...points at the restore path" \
+  grep -qF 'restore.sh' <<<"${UPDATE_SELFTEST_FAILED}"
+check "...and exits non-zero, so a cron'd update reports failure" \
+  grep -qF 'RC:1' <<<"${UPDATE_SELFTEST_FAILED}"
+# And setup failing must stop BEFORE the self-test: a self-test run against a
+# half-installed stack produces failures that describe the wrong problem.
+UPDATE_SETUP_FAILED="$(drive_update 1 0)"
+selftest_not_reached_after_a_failed_setup() { ! grep -qF 'SELFTEST RAN' <<<"${UPDATE_SETUP_FAILED}"; }
+check "a failed setup stops the update before the self-test" \
+  selftest_not_reached_after_a_failed_setup
+check "...saying so, and exiting non-zero" \
+  grep -qF 'RC:1' <<<"${UPDATE_SETUP_FAILED}"
+# ...and with nothing applied there is nothing to roll back to, which is the
+# fix from the container walk: this used to offer restore.sh over a checkout it
+# had not changed.
+check "...without offering a rollback it did not create" \
+  grep -qF 'nothing to roll back' <<<"${UPDATE_SETUP_FAILED}"
 
 echo "# ...and a fetch that failed must name the reason it actually had"
 # One line covered every cause: "Could not reach the remote. Check
@@ -7579,11 +7637,41 @@ recovery_scripts_survive_offline() {
 check "the backup and restore commands survive the kill switch being on" \
   recovery_scripts_survive_offline
 # ...and net_guard must still be the dying one, for the installers that want it.
+# Driven, because the grep version could not fail. It scanned net_guard's body
+# for the string 'die ' — and the mutation sweep stubs a function by inserting
+# 'return 0' after the opening brace, leaving the rest of the body, and the
+# 'die' line, exactly where it was. So net_guard returned success for every
+# caller, every installer would have continued with the kill switch on, and
+# this test stayed green. It was a survivor in the sweep, and it is the most
+# safety-relevant one on that list.
 net_guard_still_dies() {
-  awk '/^net_guard\(\) \{/ { inb = 1 } inb && /die / { found = 1 }
-       inb && /^\}/ { exit } END { exit !found }' \
-      <<<"$(sed 's/#.*//' "${REPO}/scripts/lib.sh")" || {
-    echo "net_guard no longer dies, so every installer now continues without a network" >&2
+  local out rc=0
+  # Offline, through the real state file the real reader reads.
+  out="$(
+    NETMODE_STATE_FILE="${SANDBOX}/netmode-offline" \
+    bash -c '
+      source "$1" >/dev/null 2>&1
+      NETMODE_STATE_FILE="$2"; printf "offline\n" > "$2"
+      net_guard "A pull" 2>&1
+    ' _ "${REPO}/scripts/lib.sh" "${SANDBOX}/netmode-offline"
+  )" || rc=$?
+  (( rc != 0 )) || {
+    echo "net_guard returned success with netmode OFFLINE — every installer now continues without a network" >&2
+    return 1
+  }
+  grep -qi 'offline' <<<"${out}" || {
+    printf 'net_guard died without saying the kill switch is why: %s\n' "${out}" >&2
+    return 1
+  }
+  # ...and it must NOT die when the network is allowed, or nothing installs.
+  rc=0
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    NETMODE_STATE_FILE="$2"; printf "online\n" > "$2"
+    net_guard "A pull"
+  ' _ "${REPO}/scripts/lib.sh" "${SANDBOX}/netmode-online" >/dev/null 2>&1 || rc=$?
+  (( rc == 0 )) || {
+    echo "net_guard dies when netmode is ONLINE — nothing could install" >&2
     return 1
   }
 }
