@@ -334,17 +334,25 @@ seed_agent_settings() {
   # anywhere. Measured on 3b and 7b, through both /api/chat and
   # /v1/chat/completions; and with this false the 3b created the file, ran it
   # and finished the task.
-  # max_output_tokens is seeded for the reason spelled out at
-  # AGENT_MAX_OUTPUT_TOKENS in lib.sh: unset, the client reserved half the
-  # window for output and the prompt was truncated to 8,194 of 18,313 tokens.
-  # It is sent as a number, not a string — the settings API stores what it is
-  # given, and a quoted "2048" round-trips looking correct while reserving
-  # nothing.
+  # max_output_tokens is seeded as a cap on one reply, and for nothing else.
+  # It was once believed to buy instruction room — "unset, the client reserved
+  # half the window for output" — and it does not: measured, Ollama truncates
+  # on prompt > num_ctx whatever the client asks for. See AGENT_MAX_OUTPUT_TOKENS
+  # in lib.sh and docs/PROMPT-WINDOW.md. It is still sent as a number, not a
+  # string: this API stores what it is given and a quoted "2048" round-trips
+  # looking correct while meaning nothing.
+  #
+  # enable_switch_llm_tool is the ONE tool this stack can decline. It is read
+  # by create_agent() and honoured, unlike the 'tools' list, which the app
+  # overwrites with its own defaults on every conversation. Worth ~329 tokens,
+  # and the tool lets the agent switch to another model on a box that has one.
+  # docs/PROMPT-WINDOW.md has the rest of the tool budget and why it is stuck.
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         --argjson out "$(agent_max_output_tokens)" \
         --argjson tmo "$(agent_request_timeout)" \
         '{agent_settings_diff:{agent:"CodeActAgent",
+                               enable_switch_llm_tool:false,
                                llm:{model:$m, base_url:$u, api_key:"local-llm",
                                     native_tool_calling:$native,
                                     max_output_tokens:$out,

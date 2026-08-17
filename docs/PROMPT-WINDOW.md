@@ -373,6 +373,26 @@ prompt: its role, its security policy, its filesystem rules, the
 working-directory rule that two failed droplet runs were blamed on, and all 25
 tool definitions.
 
+### The margin is per-conversation, not per-prompt
+
+The 2,409 tokens of headroom are not a standing reserve — they are consumed as
+the conversation grows. Differencing the agent's own accumulated counter across
+one run:
+
+| call | prompt tokens | Δ |
+|---|---:|---:|
+| autotitle | 425 | — |
+| turn 1 | **13,975** | — |
+| turn 2 | 14,079 | +104 |
+| turn 3 | 14,197 | +118 |
+
+About 110 tokens per turn, as each action and observation joins the history. So
+the margin is worth roughly **20 turns** before the prompt reaches 16,384 and
+Ollama halves it again. OpenHands' condenser (`max_size: 80`, `keep_first: 4`)
+is supposed to intervene before that, and on a task that ends in two or three
+turns none of this is reached — but a long run is still racing the window, and
+the failure at the end of that race is the silent one documented above.
+
 ## A correction, and how it was caught
 
 `scripts/lib.sh` carried this reasoning next to `AGENT_MAX_OUTPUT_TOKENS`:
