@@ -17177,6 +17177,54 @@ usage_on_an_error_path_goes_to_stderr() {
 check "no script prints its usage to stdout on a path that fails" \
   usage_on_an_error_path_goes_to_stderr
 
+echo "# keep-alive is a decision this project can make, not a warning to hand over"
+# 'lca check' warned about OLLAMA_KEEP_ALIVE on every box with the agent on,
+# for ever. The two facts needed to decide it — how much RAM this box has and
+# which tiers are switched on — are the same two the ladder already reads, so
+# tune.sh decides it.
+#
+# Driven across the matrix, because the rule's whole value is that it follows
+# what is ENABLED and who is being starved rather than headroom alone.
+ka_of() { keepalive_plan "$1" "$2" "${3:-qwen2.5-coder:3b}"; }
+ka_value() { local p; p="$(ka_of "$@")"; printf '%s' "${p%%|*}"; }
+ka_why()   { local p; p="$(ka_of "$@")"; printf '%s' "${p#*|}"; }
+# Agent off: one model exists and nothing evicts it, so a timer costs one load
+# and pinning would hold the RAM permanently to save it.
+check "agent off on a small box -> 30m"  test "$(ka_value 4 false)"  = 30m
+check "agent off on a big box -> still 30m, RAM is not the question" \
+  test "$(ka_value 64 false)" = 30m
+# Agent on: its prompt is ~15,000 tokens and its steps are 10-25 minutes apart,
+# so a 30m timer expires mid-task.
+check "agent on -> pinned"               test "$(ka_value 16 true)"  = -1
+check "...on a mid-sized box too"        test "$(ka_value 8 true)"   = -1
+# ...with the one headroom caveat, which is a caveat and not the rule: pinning
+# holds the weights with nothing running.
+check "...but not when it would leave the box under 2 GiB spare" \
+  test "$(ka_value 4 true)" = 30m
+check "...and a bigger model moves that line, not the RAM alone" \
+  test "$(ka_value 10 true qwen2.5-coder:14b)" = 30m
+# Every answer must carry its reason, because the reason is what a reader needs
+# when the answer surprises them.
+ka_always_explains() {
+  local a r
+  for a in true false; do
+    for r in 2 4 8 16 64; do
+      [[ -n "$(ka_why "${r}" "${a}")" ]] || {
+        printf 'keepalive_plan(%s,%s) decided without saying why\n' "${r}" "${a}" >&2
+        return 1
+      }
+    done
+  done
+}
+check "...and every answer says why it was reached" ka_always_explains
+# The honest half: this cannot fix eviction, and must not imply that it does.
+# PERFORMANCE.md measured 543s cold against 3.6s warm, and that cost comes from
+# the other model ARRIVING, which no timer prevents.
+check "tune says the timer is only half of it when the agent is on" \
+  grep -qF 'Switching between the chat and the agent still unloads one model' "${REPO}/scripts/tune.sh"
+check "...and tune writes the decision to .env rather than only the drop-in" \
+  grep -qF 'write_env_or_die OLLAMA_KEEP_ALIVE' "${REPO}/scripts/tune.sh"
+
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
 # Every function below survived being stubbed to 'return 0': the whole suite
 # still passed. In each case something LOOKED like coverage. For some it was a

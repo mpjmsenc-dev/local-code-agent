@@ -3758,6 +3758,60 @@ agent_prompt_cache_at_risk() {
   [[ "${OLLAMA_KEEP_ALIVE}" != "-1" ]]
 }
 
+# keepalive_plan RAM_GIB AGENT_ON MODEL — "VALUE|WHY", the keep-alive this box
+# should run and the sentence that says why.
+#
+# This was a permanent warning from 'lca check' — a decision the project could
+# make from things it already knows, left to the user as a message. It is made
+# here, and the rule comes out of the measurements rather than out of headroom.
+#
+# WHAT THE MEASUREMENTS ACTUALLY SAY. There are two different costs and only
+# one of them is a timer:
+#
+#   idle expiry   the model unloads while you think, and the next request pays
+#                 a load plus a full prompt re-read. Measured on the agent's
+#                 own prompt: 13,430 prompt tokens on the first call, 171 while
+#                 it stayed resident.
+#   eviction      OLLAMA_MAX_LOADED_MODELS=1, so the OTHER model arriving
+#                 unloads this one, whatever the timer says. Measured on the
+#                 same ~15,000-token prompt: 543 s cold, 3.6 s warm.
+#
+# Keep-alive controls the first and CANNOT TOUCH THE SECOND. Pinning one model
+# with -1 does not stop a chat message evicting the agent's model; it only
+# decides what happens when nothing is asking. docs/PERFORMANCE.md is right
+# that pinning moves which model loses rather than solving it — so this rule
+# does not pretend otherwise, and tune says so out loud.
+#
+# WHO IS BEING STARVED, which is what decides it:
+#
+#   agent off   one model exists, nothing evicts anything, and the only cost a
+#               timer controls is one model load. 30m. Pinning would hold RAM
+#               permanently to save a single load — a bad trade on a small box.
+#   agent on    the agent's prompt is ~15,000 tokens and its steps are 10-25
+#               minutes apart, so a 30m timer is a coin-flip on every step and
+#               a certainty across any pause between tasks. It is the surface
+#               whose cold price is 543 s. -1.
+#
+# ...with one headroom caveat, and it is a caveat rather than the rule: -1
+# means the weights stay resident with nothing running, so on a box where the
+# model is most of the RAM that is a permanent cost for an intermittent gain.
+# Below two spare GiB this stays at 30m and says which constraint won.
+keepalive_plan() {
+  local ram="${1:-0}" agent_on="${2:-false}" model="${3:-${MODEL_NAME:-}}" need=""
+  [[ "${ram}" =~ ^[0-9]+$ ]] || ram=0
+  if [[ "${agent_on}" != "true" ]]; then
+    printf '30m|the agent tier is off, so only one model is ever loaded and nothing evicts it — a timer here saves one model load and pinning would hold the RAM for it permanently'
+    return 0
+  fi
+  need="$(model_ram_gb "${model}" 2>/dev/null || true)"
+  if [[ -n "${need}" ]] && awk -v r="${ram}" -v n="${need}" 'BEGIN { exit !(r - n < 2) }'; then
+    printf '30m|the agent tier is on, but %s GB of model in %s GiB of RAM leaves under 2 GiB spare — pinning it resident would cost this box more than the reload saves' \
+      "${need}" "${ram}"
+    return 0
+  fi
+  printf -- '-1|the agent tier is on: its prompt is ~15,000 tokens and its steps are 10-25 minutes apart, so a 30m timer expires mid-task and the next step re-reads the whole prompt (measured 13,430 tokens cold against 171 warm)'
+}
+
 # agent_workspace_dir — where the agent keeps its workspace and settings.
 agent_workspace_dir() {
   printf '%s/.openhands' "${HOME}"

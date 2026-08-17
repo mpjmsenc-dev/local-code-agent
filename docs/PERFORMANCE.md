@@ -225,6 +225,14 @@ What to do about it:
   in output quality — on a small local model you cannot spare it.
 - **Running two models at once.** `OLLAMA_MAX_LOADED_MODELS=1` is set on purpose;
   a second resident model competes for the same RAM and cores.
+- **`OLLAMA_KEEP_ALIVE=-1`, as a fix for the section above.** It is not one, and
+  it is worth being exact about why: keep-alive decides what happens when
+  *nothing is asking*. Eviction happens when the *other model arrives*. Pinning
+  one model does not stop the other one loading — it only changes which of them
+  is holding RAM when the switch comes. `lca tune` sets keep-alive from this
+  box's RAM and which tiers are on (`-1` with the agent on, so the agent's own
+  gaps stop costing a full prompt re-read), and says the same thing out loud
+  when it does.
 
   With `ENABLE_AGENT=true` the stack itself makes a second model, and what that
   costs is its own section:
