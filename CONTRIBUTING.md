@@ -624,6 +624,16 @@ can be trusted and one that cannot; but the list of functions it sweeps is now
 derived from the same pattern that patches them, so the two cannot disagree
 about what a definition looks like.
 
+And it takes a lock. Two sweeps once ran at the same time — a relaunch whose
+predecessor's `xargs` had been reparented to `init` rather than killed with its
+parent — both appending to one results file and copying trees into the same
+directories. 123 result lines over 73 functions, every tree liable to be
+overwritten mid-run by the other sweep. It looked exactly like a result, which
+is the whole theme: **anything that writes verdicts to a shared place needs to
+be the only thing writing there, and needs to say so rather than assume it.**
+When you kill a background pipeline, kill the process *group* — a bare `kill`
+on the parent leaves the `xargs` running and adopted by `init`.
+
 ## What only a real machine can settle, and how to settle it
 
 A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
