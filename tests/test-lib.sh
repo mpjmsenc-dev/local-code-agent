@@ -8922,7 +8922,7 @@ if have jq; then
     # edit that moves it to the end would turn a passing check into a failing
     # one with nothing to see.
     local want="${n}"
-    if (( n <= 10 )); then want="${words[n]}"; fi
+    if (( n <= 300 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
       printf 'PHONE.md claims %s starter questions; the file has %s\n' \
         "${claimed}" "${n}" >&2
@@ -17156,6 +17156,261 @@ usage_on_an_error_path_goes_to_stderr() {
 }
 check "no script prints its usage to stdout on a path that fails" \
   usage_on_an_error_path_goes_to_stderr
+
+echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
+# Every function below survived being stubbed to 'return 0': the whole suite
+# still passed. In each case something LOOKED like coverage. For some it was a
+# gate that read the function's own body and found the words it wanted there —
+# a stub leaves the body, and the words, exactly where they were. For others
+# there was no gate at all, only stubs written by the tests that needed the
+# function out of the way.
+#
+# These are the ones that can be driven here. The ones that genuinely cannot —
+# a real GPU, a real sudo refusal on a suite running as root, a live container
+# — are listed in docs/CONTRIBUTING.md with what would settle them, rather
+# than being papered over with another source grep.
+lib_in() {   # -> a bash -c that sources the real lib.sh and runs "$@"
+  bash -c 'source "$1" >/dev/null 2>&1; shift; eval "$@"' _ "${REPO}/scripts/lib.sh" "$@"
+}
+
+# model_load_notice: the guard against telling someone to wait when they will
+# not have to, and against putting that sentence in the answer. Both were
+# checked by grepping the function for 'ollama_processor' and for a printf with
+# '>&2' on it.
+notice_when() {   # RESIDENT(yes|no) -> "OUT|ERR"
+  local out err
+  err="${SANDBOX}/notice.err"
+  out="$(lib_in "MODEL_NAME=m; ollama_processor() { $( [[ $1 == yes ]] && echo 'printf 100%% CPU' || echo 'return 1' ); }; model_load_notice" 2>"${err}")"
+  printf '%s|%s' "${out}" "$(cat "${err}")"
+}
+check "a cold model is announced before the wait" \
+  grep -qF 'Loading m into memory' <<<"$(notice_when no)"
+check "...on stderr, so it cannot land in the answer" \
+  grep -qE '^\|' <<<"$(notice_when no)"
+check "...and a resident model is not announced at all" \
+  test "$(notice_when yes)" = '|'
+
+# root_for_probe: the switch that decides whether a probe may hang on a
+# password prompt. Its gate grepped the body for both branch names — which a
+# stub leaves in place while answering neither.
+asked_probe() {   # MAY_PROMPT -> INTERACTIVE|STRICT
+  lib_in "LCA_MAY_PROMPT=$1
+          can_root()     { printf INTERACTIVE; return 0; }
+          can_root_now() { printf STRICT; return 0; }
+          root_for_probe"
+}
+check "a caller that may prompt gets the interactive answer" \
+  test "$(asked_probe true)" = INTERACTIVE
+check "one that may not gets the strict one" \
+  test "$(asked_probe false)" = STRICT
+check "...and silence means strict, because a hung banner is the cost" \
+  test "$(asked_probe '')" = STRICT
+
+# Paths three other scripts delete, back up and restore. Nothing drove them.
+check "the agent workspace is under the invoking user's HOME" \
+  test "$(HOME=/tmp/h lib_in 'agent_workspace_dir')" = /tmp/h/.openhands
+check "the venv interpreter is inside the repo's own venv" \
+  test "$(lib_in 'REPO_ROOT=/r; venv_python')" = /r/.venv/bin/python
+check "...and VENV_NAME moves it" \
+  test "$(lib_in 'REPO_ROOT=/r; VENV_NAME=.v2; venv_python')" = /r/.v2/bin/python
+
+# tailscale_ip4 and host_listeners: both were only ever named in a grep of some
+# caller. Both take a stubbed command perfectly well.
+with_stub() {   # NAME BODY EXPR -> output of EXPR with NAME on PATH
+  local d="${SANDBOX}/stub-$1"
+  rm -rf "${d}"
+  # make_stub_dir + stub_path, not a hand-rolled front-load. The suite has a
+  # gate insisting on exactly this, and it caught the first version of these
+  # three lines: a PATH built by hand is a PATH whose sudo pass-through nobody
+  # checked, which is how a test once asked the real docker daemon instead of
+  # its fixture.
+  make_stub_dir "${d}"
+  printf '#!/usr/bin/env bash\n%s\n' "$2" > "${d}/$1"
+  chmod +x "${d}/$1"
+  PATH="$(stub_path "${d}")" lib_in "$3"
+}
+check "a Tailscale address is read from tailscale itself" \
+  test "$(with_stub tailscale 'echo 100.64.0.5' 'tailscale_ip4')" = 100.64.0.5
+check "...and something that is not an address is refused, not passed on" \
+  test -z "$(with_stub tailscale 'echo not-an-ip' 'tailscale_ip4 || true')"
+check "...as is a tailscale that answers nothing" \
+  test -z "$(with_stub tailscale 'exit 1' 'tailscale_ip4 || true')"
+check "the listener list is whatever ss reports" \
+  grep -qF '0.0.0.0:3000' <<<"$(with_stub ss 'echo "LISTEN 0 4096 0.0.0.0:3000 0.0.0.0:*"' 'host_listeners')"
+
+# netmode_state: read by five scripts to decide whether the internet is
+# allowed. Only ever stubbed.
+check "netmode reports what the state file says" \
+  test "$(printf 'offline' > "${SANDBOX}/nm"; lib_in "NETMODE_STATE_FILE=${SANDBOX}/nm; netmode_state")" = offline
+check "...and no state file means online, not unknown" \
+  test "$(lib_in "NETMODE_STATE_FILE=${SANDBOX}/no-such-nm; netmode_state")" = online
+
+# ollama_relay_unit_address: what 'lca relay status' compares against .env, and
+# what says the relay moved. It reads a unit file, so it drives from one.
+relay_addr_from() {   # UNIT-CONTENTS -> the address, or nothing
+  local d="${SANDBOX}/relay-unit"
+  rm -rf "${d}"; mkdir -p "${d}"
+  [[ -n "$1" ]] && printf '%s\n' "$1" > "${d}/local-code-agent-ollama-relay.socket"
+  lib_in "SYSTEMD_UNIT_DIR=${d}; ollama_relay_unit_address || true"
+}
+check "the relay's live address comes off its unit file" \
+  test "$(relay_addr_from '[Socket]
+ListenStream=172.17.0.1:11435')" = 172.17.0.1:11435
+check "...a unit with no ListenStream is refused, not read as empty" \
+  test -z "$(relay_addr_from '[Socket]
+Accept=no')"
+check "...and so is no unit at all" test -z "$(relay_addr_from '')"
+
+# confirm: driven in the auto-yes direction only, which is the direction a stub
+# also answers. The refusing direction is what stands between 'lca uninstall'
+# and a machine, so it is driven through a real terminal.
+confirm_answers() {   # KEYSTROKES -> yes|no
+  local rc=0
+  script -qec "bash -c 'source \"${REPO}/scripts/lib.sh\" >/dev/null 2>&1; confirm \"Go ahead?\"'" \
+    /dev/null <<<"$1" >/dev/null 2>&1 || rc=$?
+  (( rc == 0 )) && printf 'yes' || printf 'no'
+}
+check "a terminal answering 'n' is a refusal"      test "$(confirm_answers n)" = no
+check "...'y' is a confirmation"                   test "$(confirm_answers y)" = yes
+check "...and a bare Enter takes the default, yes" test "$(confirm_answers '')" = yes
+
+# load_env_readonly: the whole point is that reporters never write .env. Only
+# motd.sh's own test covered it, and that passes just as well with this stubbed
+# to nothing.
+readonly_load() {   # -> "CREATED|MODEL"
+  local dir="${SANDBOX}/ro-env"
+  rm -rf "${dir}"; mkdir -p "${dir}/scripts"
+  cp "${REPO}/scripts/lib.sh" "${dir}/scripts/"
+  cp "${REPO}/.env.example" "${dir}/"
+  local model
+  model="$(bash -c 'source "$1/scripts/lib.sh" >/dev/null 2>&1
+                    load_env_readonly; printf "%s" "${MODEL_NAME:-unset}"' _ "${dir}" 2>/dev/null)"
+  printf '%s|%s' "$( [[ -e "${dir}/.env" ]] && echo created || echo untouched )" "${model}"
+}
+check "a read-only load writes no .env" \
+  grep -q '^untouched|' <<<"$(readonly_load)"
+check "...and still hands the caller its settings" \
+  grep -qv '|unset$' <<<"$(readonly_load)"
+
+echo "# ...and the rule that stops the list growing back"
+# Four gates in two days read source text as evidence of a behaviour, and all
+# four stayed green while the behaviour was gone. The rule is in
+# CONTRIBUTING.md: drive it, or say in a SOURCE-GREP: comment what you cannot
+# drive and why. This is what enforces it.
+#
+# A classifier taking a FILE, not the suite directly, because it has to be run
+# over a fixture to prove it can tell the two apart — a classifier that
+# silently matched nothing would be this exact bug one level up, which is the
+# whole thing being prevented.
+#
+# SOURCE-GREP: the subject of this gate IS the text of the test suite —
+# whether its gates drive behaviour or read source for evidence of it. There is
+# no behaviour to drive; the property is syntactic. What it cannot check is
+# whether a gate that DOES drive drives the right thing.
+source_grep_gates() {   # FILE -> functions that read repo source with a text tool
+  awk '
+    /^[a-z_][a-z0-9_]*\(\) *\{/ {
+      fn=$0; sub(/\(\).*/,"",fn); src=0; tool=0
+      # A one-line definition opens and closes on the same line. Without this
+      # the scanner never saw its "}" and treated the ENTIRE REST OF THE FILE
+      # as that function body — which quietly corrupted every verdict after the
+      # first one-liner, this list included. Found by mutating the gate.
+      if ($0 ~ /\}[[:space:]]*$/) {
+        if ($0 ~ /\$\{REPO\}\//  && $0 ~ /(grep|awk|sed|cat |head |tail )/) print fn
+        inb=0; next
+      }
+      inb=1; next
+    }
+    inb && /\$\{REPO\}\// { src=1 }
+    inb && /(grep|awk|sed|cat |head |tail )/ { tool=1 }
+    inb && /^\}/ { if (src && tool) print fn; inb=0 }
+  ' "$1" | sort -u
+}
+# The marker must be a comment line that BEGINS with it. Anything looser counts
+# prose ABOUT the rule as an excuse FROM it: the first version matched the token
+# anywhere, so this section's own explanation of what a SOURCE-GREP: comment is
+# for silently justified the function underneath it — and deleting that
+# function's real marker changed nothing. Found by mutating it, which is the
+# only reason it is not still true.
+justified_gates() {   # FILE -> functions carrying a SOURCE-GREP: justification
+  awk '
+    /^[[:space:]]*# SOURCE-GREP: ./ && !inb { just=1; next }
+    /^[a-z_][a-z0-9_]*\(\) *\{/ {
+      fn=$0; sub(/\(\).*/,"",fn)
+      if (just) print fn
+      just=0
+      if ($0 ~ /\}[[:space:]]*$/) { inb=0; next }
+      inb=1; next
+    }
+    # Anything at top level that is not a comment ends the block, so a marker
+    # cannot leak past the function it was written for.
+    !inb && !/^[[:space:]]*#/ { just=0 }
+    inb && /^[[:space:]]*# SOURCE-GREP: ./ { print fn }
+    inb && /^\}/ { inb=0 }
+  ' "$1" | sort -u
+}
+# Driven over a fixture, both directions, before it is trusted on the real file.
+SG_FIXTURE="${SANDBOX}/sg-fixture.sh"
+cat > "${SG_FIXTURE}" <<'SGFIX'
+drives_the_behaviour() {
+  out="$(some_function arg)"
+  [[ "${out}" == expected ]]
+}
+reads_the_source_with_no_excuse() {
+  grep -q 'something' "${REPO}/scripts/lib.sh"
+}
+# SOURCE-GREP: needs a GPU, which no runner has.
+reads_the_source_and_says_why() {
+  grep -q 'something' "${REPO}/scripts/lib.sh"
+}
+SGFIX
+check "the classifier sees a gate that reads source" \
+  grep -qx 'reads_the_source_with_no_excuse' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+check "...and the justified one too, since it also reads source" \
+  grep -qx 'reads_the_source_and_says_why' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+driver_is_not_flagged() { ! grep -qx 'drives_the_behaviour' <<<"$(source_grep_gates "${SG_FIXTURE}")"; }
+check "...but not one that drives the behaviour" driver_is_not_flagged
+check "the justification reader finds the excuse where there is one" \
+  grep -qx 'reads_the_source_and_says_why' <<<"$(justified_gates "${SG_FIXTURE}")"
+no_excuse_is_not_invented() { ! grep -qx 'reads_the_source_with_no_excuse' <<<"$(justified_gates "${SG_FIXTURE}")"; }
+check "...and does not invent one where there is none" no_excuse_is_not_invented
+# Non-vacuity, on the real file: a classifier that has stopped matching would
+# make every assertion below pass over nothing.
+check "the classifier still recognises this suite's source greps" \
+  test "$(source_grep_gates "${REPO}/tests/test-lib.sh" | grep -c .)" -ge 100
+# SOURCE-GREP: this reads the suite's text because the suite's text is the
+# subject. What it cannot check is whether a justification is honest — only a
+# reader can do that.
+new_source_greps_are_justified() {
+  local base="${REPO}/tests/source-grep-baseline.txt"
+  [[ -r "${base}" ]] || { echo "the source-grep baseline is missing" >&2; return 1; }
+  local allowed="${SANDBOX}/sg-allowed" found="${SANDBOX}/sg-found" bad
+  sort -u "${base}" > "${allowed}.b"
+  justified_gates "${REPO}/tests/test-lib.sh" > "${allowed}.j"
+  sort -u "${allowed}.b" "${allowed}.j" > "${allowed}"
+  source_grep_gates "${REPO}/tests/test-lib.sh" > "${found}"
+  bad="$(comm -23 "${found}" "${allowed}")"
+  [[ -z "${bad}" ]] || {
+    printf 'these gates read source text as evidence of a behaviour, with no SOURCE-GREP: justification saying what they cannot drive:\n%s\nDrive it, or say why you cannot — CONTRIBUTING.md, "Drive the behaviour".\n' \
+      "${bad}" >&2
+    return 1
+  }
+}
+check "a new gate that greps source says why it cannot drive instead" \
+  new_source_greps_are_justified
+# The baseline is debt, not permission: it may shrink, never grow.
+# SOURCE-GREP: it counts lines in a checked-in list. There is no behaviour
+# here to drive; what it cannot check is whether the entries still deserve to
+# be on it.
+baseline_has_not_grown() {
+  local n
+  n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
+  (( n <= 300 )) || {
+    printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
+    return 1
+  }
+}
+check "...and the grandfathered list never gets longer" baseline_has_not_grown
 
 echo
 if (( FAILED > 0 )); then

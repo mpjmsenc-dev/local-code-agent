@@ -534,6 +534,81 @@ And prompt length is a real cost: it is spent on every message, out of a 4096
 token context on the 3b rung. Cut what measurement shows does not work rather
 than layering more words on top.
 
+## Drive the behaviour. Reading the source for evidence of it is not a check
+
+This is the single most common way a gate here has turned out to be
+decoration, and it has now happened four times in two days:
+
+| The gate | What it read | Why it could not fail |
+|---|---|---|
+| the conventions keyed-phrase gate | `config/CONVENTIONS.md`, raw | the editor note at the top lists every keyed phrase, so the grep always matched — for two sessions |
+| `webui.sh` drift reporting | seven hand-written `check` lines naming seven keys | `webui_drift` grew an eighth; nothing noticed, and `WEBUI_BANNERS` drift printed nothing under a green health line |
+| `every_installed_unit_is_removed` | `uninstall.sh`, for each unit's *name* | a file that merely mentions a unit passes; removal was never attempted |
+| `net_guard_still_dies` | `net_guard`'s own body, for the string `die ` | stubbing the function to `return 0` leaves the body, and that string, exactly where they were |
+
+Every one of them read source text as evidence that a behaviour happens, and
+every one of them stayed green while the behaviour was gone. The last was
+found by mutation sweep: stub each function in `scripts/lib.sh` to `return 0`,
+run the suite, and see what still passes. **Forty-four functions survived.**
+
+**So: drive the thing.** Call the function, with the world stubbed around it,
+and assert on what it returns, prints or leaves behind. Nearly everything is
+drivable with less setup than the grep took to write — the survivor section at
+the end of `tests/test-lib.sh` drives a Tailscale address off a stubbed
+`tailscale`, a relay address off a real unit file in the sandbox, and
+`confirm`'s refusal through a real terminal via `script`.
+
+**Where driving is genuinely impossible** — a real GPU, a real sudo refusal on
+a suite that runs as root, a live container, a package install — a source grep
+is allowed, and it must say so:
+
+```bash
+# SOURCE-GREP: this needs an NVIDIA card, which no runner here has. What it
+# cannot check is that the parse is right for a real nvidia-smi.
+gpu_probe_reads_the_largest_card() { ... }
+```
+
+`new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
+that reads repo source with a text tool, is not in
+`tests/source-grep-baseline.txt`, and carries no `SOURCE-GREP:` line, fails the
+suite. The baseline is the 300 that existed when the rule was written — it is a
+record of debt, not permission, and the honest direction for it is down.
+
+The meta-gate is itself the kind of thing that becomes decoration, so it is
+driven too: its classifier is run over a fixture holding one offending function
+and one justified one, and asserted to tell them apart. Without that, a
+classifier that silently matched nothing would be the same bug, one level up.
+
+## What only a real machine can settle, and how to settle it
+
+A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
+ran the suite. Forty-four survived. Most were then driven (see the last section
+of `tests/test-lib.sh`), but some genuinely cannot be: they ask a real kernel, a
+real daemon, a real account. Those are **not** covered by another source grep —
+they are listed here, with the command that would settle each and what a pass
+looks like, so the work is concrete rather than open-ended.
+
+| Functions | Where | Command | A pass is |
+|---|---|---|---|
+| `agent_container_running`, `agent_container_exists`, `agent_live_port`, `agent_live_sandboxes`, `agent_orphan_sandboxes` | droplet, agent tier up | `lca agent start`, then `lca agent watch --live --once` | the view resolves a conversation; `agent_live_port` equals `AGENT_PORT`; the sandbox count equals `docker ps` filtered on `oh-agent-server-` |
+| `agent_conversation_record`, `agent_recorded_conversation`, `agent_conversation_warning`, `agent_conversations_payload` | droplet, one task submitted | `lca agent task --dir /tmp/x "…"`, note the id, then `lca agent watch` | the recorded id equals the one `task` printed; with a second sandbox alive the warning fires and names the *recorded* id, not the newest |
+| `agent_model_for_run`, `agent_model_loaded_context` | droplet, agent tier up | `lca agent selftest` | the derived `-agent` model is chosen when present, the base model when not; the loaded context equals `AGENT_MODEL_CONTEXT` |
+| `webui_container_env`, `webui_container_env_list`, `webui_container_exists`, `webui_container_running` | any box with docker | container up, then stopped | `webui_container_env PORT` equals `docker inspect`'s value; with it **stopped**, `exists` true and `running` false — that distinction is the whole point |
+| `start_ollama_bg`, `restart_ollama`, `ensure_ollama_up`, `wait_for_ollama`, `warm_model`, `ollama_bg_env` | droplet | `systemctl stop ollama`, then `ensure_ollama_up 90` | the API answers afterwards; `ollama_bg_env OLLAMA_CONTEXT_LENGTH` matches `.env` |
+| `resync_dropin_if_drifted` | droplet | edit the drop-in by hand, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again |
+| `ollama_relay_healthy` | droplet | `lca relay install`, `lca relay status`, then `systemctl stop` the socket | healthy **only** while Ollama answers *through* the relay address, not merely while the socket is bound |
+| `stale_agent_models` | droplet | pull a second `-agent` model, then `lca check` | the stale one is named, the current one is not |
+| `can_root`, `can_root_now`, `am_root`, `writable_by_us`, `root_for_probe` | droplet, **as a non-root user** | run `lca check` and `lca backup` as an ordinary sudoer, then as a non-sudoer | `can_root_now` false with no cached credential; nothing hangs on a password prompt in a reporter; `writable_by_us` false on a root-owned `.env` |
+| `systemd_available` | droplet **and** a container | `lca check` in both | true on the droplet, false in the container, and no script dies of the difference |
+| `gpu_state`, `has_nvidia_gpu` | **a GPU host — not the droplet** | `lca speed` on any NVIDIA box | placement classified as `active`/`split`/`idle` rather than guessed from a string |
+| `apt_get` | already covered | CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
+
+`confirm`'s refusing branch, `netmode_state`, `tailscale_ip4`, `host_listeners`,
+`ollama_relay_unit_address`, `agent_workspace_dir`, `venv_python`,
+`load_env_readonly`, `model_load_notice` and `root_for_probe` were on that list
+too and are **not** any more: each is driven in the suite now, with a stubbed
+command, a real unit file in the sandbox, or a real terminal via `script`.
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide
