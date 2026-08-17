@@ -419,6 +419,26 @@ prompt: its role, its security policy, its filesystem rules, the
 working-directory rule that two failed droplet runs were blamed on, and all 25
 tool definitions.
 
+### What the agent then did with its instructions
+
+Token counts are not the point; behaviour is. The same selftest-shaped task,
+post-cut, run end to end:
+
+| | |
+|---|---|
+| turn 1 | `FileEditorAction` → created `/workspace/project/hello.py` — **inside the directory it was given** |
+| turn 2 | `TerminalAction` → `python3 /workspace/project/hello.py`, `exit_code: 0`, output `hello from the agent` |
+| turn 3 | *"The hello.py file executed successfully and printed \"hello from the agent\" to the console."* |
+
+It wrote where it was told, **ran what it built**, and reported the output it
+had actually produced rather than the output it intended to produce. The third
+turn quotes the real string from the real observation.
+
+This is the behaviour the tier was documented as incapable of. It is one task
+and a small one, and the honest reading is not "the 3b is fixed" — it is that
+the agent was previously being asked to execute with the description of
+`terminal` removed from its context, and it no longer is.
+
 ### The margin is per-conversation, not per-prompt
 
 The 2,409 tokens of headroom are not a standing reserve — they are consumed as
