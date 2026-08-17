@@ -302,27 +302,33 @@ one.
 
 ### What the tools are worth
 
-Tokenized per tool on the reconstruction, so these are shares rather than
-absolute counts (the reconstruction under-counts the whole by ~18%):
+Two of the 26 have already gone, both confirmed by counting the tools in a live
+event 0:
 
-| group | count | share of tool JSON | ≈ of the real 10,280 |
+| tool | how it went | measured saving |
+|---|---|---|
+| `invoke_skill` | OpenHands dropped it by itself once the catalogue emptied | part of the 4,378 |
+| `switch_llm` | `enable_switch_llm_tool: false` in seeded settings | **254** |
+
+**24 tools remain**, and what they are worth is an *estimate*, apportioned from
+the reconstruction:
+
+| group | count | share of tool JSON | ≈ of the real 10,134 |
 |---|---:|---:|---:|
-| `browser_*` | 14 | 35.3% | ~3,630 |
-| `create_*_pr` | 5 | 15.3% | ~1,570 |
-| `invoke_skill` | 1 | 1.9% | ~195 |
-| **removable here** | **20** | **52.5%** | **~5,394** |
+| `browser_*` | 14 | 35.3% | ~3,600 |
+| `create_*_pr` | 5 | 15.3% | ~1,550 |
+| **the 19 that are not this tier's job** | **19** | **50.6%** | **~5,150** |
 
-`invoke_skill` has already gone — OpenHands dropped it by itself when the
-catalogue emptied, which is where ~150 of the 4,378 actually saved came from.
-The remaining 19 are still being sent.
+Treat those with suspicion. The one estimate in this table that has since been
+checked against reality was **29% high**: `switch_llm` was projected at ~329
+and measured 254. Apportioning schemas that Ollama re-serialises is guesswork
+with a percentage attached. The real figure for the 19 is more likely nearer
+**4,000** than 5,150, and nothing here should be quoted as measured.
 
-Dropping the browser and forge tools as well would take the prompt to roughly
-
-    13,975 − ~5,200 ≈ 8,800
-
-which is not needed to fit the window and would still be worth having: it is
-the difference between an agent that reads its instructions in 11 minutes and
-one that reads them in 7.
+Dropping them would take the prompt to roughly 9,500–10,000. That is not needed
+to fit the window, and it is worth wanting anyway: it is the difference between
+an agent that reads its instructions in 11 minutes and one that reads them in
+8. There is no supported way to do it — see below.
 
 ### Can the tool set be cut the same way? Almost entirely, no.
 
