@@ -307,11 +307,42 @@ Dropping the browser and forge tools as well would take the prompt to roughly
 
     13,975 − ~5,200 ≈ 8,800
 
-which is not needed to fit the window and would be worth doing anyway: it is
+which is not needed to fit the window and would still be worth having: it is
 the difference between an agent that reads its instructions in 11 minutes and
-one that reads them in 7. `browser_tool_set` is one entry in the agent spec's
-`tools` list, so the lever exists; it was left alone here because the measured
-task was the skills cut and one change at a time is how this was kept honest.
+one that reads them in 7.
+
+### Can the tool set be cut the same way? Almost entirely, no.
+
+The skills cut worked because `load_public_skills` had a documented
+graceful-failure contract — *"Returns empty list if loading fails"* — so
+removing its input removed the feature. Nothing in the tool path offers that.
+Every route was checked and all but one is closed:
+
+| route | verdict | where |
+|---|---|---|
+| set `tools` in `/api/v1/settings` | **overwritten** — the app does `model_copy(update={'tools': get_default_tools(...)})` on every conversation, discarding whatever the user stored | `live_status_app_conversation_service.py:1445` |
+| turn the browser off | **hardcoded** — `get_default_tools(enable_browser=True)`, no setting, no env var, at the call site itself | same file, `:1436` |
+| `filter_tools_regex` | **unreachable** — the field exists on `AgentBase` and is honoured, but `create_agent()` never passes it, and settings do not expose it | `sdk/agent/base.py:143,535`; `sdk/settings/model.py:1102` |
+| break the browser import, as with skills | **unsafe** — `register_default_tools` does a bare `from openhands.tools.browser_use import BrowserToolSet` with no `try/except`, so a missing module raises during conversation creation rather than degrading | `tools/preset/default.py:30` |
+| drop the 5 MCP forge tools | **possible, but it is not a tool switch** — they come from the app's own MCP server, which is registered only `if self.web_url`; that same `web_url` also carries the secrets webhook and the `<HOST>` block, so unsetting `OH_WEB_URL` turns off three things to remove one | same file, `:1057`, `:993`, `:1421` |
+| `enable_switch_llm_tool: false` | **works** — read by `create_agent()` and honoured | `sdk/settings/model.py:1099` |
+| `agent_type: plan` | **wrong tool** — the only other agent type swaps in `get_planning_tools()`, which is a planning agent, not one that executes | `app_conversation_models.py:44` |
+
+So **one** of the 25 tools can be declined through supported configuration, and
+it is worth ~329 tokens. That is the honest total: 2.4% of the prompt, against
+the 30% those 19 tools represent.
+
+`enable_switch_llm_tool: false` is now seeded with the rest of the settings —
+it costs nothing and the tool it removes offers to switch models on a box with
+one model. The other 19 stay until OpenHands exposes a setting for them, or
+until this project is willing to patch a vendored container, which it should
+not be: the images are pinned precisely so they do not change under the user.
+
+**What this means for the window.** The skills cut was not merely the easiest
+saving, it was very nearly the only one available. 72.5% of the prompt is tool
+JSON that this stack has no supported way to reduce. Fitting inside 16,384
+therefore depends on that one cut holding, with a 2,409-token margin that a
+long conversation spends at ~110 tokens a turn.
 
 ## After the cut, measured the same way
 
