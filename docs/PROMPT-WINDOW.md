@@ -114,13 +114,19 @@ the whole file is 3,037.
 is preamble, and 56% of it is tool JSON.
 
 > **Retraction.** An earlier note in this project's working history put the
-> task at **12.3%** of the prompt. That figure is wrong and is withdrawn; the
-> measured value is 0.9%. The likely source of the error is next door in the
-> same table: the prompt overshoots its window by 1,969 tokens, which is
-> **12.0%** of 16,384. Two numbers about the same prompt, one of them about the
-> task and one about the overshoot, and they were transposed. Recorded here so
-> that nobody meets 12.3% again and tries to reconstruct which quantity it
-> measured — it measured nothing.
+> task at **12.3%** of the prompt. That figure is withdrawn; the measured value
+> is 0.9%.
+>
+> Its origin is not certain, and there are two candidates. The likelier is
+> docs/AGENT.md's older decomposition, which put "the user's task" at **2,041
+> tokens** of a 15,225-token request — a share in the 12–13% range, measured on
+> a different task, a different OpenHands build, and a prompt whose tool
+> schemas were counted differently. The other is simple transposition with the
+> 1,969-token overshoot, which is 12.0% of 16,384.
+>
+> Either way it is stale rather than mysterious, and it should not be
+> reconciled with anything here. The task measured in this file is
+> `agent_task_prompt`'s 824 characters: **165 tokens, 0.9%.**
 
 ### On the tool figure
 
@@ -331,6 +337,15 @@ Every route was checked and all but one is closed:
 So **one** of the 25 tools can be declined through supported configuration, and
 it is worth ~329 tokens. That is the honest total: 2.4% of the prompt, against
 the 30% those 19 tools represent.
+
+This confirms, and explains, what docs/AGENT.md already recorded the hard way:
+posting an explicit `tools` list saved **0 tokens** and left 57 browser
+mentions in place, and `filter_tools_regex` stored `null`. That was true and
+the reason was not known — "OpenHands 1.8 ignores it". It is not ignoring it:
+`model_copy` overwrites the stored list with `get_default_tools(...)` at
+conversation creation, and `create_agent()` never forwards
+`filter_tools_regex`. The setting is honoured right up to the moment it is
+discarded.
 
 `enable_switch_llm_tool: false` is now seeded with the rest of the settings —
 it costs nothing and the tool it removes offers to switch models on a box with
