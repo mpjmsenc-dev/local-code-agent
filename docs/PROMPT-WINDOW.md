@@ -514,14 +514,82 @@ So the third question moved, and it moved by the failure changing shape: from
 that visibly fails to start is worth more than one that reports success over
 code that has never been executed. It is still a failed task.
 
+### Sample 2 of the same task, and it is a different animal
+
+Sample 1 derailed after a rejected tool call. Sample 2, same task, same
+settings, fresh conversation:
+
+| time | | |
+|---|---|---|
+| 16:57:45 | `FileEditorAction` | created `/workspace/project/wordcount.py` |
+| 16:59:06 | `FileEditorAction` | created `/workspace/project/test.txt` — *the test file the task asked for* |
+| 16:59:54 | `TerminalAction` | `python3 /workspace/project/wordcount.py /workspace/project/test.txt` |
+| 16:59:55 | observation | `IndentationError: unindent does not match any outer indentation level` |
+| 17:01:10 → 17:08:45 | four repair attempts | 2 × malformed `str_replace`, 3 × `create` on an existing path, all rejected |
+| 17:11:19 | agent message | *"I apologize, but I'm not able to interact directly with a file system or execute commands…"* |
+
+And the code it wrote:
+
+```python
+import sys                                    # ← the old run had NO imports
+
+def usage():
+    print("Usage: wordcount.py <filename>", file=sys.stderr)
+    sys.exit(1)
+
+if len(sys.argv) != 2:                        # ← the old run indexed argv[1] unguarded
+    usage()
+...
+       lines = content.split('\n')            # ← line 15, seven spaces not eight
+```
+
+**Every specific defect the old run is documented for is fixed.** No imports →
+`import sys` present. Unguarded `sys.argv[1]` → guarded, usage to stderr,
+exit 1. Never ran, no test file, no output → test file created and the program
+executed. Wrong directory → both files inside the directory it was given.
+
+What remains is **one wrong space on line 15**, and an inability to repair it:
+it reached for `str_replace` with a quoted string literal as `old_str` (so it
+never matched), then tried `create` on a path that already existed, three
+times. Then it denied having a filesystem — the same false-incapacity
+pathology this project documents for the phone chat, on a run where it had
+already created two files and executed one of them.
+
+### The three questions, across both samples
+
+| | old run 2 | sample 1 | sample 2 |
+|---|---|---|---|
+| right directory | **violated** (`/workspace/wordcount.py`) | no violation, nothing written | **passed** — both files inside |
+| runs its own work | **never executed** | nothing built to run | **passed** — ran it, got the real error back |
+| declares completion without running | **`finished`, "You can now use this script"** | asked for the task | **no false claim** — reported failure |
+
+All three moved. The third moved twice over: neither sample produced a false
+completion, and sample 2 caught its own broken code by running it, which is the
+behaviour the prohibition asks for and never previously got.
+
+The dominant failure is now a different one: **it cannot repair what it wrote.**
+That is a smaller and much more legible problem than "declares victory over code
+that has never been executed".
+
 ### What this is not: a measurement
 
-Two runs is not a result, and this project's own tooling says so out loud.
+Three runs is not a benchmark, and this project's own tooling says so out loud:
 `scripts/prompt-bench.sh` warns that six samples "have pointed the WRONG WAY"
-and tells you to use `-n 20` before acting on anything. I have `n = 1` per
-task. On that basis docs/AGENT.md's measured-behaviour section has **not** been
-rewritten, and should not be until someone runs both tasks enough times to
-know. Each run costs 20–40 minutes on this box, most of it prompt evaluation.
+and tells you to use `-n 20` before acting on anything. This is **n = 2** on
+`wordcount` and **n = 1** on the selftest shape, at 20–40 minutes a run, nearly
+all of it prompt evaluation.
+
+What justifies rewriting docs/AGENT.md on that evidence is not the sample size,
+it is that the change is **qualitative and mechanically explained**. The old
+section's four named defects — no imports, unguarded `argv[1]`, wrote outside
+its directory, never executed — are each individually absent now, and the
+reason is not luck: the definition of `terminal` used to be deleted from the
+prompt and `file_editor` cut in half, and they no longer are. A model cannot
+call a tool whose description it was never shown.
+
+What still needs proper sampling is the *rate*: how often the 3b gets there,
+and how often it derails as sample 1 did. That is stated as unknown rather than
+guessed at.
 
 What *is* established, and needs no sampling, is mechanical: the prompt fits,
 nothing is truncated, and the tool definitions the agent needs are now in its
