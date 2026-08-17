@@ -267,8 +267,15 @@ main() {
   if [[ "${dry_run}" == "true" ]]; then
     if [[ "${AUTO_TUNE}" != "true" ]]; then
       info "AUTO_TUNE is '${AUTO_TUNE}', not 'true' — a real run would keep the manual pin and change nothing."
-    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" \
+            && "${ka_want}" == "${OLLAMA_KEEP_ALIVE}" ]]; then
       info "Already tuned — a real run would change nothing."
+    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+      # Keep-alive alone. Without this arm the dry run said "would change
+      # nothing" about a run that was about to rewrite .env and restart Ollama
+      # — introduced the moment keep-alive became a tuned value, which is
+      # exactly when a dry run stops being able to ignore it.
+      info "A real run would leave the model and context alone and set keep-alive ${OLLAMA_KEEP_ALIVE} -> ${ka_want}: ${ka_why}."
     else
       # ...including what it costs. A dry run exists to show what a real run
       # would do, and the biggest thing a real run does is download a model:

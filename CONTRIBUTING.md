@@ -633,20 +633,70 @@ real daemon, a real account. Those are **not** covered by another source grep �
 they are listed here, with the command that would settle each and what a pass
 looks like, so the work is concrete rather than open-ended.
 
-| Functions | Where | Command | A pass is |
-|---|---|---|---|
-| `agent_container_running`, `agent_container_exists`, `agent_live_port`, `agent_live_sandboxes`, `agent_orphan_sandboxes` | droplet, agent tier up | `lca agent start`, then `lca agent watch --live --once` | the view resolves a conversation; `agent_live_port` equals `AGENT_PORT`; the sandbox count equals `docker ps` filtered on `oh-agent-server-` |
-| `agent_conversation_record`, `agent_recorded_conversation`, `agent_conversation_warning`, `agent_conversations_payload` | droplet, one task submitted | `lca agent task --dir /tmp/x "…"`, note the id, then `lca agent watch` | the recorded id equals the one `task` printed; with a second sandbox alive the warning fires and names the *recorded* id, not the newest |
-| `agent_model_for_run`, `agent_model_loaded_context` | droplet, agent tier up | `lca agent selftest` | the derived `-agent` model is chosen when present, the base model when not; the loaded context equals `AGENT_MODEL_CONTEXT` |
-| `webui_container_env`, `webui_container_env_list`, `webui_container_exists`, `webui_container_running` | any box with docker | container up, then stopped | `webui_container_env PORT` equals `docker inspect`'s value; with it **stopped**, `exists` true and `running` false — that distinction is the whole point |
-| `start_ollama_bg`, `restart_ollama`, `ensure_ollama_up`, `wait_for_ollama`, `warm_model`, `ollama_bg_env` | droplet | `systemctl stop ollama`, then `ensure_ollama_up 90` | the API answers afterwards; `ollama_bg_env OLLAMA_CONTEXT_LENGTH` matches `.env` |
-| `resync_dropin_if_drifted` | droplet | edit the drop-in by hand, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again |
-| `ollama_relay_healthy` | droplet | `lca relay install`, `lca relay status`, then `systemctl stop` the socket | healthy **only** while Ollama answers *through* the relay address, not merely while the socket is bound |
-| `stale_agent_models` | droplet | pull a second `-agent` model, then `lca check` | the stale one is named, the current one is not |
-| `can_root`, `can_root_now`, `am_root`, `writable_by_us`, `root_for_probe` | droplet, **as a non-root user** | run `lca check` and `lca backup` as an ordinary sudoer, then as a non-sudoer | `can_root_now` false with no cached credential; nothing hangs on a password prompt in a reporter; `writable_by_us` false on a root-owned `.env` |
-| `systemd_available` | droplet **and** a container | `lca check` in both | true on the droplet, false in the container, and no script dies of the difference |
-| `gpu_state`, `has_nvidia_gpu` | **a GPU host — not the droplet** | `lca speed` on any NVIDIA box | placement classified as `active`/`split`/`idle` rather than guessed from a string |
-| `apt_get` | already covered | CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
+Each row is meant to be run without interpretation: the command is the whole
+command, and the pass condition is a thing you can look at and be sure about.
+`L=/opt/local-code-agent` throughout (wherever your checkout is).
+
+**Agent tier** — needs `ENABLE_AGENT=true`, `sudo lca apply`, `lca agent start`.
+
+```bash
+mkdir -p /tmp/probe && cd /tmp/probe && git init -q
+lca agent task --dir /tmp/probe "create hello.txt containing the word hello"   # note the id it prints
+lca agent watch --live --once
+```
+
+| Function | Pass condition |
+|---|---|
+| `agent_container_running`, `agent_container_exists` | `lca agent status` says running; then `sudo docker stop openhands-app` and it says exists-but-not-running, not "not created" |
+| `agent_live_port` | `bash -c 'source $L/scripts/lib.sh; load_env; agent_live_port'` prints the same number as `AGENT_PORT` in `.env` |
+| `agent_live_sandboxes`, `agent_orphan_sandboxes` | its line count equals `sudo docker ps --format '{{.Names}}' \| grep -c '^oh-agent-server-'`; with the agent stopped and a sandbox left, `agent_orphan_sandboxes` lists exactly that one |
+| `agent_recorded_conversation`, `agent_conversation_record` | prints the id `lca agent task` printed above, character for character |
+| `agent_conversation_warning` | start a second task without stopping the first: it fires and names the **recorded** id, not the newest sandbox |
+| `agent_conversations_payload` | non-empty, and `jq .` parses it |
+| `agent_model_for_run` | with `<model>-agent` pulled it prints that; after `ollama rm <model>-agent` it prints `MODEL_NAME` |
+| `agent_model_loaded_context` | equals `AGENT_MODEL_CONTEXT` from `.env` (16384 by default) |
+
+**Chat container** — any box with docker and the container created.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `webui_container_env` | `bash -c 'source $L/scripts/lib.sh; load_env; webui_container_env PORT'` | equals `sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' open-webui \| grep '^PORT='` |
+| `webui_container_env_list` | same, no argument | every `-e` line `install_webui.sh` bakes in appears once |
+| `webui_container_exists`, `webui_container_running` | `sudo docker stop open-webui`, then both | `exists` true, `running` false. **This distinction is the whole point** — collapsing them is how "already matches .env" was printed about a container that did not exist |
+
+**Ollama lifecycle** — droplet, systemd.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `ensure_ollama_up`, `wait_for_ollama`, `start_ollama_bg`, `restart_ollama` | `sudo systemctl stop ollama`, then `bash -c 'source $L/scripts/lib.sh; load_env; ensure_ollama_up 90; echo rc=$?'` | `rc=0` and `curl -fsS $(ollama_url)/api/version` answers |
+| `ollama_bg_env` | with Ollama up: `bash -c 'source $L/scripts/lib.sh; load_env; ollama_bg_env OLLAMA_CONTEXT_LENGTH'` | equals `OLLAMA_CONTEXT_LENGTH` in `.env` |
+| `warm_model` | `time` it twice in a row | the second call returns in under a second |
+| `resync_dropin_if_drifted` | `sudo sed -i 's/OLLAMA_KEEP_ALIVE=.*/OLLAMA_KEEP_ALIVE=99m/' /etc/systemd/system/ollama.service.d/local-code-agent.conf`, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again, and `lca check` reports no drift |
+| `stale_agent_models` | `ollama cp <model>-agent stale-agent`, then `lca check` | `stale-agent` is named, the current `-agent` model is not |
+
+**Relay** — droplet.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `ollama_relay_healthy` | `sudo lca relay install`, `lca relay status`; then `sudo systemctl stop local-code-agent-ollama-relay.socket` and re-run | healthy **only** in the first case. It must answer false when the socket is bound but Ollama is not answering *through* it — stop `ollama` with the socket up to see that |
+
+**Privilege — the one only a real account can settle.** Run as an ordinary
+sudoer, then as a user with no sudo rights at all.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `can_root_now` | `sudo -k`, then `lca check` | it does **not** prompt for a password and does not hang; the report says what it could not look at |
+| `can_root` | `lca backup` as that user | it may prompt, once, and says why before it does |
+| `am_root` | both accounts | true only under `sudo` |
+| `writable_by_us` | `bash -c 'source $L/scripts/lib.sh; writable_by_us $L/.env; echo $?'` as the non-root user on a root-owned `.env` | `1`. On a suite running as root this arm is unreachable, which is why it is here |
+
+**Everything else**
+
+| Function | Where | Pass condition |
+|---|---|---|
+| `systemd_available` | droplet **and** `docker run --rm -it ubuntu:24.04` with the repo mounted | true on the droplet, false in the container, and `lca check` completes on both |
+| `gpu_state`, `has_nvidia_gpu` | **an NVIDIA host — not the droplet** | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string |
+| `apt_get` | already covered by CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
 
 `confirm`'s refusing branch, `netmode_state`, `tailscale_ip4`, `host_listeners`,
 `ollama_relay_unit_address`, `agent_workspace_dir`, `venv_python`,

@@ -17367,6 +17367,56 @@ check "tune says the timer is only half of it when the agent is on" \
   grep -qF 'Switching between the chat and the agent still unloads one model' "${REPO}/scripts/tune.sh"
 check "...and tune writes the decision to .env rather than only the drop-in" \
   grep -qF 'write_env_or_die OLLAMA_KEEP_ALIVE' "${REPO}/scripts/tune.sh"
+# ...and the dry run must not call that "nothing". The moment keep-alive became
+# a tuned value, "already tuned" stopped meaning what it said: model and
+# context could both match while a real run was about to rewrite .env and
+# restart Ollama. Driven, in a scratch checkout, because a dry run that lies
+# about what a real run would do is worse than no dry run.
+# SOURCE-GREP: a false positive of the classifier, and worth leaving as one
+# rather than teaching it a special case it could be fooled by. This copies the
+# repo's scripts in order to RUN them and parses their OUTPUT; the only thing
+# it reads out of ${REPO} is a file path to copy. What it cannot check is that
+# the ladder decision line keeps its shape — so it fails loudly when the parse
+# comes back empty rather than asserting over nothing.
+tune_dry_run_in() {   # KEEPALIVE -> what --dry-run said
+  local dir="${SANDBOX}/tunedry"
+  rm -rf "${dir}"; mkdir -p "${dir}/scripts"
+  cp "${REPO}/scripts/lib.sh" "${REPO}/scripts/tune.sh" "${dir}/scripts/"
+  cp "${REPO}/.env.example" "${dir}/"
+  # The ladder picks from THIS machine's RAM, so the .env is seeded with
+  # whatever it decides here rather than with a guess that only holds on one
+  # box. One dry run to ask, a second to assert on.
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=true\nOLLAMA_KEEP_ALIVE=30m\n' > "${dir}/.env"
+  local first m c
+  first="$(bash "${dir}/scripts/tune.sh" --dry-run 2>&1)"
+  m="$(sed -n 's/.*Ladder decision: model=\([^ ]*\).*/\1/p' <<<"${first}" | head -1)"
+  c="$(sed -n 's/.*context=\([0-9]*\).*/\1/p' <<<"${first}" | head -1)"
+  [[ -n "${m}" && -n "${c}" ]] || { printf 'could not read the ladder decision: %s\n' "${first}" >&2; return 1; }
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=true\nMODEL_NAME=%s\nOLLAMA_CONTEXT_LENGTH=%s\nOLLAMA_KEEP_ALIVE=%s\n' \
+    "${m}" "${c}" "$1" > "${dir}/.env"
+  bash "${dir}/scripts/tune.sh" --dry-run 2>&1
+}
+dry_run_reports_a_keepalive_only_change() {
+  local out
+  out="$(tune_dry_run_in 30m)" || return 1
+  ! grep -qF 'would change nothing' <<<"${out}" || {
+    printf 'the dry run called a keep-alive change "nothing": %s\n' "${out}" >&2
+    return 1; }
+  grep -qF 'keep-alive 30m -> -1' <<<"${out}" || {
+    printf 'the dry run does not say what it would set keep-alive to: %s\n' "${out}" >&2
+    return 1; }
+}
+check "a dry run reports a keep-alive-only change instead of calling it nothing" \
+  dry_run_reports_a_keepalive_only_change
+dry_run_still_says_nothing_when_nothing() {
+  local out
+  out="$(tune_dry_run_in -1)" || return 1
+  grep -qF 'would change nothing' <<<"${out}" || {
+    printf 'a fully-tuned box is no longer reported as needing nothing: %s\n' "${out}" >&2
+    return 1; }
+}
+check "...and still says nothing when there is nothing" \
+  dry_run_still_says_nothing_when_nothing
 
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
 # Every function below survived being stubbed to 'return 0': the whole suite
