@@ -208,6 +208,7 @@ start_agent() {
     -e OH_SANDBOX_KIND=DockerSandboxServiceInjector \
     -e OH_SANDBOX_HOST_PORT="${AGENT_PORT}" \
     -e OH_WEB_URL="$(agent_web_url)" \
+    -e OH_AGENT_SERVER_ENV="$(agent_sandbox_env)" \
     -e LLM_MODEL="${model}" \
     -e LLM_BASE_URL="${base_url}" \
     -e LLM_API_KEY=local-llm \

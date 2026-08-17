@@ -531,6 +531,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # where the ladder put it; only the agent gets this. Never applied below the
   # server default — see agent_model_context.
   AGENT_MODEL_CONTEXT="${AGENT_MODEL_CONTEXT:-16384}"
+  # Which ref of the public skills repository the agent's sandboxes may load
+  # from. The default names one that does not exist, deliberately: see
+  # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
+  AGENT_EXTENSIONS_REF="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
   # How much of that window the agent may spend on ONE reply.
   #
   # It is not a cap on verbosity, it is a cap on how much of the window the
@@ -539,16 +543,28 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   #
   #   truncating input prompt   limit=8194  prompt=18313  keep=4  new=8194
   #
-  # 16384 - 8190 = 8194. The client reserved half the window for output it was
-  # never going to produce, so an 18,313-token prompt was cut to 8,194 and the
-  # agent saw under half of its own instructions on every single step —
-  # including the working-directory rule that two failed droplet runs are
-  # blamed on. No wording fixes that; it is arithmetic.
+  # 16384 - 8190 = 8194, which is where "the client reserved half the window
+  # for output it was never going to produce" came from. CORRECTED, 2026-08-17,
+  # and the arithmetic was a coincidence: 16384/2 + 2 is also 8194.
   #
-  # 2048 is generous for one reply from a coding agent and buys 6,142 more
-  # tokens of instruction. It does not make an 18k prompt fit a 16k window —
-  # nothing at this rung does — but it is the difference between the model
-  # seeing half its instructions and seeing most of them.
+  # Measured by overflowing contexts Ollama honours, varying num_predict on
+  # purpose so the two theories separate:
+  #
+  #   num_ctx 512   num_predict 1     limit 258   (NumCtx-NumPredict predicts 511)
+  #   num_ctx 1024  num_predict 200   limit 514   (predicts 824)
+  #
+  #   limit = num_ctx / 2 + 2, whatever num_predict says.   (ollama 0.32.5)
+  #
+  # The product's own data says the same: the run of 2026-08-17 carried
+  # max_output_tokens=2048 and was still cut to 8194, where a reservation of
+  # 2048 would have left 14,336.
+  #
+  # So this setting does NOT buy instruction room — half the window is reserved
+  # no matter what is asked for, and 8,194 is the whole prompt budget at
+  # AGENT_MODEL_CONTEXT=16384. It remains worth setting as a cap on one reply,
+  # which is what it says on the tin. What actually buys instruction room is
+  # cutting the prompt (see agent_sandbox_env) or doubling the window, and
+  # docs/PROMPT-WINDOW.md has the measurement for both.
   # NOT defaulted here, and that is a deliberate limitation with a date on it.
   # Every key load_env defaults must also appear in .env.example and in the
   # README's settings table — the suite gates all three against each other — and
@@ -3610,6 +3626,41 @@ agent_llm_base_url() {
   fi
   port="$(ollama_url)"; port="${port##*:}"
   printf 'http://host.docker.internal:%s/v1' "${port}"
+}
+
+# agent_sandbox_env — the environment OpenHands injects into every sandbox it
+# creates, in the JSON its OH_AGENT_SERVER_ENV passthrough expects.
+#
+# One variable, and it is here to stop a download that costs 4,232 tokens of
+# every prompt this tier sends.
+#
+# On startup the agent-server clones github.com/OpenHands/extensions into
+# ~/.openhands/cache/skills/public-skills and lists what it finds in a <SKILLS>
+# block in the system prompt. Measured on this box: 59 skills cached, 57 in the
+# prompt, 4,232 tokens — 23% of an 18,353-token prompt against a window that
+# only ever grants a prompt 8,194 (see docs/PROMPT-WINDOW.md). They are
+# release-notes, linear, datadog, discord, azure-devops, bitbucket and the
+# like. On a private box with no forge credentials not one of them can run.
+#
+# There is no setting for it. agent_context.load_public_skills is false in this
+# stack's own settings and it makes no difference: the app server calls its
+# skill loader with load_public=True hardcoded
+# (app_conversation_service_base.py:143), overriding what the user asked for.
+# The filter that is supposed to narrow the catalogue is broken upstream too —
+# marketplace_path defaults to 'marketplaces/default.json', that file is not in
+# the repository, and a marketplace that cannot be read is treated as no filter
+# at all, so the default loads EVERYTHING.
+#
+# So the lever is the ref. EXTENSIONS_REF is read by the SDK and passed to git;
+# pointed at a ref that does not resolve, the clone fails, load_public_skills
+# returns an empty list by contract ("Returns empty list if loading fails"),
+# and the <SKILLS> block disappears. Nothing else in the conversation changes.
+#
+# Named rather than random so it is self-explaining in a log, and overridable
+# so that a box which DOES want the catalogue can have it back with one line in
+# .env rather than a patch.
+agent_sandbox_env() {
+  printf '{"EXTENSIONS_REF":"%s"}' "${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
 }
 
 # docker_bridge_gateway — the host's address ON the default docker bridge, i.e.

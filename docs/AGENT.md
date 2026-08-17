@@ -165,11 +165,17 @@ ladder gives **8192** on a 16 GiB box and **4096** on an 8 GiB one, because
 that is what leaves room for the model itself.
 
 This is not a "loses the thread sooner" problem, it is a "cannot start"
-problem. Measured on a real run: the agent's first request to the model was
-**15,492 tokens** — its system prompt plus 22 tool definitions — before the
-task text. At the 4096 rung Ollama silently truncates that, and there is no
-window in which the agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at
-least 16384, and 32768 if the RAM is there, or do not enable this tier.
+problem. Measured on a real run with the model's own tokenizer: the agent's
+first request was **18,353 tokens** — 10,280 of tool JSON for 26 tools, 4,871
+of dynamic context, 3,037 of system prompt, and 165 for the task itself. At the
+4096 rung Ollama silently truncates that, and there is no window in which the
+agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at least 16384, and
+32768 if the RAM is there, or do not enable this tier.
+
+And 16384 is not as much headroom as it reads: **Ollama gives a prompt half the
+window**, measured as `num_ctx/2 + 2` on 0.32.5, so the agent's real prompt
+budget at `AGENT_MODEL_CONTEXT=16384` is 8,194. Every number above, the
+truncation rule, and what was cut to fix it are in docs/PROMPT-WINDOW.md.
 
 **The 3b model finishes the loop without doing the work.** This is the one to
 read before enabling the tier on a small droplet. Measured end to end: the
@@ -197,7 +203,7 @@ reports this model as `tools`-capable. A 3B model is simply not reliable at
 emitting one. Give the agent tier the largest model your RAM allows, and do not
 judge it by a run on the small rung.
 
-**It is slower than the client's own patience.** That 15,492-token prompt is
+**It is slower than the client's own patience.** That 18,353-token prompt is
 processed at roughly **17 tokens/second** on 4 CPU cores — about fifteen
 minutes for the first call. The LLM client gives up at its `timeout` (300 s by
 default) and cancels, which Ollama logs as a `500`, and the run makes no
@@ -577,9 +583,9 @@ that returns `ok`"), start to file-on-disk, all six links green:
 Two things in that table are worth internalising.
 
 **Model size barely moves the number**, because an agent step is dominated by
-**reading**, not writing: OpenHands' prompt is around 15,000 tokens before the
-model produces its first one. A two-line function and a two-hundred-line
-refactor cost nearly the same on the way in.
+**reading**, not writing: OpenHands' prompt is 18,353 tokens before the model
+produces its first one. A two-line function and a two-hundred-line refactor
+cost nearly the same on the way in.
 
 **Neither does halving the machine.** The 7.8 GiB droplet is the box this
 project targets, and one task there costs 12 minutes against 11 on a box with

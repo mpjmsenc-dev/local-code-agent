@@ -21,18 +21,22 @@ token ids for a string under *the loaded model's own* tokenizer.
     $ curl -s 127.0.0.1:42733/props | jq '{n_ctx: .default_generation_settings.n_ctx, model: .model_path}'
     { "n_ctx": 16384, "model": ".../blobs/sha256-4a188102020e9c9530b687fd6400f775c45e90a0d7baafe65bd0a36963fbb7ba" }
 
-The port is ephemeral and changes on every model load — find it with
-`ss -lntp | grep ollama` rather than hardcoding it. `n_ctx: 16384` confirms
-this runner *is* the `-agent` model's process, so its tokenizer is the one that
-will count the real prompt. It is free, it is local, and it is exact.
+The port is ephemeral: it changes on every model load, and it went from 42733
+to 43423 during this very session when the model idled out and was reloaded.
+Do not hardcode it, and do not grep for it by name either — the runner does not
+reliably show up as `ollama` in `ss -lntp`. Ask each loopback listener whether
+it answers `/props` like llama.cpp; the one that does is the runner. `n_ctx`
+coming back 16384 then confirms it is the `-agent` model's own process, so its
+tokenizer is the one that will count the real prompt. Free, local, exact.
 
 ## The window
 
 | | tokens |
 |---|---|
-| `AGENT_MODEL_CONTEXT` (scripts/lib.sh:533), the derived model's `num_ctx` | **16,384** |
+| `AGENT_MODEL_CONTEXT`, the derived model's `num_ctx` | **16,384** |
 
-This is the whole window: prompt and generation share it.
+Prompt and generation share it — but not evenly, and not the way this project
+assumed. See "The window is not the window" below: a prompt may have half.
 
 ## Where the prompt comes from
 
@@ -150,6 +154,40 @@ That reframes every previous failure in this tier. The runs that wrote outside
 their working directory and reported success on code they never executed were
 not ignoring their instructions. **They never received them.**
 
+## Reproducing any of this
+
+Nothing here needs a paid tokenizer, a library, or a second model. Four steps.
+
+**1. Find the runner and confirm it is the right model.** The port is
+ephemeral; never hardcode it.
+
+    PORT=$(ss -lntp | awk '/ollama/ && !/11434/ {split($4,a,":"); print a[2]; exit}')
+    curl -s 127.0.0.1:$PORT/props | jq '.default_generation_settings.n_ctx'
+
+**2. Count tokens exactly.**
+
+    ntok() { curl -s 127.0.0.1:$PORT/tokenize -H 'Content-Type: application/json' \
+             -d "$(jq -Rs '{content:.}')" | jq '.tokens|length'; }
+    ntok < some-file.txt
+
+**3. Get the prompt the agent was actually given.** Event 0 of the conversation,
+inside the runtime container:
+
+    C=$(docker ps --format '{{.Names}}' | grep oh-agent-server)
+    docker exec "$C" sh -c 'cat /workspace/conversations/*/events/event-00000-*.json' \
+      | jq -r '.system_prompt.text'    # and .dynamic_context.text, and .tools
+
+**4. Read what Ollama made of it.** This is the number that matters, and it is
+only ever in the log:
+
+    journalctl -u ollama | grep 'truncating input prompt'
+
+The agent's own accounting is in the same conversation's event stream —
+`.value.usage_to_metrics.agent.accumulated_token_usage.prompt_tokens` on the
+`ConversationStateUpdateEvent`s — and differencing consecutive ones gives the
+per-call charge, which is what proves the truncation rather than merely
+suggesting it.
+
 ## The cut that fits
 
     18,353 − 4,232 (SKILLS) = 14,121 tokens
@@ -171,6 +209,54 @@ Two things fix the rest, and they are not alternatives — the first is free:
    Bitbucket and Azure DevOps. On this box none of the 19 can do anything.
 
 Only both together put the prompt under 8,194 on the RAM this project targets.
+
+### What the tools are worth
+
+Tokenized per tool on the reconstruction, so these are shares rather than
+absolute counts (the reconstruction under-counts the whole by ~18%):
+
+| group | count | share of tool JSON | ≈ of the real 10,280 |
+|---|---:|---:|---:|
+| `browser_*` | 14 | 35.3% | ~3,630 |
+| `create_*_pr` | 5 | 15.3% | ~1,570 |
+| `invoke_skill` | 1 | 1.9% | ~195 |
+| **removable here** | **20** | **52.5%** | **~5,394** |
+
+`invoke_skill` joins them once the catalogue is gone: it is the tool whose only
+purpose is to invoke a skill from a list that is now empty.
+
+So the full arithmetic, if both cuts are made:
+
+    18,353 − 4,232 (skills) − ~5,394 (20 dead tools) ≈ 8,727
+
+Still ~500 over 8,194, closed by dropping `CUSTOM_SECRETS` (395) and the
+`BROWSER_TOOLS` (163) and `PULL_REQUESTS` (139) sections of the system prompt,
+which describe tools that would no longer exist.
+
+## A correction, and how it was caught
+
+`scripts/lib.sh` carried this reasoning next to `AGENT_MAX_OUTPUT_TOKENS`:
+
+> 16384 - 8190 = 8194. The client reserved half the window for output it was
+> never going to produce […] 2048 is generous for one reply from a coding agent
+> and buys 6,142 more tokens of instruction.
+
+The arithmetic works and the conclusion is wrong, because `16384/2 + 2` is
+*also* 8194. Two theories, one observation, and nobody had varied the input
+that separates them. Varying it:
+
+| `num_ctx` | `num_predict` | `NumCtx−NumPredict` predicts | observed |
+|---:|---:|---:|---:|
+| 512 | 1 | 511 | **258** |
+| 1,024 | 200 | 824 | **514** |
+
+The reservation theory is out. And the product's own data had already said so:
+the run measured here carried `max_output_tokens=2048` and was still cut to
+8,194, where a 2,048-token reservation would have left 14,336.
+
+`AGENT_MAX_OUTPUT_TOKENS` buys no instruction room at all. It is still worth
+setting as what it claims to be — a cap on one reply — but the 6,142 tokens it
+was believed to buy were never there.
 
 The skills being dropped are OpenHands' built-in catalogue: `release-notes`,
 `iterate`, `linear`, `code-review`, `datadog`, `discord`, `deno`,
