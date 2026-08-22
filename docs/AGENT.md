@@ -678,8 +678,24 @@ demonstrate it. The honest position is now:
 #### RESULT — the re-run that measures this
 
 Measured on the droplet with the request timeout fixed and the prompt no longer
-truncated: the same `wordcount.py` task, on the same rung, against the sharpened
-`config/CONVENTIONS.md` rules.
+truncated: the same `wordcount.py` task, on the same rung.
+
+**Which channel carried the rules, because this page got that wrong once.** This
+paragraph used to say the re-run ran "against the sharpened
+`config/CONVENTIONS.md` rules". It cannot have. `config/CONVENTIONS.md` is read
+by aider and the chat app and **has never reached the agent** — the channel that
+was supposed to carry it there is `system_message_suffix`, which this build
+overwrites with its own `<HOST>` value (measured: `SystemPromptEvent` 14,640
+chars, neither rule present). The rules reach the agent in the **task text**,
+through `agent_task_prompt`, and nowhere else.
+
+That leaves one thing unsettled about the table below, and it is worth stating
+rather than papering over: the three prohibitions now in `agent_task_prompt`
+landed at roughly the same time as this re-run, and **nothing recorded which
+version of the task text that run received.** So "the rule was read, worded as a
+prohibition, and present three times over" is an inference, not a measurement.
+The next run of this task should capture its own `SystemPromptEvent` and the
+submitted task text alongside the result, so the question cannot be open twice.
 
 | | |
 |---|---|
