@@ -2965,7 +2965,7 @@ agent_task_prompt() {
   #                                /workspace/project/TestAppOllama1Coding)
   #   it never checked the task    (a test file and a shown run were asked for
   #                                in plain words, and neither was attempted)
-  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Do not report success on code you have not executed."
+  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Never report success on code you have not executed."
   printf '%s\n' "Never write outside ${dir}. Not /workspace, not anywhere above it."
   printf '%s\n' "Before finishing, re-read the task above and check each stated requirement against what you actually did. If any requirement is untouched, the task is not complete."
 }

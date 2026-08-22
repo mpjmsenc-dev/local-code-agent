@@ -162,7 +162,7 @@ PROMPT_CHARS="$(lca_system_prompt | wc -c)"
 PROMPT_TOKENS=$(( PROMPT_CHARS / 4 ))
 PROMPT_CAP=$(( OLLAMA_CONTEXT_LENGTH * 15 / 100 ))
 if [[ "${OLLAMA_CONTEXT_LENGTH}" =~ ^[0-9]+$ ]] && (( PROMPT_TOKENS > PROMPT_CAP )); then
-  p_warn "the chat app's system prompt is ~${PROMPT_TOKENS} tokens, over the ${PROMPT_CAP} this stack budgets (15% of your ${OLLAMA_CONTEXT_LENGTH}-token context) — config/CONVENTIONS.md is appended to it, so a long instructions file is paid for on every message. Shorten it, or set AIDER_CONVENTIONS=false to drop it from the chat app, aider and the agent together."
+  p_warn "the chat app's system prompt is ~${PROMPT_TOKENS} tokens, over the ${PROMPT_CAP} this stack budgets (15% of your ${OLLAMA_CONTEXT_LENGTH}-token context) — config/CONVENTIONS.md is appended to it, so a long instructions file is paid for on every message. Shorten it, or set AIDER_CONVENTIONS=false to drop it from the chat app and aider. (It does not change what the AGENT receives: the file never reaches it — see docs/AGENT.md.)"
 else
   p_pass "system prompt fits its share of the context (~${PROMPT_TOKENS} tokens)"
 fi

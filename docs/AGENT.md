@@ -361,17 +361,49 @@ visible instead of comfortable.
 
 ## Your instructions reach it too
 
-`config/CONVENTIONS.md` is the one file that steers all three surfaces — aider,
-the chat app, and this agent. The agent gets it two ways, because only one of
-them is guaranteed:
+`config/CONVENTIONS.md` steers **two** of this stack's three surfaces directly,
+and the third gets a distilled subset by a different route. That distinction was
+wrong here for months and is worth stating plainly.
 
-- **Mounted** at `/.openhands/lca-instructions.txt` inside the container, which
-  is a plain bind mount and therefore certain.
-- **Passed** as `LCA_USER_INSTRUCTIONS`, which is *not* a documented OpenHands
-  variable. It costs nothing if the agent ignores it, and this project does not
-  claim it works — the mount is the part that does.
+| surface | how the file reaches it | verified |
+|---|---|---|
+| aider | `--read config/CONVENTIONS.md` on the command line | yes — a real aider flag |
+| the chat app | appended to `lca_system_prompt` | yes — its keyed phrases are in the assembled prompt |
+| **the agent** | **it does not** | the mount and the env var are both inert |
 
-`AIDER_CONVENTIONS=false` switches the file off for all three at once.
+**What this section used to say, and why it was wrong.** It claimed the agent
+got the file two ways, and that the bind mount was "certain". The mount *is*
+certain — the file is genuinely at `/.openhands/lca-instructions.txt` inside the
+container, exactly as described. **Nothing reads it.** `grep -rn
+lca-instructions /app/openhands` is empty, and none of the file's five keyed
+phrases appear anywhere in the agent's first prompt. The mechanism was verified
+and the effect never was, which is the same mistake as `agent_settings.tools`
+and `SANDBOX_STARTUP_GRACE_SECONDS` — see the settings audit below.
+
+**How the rules actually reach the agent:** `agent_task_prompt` writes three
+prohibitions into the task text, and that channel is measured — the submitted
+and received `sha256` match, and all three are present in the `MessageEvent` the
+agent received.
+
+**Why the whole file is not sent that way**, since the channel exists and works.
+Tokenized with the model's own tokenizer:
+
+| | tokens |
+|---|---:|
+| `config/CONVENTIONS.md`, editor note stripped | **680** |
+| the three prohibitions actually sent | **96** |
+| the margin a whole conversation has | **2,601** |
+
+Sending the file would spend **26% of everything a conversation has** on text
+whose agent-relevant part is 96 tokens — and it would be spent on every
+conversation, permanently, against a window this project just built a ceiling
+for. The file is written for humans editing code with aider; the agent needs
+three sentences out of it. So the agent gets the subset, and the subset is
+gated: `tests/test-lib.sh` holds `agent_task_prompt` to the same keyed phrases
+`config/CONVENTIONS.md` is held to, so the two cannot drift apart silently.
+
+`AIDER_CONVENTIONS=false` switches the file off for aider and the chat app. It
+does **not** change what the agent receives, because the agent never had it.
 
 ## Security
 
@@ -1206,3 +1238,102 @@ If a second channel is ever wanted, `.openhands/microagents/` is what this
 build actually reads (alongside `hooks.json`, `skills`, `setup.sh` and
 `pre-commit.sh`) — and it would cost prompt tokens in `dynamic_context`, which
 after the cut is exactly what there is least of.
+
+---
+
+## The worst bug this project has had: the agent's work was deleted by the command that told you to read it
+
+It ran for weeks, against real work, and every part of it looked fine from the
+outside. It is written up at length because the shape is more useful than the
+fix.
+
+### What the messages claimed
+
+Three of them, in the order a user meets them:
+
+| where | what it said |
+|---|---|
+| `lca agent watch`, on stopping a run | *"Agent stopped. Its workspace is intact in `~/.openhands` — read it, then start again."* |
+| `lca agent stop` | *"Its workspace and settings are kept in `~/.openhands`."* |
+| `lca agent gc` | warned that removing a sandbox *"deletes anything the agent built inside it that you have not copied out"* — and then removed it |
+
+### What actually happened
+
+**The sandbox has no mounts.** Not a misconfigured mount — none:
+
+    docker inspect <sandbox> --format '{{.Mounts}}'   ->   (empty)
+
+Everything the agent writes lives in that container's writable layer and
+nowhere else. `~/.openhands` held settings, a sqlite database and conversation
+event logs, and never a single file the agent produced — confirmed by searching
+the whole host for the deliverables of earlier runs and finding none.
+
+Then the sequence composes:
+
+1. The watcher stops the **app** container. It does not stop the sandbox, so at
+   that moment the agent's files still exist.
+2. It tells you to read them in `~/.openhands`, where they are not, and to
+   *start again*.
+3. `lca agent start` runs `remove_orphan_sandboxes`, which `docker rm -f`s every
+   sandbox.
+
+**Following the advice destroyed the work the advice had just pointed at.** The
+one instruction the message gave was the one action that made recovery
+impossible.
+
+### Why the fix is preservation and not rewording
+
+Rewording was the cheaper fix and it was the wrong one. The message was not
+merely inaccurate — it was answering a real need. Someone stops a run precisely
+*because* they want to look at what it produced. A corrected message that said
+"your work is in a container that is about to be deleted, extract it yourself
+with `docker cp`" would have been honest and would still have left every user
+one forgotten step away from losing everything.
+
+So `agent_preserve_workspace` copies `/workspace` out **before** the container is
+destroyed, at all three moments where that happens: when the watcher stops a run,
+when `lca agent start` collects orphans, and when `lca agent gc` reclaims. The
+promise the messages were making is now a promise the code keeps, which is the
+only version of "fixed" worth having.
+
+### Three follow-on bugs, and the second is the instructive one
+
+**1. The gate found the second removal path.** Written as "preserve, then
+remove", the new gate passed while `lca agent gc` — a completely separate
+removal site — still deleted work outright. It now checks *every* site that
+destroys a sandbox against the lines above it, and fails if fewer than two exist.
+
+**2. Fixing stopped-sandbox collection alone would have made things worse.**
+`agent_orphan_sandboxes` asked `docker ps`, which lists running containers only,
+so an *exited* sandbox was reclaimed by nothing this project ships and held its
+layer for the life of the box. The obvious fix is to look at `docker ps -a`.
+
+That fix, on its own, is a data-loss bug. `agent_preserve_workspace` did its
+work through `docker exec`, and Docker refuses that on a stopped container —
+`container … is not running`. So widening collection would have reached exactly
+the sandboxes whose work could not be saved, and deleted them unread. **The
+tidy-up would have caused the very loss the preservation was written to
+prevent.**
+
+It was caught by calling the preserve function against a stopped container
+rather than assuming it behaved the same as against a running one. Preservation
+now has a `docker cp` fallback, which needs nothing from inside the container.
+
+**3. The fast path failed silently on a different image.** The
+`find -quit` + GNU `tar` route is not universal; a busybox image answers
+neither, and the first version reported *"nothing to save"* about a workspace
+full of work. It now falls through to the fallback instead of returning, because
+**silence about an empty sandbox and silence about an unreadable one must not
+look the same.**
+
+### The lesson, which is the same one as everywhere else in this file
+
+Every one of these was a mechanism that had been verified and an effect that had
+not. The bind mount really was mounted. `docker ps` really did list sandboxes.
+`docker exec` really did copy files. Each check passed, and none of them was a
+check of the thing that mattered.
+
+The question that finds these is never *"is it configured?"* — it is **"what
+would I observe if this did nothing at all, and have I observed otherwise?"**
+For the workspace the answer took one command: look on the host for a file the
+agent wrote. There was never one.

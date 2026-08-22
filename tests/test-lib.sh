@@ -4120,6 +4120,41 @@ suffix_carries_the_conventions_rules() {
 check "the task's system message carries the same two rules as the conventions" \
   suffix_carries_the_conventions_rules
 
+# ...and the same, on the channel that actually arrives.
+#
+# The gate above guards agent_task_suffix, which is INERT: the app overwrites
+# system_message_suffix with its own <HOST> value, measured. It is kept because
+# the suffix is still sent and would be correct on a build that honoured it —
+# but a drift gate whose only subject is a dead channel protects nothing. The
+# rules reach the model through agent_task_prompt and through nothing else, so
+# that is what has to be held to config/CONVENTIONS.md's keyed wording.
+#
+# Not a duplicate of the three checks above. Those assert the prompt demands the
+# right behaviours; this asserts it does so in the FILE'S words, so that
+# rewording config/CONVENTIONS.md without touching the prompt is caught.
+task_prompt_carries_the_conventions_wording() {
+  local prompt lower
+  prompt="$(agent_task_prompt /workspace/project 'do the thing')"
+  lower="${prompt,,}"
+  grep -qF 'never report success on code you have not executed' <<<"${lower}" || {
+    echo 'the task text lost the run-what-you-built rule in the wording config/CONVENTIONS.md is keyed to' >&2
+    return 1; }
+  # The directory rule is the one two droplet runs actually violated, and the
+  # prompt states it with the directory interpolated, so match the stable half.
+  grep -qF 'never write outside' <<<"${lower}" || {
+    echo 'the task text lost the working-directory prohibition' >&2; return 1; }
+  # Both phrases must still be in the file the gate claims to be keyed to, or
+  # this is checking the prompt against nothing.
+  local body
+  body="$(awk '/<!--/ { skip = 1 } skip == 0 { print } /-->/ { skip = 0 }' \
+            "${REPO}/config/CONVENTIONS.md" | tr '\n' ' ' | tr -s ' ')"
+  grep -qiF 'never report success on code you have not executed' <<<"${body}" || {
+    echo 'config/CONVENTIONS.md no longer carries the phrase the task text is matched against' >&2
+    return 1; }
+}
+check "...and so does the task text, which is the channel that reaches the agent" \
+  task_prompt_carries_the_conventions_wording
+
 # Identifying the conversation by SET DIFFERENCE rather than by being newest.
 CONV_BEFORE='{"items":[{"id":"old-one"},{"id":"older"}]}'
 CONV_AFTER='{"items":[{"id":"old-one"},{"id":"older"},{"id":"the-new-one"}]}'
