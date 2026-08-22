@@ -196,13 +196,46 @@ start_agent() {
     # does not pretend it is one: the file is also mounted where the agent can
     # read it, and docs/AGENT.md says which of the two is guaranteed. An env
     # var that may do nothing is fine only when something else does the job.
+    # INERT, and now known to be. 'grep -rn LCA_USER_INSTRUCTIONS /app/openhands'
+    # is empty: it is a name this project invented, so nothing on the other side
+    # was ever going to read it. Kept because it costs one env var and would be
+    # the natural hook if OpenHands ever grows one -- but nothing may reason
+    # from its presence that the instructions reach the model. They reach it
+    # through agent_task_prompt, which is measured and byte-identical on
+    # arrival, and through nothing else.
     extra_env+=( -e "LCA_USER_INSTRUCTIONS=${instructions}" )
   fi
 
+  # WHICH OF THESE ACTUALLY DO ANYTHING. Audited 2026-08-22, by experiment
+  # rather than by whether the API accepted them, after three settings in a row
+  # turned out to be inert. The rule that came out of it:
+  #
+  #   OH_<FIELD> / OH_SANDBOX_<FIELD>   nested config. WORKS.
+  #   bare SANDBOX_<FIELD>              read only inside `if config.sandbox is
+  #                                     None`, and OH_SANDBOX_KIND makes that
+  #                                     false, so it is DEAD here. This is how
+  #                                     SANDBOX_STARTUP_GRACE_SECONDS fooled us;
+  #                                     SANDBOX_VOLUMES sits in the same branch.
+  #   a name this project invented      nothing reads it. Ever.
+  #
+  # Verified working: AGENT_SERVER_IMAGE_* (the sandbox runs that image),
+  # OH_SANDBOX_HOST_PORT (arrives as OH_WEBHOOKS_0_BASE_URL), OH_WEB_URL
+  # (arrives as OH_ALLOW_CORS_ORIGINS_0), OH_SANDBOX_STARTUP_GRACE_SECONDS
+  # (setting it to 1 reproduced the 08-22 failure on demand), OH_AGENT_SERVER_ENV
+  # (EXTENSIONS_REF reaches the sandbox and the catalogue is gone from the
+  # prompt), LOG_ALL_EVENTS (read at app_server/utils/logger.py:62).
+  #
+  # INERT, and left in place deliberately -- see LCA_USER_INSTRUCTIONS above and
+  # the lca-instructions mount below. docs/AGENT.md carries the whole table.
   as_root docker run -d \
     --name "${AGENT_CONTAINER}" \
     --restart unless-stopped \
     ${extra_env[@]+"${extra_env[@]}"} \
+    `# INERT. Nothing reads this path: 'grep -rl lca-instructions /app/openhands'` \
+    `# is empty, and none of CONVENTIONS.md's five load-bearing phrases appear` \
+    `# anywhere in event 0. What OpenHands DOES read from .openhands is` \
+    `# hooks.json, microagents, skills, setup.sh and pre-commit.sh. The rules` \
+    `# reach the model through the TASK TEXT (agent_task_prompt) and only there.` \
     -v "${REPO_ROOT}/config/CONVENTIONS.md:/.openhands/lca-instructions.txt:ro" \
     -e AGENT_SERVER_IMAGE_REPOSITORY="${AGENT_RUNTIME_IMAGE}" \
     -e AGENT_SERVER_IMAGE_TAG="${AGENT_RUNTIME_TAG}" \
@@ -350,6 +383,16 @@ seed_agent_settings() {
   # measured live by differencing two runs and subtracting the task-length
   # change — the tool lets the agent switch to another model on a box with one.
   # docs/PROMPT-WINDOW.md has the rest of the tool budget and why it is stuck.
+  # agent:"CodeActAgent" is INERT, and kept only because it is this API's own
+  # default. Measured: the string round-trips, but "CodeActAgent" exists nowhere
+  # in the image except as the default of this very field -- the SDK ships
+  # Agent and ACPAgent, and the conversation's base_state.json records
+  # agent.kind = "Agent" whatever is posted here. Do not read its presence as
+  # "this stack runs CodeActAgent"; nothing resolves the name at all.
+  #
+  # The llm.* fields below are the opposite and were checked the same way: all
+  # five arrive in the sandbox's own base_state.json (model, base_url,
+  # native_tool_calling, max_output_tokens 2048, timeout 1800).
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         --argjson out "$(agent_max_output_tokens)" \

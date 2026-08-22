@@ -3716,6 +3716,48 @@ work_is_saved_before_the_sandbox_is_destroyed() {
 }
 check "the agent's work is copied out before its sandbox is destroyed" \
   work_is_saved_before_the_sandbox_is_destroyed
+# The context ceiling. A conversation that outgrows the window is not degraded,
+# it is untrustworthy: ollama keeps the first 4 tokens and the TAIL, so the run
+# continues with its role, its rules and the definition of the tool that
+# executes commands deleted. Every documented failure of this tier was measured
+# in that state. docs/PROMPT-WINDOW.md.
+truncation_stops_the_run() {
+  # Truncation must outrank every other verdict, including the wall clock:
+  # the others stop a run going nowhere, this one stops a run that looks like
+  # progress and is not.
+  [[ "$(agent_run_verdict 0 0 999999 1 99 1 truncated)" == "truncated" ]] || {
+    echo 'a truncated run is no longer stopped, or another limit outranks it' >&2
+    return 1; }
+  [[ "$(agent_run_verdict 0 0 999999 1 0 0 ok)" == "timeout" ]] || {
+    echo 'the context check has displaced the wall-clock verdict' >&2; return 1; }
+  # And it must never invent one. No journal, an unparseable reading, or a
+  # window it does not know all have to come back ok — stopping somebody's run
+  # on a measurement that was not made is worse than not watching.
+  local v
+  for v in "$(agent_context_verdict abc def no 90)" \
+           "$(agent_context_verdict 500 0 no 90)" \
+           "$(agent_context_verdict '' '' '' '')"; do
+    [[ "${v}" == "ok" ]] || {
+      echo 'the context check reports a verdict from a reading it does not have' >&2
+      return 1; }
+  done
+  # The threshold has to actually bite, or the warning never fires.
+  [[ "$(agent_context_verdict 13783 16384 no 90)" == "ok" ]]   || { echo 'warns far below the threshold' >&2; return 1; }
+  [[ "$(agent_context_verdict 14800 16384 no 90)" == "near" ]] || { echo 'does not warn at 90% of the window' >&2; return 1; }
+  [[ "$(agent_context_verdict 1 16384 yes 90)" == "truncated" ]] || {
+    echo 'an observed truncation is not reported as one' >&2; return 1; }
+  # The watcher must consult it, and stop rather than merely mention it.
+  local watch_body
+  watch_body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
+  grep -q 'agent_context_state' <<<"${watch_body}" || {
+    echo 'the watcher never reads the context state, so the ceiling is documentation again' >&2
+    return 1; }
+  grep -q 'ctx_verdict' <<<"${watch_body}" || {
+    echo 'the watcher reads the context state and does not pass it to the verdict' >&2
+    return 1; }
+}
+check "a run whose prompt was truncated is stopped, and nothing is stopped on a guess" \
+  truncation_stops_the_run
 agent_base_url_is_not_loopback() {
   local u; u="$(agent_llm_base_url)"
   # host.docker.internal, because inside the container 127.0.0.1 is the

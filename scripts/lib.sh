@@ -561,6 +561,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # agent_settings.tools — a documented setting that is silently inert on the
   # path this project actually uses. See agent.sh and docs/AGENT.md.
   AGENT_SANDBOX_GRACE_SECONDS="${AGENT_SANDBOX_GRACE_SECONDS:-120}"
+  # When the watcher starts warning that a conversation is running out of
+  # window, as a percentage of it. Stopping is not tunable and happens only on
+  # real truncation; this is the early warning before that.
+  AGENT_CONTEXT_WARN_PERCENT="${AGENT_CONTEXT_WARN_PERCENT:-90}"
   # How much of that window the agent may spend on ONE reply.
   #
   # It is not a cap on verbosity, it is a cap on how much of the window the
@@ -2701,6 +2705,57 @@ agent_failure_signature() {
 # uses here for "keep everything", so a reader who has met one has met both.
 # A non-numeric limit is also no limit rather than an error: a typo in .env
 # must not stop a run that is going fine.
+# agent_context_state [SINCE] — "USED<TAB>WINDOW<TAB>TRUNCATED", or nothing.
+#
+# The margin is the limit nobody was watching. Measured: this tier's prompt
+# starts at 13,783 of a 16,384 window, so a whole conversation has 2,601 tokens,
+# and every observation is appended and never removed. Reading one 100-line
+# source file costs 1,287 of them; a 300-line file costs 3,652 and ends the
+# conversation in a single turn.
+#
+# And ending it is silent. Ollama does not refuse an over-long prompt, it keeps
+# the first 4 tokens and the TAIL — which deletes the role, the security policy,
+# the filesystem rules and the definition of `terminal`, the tool that executes.
+# Every documented failure of this tier (fabricated tool calls, writing outside
+# the working directory, reporting success on code it never ran) was measured
+# while that was happening. So a truncated run is not a degraded run, it is a
+# run whose findings cannot be trusted, and the watcher stops it.
+#
+# The numbers come from ollama's own journal, which prints one line per prompt
+# whether or not it truncated — the fitting case is silent in every other log:
+#
+#   new prompt, n_ctx_slot = 16384, n_keep = 4, task.n_tokens = 13783
+#   msg="truncating input prompt" limit=8194 prompt=18353 keep=4 new=8194
+#
+# Best-effort by contract. No journalctl, no systemd unit, or no ollama lines
+# yet all return nothing, and the caller treats that as "cannot tell" rather
+# than as "fine" — this must never invent a verdict it did not measure.
+agent_context_state() {
+  local since="${1:--10min}" lines used="" window="" truncated=no
+  have journalctl || return 1
+  lines="$(journalctl -u ollama -o cat --since "${since}" 2>/dev/null)" || return 1
+  [[ -n "${lines}" ]] || return 1
+  grep -q 'truncating input prompt' <<<"${lines}" && truncated=yes
+  used="$(grep -oE 'task\.n_tokens = [0-9]+' <<<"${lines}" | tail -1 | grep -oE '[0-9]+$' || true)"
+  window="$(grep -oE 'n_ctx_slot = [0-9]+' <<<"${lines}" | tail -1 | grep -oE '[0-9]+$' || true)"
+  [[ -n "${used}" || "${truncated}" == "yes" ]] || return 1
+  printf '%s\t%s\t%s\n' "${used:-0}" "${window:-0}" "${truncated}"
+}
+
+# agent_context_verdict USED WINDOW TRUNCATED WARN_PERCENT — "truncated", "near"
+# or "ok". Split from the reading so it can be tested without a journal.
+agent_context_verdict() {
+  local used="${1:-0}" window="${2:-0}" truncated="${3:-no}" pct="${4:-90}"
+  [[ "${truncated}" == "yes" ]] && { printf 'truncated'; return 0; }
+  [[ "${used}" =~ ^[0-9]+$ && "${window}" =~ ^[0-9]+$ ]] || { printf 'ok'; return 0; }
+  [[ "${pct}" =~ ^[0-9]+$ ]] || pct=90
+  (( window > 0 && pct > 0 )) || { printf 'ok'; return 0; }
+  # Integer arithmetic on purpose: this runs in the watcher's hot loop and bc
+  # is not a dependency this project takes for one comparison.
+  (( used * 100 >= window * pct )) && { printf 'near'; return 0; }
+  printf 'ok'
+}
+
 agent_run_verdict() {
   local iters="${1:-0}" max_iters="${2:-0}" elapsed="${3:-0}" \
         timeout_min="${4:-0}" strikes="${5:-0}" max_strikes="${6:-0}"
@@ -2710,7 +2765,14 @@ agent_run_verdict() {
   [[ "${iters}" =~ ^[0-9]+$ ]] || iters=0
   [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed=0
   [[ "${strikes}" =~ ^[0-9]+$ ]] || strikes=0
-  # Wall clock first: it is the one a runaway run is most likely to hit, and
+  # Truncation first, ahead of even the wall clock. The other three verdicts
+  # stop a run that is going nowhere; this one stops a run that is producing
+  # confident output with its own instructions deleted, which is worse than
+  # going nowhere because it looks like progress. See agent_context_state.
+  if [[ "${7:-ok}" == "truncated" ]]; then
+    printf 'truncated'; return 0
+  fi
+  # Wall clock next: it is the one a runaway run is most likely to hit, and
   # the one the user set to be able to walk away.
   if (( timeout_min > 0 )) && (( elapsed >= timeout_min * 60 )); then
     printf 'timeout'; return 0
@@ -2730,6 +2792,7 @@ agent_stop_reason() {
     timeout)    printf 'the wall-clock limit (AGENT_TIMEOUT_MINUTES) was reached — the run was stopped, not finished' ;;
     iterations) printf 'the step ceiling (AGENT_MAX_ITERATIONS) was reached — the run was stopped, not finished' ;;
     stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
+    truncated)  printf 'the prompt outgrew the model window and Ollama cut it — it keeps the first 4 tokens and the TAIL, so the role, the security policy, the filesystem rules and the definition of the tool that executes commands were all deleted. Anything produced after that point is untrustworthy, so the run was stopped rather than left to look like progress' ;;
     *)          printf 'the run ended on its own' ;;
   esac
 }

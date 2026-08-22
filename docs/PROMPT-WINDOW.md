@@ -1049,3 +1049,44 @@ Raising `AGENT_MODEL_CONTEXT` past 16384 is the only lever left that this
 project controls, and it is bounded by RAM: measured earlier in this file, the
 3b at 32768 costs 3.4 GB resident against 2.2 GB at 4096, and generates at
 4.07 tok/s against 10.41. On a 7.8 GiB box that is a real trade, not a free one.
+
+## The ceiling is enforced now, not just written down
+
+Everything above measures the margin. None of it helped anyone, because a
+conversation that walks out of its window does so silently: Ollama does not
+refuse an over-long prompt, it keeps the first 4 tokens and the tail, and the
+agent keeps answering — confidently, with its role, its security policy, its
+filesystem rules and the definition of `terminal` deleted. Every failure this
+project documented in its first month was measured in that state.
+
+That is the same shape as the submission bug: **the system knows, and nobody
+asks.** So `lca agent watch` now asks.
+
+| what | when | why that and not something else |
+|---|---|---|
+| **warn** | the window passes `AGENT_CONTEXT_WARN_PERCENT` (default 90) | the margin only ever shrinks, so the first crossing is the last useful moment to act |
+| **stop** | Ollama actually truncates | not tunable, and it outranks every other limit — the wall clock and the step ceiling stop a run that is going nowhere, this one stops a run that *looks like progress* |
+
+The numbers come from Ollama's own journal, which prints one line per prompt
+whether or not it truncated — a prompt that fits leaves no trace anywhere else:
+
+    new prompt, n_ctx_slot = 16384, n_keep = 4, task.n_tokens = 13783
+    msg="truncating input prompt" limit=8194 prompt=18353 keep=4 new=8194
+
+**It never stops a run on a guess.** No `journalctl`, no ollama unit, an
+unparseable reading, or a window it cannot determine all resolve to `ok` and the
+watcher carries on. Stopping somebody's twenty-minute run on a measurement that
+was not made would be worse than not watching at all, and that is gated: three
+unreadable inputs must all come back `ok`, and the truncated verdict must
+outrank a wall clock that has already expired.
+
+The warning says the thing a user can act on rather than a percentage:
+
+    This conversation has used 14,800 of its 16,384-token window. Every
+    observation is added and none are ever removed, so it only grows — and one
+    100-line file read costs about 1,300 tokens. If it goes over, ollama cuts
+    the FRONT of the prompt and the agent loses its own rules and tools. Finish
+    or restart the conversation soon; a new one starts fresh.
+
+Said once per run, not once per poll: the margin is monotonic, so repeating it
+would bury it under its own echo.

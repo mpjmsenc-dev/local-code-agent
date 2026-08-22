@@ -373,14 +373,34 @@ main() {
     fi
 
     now="$(date +%s)"; elapsed=$(( now - started ))
+
+    # The context ceiling. Read from ollama's own journal rather than counted
+    # here, because ollama is the only thing that knows what the prompt
+    # tokenized to — and it is the only place a prompt that FITS leaves a trace
+    # at all. "cannot tell" (no journalctl, no unit, no lines yet) stays ok:
+    # this must never stop a run on a measurement it did not make.
+    ctx_verdict=ok
+    if ctx_state="$(agent_context_state "-2min" 2>/dev/null)"; then
+      IFS=$'\t' read -r ctx_used ctx_window ctx_trunc <<<"${ctx_state}"
+      ctx_verdict="$(agent_context_verdict "${ctx_used}" "${ctx_window}" \
+                       "${ctx_trunc}" "${AGENT_CONTEXT_WARN_PERCENT}")"
+      # Said once, not every poll: the margin only ever shrinks, so repeating it
+      # each round would bury the line that matters under its own echo.
+      if [[ "${ctx_verdict}" == "near" && "${ctx_warned}" != "yes" ]]; then
+        ctx_warned=yes
+        warn "This conversation has used ${ctx_used} of its ${ctx_window}-token window. Every observation is added and none are ever removed, so it only grows — and one 100-line file read costs about 1,300 tokens. If it goes over, ollama cuts the FRONT of the prompt and the agent loses its own rules and tools. Finish or restart the conversation soon; a new one starts fresh."
+      fi
+    fi
+
     verdict="$(agent_run_verdict "${iters}" "${AGENT_MAX_ITERATIONS}" \
                  "${elapsed}" "${AGENT_TIMEOUT_MINUTES}" \
-                 "${strikes}" "${AGENT_STUCK_STRIKES}")"
+                 "${strikes}" "${AGENT_STUCK_STRIKES}" "${ctx_verdict}")"
     [[ "${verdict}" == "ok" ]] && continue
 
     warn "Stopping the agent: $(agent_stop_reason "${verdict}")"
     info "Steps seen: ${iters} ($(step_source_label "${step_source}")) · failures seen: ${matched_fails} · run time: $(human_duration "${elapsed}")"
     [[ "${verdict}" == "stuck" ]] && info "The failure it kept repeating: ${last_sig}"
+    [[ "${verdict}" == "truncated" ]] && info "Window: ${ctx_used:-?} of ${ctx_window:-?} tokens. Give the next attempt a smaller task, fewer files to read, or a larger AGENT_MODEL_CONTEXT if the RAM is there — docs/PROMPT-WINDOW.md has what the margin buys."
     if [[ "${dry_run}" == "true" ]]; then
       info "--dry-run: the agent is still running."
     else

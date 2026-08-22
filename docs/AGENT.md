@@ -1138,3 +1138,71 @@ Verified end to end: forced the failure with a 1-second grace and got exactly
 that, exit 1; restored 120 and the next submit named its conversation on the
 first poll. The old set-difference path is kept as a fallback for a reply this
 cannot parse.
+
+---
+
+## Which settings actually do anything: the whole list, checked one by one
+
+Three settings turned out to be inert in three separate investigations —
+`agent_settings.tools`, `system_message_suffix`, and
+`SANDBOX_STARTUP_GRACE_SECONDS`. Three is a pattern, so everything this project
+sends into OpenHands was audited the same way: **by changing it and observing
+the result**, never by whether the API accepted it.
+
+### The rule that explains all of them
+
+| how it is spelled | verdict |
+|---|---|
+| `OH_<FIELD>`, `OH_SANDBOX_<FIELD>` | nested config — **works** |
+| bare `SANDBOX_<FIELD>` | read only inside `if config.sandbox is None`, and `OH_SANDBOX_KIND` makes that false — **dead here** |
+| a settings-API field | stored faithfully; honoured **selectively**, and the API cannot tell you which |
+| a name this project invented | nothing reads it, ever |
+
+The second row is the trap: `SANDBOX_STARTUP_GRACE_SECONDS` and
+`SANDBOX_VOLUMES` are both documented, both sit in that branch, and both are
+silently ignored on any stack that configures a sandbox kind — which is every
+stack that works.
+
+### Verified working
+
+| what | how it was proven |
+|---|---|
+| `AGENT_SERVER_IMAGE_REPOSITORY` / `_TAG` | the sandbox runs that exact image |
+| `OH_SANDBOX_KIND` | it is *why* `config.sandbox` is not `None` — the grace experiment proves it |
+| `OH_SANDBOX_HOST_PORT` | arrives in the sandbox as `OH_WEBHOOKS_0_BASE_URL=…:3001/api/v1/webhooks` |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS` | set to 1, the failure reproduced on demand; at 120 it stopped |
+| `OH_WEB_URL` | arrives as `OH_ALLOW_CORS_ORIGINS_0` |
+| `OH_AGENT_SERVER_ENV` → `EXTENSIONS_REF` | present in sandbox env; the 4,232-token catalogue is gone from the prompt |
+| `LOG_ALL_EVENTS` | read at `app_server/utils/logger.py:62` |
+| `llm.model`, `.base_url`, `.native_tool_calling`, `.max_output_tokens`, `.timeout` | all five in the sandbox's own `base_state.json` |
+| `enable_switch_llm_tool` | `switch_llm` is absent from the 24 tools |
+| `initial_message` | byte-identical `sha256` between what was sent and the `MessageEvent` |
+
+### Inert — sent, accepted, and doing nothing
+
+| what | what actually happens |
+|---|---|
+| `agent_settings.tools` | stores verbatim; the prompt's tool array is byte-identical either way |
+| `filter_tools_regex` | posted, stored as `null` |
+| `include_default_tools` | posted, stored as `null` |
+| `agent: "CodeActAgent"` | stored verbatim — but the name appears nowhere in the image except as this field's own default. The SDK ships `Agent` and `ACPAgent`, and `base_state.json` records `agent.kind = "Agent"` regardless |
+| `LCA_USER_INSTRUCTIONS` | a name this project invented; `grep -rn` over `/app/openhands` is empty |
+| `config/CONVENTIONS.md` mounted at `/.openhands/lca-instructions.txt` | never read. None of its five load-bearing phrases appear anywhere in event 0 |
+| `agent.system_message_suffix` | overwritten by the app with its own `<HOST>` value |
+
+**Seven of roughly twenty.** All seven are left in place on purpose — each costs
+one field and would be the natural hook if OpenHands ever honoured it — but each
+is now annotated at the point it is sent, so nobody reasons from its presence.
+
+### The one that matters most
+
+The two rules this project cares about — run what you built, stay in your
+directory — do **not** travel on the instructions mount or the suffix, both of
+which are inert. They reach the model through the **task text** and through
+nothing else. That channel is measured: submitted and received `sha256` match,
+and all three prohibitions are present in the `MessageEvent` the agent got.
+
+If a second channel is ever wanted, `.openhands/microagents/` is what this
+build actually reads (alongside `hooks.json`, `skills`, `setup.sh` and
+`pre-commit.sh`) — and it would cost prompt tokens in `dynamic_context`, which
+after the cut is exactly what there is least of.

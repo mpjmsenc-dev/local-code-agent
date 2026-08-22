@@ -104,7 +104,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -127,6 +127,8 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_fail "OLLAMA_RELAY_PORT='${value}' is not a port number, so the relay cannot listen and the agent tier has no way to reach the model. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install" ;;
     AGENT_MODEL_CONTEXT)
       p_warn "AGENT_MODEL_CONTEXT='${value}' is not a positive number, so the agent's derived model falls back to 16384. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+    AGENT_CONTEXT_WARN_PERCENT)
+      p_warn "AGENT_CONTEXT_WARN_PERCENT='${value}' is not a positive number, so 'lca agent watch' falls back to 90 and you get no early warning before a conversation runs out of window. Fix it in ${ENV_FILE}." ;;
     AGENT_SANDBOX_GRACE_SECONDS)
       p_warn "AGENT_SANDBOX_GRACE_SECONDS='${value}' is not a positive number, so the app falls back to OpenHands' 15-second default — and this box has needed 17. When a sandbox answers late the app abandons it, 'lca agent task' fails, and the container is left running. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     AGENT_MAX_ITERATIONS)
