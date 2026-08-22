@@ -755,6 +755,48 @@ configuration.
 2. It is exact rather than estimated.
 3. It is structurally complete, where 15,225 omits `dynamic_context`.
 
+And there is a fourth reason, which settles it without needing any of the
+above. **Ollama counted the 2026-08-10 prompt too, on the day it was
+estimated at 15,225**, and the journal still holds the line:
+
+    2026-08-10T16:52:05  truncating input prompt  limit=8194 prompt=17820 keep=4 new=8194
+    2026-08-10T16:57:06  truncating input prompt  limit=8194 prompt=17820 keep=4 new=8194
+
+**17,820, not 15,225** — an under-count of 2,595 tokens, 17.1%, on the very
+run the older decomposition was drawn from. The conversation it belongs to is
+`4e0fdc30…`, whose events are timestamped 16:52 and 17:27 the same afternoon.
+
+Nor was that a one-off. Every agent prompt Ollama logged between 2026-08-09 and
+the cut sits in the same band, and none of them is near 15,000:
+
+| date | prompt Ollama counted |
+|---|---:|
+| 08-10 | 17,820 |
+| 08-11 | 17,820, 18,567 |
+| 08-12 | 18,336, 18,313 |
+| 08-17 | 18,353 |
+
+The ~18k regime is what this tier actually ran at for its whole pre-cut history.
+15,225 never described a real prompt on this box.
+
+### Nothing has been truncated since the cut
+
+Counted over the journal rather than asserted: **zero** `truncating input
+prompt` warnings after the catalogue was cut on 2026-08-17. The last one is the
+18,353 line at 10:25:15, and the only two after it — `limit=258` and
+`limit=514` — are the deliberate `num_ctx` probes that established the halving
+rule, not agent runs.
+
+That rule now has four rungs behind it, every one of them observed in this
+journal rather than derived:
+
+| `num_ctx` | `limit` observed | `num_ctx/2 + 2` |
+|---:|---:|---:|
+| 512 | 258 | 258 |
+| 1024 | 514 | 514 |
+| 4096 | 2050 | 2050 |
+| 16384 | 8194 | 8194 |
+
 **15,225 was not wrong about what it measured.** It was an incomplete
 decomposition of a different task, estimated rather than tokenized. Its finding
 that stands untouched is the browser one: ~5,985 tokens, 46% *of the system

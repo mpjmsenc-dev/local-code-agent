@@ -843,9 +843,12 @@ agent's actual requests showed.
 > configuration difference: window, extensions state, agent-server version,
 > tool spec and the 57-skill catalogue were all identical on both dates, and
 > that was checked against the state each run recorded rather than assumed.
-> These figures were also estimated; the later ones come from the model's own
-> tokenizer and are corroborated by Ollama's own log line. The full
-> reconciliation, term by term, is in docs/PROMPT-WINDOW.md.
+> These figures were also estimated. What settles it: **Ollama counted this
+> very run and logged `prompt=17820`** — the 15,225 estimate under-counted the
+> same afternoon's prompt by 17.1%, and every agent prompt in the journal from
+> 08-09 to the cut sits between 17,820 and 18,742. The ~15k figure never
+> described a real prompt on this box. The full reconciliation, term by term,
+> is in docs/PROMPT-WINDOW.md.
 >
 > **What survives unchanged** is everything this section is actually about: the
 > browser share, the dead `agent_settings.tools` knob, and prefix caching. The
