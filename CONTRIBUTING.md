@@ -578,6 +578,16 @@ the one thing such a helper genuinely cannot check: that the extraction still
 finds the right block. Every one of them fails loudly on an empty block, which
 is what stops it asserting over nothing.
 
+**A known false positive, so nobody thinks they have done something wrong.**
+The classifier asks whether a function mentions a `${REPO}/` path *and* uses a
+text tool. A gate that **runs** a repo script and greps its **output** does
+both, and is the opposite of a source grep — `uninstall_says`,
+`tune_dry_run_in` and `big_unknown_is_elided` are all in that position. They
+carry a marker saying so. That is deliberate: a tighter rule would have to
+guess which tool touched which path, and a classifier that guesses is the thing
+this section exists to stop. Three false positives with an honest sentence each
+is a better trade than one clever rule nobody can audit.
+
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
 `tests/source-grep-baseline.txt`, and carries no `SOURCE-GREP:` line, fails the

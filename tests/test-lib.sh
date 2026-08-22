@@ -2928,6 +2928,61 @@ check "...with what came back on screen" \
   grep -qF 'Traceback: FileNotFoundError' <<<"${VIEW_OUT}"
 # The two that matter most, because this is somebody else's format and it will
 # change: an event this build has never seen must still appear.
+# The FIRST event of every conversation, and by far the largest: a system
+# prompt measured at 14,387 characters plus schemas for 26 tools. Unrecognised
+# it fell to the raw fallback and buried the entire run under one wall of JSON
+# — the fallback exists so nothing vanishes, and unbounded it does the
+# opposite. Driven, because the failure is what it PRINTS.
+VIEW_PROMPT_FIXTURE="${SANDBOX}/sysprompt.json"
+{
+  printf '{"items":[\n'
+  printf ' {"kind":"SystemPromptEvent","source":"agent","timestamp":"2026-08-17T10:25:15Z",'
+  printf '"system_prompt":{"text":"'
+  # 4,000 characters, which is the shape of the real thing rather than a token
+  # of it: a fixture that fits on screen cannot show a fixture being buried.
+  awk 'BEGIN { while (i++ < 400) printf "0123456789" }'
+  printf '"},"tools":[{"name":"TerminalTool"},{"name":"FileEditorTool"},{"name":"BrowserTool"}]},\n'
+  printf ' {"kind":"ActionEvent","source":"agent","timestamp":"2026-08-17T10:31:00Z","action":{"kind":"ExecuteBashAction","command":"ls -la"}}\n]}\n'
+} > "${VIEW_PROMPT_FIXTURE}"
+VIEW_PROMPT_OUT="$(bash "${REPO}/scripts/agent-view.sh" --from "${VIEW_PROMPT_FIXTURE}" 2>&1 || true)"
+check "the first event is summarised by size, not printed" \
+  grep -qE 'system prompt · 4[0-9]{3} chars · 3 tools' <<<"${VIEW_PROMPT_OUT}"
+prompt_event_does_not_bury_the_run() {
+  local n
+  n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
+  (( n <= 288 )) || {
+    printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
+    return 1
+  }
+  grep -qF 'bash · ls -la' <<<"${VIEW_PROMPT_OUT}" || {
+    echo 'the run underneath the system prompt did not survive it' >&2
+    return 1
+  }
+}
+check "...so the run underneath it is still readable" prompt_event_does_not_bury_the_run
+# ...and the bound applies to ANY unrecognised event, not just this one, since
+# the next large thing upstream adds will not be called SystemPromptEvent.
+# SOURCE-GREP: the third false positive of this shape, and marked rather than
+# worked around. It RUNS agent-view.sh and greps its output; the only thing it
+# reads out of ${REPO} is a path to execute. What it cannot check is that the
+# eliding message keeps its wording — the line count assertion above is what
+# holds the behaviour.
+big_unknown_is_elided() {
+  local f="${SANDBOX}/bigunknown.json" out
+  { printf '{"items":[{"kind":"SomethingHugeUpstreamAdds","blob":"'
+    awk 'BEGIN { while (i++ < 300) printf "0123456789" }'
+    printf '"}]}\n'; } > "${f}"
+  out="$(bash "${REPO}/scripts/agent-view.sh" --from "${f}" 2>&1 || true)"
+  grep -qE 'more characters of an event this build does not recognise' <<<"${out}" || {
+    printf 'an unrecognised 3,000-character event was printed whole: %s lines\n' "$(grep -c . <<<"${out}")" >&2
+    return 1; }
+  # ...and --full still shows all of it, because eliding must never mean losing.
+  out="$(bash "${REPO}/scripts/agent-view.sh" --full --from "${f}" 2>&1 || true)"
+  ! grep -qE 'more characters of an event' <<<"${out}" || {
+    echo '--full still elided the event it exists to show whole' >&2; return 1; }
+}
+check "...and any oversized unknown event is elided, with the amount said" \
+  big_unknown_is_elided
 check "an event kind nothing here knows is still printed" \
   grep -qF 'SomethingUpstreamAddedLater' <<<"${VIEW_OUT}"
 check "...and one with no recognisable field at all is printed raw" \

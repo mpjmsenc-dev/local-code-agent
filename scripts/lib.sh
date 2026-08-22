@@ -3310,6 +3310,16 @@ agent_event_class() {
   case "$(agent_event_tool "${1:-}" 2>/dev/null || true)" in
     *Finish*|*finish*) printf 'finished'; return 0 ;;
   esac
+  # The FIRST event of every conversation, and the largest thing in the stream
+  # by a wide margin: a system prompt measured at 14,387 characters plus the
+  # schemas for 26 tools. Unrecognised it fell to the raw fallback, so the very
+  # first thing a viewer printed was tens of thousands of characters of JSON
+  # with the run underneath it. It is worth a class of its own because the ONE
+  # number in it a reader wants — how big the prompt is — is the number that
+  # decides whether it fits the window at all.
+  case "${kind}" in
+    *SystemPrompt*|*system_prompt*) printf 'prompt'; return 0 ;;
+  esac
   case "${kind}" in
     *Action*|*action*)        printf 'action' ;;
     *Observation*|*observation*) printf 'observation' ;;
@@ -3407,6 +3417,22 @@ agent_event_body() {
     <<<"${1:-}" 2>/dev/null
 }
 
+# agent_event_prompt_summary JSON — "N chars · M tools", or nothing.
+#
+# The size, not the content. Reading a 14,387-character system prompt in a
+# terminal is not what anybody is doing here; knowing it is 14,387 against a
+# 16,384-token window is.
+agent_event_prompt_summary() {
+  have jq || return 1
+  jq -r '
+    [ (.system_prompt?.text? // .system_prompt? // .text? | strings | length),
+      ( [ .tools?, .system_prompt?.tools? ] | map(arrays) | .[0] | length )
+    ] as $p
+    | if ($p[0] // null) == null then empty
+      else "\($p[0]) chars" + (if ($p[1] // null) == null then "" else " · \($p[1]) tools" end)
+      end' <<<"${1:-}" 2>/dev/null
+}
+
 # agent_event_headline JSON — one line: what this event IS, at a glance.
 #
 # Falls back through progressively weaker descriptions and never to silence:
@@ -3428,6 +3454,11 @@ agent_event_headline() {
     observation)
       if [[ -n "${label}" ]]; then printf '%s returned' "${label}"; else printf 'a result'; fi ;;
     message)   printf 'message' ;;
+    prompt)
+      local size
+      size="$(agent_event_prompt_summary "${json}" 2>/dev/null || true)"
+      if [[ -n "${size}" ]]; then printf 'system prompt · %s' "${size}"
+      else printf 'system prompt'; fi ;;
     error)
       if [[ -n "${label}" ]]; then printf 'ERROR from %s' "${label}"; else printf 'ERROR'; fi ;;
     *)

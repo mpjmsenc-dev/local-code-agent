@@ -142,6 +142,7 @@ print_event() {
     action)      marker='>'; colour="${C_BLUE}" ;;
     observation) marker='<'; colour="${C_GREEN}" ;;
     message)     marker='*'; colour="" ;;
+    prompt)      marker='#'; colour="" ;;
     error)       marker='!'; colour="${C_RED}" ;;
     *)           marker='?'; colour="${C_YELLOW}" ;;
   esac
@@ -181,10 +182,21 @@ print_event() {
         "${C_YELLOW}" "$(( total - AGENT_VIEW_BODY_LINES ))" "${C_RESET}"
     fi
   fi
-  # An event none of the accessors could read is printed whole. This is the
-  # line that keeps a silent screen from ever meaning "nothing happened".
+  # An event none of the accessors could read is printed, and BOUNDED. This is
+  # the line that keeps a silent screen from ever meaning "nothing happened" —
+  # but unbounded it does the opposite: the first event of every conversation
+  # is a system prompt of ~14,400 characters plus 26 tool schemas, and printing
+  # it whole buried the entire run under one wall of JSON. Elided, with the
+  # amount said, so nothing is hidden and nothing is drowned. --full prints it
+  # all.
   if [[ "${class}" == "unknown" && -z "${thought}" && -z "${body}" ]]; then
-    wrap '            ' "${json}"
+    if [[ "${VIEW_FULL}" == "true" || ${#json} -le 600 ]]; then
+      wrap '            ' "${json}"
+    else
+      wrap '            ' "${json:0:600}"
+      printf '            %b(%s more characters of an event this build does not recognise — --full shows them)%b\n' \
+        "${C_YELLOW}" "$(( ${#json} - 600 ))" "${C_RESET}"
+    fi
   fi
   # Time between this event and the one before it: the number that says which
   # step was expensive, available only once there are two of them.
