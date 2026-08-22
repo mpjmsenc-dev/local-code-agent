@@ -4370,6 +4370,48 @@ agent_sh_corrects_the_callback_address() {
 }
 check "the agent tells its sandboxes the port it is really published on" \
   agent_sh_corrects_the_callback_address
+# The 4,232 tokens this tier was spending, on every single prompt, advertising
+# a catalogue of skills that cannot run on it.
+#
+# The agent-server clones github.com/OpenHands/extensions on startup and lists
+# what it finds in a <SKILLS> block. Measured with the model's own tokenizer:
+# 57 skills, 4,232 tokens, 23% of an 18,353-token prompt that had to fit in
+# 16,384 and did not. They are linear, datadog, discord, azure-devops,
+# bitbucket and the rest — capabilities this tier is not for. (Not "none of
+# them can run": a GitHub token IS registered here. They cost a quarter of a
+# prompt that did not fit; that is the reason, and it is enough.)
+#
+# There is no setting: load_public_skills is already false here and the app
+# server calls its loader with load_public=True hardcoded anyway. The ref is
+# the lever, and docs/PROMPT-WINDOW.md has the whole measurement.
+agent_sandbox_env_disables_public_skills() {
+  local j; j="$(agent_sandbox_env)"
+  [[ "${j}" == '{"EXTENSIONS_REF":"lca-public-skills-disabled"}' ]] || {
+    printf 'agent_sandbox_env emitted %s, which would let the catalogue load\n' "${j}" >&2
+    return 1; }
+}
+check "the agent's sandboxes are told not to fetch the public skills catalogue" \
+  agent_sandbox_env_disables_public_skills
+# Overridable, because a box WITH forge credentials may want the catalogue and
+# should not need a patch to get it.
+agent_sandbox_env_is_overridable() {
+  local j; j="$(AGENT_EXTENSIONS_REF=main agent_sandbox_env)"
+  [[ "${j}" == '{"EXTENSIONS_REF":"main"}' ]] || {
+    printf 'AGENT_EXTENSIONS_REF was ignored: %s\n' "${j}" >&2; return 1; }
+}
+check "...and a box that wants the catalogue can have it back from .env" \
+  agent_sandbox_env_is_overridable
+# Built and passed are two claims, and this suite has already shipped a bug
+# where only the first was true. Asserted against the run block itself.
+agent_sh_passes_the_sandbox_env() {
+  local body
+  body="$(agent_run_block)"
+  grep -q -- '-e OH_AGENT_SERVER_ENV=' <<<"${body}" || {
+    echo 'OH_AGENT_SERVER_ENV never reaches docker run, so every sandbox re-fetches the skills catalogue' >&2
+    return 1; }
+}
+check "...and the variable that carries it reaches docker run" \
+  agent_sh_passes_the_sandbox_env
 # The URL must be built from AGENT_PORT, not from the 3000 the container listens
 # on internally. This is the whole bug in one function.
 agent_web_url_follows_agent_port() {

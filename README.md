@@ -168,16 +168,24 @@ opinion. Measured: **12 minutes** on a 4 vCPU / 7.8 GiB droplet running the 3b,
 11 minutes on a 16 GB box running the 7b. Reading is where the hardware shows;
 the model size barely moves it.
 
-**Read this before you trust it with anything.** The selftest passing is a real
-result and a narrow one — one file, one function, and the task names the exact
-path to write it to. Two larger tasks were then run on the droplet at the 3b
-rung and **both failed the same way: the agent declares completion without
-running its own work.** One produced a `wordcount.py` that uses `sys` with no
-import, so it dies on its first executed line — reported as finished, never
-executed once. Treat this tier's output as **a draft that has never been run**,
-because at this rung that is exactly what it is. It is genuinely useful for
-scaffolding and for work you were going to read line by line anyway; it is not
-useful for anything you intend to trust unread.
+**Read this before you trust it with anything.** This paragraph used to say the
+agent declares completion without running its own work, and that was measured
+against a prompt Ollama was silently truncating — it was cutting the agent's
+18,353-token prompt to 8,194 from the front, which deleted the definition of the
+tool that runs commands. That is fixed: the prompt is 13,796 tokens and nothing
+is truncated (docs/PROMPT-WINDOW.md).
+
+Re-run since, the same task writes correct-looking code **into the right
+directory**, creates the test file it was asked for, **runs it**, and reports
+the real error it hit rather than claiming success. What it then cannot do is
+repair its own bug. So treat this tier's output as **a first draft that has been
+executed once** — better than the never-executed draft this used to describe,
+and still not something to trust unread. It is genuinely useful for scaffolding
+and for work you were going to read line by line anyway.
+
+That is `n = 2`, not a benchmark: another sample of the same task derailed and
+wrote nothing at all. The *rate* is unmeasured and this project does not claim
+one.
 
 Two things follow, and both are honest rather than reassuring. `lca agent task`
 is this project's own way in, because it names the working directory explicitly —
@@ -187,9 +195,12 @@ the failing runs wrote outside the repo they were given:
 lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
 ```
 
-And **"the 3b is too small" is a hypothesis, not a measurement.** Nobody has run
-those tasks at a larger rung, and a straight swap is not the experiment: the 7b
-fails the tool-call channel exactly as the 3b does.
+And **"the 3b is too small" is a hypothesis, not a measurement** — one that got
+weaker, not stronger. Part of what looked like a model-size ceiling was a prompt
+with its front cut off, and removing that moved every one of the three
+behaviours it was blamed for. Nobody has run these tasks at a larger rung, and a
+straight swap is not the experiment: the 7b fails the tool-call channel exactly
+as the 3b does.
 
 It stays off by default for what it costs to fetch and what it can do, not
 because it is too slow. That distinction, the two failed runs in full, why
@@ -420,6 +431,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_MAX_ITERATIONS` | `100` | steps before an unattended run is stopped (0 = no limit) |
 | `AGENT_TIMEOUT_MINUTES` | `180` | wall-clock limit for a run (0 = no limit) |
 | `AGENT_STUCK_STRIKES` | `3` | identical failures in a row before the approach is abandoned (0 = never) |
+| `AGENT_EXTENSIONS_REF` | `lca-public-skills-disabled` | ref of OpenHands' public skills repo the agent may load from; the default does not exist, which keeps a 4,232-token catalogue of unusable skills out of every prompt (docs/PROMPT-WINDOW.md). Set to `main` to load it |
 | `AGENT_STEP_SOURCE` | `auto` | where the step ceiling counts from: `auto` (agent's event API, container log as fallback), `events`, `log` |
 | `BACKUP_AGENT_WORKSPACE` | `false` | include the agent's `~/.openhands` workspace in backups |
 | `BACKUP_AGENT_MAX_MB` | `2048` | skip that workspace above this size (0 = no ceiling) |

@@ -165,11 +165,20 @@ ladder gives **8192** on a 16 GiB box and **4096** on an 8 GiB one, because
 that is what leaves room for the model itself.
 
 This is not a "loses the thread sooner" problem, it is a "cannot start"
-problem. Measured on a real run: the agent's first request to the model was
-**15,492 tokens** — its system prompt plus 22 tool definitions — before the
-task text. At the 4096 rung Ollama silently truncates that, and there is no
-window in which the agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at
-least 16384, and 32768 if the RAM is there, or do not enable this tier.
+problem. Measured on a real run with the model's own tokenizer: the agent's
+first request was **18,353 tokens** — 10,280 of tool JSON for 26 tools, 4,871
+of dynamic context, 3,037 of system prompt, and 165 for the task itself. At the
+4096 rung Ollama silently truncates that, and there is no window in which the
+agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at least 16384, and
+32768 if the RAM is there, or do not enable this tier.
+
+And going over the window is punished out of proportion: Ollama does not trim
+an over-long prompt to fit, it **cuts it to `num_ctx/2 + 2`, keeping the first
+4 tokens and then the tail**. At 16384 that meant an 18,353-token prompt lost
+10,159 tokens — the role, the security policy and the filesystem rules — to
+overshoot by 1,969. Cutting the skills catalogue brought it to 13,975, which
+fits. Every number, the truncation rule and what was cut are in
+docs/PROMPT-WINDOW.md.
 
 **The 3b model finishes the loop without doing the work.** This is the one to
 read before enabling the tier on a small droplet. Measured end to end: the
@@ -197,7 +206,7 @@ reports this model as `tools`-capable. A 3B model is simply not reliable at
 emitting one. Give the agent tier the largest model your RAM allows, and do not
 judge it by a run on the small rung.
 
-**It is slower than the client's own patience.** That 15,492-token prompt is
+**It is slower than the client's own patience.** That 18,353-token prompt is
 processed at roughly **17 tokens/second** on 4 CPU cores — about fifteen
 minutes for the first call. The LLM client gives up at its `timeout` (300 s by
 default) and cancels, which Ollama logs as a `500`, and the run makes no
@@ -577,9 +586,9 @@ that returns `ok`"), start to file-on-disk, all six links green:
 Two things in that table are worth internalising.
 
 **Model size barely moves the number**, because an agent step is dominated by
-**reading**, not writing: OpenHands' prompt is around 15,000 tokens before the
-model produces its first one. A two-line function and a two-hundred-line
-refactor cost nearly the same on the way in.
+**reading**, not writing: OpenHands' prompt is 18,353 tokens before the model
+produces its first one. A two-line function and a two-hundred-line refactor
+cost nearly the same on the way in.
 
 **Neither does halving the machine.** The 7.8 GiB droplet is the box this
 project targets, and one task there costs 12 minutes against 11 on a box with
@@ -617,150 +626,73 @@ the run they came from.
 The practical rule: the only trustworthy answer for a box is that box's own
 `lca agent selftest`.
 
-### What the 3b actually produces: two real tasks, both failed
+### What the 3b actually produces — rewritten 2026-08-17, because the prompt was broken
 
-The selftest passing is a real result and it is a narrow one — it asks for one
-file containing one function, and it names the exact path to write it to. Two
-larger tasks were then run on the droplet at the same rung (`3b-agent` @ 16384),
-and **both failed in the same way**. This is what a user should expect here.
+**This section used to say the 3b declares completion without executing its own
+work, and that conclusion was drawn against a prompt that was being truncated.**
+Ollama was cutting the agent's 18,353-token prompt down to 8,194 and keeping the
+*tail*, which deleted the definition of `terminal` outright and severed
+`file_editor` halfway through its schema. The model was being asked to execute
+with the description of the tool that executes removed from its context. See
+docs/PROMPT-WINDOW.md for the measurement and the boundary arithmetic.
+
+The prompt now fits (13,796 tokens, nothing truncated). The tasks were re-run.
+Both the old and the new results are kept below, because the difference is the
+point.
+
+#### What it did before, with a truncated prompt
 
 | | task | what it did | verdict |
 |---|---|---|---|
 | run 1 | create a README | `touch README.md`, then *"successfully created"* | empty file, reported as done |
 | run 2 | a `wordcount.py` CLI with a stated output format, error handling, a test file, run it, show the output | one write, then 25 minutes later a message quoting the code back and *"You can now use this script"*, `execution_status: finished` | code that cannot run, in the wrong directory, none of the three requested steps done |
 
-Run 2's code had three defects, and the first is fatal:
+Run 2's code used `os`, `sys` and `re` **with no imports at all**, so
+`python wordcount.py t.txt` died on its first executed line with
+`NameError: name 'sys' is not defined`. It indexed `sys.argv[1]` with no guard.
+It never ran the file, never created the test file, never showed output. And it
+wrote to `/workspace/wordcount.py` while working in
+`/workspace/project/TestAppOllama1Coding` — outside its directory entirely.
 
-- **It uses `os`, `sys` and `re` with no imports at all.** Verified by executing
-  it: `python wordcount.py t.txt` fails immediately with
-  `NameError: name 'sys' is not defined`. **The first executed line crashes.**
-- It indexes `sys.argv[1]` with no guard, so the missing-argument case the task
-  explicitly asked for raises `IndexError` instead of exiting 1 with a message.
-- It never ran the file, never created the test file, and never showed output —
-  all three explicitly requested.
+#### What it does now, with the whole prompt
 
-It also wrote to `/workspace/wordcount.py` while working in
-`/workspace/project/TestAppOllama1Coding`, so the deliverable landed outside the
-repo entirely.
-
-#### These two runs were later explained, and it was not mainly the model
-
-This section used to read the two runs as evidence that the agent "declares
-completion without executing its own work". **They cannot carry that weight, and
-the correction matters more than the original claim**, because two defects in
-this project's own configuration meant those runs never received the
-instructions they were being judged against:
-
-- **A 300-second client timeout against replies that took 901 seconds.** Every
-  step was discarded at five minutes while the model was still producing it, so
-  a run could sit "running" for half an hour having executed nothing.
-- **`max_output_tokens` unset, so the client reserved half the window for a
-  reply.** An 18,313-token prompt was truncated to 8,194 — **the agent read
-  under half its instructions**, and the working-directory rule was in the half
-  it never saw. That alone explains the file landing in `/workspace`, which this
-  page previously attributed to the model ignoring a directory it had been
-  given.
-
-Both are fixed in code. What that means for the two runs above: **they are no
-longer evidence of anything about the model.** A model that receives half its
-instructions and has every long reply thrown away is not being measured.
-
-**What survives the correction**: the behaviour is *still observed* — the tier
-does declare completion without running what it built, and run 2's code did die
-on its first executed line. What is gone is the claim that these runs
-demonstrate it. The honest position is now:
-
-- treat this tier's output as **a draft that has not been executed**, because at
-  this rung it often has not been;
-- and take the *size* of that problem from the clean re-run below rather than
-  from these two, which were broken in two ways that have since been fixed.
-
-#### RESULT — the re-run that measures this
-
-Measured on the droplet with the request timeout fixed and the prompt no longer
-truncated: the same `wordcount.py` task, on the same rung.
-
-**Which channel carried the rules, because this page got that wrong once.** This
-paragraph used to say the re-run ran "against the sharpened
-`config/CONVENTIONS.md` rules". It cannot have. `config/CONVENTIONS.md` is read
-by aider and the chat app and **has never reached the agent** — the channel that
-was supposed to carry it there is `system_message_suffix`, which this build
-overwrites with its own `<HOST>` value (measured: `SystemPromptEvent` 14,640
-chars, neither rule present). The rules reach the agent in the **task text**,
-through `agent_task_prompt`, and nowhere else.
-
-That leaves one thing unsettled about the table below, and it is worth stating
-rather than papering over: the three prohibitions now in `agent_task_prompt`
-landed at roughly the same time as this re-run, and **nothing recorded which
-version of the task text that run received.** So "the rule was read, worded as a
-prohibition, and present three times over" is an inference, not a measurement.
-The next run of this task should capture its own `SystemPromptEvent` and the
-submitted task text alongside the result, so the question cannot be open twice.
+Same `wordcount.py` task, same rung, prompt verified intact first — all three
+prohibitions present, no truncation:
 
 | | |
 |---|---|
-| Task | `wordcount.py` — stated output format, error handling, create a test file, run it, show the output |
-| Configuration | `3b-agent` @ 16384, `AGENT_REQUEST_TIMEOUT=1800`, `AGENT_MAX_OUTPUT_TOKENS` set, full prompt delivered |
-| Did it write to the named directory? | **Fixed.** `/workspace/project/wordcount.py`, and nothing above it. |
-| Is the code it wrote working? | **Fixed.** Imports present in both branches and the file runs. Line/word/character logic correct, `FileNotFoundError` handled to stderr with exit 1, a missing argument handled. |
-| Did it run what it built? | **Not fixed.** Zero terminal actions after sandbox init. No test file was created, the script was never executed, and no output was shown — all three explicitly requested. |
-| What it said at the end | *"Great! The wordcount.py script has been successfully created and saved at /workspace/project/wordcount.py… If you have any questions or need further assistance, feel free to ask!"* |
-| Remaining defect in the code | The usage message on a missing argument goes to stdout rather than stderr. |
+| created `/workspace/project/wordcount.py` | **inside** the directory it was given |
+| created `/workspace/project/test.txt` | the test file the task asked for |
+| ran `python3 wordcount.py test.txt` | **executed its own work** |
+| got `IndentationError` back | and reported the failure rather than success |
 
-**The two that moved are the two the truncation fix predicts.** It can now read
-its whole instruction, and the directory rule is inside what it reads. The third
-did not move, with the rule read, worded as a prohibition, and present three
-times over.
+Every named defect above is gone. `import sys` is present. `sys.argv[1]` is
+guarded, with usage on stderr and `exit 1`, exactly as asked. The test file
+exists. The program was executed. Both files landed inside the working
+directory. What remains is **one wrong space on line 15** — seven where eight
+were needed.
 
-So, stated as narrowly as the measurement allows: **at this rung, "verify before
-claiming done" appears not to be reachable by instruction.** That is a
-measurement of the 3b and nothing else. It says nothing about a larger model,
-and the same re-run at a higher rung is the open experiment.
+**The failure mode has moved, and it is now a smaller one: it cannot repair
+what it wrote.** Four attempts, all malformed — `str_replace` with a quoted
+string literal as `old_str` so it never matched, then `create` on a path that
+already existed, three times — and then it claimed it could not "interact
+directly with a file system", on a run where it had already created two files
+and executed one.
 
-What this page can now tell you: the plumbing delivers the whole prompt and
-waits long enough for the answer, the directory rule lands, and the code that
-comes out of a 3b on a task this size runs. What it still cannot tell you is
-whether anything at this rung will execute its own work before reporting
-success — and on this evidence, it does not.
+**So, plainly, at the 3b rung today:** it writes broadly correct code to the
+right place and runs it, catches its own errors by running them, and does not
+claim success it has not earned. It then gets stuck fixing what it found. Treat
+its output as **a first draft that has been executed once** — which is a
+materially better thing than the never-executed draft this section used to
+describe, and still not something to trust unread.
 
-#### A third run, and a different failure: the imagined directory
-
-All of the above is one file. A multi-file task fails somewhere else entirely,
-so it is recorded separately rather than folded into the run above.
-
-Measured on the droplet, same rung, same fixed configuration. Task: an Expo app
-shell — four files, named: `app.json`, `package.json`, `App.js`, `.gitignore`.
-
-| | |
-|---|---|
-| Events | **28** — more than twice the 12-event `wordcount` runs. It tried hard. |
-| Files created | **none** |
-| Create actions used | **none, not once** |
-| What it did first | An **edit** against a path nobody had mentioned — *"Invalid `path` parameter: /workspace/project/TestAppOllama1Coding/src/utils/config.js. The path does not exist."* |
-| What it did next | Listed the directory. Saw one file, `README.md`. |
-| What it concluded | *"It seems there was a misunderstanding or an issue with accessing the /workspace/project directory… Let's try exploring other directories instead."* |
-
-The shape, stated as narrowly as the measurement allows: **at this rung, given a
-task that asks for several files, the agent may edit against paths it has
-invented, and read "file not found" as a fault in the environment rather than as
-a signal to create.** It had the evidence in hand — its own `ls` showed one
-`README.md` — and drew the opposite conclusion from it.
-
-Two things follow, and neither is the finding above:
-
-- This is **not** the run-what-you-built problem. That run wrote a correct file
-  and would not execute it; this one never wrote anything, and the volume of
-  activity — 28 events — is exactly what makes it hard to see from outside. A
-  run that is busy inventing paths looks, on any progress display that counts
-  steps, more alive than one that is working.
-- It appears on **multi-file** tasks. Every earlier measurement here is a
-  single-file task, so "it can do a small task" does not generalise to "it can
-  do a small task four times".
-
-If you are watching a run like this, `lca agent watch --live` shows it: the
-tool calls are edits against paths that do not exist, and the errors are on
-screen rather than folded into a spinner. That is the case the view was built
-for, and it is the case a step counter cannot tell you about.
+**On evidence strength, honestly:** this is `n = 2` on `wordcount` and `n = 1`
+on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
+derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
+asked to be told the task, and wrote nothing. So the *rate* is unmeasured and
+this section does not claim one. What is not in doubt is the mechanism: a model
+cannot call a tool whose description was cut out of its prompt, and that is what
+was happening.
 
 Two things changed because of these runs:
 
@@ -863,13 +795,23 @@ because of what it can do and what it costs to fetch, which is the same reason
 
 What would still improve it, in order:
 
-1. **A smaller first prompt.** ~15k tokens before the first output token is most
-   of what a step costs, and most of that is OpenHands' own framing rather than
-   the task. This is the one change that would make every step cheaper on every
-   box.
-2. **Images that are not 7 GB.**
+1. **A smaller first prompt.** This was listed here as upstream and out of
+   reach. **Partly wrong, and it has since been done:** the prompt was 18,353
+   tokens, 4,232 of them a catalogue of OpenHands skills fetched from GitHub
+   that this tier cannot use, and cutting it brought the prompt to 13,796 —
+   under the window for the first time, so it is no longer truncated. That was
+   in this project's gift all along. See `AGENT_EXTENSIONS_REF` and
+   docs/PROMPT-WINDOW.md.
+2. **A smaller tool set.** What remains genuinely *is* upstream, and this has
+   been checked route by route rather than assumed: 72.5% of the prompt is tool
+   JSON, 19 of the 24 tools are a headless browser and forge integrations this
+   tier does not use, and OpenHands exposes no supported way to decline them —
+   the `tools` setting is overwritten at conversation creation, `enable_browser`
+   is hardcoded, and `filter_tools_regex` is never forwarded. Exactly one tool
+   can be declined (`enable_switch_llm_tool`, worth 254 tokens, now off).
+3. **Images that are not 7 GB.**
 
-Both are upstream of this project. Neither blocks anyone today: turn it on, run
+2 and 3 are upstream. Neither blocks anyone today: turn it on, run
 `lca agent selftest`, and you get your own box's number in about a quarter of an
 hour.
 
