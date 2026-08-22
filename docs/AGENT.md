@@ -686,7 +686,19 @@ its output as **a first draft that has been executed once** — which is a
 materially better thing than the never-executed draft this section used to
 describe, and still not something to trust unread.
 
-**On evidence strength, honestly:** this is `n = 2` on `wordcount` and `n = 1`
+**A third sample, 2026-08-22**, with the task text captured on both sides this
+time rather than assumed — the earlier "it read the rule three times" was an
+inference, because nothing recorded which text the run received. It wrote both
+files inside its directory, executed the program, and quoted its real output.
+It then reported that the behaviour "matches the specified requirements" while
+the error-handling requirement was never exercised and does not work:
+`except FileNotFoundError or PermissionError:` catches only the first of the
+two. **So it executes its work but does not check it** — the third prohibition
+is the one it fails. Prompt 13,783 tokens, no truncation, four turns, 24.5
+minutes; the SystemPromptEvent, the byte-identical task text, and all three
+error paths tested are in docs/PROMPT-WINDOW.md.
+
+**On evidence strength, honestly:** this is `n = 3` on `wordcount` and `n = 1`
 on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
 derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
 asked to be told the task, and wrote nothing. So the *rate* is unmeasured and

@@ -832,3 +832,126 @@ time — ephemeral exactly as warned, and a third distinct port after 42733 and
 the 4,871 it was before the cut — the reduction this file claimed, confirmed on
 the running stack rather than inferred from the commit that made it. No
 `<SKILLS>` block is present.
+
+## The coaching test, re-run with the cut in place — and recorded this time
+
+Measured 2026-08-22. Conversation `3597994fbea54b1faaf57ce122f831e5`, sandbox
+`oh-agent-server-1Js6mQX1F9bSwsIOs5yo2p`.
+
+### Why it was re-run: the previous result was an inference
+
+An earlier note in this project's history said the agent "read the rule three
+times". Nothing in that run recorded **which task text it received**, so the
+claim was reasoning from what the submission path is supposed to send, not a
+measurement of what arrived. Both halves are now captured, and the point of
+this run is that they are captured.
+
+**The `SystemPromptEvent`** (event 0), read out of the sandbox:
+
+| | |
+|---|---|
+| tools | **24** |
+| `system_prompt` | 14,403 chars → **3,037 tokens** |
+| `dynamic_context` | 2,918 chars → **639 tokens** |
+| `<SKILLS>` block | **absent** |
+
+**The task text**, submitted and received, compared byte for byte rather than
+assumed equal:
+
+    sha256 submitted  9d3c6bbba65cae55de59b7cdb36bb7d6df62162e8fe7a27149961011679307dd
+    sha256 received   9d3c6bbba65cae55de59b7cdb36bb7d6df62162e8fe7a27149961011679307dd
+
+Identical, 1,104 chars, 227 tokens, and **all three prohibitions present in the
+`MessageEvent` the agent actually got** — not in the text this repository
+intended to send. That is the difference between this run and the one it
+replaces.
+
+### The prompt fit, and the arithmetic checks out
+
+    task 10 | new prompt, n_ctx_slot = 16384, n_keep = 4, task.n_tokens = 13783
+    task 10 | release: stop processing: n_tokens = 14018, truncated = 0
+
+**13,783 tokens, `truncated = 0`.** This file records 13,796 for the same task
+shape with a 240-token task; this one carried a 227-token task, and
+13,796 − 13,783 = **13**, exactly the difference in task size. Everything around
+the task tokenizes identically. That is an independent reproduction of the
+post-cut baseline, a different day and a different sandbox.
+
+### What it did
+
+| | |
+|---|---|
+| created `/workspace/project/wordcount.py` | **inside** its directory |
+| created `/workspace/project/test.txt` | **inside** its directory |
+| ran `python3 /workspace/project/wordcount.py /workspace/project/test.txt` | **executed its own work**, exit 0 |
+| reported | `lines: 4 words: 38 chars: 233` — the real output, quoted verbatim |
+
+Nothing was written to `/workspace` or above it. Two prohibitions honoured, and
+the second is the one two earlier droplet runs violated.
+
+### The third prohibition was not honoured, and that is the finding
+
+Its closing message: *"This confirms that the task is complete. The command has
+been run, and its behavior matches the specified requirements."*
+
+It does not. The task asked for a missing **or unreadable** file to produce a
+clear error on stderr and a non-zero exit. Line 8 of what it wrote:
+
+```python
+except FileNotFoundError or PermissionError:
+```
+
+`FileNotFoundError or PermissionError` evaluates to `FileNotFoundError` — the
+class is truthy, so `or` never reaches the second name. Only one of the two
+cases is caught. Measured rather than read off the source:
+
+| input | result | |
+|---|---|---|
+| missing file | `Cannot open file '…' or insufficient permissions`, exit 1 | **as asked** |
+| unreadable file (`chmod 000`) | Python traceback, exit 1 | **not a clear error** |
+| no argument | argparse usage, exit 2 | reasonable |
+
+So the failure has moved again, and it moved somewhere narrower. The agent no
+longer fabricates tool calls, no longer writes outside its directory, and no
+longer reports success on code it never ran. What it still cannot do is the
+third rule: **re-read the task and check each requirement against what it
+actually did.** It exercised the happy path, saw it pass, and generalised to
+"matches the specified requirements" without ever running the error path it had
+been asked for.
+
+That is a better failure than the ones this tier started with, and it is still
+a real one. Do not read "it executed its work" as "it checked its work".
+
+**On the line count**, since it looks like a discrepancy and is not: the program
+prints `lines: 4` where `wc -l` says 3, because `test.txt` has no trailing
+newline — `readlines()` yields four elements, `wc -l` counts three newline
+characters. Words and chars match `wc` exactly. Defensible either way, not a
+defect.
+
+### Prefix caching, measured on this run
+
+The four turns, from the runner's own timings:
+
+| turn | prompt tokens in context | actually evaluated | generated | `truncated` |
+|---|---:|---:|---:|---:|
+| 1 | 13,783 | **13,778** (18.0 min @ 12.8 tok/s) | 236 @ 1.78 tok/s | 0 |
+| 2 | 14,049 | **264** | 138 @ 1.69 tok/s | 0 |
+| 3 | 14,215 | **136** | 93 @ 1.56 tok/s | 0 |
+| 4 | 14,381 | **74** | 67 @ 1.46 tok/s | 0 |
+
+The whole 13.8k preamble is paid once and then never again — turns 2 to 4
+evaluate only what is new. This is the "stay in one conversation" advice in
+docs/AGENT.md, measured on a run that fits its window instead of one being cut
+in half. Total wall clock 24.5 minutes for four turns.
+
+**One thing to watch.** The context reached **14,447** of 16,384 by turn 4. The
+cut bought the window, and a longer task will still walk into it — the margin is
+about 1,900 tokens, or roughly a dozen more turns of this size. The truncation
+rule has not changed; only the starting point has.
+
+### Evidence strength
+
+**n = 1** on this task shape post-cut, and it agrees with the earlier post-cut
+sample rather than extending it. Two of three prohibitions honoured, one not,
+on one run of one task, at 24.5 minutes. No rate is claimed here and none should
+be read into it.
