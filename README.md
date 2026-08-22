@@ -428,6 +428,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_TIMEOUT_MINUTES` | `180` | wall-clock limit for a run (0 = no limit) |
 | `AGENT_STUCK_STRIKES` | `3` | identical failures in a row before the approach is abandoned (0 = never) |
 | `AGENT_EXTENSIONS_REF` | `lca-public-skills-disabled` | ref of OpenHands' public skills repo the agent may load from; the default does not exist, which keeps a 4,232-token catalogue of unusable skills out of every prompt (docs/PROMPT-WINDOW.md). Set to `main` to load it |
+| `AGENT_SANDBOX_GRACE_SECONDS` | `120` | how long the app waits for a new sandbox to answer before abandoning it. OpenHands allows 15s and this box has needed 17 — that race silently lost 5 of 23 submissions (docs/AGENT.md) |
 | `AGENT_STEP_SOURCE` | `auto` | where the step ceiling counts from: `auto` (agent's event API, container log as fallback), `events`, `log` |
 | `BACKUP_AGENT_WORKSPACE` | `false` | include the agent's `~/.openhands` workspace in backups |
 | `BACKUP_AGENT_MAX_MB` | `2048` | skip that workspace above this size (0 = no ceiling) |

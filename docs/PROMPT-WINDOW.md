@@ -955,3 +955,97 @@ rule has not changed; only the starting point has.
 sample rather than extending it. Two of three prohibitions honoured, one not,
 on one run of one task, at 24.5 minutes. No rate is claimed here and none should
 be read into it.
+
+## The tool set, re-checked after the cut — and the ceiling it leaves
+
+The margin after the cut is about 1,900 tokens at the point a run ends, and 56%
+of what remains is tool JSON. So the question is whether the documented way to
+decline tools works, and it was re-tested rather than assumed to still hold.
+Measured 2026-08-22, post-cut, on agent-server 1.26.0.
+
+### `agent_settings.tools` still round-trips and is still ignored
+
+Posted an explicit two-tool list, plus the two filters, and read the settings
+back:
+
+| field posted | stored |
+|---|---|
+| `tools: [TerminalTool, FileEditorTool]` | **stored exactly as posted** |
+| `filter_tools_regex: "^(terminal\|file_editor\|finish\|think)$"` | **null** |
+| `include_default_tools: false` | **null** |
+
+Then submitted a task with that in place and read the `SystemPromptEvent` the
+sandbox actually built:
+
+    tools in the prompt   24
+    tool array            byte-identical to the run without the setting
+
+So the finding from 2026-08-10 holds unchanged four months and one cut later.
+Two of the three fields are dropped to `null` on the way in; the third is
+stored faithfully and then has no effect on the prompt.
+
+### The tool counts were never varying — they are four different things
+
+22, 24, 25 and 26 all appear in this repository, and the reason is not drift.
+Pinned by experiment:
+
+| count | what it is |
+|---|---|
+| **22** | what the sandbox logs at spec load: `Loaded 22 tools from spec` |
+| **24** | what reaches the prompt today |
+| 25 | 24 + `invoke_skill`, before the catalogue was cut |
+| 26 | 25 + `switch_llm`, before that was turned off |
+
+The gap between 22 and 24 is `finish` and `think`. They are indexes **22 and
+23** — the last two entries — appended by the framework after the spec is
+loaded, so they are in the prompt and not in the spec count.
+
+And an earlier note here has to be corrected: the `Loaded 22 tools from spec`
+line was recorded as something the explicit `tools` list *caused*. It does not.
+**22 is logged with the setting and without it**, on both sandboxes measured
+today. It was never evidence that the POST did anything.
+
+What the 24 are: 3 this tier uses (`terminal`, `file_editor`, `task_tracker`),
+14 `browser_*`, 5 pull-request tools, and `finish` + `think`. Nineteen of
+twenty-four drive a browser or a forge.
+
+**So the tool set cannot be cut through the documented channel.** The one lever
+that works is still `enable_switch_llm_tool`, and it is already off.
+
+### The ceiling, stated honestly
+
+The cut bought the window for a *first* prompt. It does not buy an unlimited
+conversation, because every observation is appended and never removed.
+
+Measured on the wordcount run: the prompt starts at **13,783** and the window is
+**16,384**, so the whole conversation has **2,601 tokens** of room. Growth per
+turn on that run was +266, then +166, then +166 — small, because its
+observations were small (1,061, 493 and 574 characters).
+
+At that rate it is roughly **15 more turns, so about 16 in total**. That number
+is a ceiling for trivial output and nothing else. What the margin actually buys,
+measured with the same tokenizer:
+
+| one observation | tokens | share of the 2,601 margin |
+|---|---:|---:|
+| a Python traceback | 113 | 4% |
+| `ls -la` of a 30-entry directory | 738 | 28% |
+| reading a 100-line source file | **1,287** | **49%** |
+| reading a 300-line source file | **3,652** | **over the margin outright** |
+
+**Two file reads end the conversation.** One `cat` of a 300-line file ends it in
+a single turn, before the agent has done anything with what it read — and when
+it ends, Ollama does not stop, it silently drops the front of the prompt and
+keeps going, which is the failure this whole file exists to document.
+
+So the honest statement of what this tier is for, after the cut:
+
+> It fits the window for **short tasks on small files** — on the order of a
+> dozen turns whose outputs are command results rather than file contents. A
+> task that requires reading real source files walks back into truncation in two
+> or three turns, and does so silently.
+
+Raising `AGENT_MODEL_CONTEXT` past 16384 is the only lever left that this
+project controls, and it is bounded by RAM: measured earlier in this file, the
+3b at 32768 costs 3.4 GB resident against 2.2 GB at 4096, and generates at
+4.07 tok/s against 10.41. On a 7.8 GiB box that is a real trade, not a free one.

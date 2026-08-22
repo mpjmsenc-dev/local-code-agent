@@ -894,10 +894,23 @@ CPU box never opens a browser.
 ```
 
 The sandbox then logs `Loaded 22 tools from spec` and sends a byte-identical
-15,225-token prompt. Measured before and after: **0 tokens saved, 57 browser
+prompt. Measured before and after: **0 tokens saved, 57 browser
 mentions either way.** `filter_tools_regex` and `include_default_tools` exist on
 the `Agent` schema and are not on the settings diff at all — posting
 `filter_tools_regex` stores `null`.
+
+> **Re-tested 2026-08-22, post-cut, and it still holds** — the settings still
+> round-trip, the two filters still store `null`, and the `SystemPromptEvent`
+> still carries a tool array byte-identical to a run without the setting.
+>
+> **One correction.** The `Loaded 22 tools from spec` line is written here as
+> something the explicit list *caused*. It is not: 22 is logged with the setting
+> and without it, on both sandboxes measured that day. The gap between it and
+> the 24 in the prompt is `finish` and `think`, appended by the framework after
+> the spec loads — they are the last two entries in the array. So the counts in
+> this repository (22, 24, 25, 26) are four different things and not drift;
+> docs/PROMPT-WINDOW.md tabulates which is which, along with the turn ceiling
+> the surviving tool JSON leaves.
 
 Nothing this project can do closes that; it is upstream. It is written down here
 so nobody spends another evening discovering the setting works and does nothing.
@@ -1030,3 +1043,98 @@ the watcher returns: **before, 1 survivor (reparented to init); after, 0**.
 `tests/test-agent-watch.sh` counts them and fails if one comes back — and also
 fails if the count is clean for the *wrong* reason, because the watcher says out
 loud when it has fallen back to the old pid-by-pid sweep.
+
+---
+
+## `lca agent task` submitted nothing, 5 times out of 23, and said it worked
+
+This is the project's own submission path, and it had the failure shape this
+whole week has been about: it produced nothing, left a container running, and
+exited 0.
+
+### What it looked like
+
+    ==> Submitting the task
+    [info] Working directory: /workspace/project
+    [warn] The task was submitted but its conversation id could not be
+           identified, so 'lca agent watch' will fall back to picking the
+           newest sandbox.
+    [info] Follow it: lca agent watch
+
+Every word of that is wrong except the first line. The task was not submitted,
+there was no conversation to identify, nothing was running, and a sandbox
+container was left up holding about 3 GB on a 7.8 GiB box. Exit status 0.
+
+### What actually happened
+
+The `POST /api/v1/app-conversations` does not return a conversation. It returns
+a **start-task**, and the conversation is created afterwards, asynchronously, by
+a path that can fail. Ours did:
+
+    19:00:31 docker_sandbox_service: Sandbox server not running:
+             http://host.docker.internal:56971 :
+    19:00:31 live_status_app_conversation_service: ERROR Error starting conversation
+    SandboxError: 500: Sandbox entered error state: oh-agent-server-3WNdhl65MHR9ATJhCj9d0p
+
+A race, and a close one. Two sandboxes six minutes apart on this box:
+
+| | container start → "ready to serve" | outcome |
+|---|---:|---|
+| the failed one | **16.55s** | app gave up at 15s |
+| the next one | 12.40s | fine |
+
+OpenHands allows 15 seconds. The sandbox answered 1.55 seconds late, the app
+marked it `ERROR`, and `wait_for_sandbox_running` raises on `ERROR` immediately
+— the 120-second timeout next to it never gets a chance.
+
+**It was not a one-off.** The app keeps every outcome at
+`/api/v1/app-conversations/start-tasks`, and this project had never once asked:
+
+    23 start-tasks:  18 READY, 5 ERROR
+    ERROR on 08-12 (three), 08-17, 08-22 — all "Sandbox entered error state"
+
+**21.7%, silent, for at least ten days.**
+
+### The setting that fixes it is not the one OpenHands documents
+
+`config.py` reads a plain `SANDBOX_STARTUP_GRACE_SECONDS` — but only inside
+`if config.sandbox is None`, the legacy fallback. This stack sets
+`OH_SANDBOX_KIND`, so `config.sandbox` is not `None` and that branch never runs.
+
+Established by experiment, not by reading:
+
+| set to 1 | result |
+|---|---|
+| `SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **succeeded** — the value was never read |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **failed exactly like 08-22** |
+
+This is the same shape as `agent_settings.tools`: a documented setting that is
+silently inert on the path this project actually uses. `AGENT_SANDBOX_GRACE_SECONDS`
+(default **120**) now travels as `OH_SANDBOX_STARTUP_GRACE_SECONDS`.
+
+### And the failure is loud now
+
+`lca agent task` reads the start-task id out of the POST reply instead of
+discarding it, and asks the app how the submission ended. `READY` gives the
+conversation id directly — no set-difference, no three-minute wait. `ERROR`
+gives this, with exit status 1:
+
+    [warn] The sandbox it gave up on is still running: oh-agent-server-4ShlhJFN…
+           Stop it: docker stop oh-agent-server-4ShlhJFN…
+    [FAIL] Your task was NOT submitted. The app failed to start a conversation
+           for it, and said why:
+
+             500: Sandbox entered error state: oh-agent-server-4ShlhJFN…
+
+           Nothing is running it and nothing will. This is almost always the
+           sandbox answering later than the app was willing to wait — OpenHands
+           allows 15 seconds by default and this box has needed 17. Raise the
+           margin and try again:
+
+             AGENT_SANDBOX_GRACE_SECONDS=120   in /opt/local-code-agent/.env
+             /opt/local-code-agent/bin/lca agent restart
+
+Verified end to end: forced the failure with a 1-second grace and got exactly
+that, exit 1; restored 120 and the next submit named its conversation on the
+first poll. The old set-difference path is kept as a fallback for a reply this
+cannot parse.

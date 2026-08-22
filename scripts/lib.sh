@@ -535,6 +535,32 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
   AGENT_EXTENSIONS_REF="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  # How long the app waits for a fresh sandbox's agent-server to answer before
+  # it declares the sandbox broken. OpenHands' default is 15 seconds and on this
+  # hardware that has no margin at all. Measured, two sandboxes six minutes
+  # apart on the same box:
+  #
+  #   container start -> "ready to serve"   16.55s   FAILED  (grace 15s)
+  #   container start -> "ready to serve"   12.40s   passed
+  #
+  # 1.55 seconds over. The app marks the sandbox ERROR, the conversation is
+  # never created, and the container it gave up on keeps running. Measured
+  # against the app's own start-task record: 5 of 23 submissions here ended
+  # that way — 21.7%, on three separate dates — every one of them reported to
+  # the user as a successful submit. It is a race, not a fault, so the fix is
+  # margin: 120 seconds costs nothing when a sandbox is ready in twelve.
+  #
+  # IT MUST BE SPELLED OH_SANDBOX_STARTUP_GRACE_SECONDS, and that is not what
+  # OpenHands documents. Its own config.py reads a plain
+  # SANDBOX_STARTUP_GRACE_SECONDS — but only inside `if config.sandbox is None`,
+  # the legacy fallback. This stack sets OH_SANDBOX_KIND, so config.sandbox is
+  # NOT None and that whole branch is skipped. Verified by experiment rather
+  # than by reading: with SANDBOX_STARTUP_GRACE_SECONDS=1 a submit succeeded
+  # (the value was never read); with OH_SANDBOX_STARTUP_GRACE_SECONDS=1 the
+  # very next submit failed exactly as the 08-22 one did. Same shape as
+  # agent_settings.tools — a documented setting that is silently inert on the
+  # path this project actually uses. See agent.sh and docs/AGENT.md.
+  AGENT_SANDBOX_GRACE_SECONDS="${AGENT_SANDBOX_GRACE_SECONDS:-120}"
   # How much of that window the agent may spend on ONE reply.
   #
   # It is not a cap on verbosity, it is a cap on how much of the window the
@@ -2964,6 +2990,47 @@ agent_conversations_payload() {
   have curl || return 1
   curl -fsS --max-time 5 \
     "$(agent_api_base)/api/v1/app-conversations/search?limit=50" 2>/dev/null
+}
+
+# agent_start_task_id RESPONSE — the start-task id out of a submit's reply.
+#
+# The POST to /api/v1/app-conversations does NOT return a conversation. It
+# returns a start-task: an id, a status, and later either the conversation it
+# produced or the reason there is none. Three call sites used to throw this
+# reply away with >/dev/null, which is the whole reason a failed submit looked
+# like a successful one for four months.
+agent_start_task_id() {
+  local response="${1:-}"
+  [[ -n "${response}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${response}" | jq -r '.id // empty' 2>/dev/null || return 1
+}
+
+# agent_start_task_state ID — "STATUS<TAB>CONVERSATION_ID<TAB>DETAIL".
+#
+# The app tells you exactly how a submit ended and this project was not asking.
+# Measured on this box: of 23 start-tasks, 5 ended ERROR — 21.7%, on three
+# separate dates — and every one of them was reported to the user as a
+# successful submission whose conversation "could not be identified".
+#
+#   READY    the conversation exists; field 2 is its id
+#   ERROR    there is no conversation and never will be; field 3 says why
+#   WORKING  still provisioning a sandbox, ask again
+#
+# Empty output means the listing could not be read, which is not the same as
+# ERROR and must not be reported as one.
+agent_start_task_state() {
+  local id="${1:-}"
+  [[ -n "${id}" ]] || return 1
+  have curl || return 1
+  have jq || return 1
+  curl -fsS --max-time 10 \
+    "$(agent_api_base)/api/v1/app-conversations/start-tasks/search?limit=100" 2>/dev/null \
+    | jq -r --arg id "${id}" '
+        [ (.items // .results // [])[] | select(.id == $id) ] | first
+        | select(. != null)
+        | [ (.status // "?"), (.app_conversation_id // ""), (.detail // "") ]
+        | @tsv' 2>/dev/null || return 1
 }
 
 # agent_conversation_count PAYLOAD — how many conversations the app is holding.

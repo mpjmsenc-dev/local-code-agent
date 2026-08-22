@@ -207,6 +207,7 @@ start_agent() {
     -e AGENT_SERVER_IMAGE_TAG="${AGENT_RUNTIME_TAG}" \
     -e OH_SANDBOX_KIND=DockerSandboxServiceInjector \
     -e OH_SANDBOX_HOST_PORT="${AGENT_PORT}" \
+    -e OH_SANDBOX_STARTUP_GRACE_SECONDS="${AGENT_SANDBOX_GRACE_SECONDS}" \
     -e OH_WEB_URL="$(agent_web_url)" \
     -e OH_AGENT_SERVER_ENV="$(agent_sandbox_env)" \
     -e LLM_MODEL="${model}" \

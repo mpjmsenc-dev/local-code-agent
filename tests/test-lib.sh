@@ -3595,18 +3595,28 @@ check "a sandbox is collectable only when its conversation is over" \
 # live runs (lags of 57s and 43s, measured), so every run fell back to the
 # newest-sandbox guess the id exists to replace.
 submit_waits_longer_than_the_measured_lag() {
-  local body tries
-  body="$(sed -n '/^CID=""/,/^done/p' "${REPO}/scripts/agent-task.sh")"
+  local body tries seen=0
+  # To '^fi', not to the first '^done'. There are two loops now — the start-task
+  # path and the set-difference fallback — and both are inside one if/else, so
+  # the old range stopped at neither and returned both counts at once.
+  body="$(sed -n '/^CID=""/,/^fi/p' "${REPO}/scripts/agent-task.sh")"
   [[ -n "${body}" ]] || { echo 'could not find the identification loop' >&2; return 1; }
   tries="$(grep -oE 'seq 1 [0-9]+' <<<"${body}" | grep -oE '[0-9]+$' || true)"
-  [[ "${tries}" =~ ^[0-9]+$ ]] || {
+  [[ -n "${tries}" ]] || {
     echo 'the identification loop no longer counts its tries — this gate stopped watching' >&2
     return 1; }
-  # 60 seconds is the longest lag seen; the window must clear it with room,
-  # because the lag is sandbox creation and a cold image pull is slower still.
-  (( tries * 2 >= 120 )) || {
-    printf 'the submitter waits about %ss for its conversation to appear; the measured lag was 57s on a warm box\n' "$(( tries * 2 ))" >&2
-    return 1; }
+  # EVERY waiting path must clear the lag, not just whichever one is written
+  # first: a fallback that gives up early is the same silent failure as before.
+  while read -r t; do
+    [[ -n "${t}" ]] || continue
+    seen=$((seen+1))
+    # 60 seconds is the longest lag seen; the window must clear it with room,
+    # because the lag is sandbox creation and a cold image pull is slower still.
+    (( t * 2 >= 120 )) || {
+      printf 'one identification path waits about %ss for its conversation; the measured lag was 57s on a warm box\n' "$(( t * 2 ))" >&2
+      return 1; }
+  done <<<"${tries}"
+  (( seen >= 1 )) || { echo 'no waiting loop found at all' >&2; return 1; }
 }
 check "the submitter waits out sandbox creation before giving up on its own id" \
   submit_waits_longer_than_the_measured_lag
@@ -3638,6 +3648,32 @@ submit_refuses_an_ambiguous_id() {
 }
 check "...and refuses to record an id it cannot attribute to this task" \
   submit_refuses_an_ambiguous_id
+# A submission that produced NOTHING must not exit 0 with a warning. This is the
+# gate for the 08-22 diagnosis: 5 of 23 submissions on this box ended with the
+# app abandoning the sandbox, and every one of them printed "the task was
+# submitted" and returned success. See docs/AGENT.md.
+submit_fails_loudly_when_the_app_refused() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/scripts/agent-task.sh")"
+  grep -q 'agent_start_task_id' <<<"${body}" || {
+    echo 'the submitter throws the POST reply away again, so it cannot know the submission failed' >&2
+    return 1; }
+  grep -q 'agent_start_task_state' <<<"${body}" || {
+    echo 'the submitter never asks the app how the submission ended' >&2; return 1; }
+  grep -qE 'ERROR\)' <<<"${body}" || {
+    echo 'the submitter does not handle the ERROR outcome the app reports' >&2; return 1; }
+  # die, not warn: the failure must be non-zero, or a script calling this
+  # cannot tell a submitted task from one that was refused.
+  grep -qE 'die "Your task was NOT submitted' <<<"${body}" || {
+    echo 'a submission the app refused no longer fails — it must die, not warn, or exit 0 hides it' >&2
+    return 1; }
+  # and it must name the container it left behind, because nothing else will
+  grep -q 'oh-agent-server-' <<<"${body}" || {
+    echo 'the abandoned sandbox is not named, so it is left running with nobody told' >&2
+    return 1; }
+}
+check "a submission the app refused fails loudly instead of exiting 0" \
+  submit_fails_loudly_when_the_app_refused
 agent_base_url_is_not_loopback() {
   local u; u="$(agent_llm_base_url)"
   # host.docker.internal, because inside the container 127.0.0.1 is the

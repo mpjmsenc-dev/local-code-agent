@@ -147,62 +147,90 @@ info "Working directory: ${DIR}"
 BODY="$(jq -nc --arg t "${PROMPT}" --arg s "${SUFFIX}" \
         '{initial_message:{role:"user",content:[{type:"text",text:$t}]},
           agent:{system_message_suffix:$s}}')"
-curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
-     -H 'Content-Type: application/json' -d "${BODY}" >/dev/null 2>&1 \
+# The reply is READ, not discarded. This POST does not return a conversation --
+# it returns a START-TASK, and the conversation is created afterwards, in the
+# background, by a path that can and does fail. Throwing the reply away with
+# >/dev/null is what made a failed submit indistinguishable from a slow one.
+RESPONSE="$(curl -fsS --max-time 120 -X POST "${BASE}/api/v1/app-conversations" \
+     -H 'Content-Type: application/json' -d "${BODY}" 2>/dev/null)" \
   || die "The agent refused the task at ${BASE}/api/v1/app-conversations. Its own log will say why: lca agent logs"
 
+TASK_ID="$(agent_start_task_id "${RESPONSE}" 2>/dev/null || true)"
+
 # --- identify it -------------------------------------------------------------
-# Polled rather than assumed: the conversation appears in the listing some time
-# after the POST returns — and "a moment" was wrong by a factor of two.
+# Two ways, and the first one is not a guess. The app publishes the outcome of
+# every submission at /api/v1/app-conversations/start-tasks, keyed by the id the
+# POST just returned: READY with the conversation it made, or ERROR with the
+# reason there is none. Asking it directly replaces both the set difference and
+# the three minutes of waiting that the set difference needed.
 #
-# MEASURED, twice, on this box. The POST answers as soon as the task is
-# accepted; the app then provisions a sandbox container before the conversation
-# is visible in the listing at all:
-#
-#   run 1  submitted 18:30:22   conversation created 18:31:19   lag 57s
-#   run 2  submitted 19:01:35   conversation created 19:02:18   lag 43s
-#
-# The loop below was ten tries of two seconds — a window of about 25 seconds,
-# which is not half the shortest lag observed. So it never once succeeded: both
-# live runs printed "its conversation id could not be identified" and fell back
-# to the newest-sandbox guess, which is the exact inference this whole
-# mechanism exists to avoid. Replaying the same set-difference by hand against
-# the same API a minute later identifies the conversation correctly every time;
-# nothing was wrong with the method, only with how long it was given.
-#
-# Three minutes, because the lag is sandbox creation and that is bounded by an
-# image pull on a cold box, not by anything this script controls. It costs
-# nothing when identification succeeds on the first pass, which is the common
-# case once a sandbox image is local.
+# WHY THIS EXISTS. Measured on this box, against the app's own record: 5 of 23
+# submissions ended ERROR -- 21.7%, on 08-12 (three), 08-17 and 08-22 -- every
+# one of them a sandbox whose agent-server answered a second or two after the
+# app stopped waiting. All five were reported to the user as a task that WAS
+# submitted whose conversation "could not be identified", with exit status 0,
+# and all five left their sandbox container running. A submission that produces
+# nothing must not look like a submission that worked.
 CID=""
 AMBIGUOUS=false
-# 90 tries of two seconds, not ten. The count is the whole difference between a
-# mechanism that works and one that has never once succeeded: the conversation
-# does not reach the listing until the app has built a sandbox for it, which was
-# 57s and 43s on the two live runs measured here, against a window of about 25.
-# Both runs therefore fell back to the newest-sandbox guess this exists to
-# replace, and neither failure was the set difference's fault — replayed by hand
-# a minute later it names the right conversation every time.
-for attempt in $(seq 1 90); do
-  AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
-  RC=0
-  CID="$(agent_new_conversation "${BEFORE}" "${AFTER}")" || RC=$?
-  if (( RC == 0 )) && [[ -n "${CID}" ]]; then
-    break
+FAILED=""
+
+if [[ -n "${TASK_ID}" ]]; then
+  for attempt in $(seq 1 90); do
+    STATE="$(agent_start_task_state "${TASK_ID}" 2>/dev/null || true)"
+    STATUS="$(printf '%s' "${STATE}" | cut -f1)"
+    case "${STATUS}" in
+      READY)
+        CID="$(printf '%s' "${STATE}" | cut -f2)"
+        [[ -n "${CID}" ]] && break
+        ;;
+      ERROR)
+        FAILED="$(printf '%s' "${STATE}" | cut -f3)"
+        break
+        ;;
+    esac
+    (( attempt == 5 )) && info "Waiting for the app to build a sandbox for this task..."
+    sleep 2
+  done
+else
+  # Fallback, for a reply this cannot parse -- jq missing, or an OpenHands that
+  # answers some other shape. The old set difference, unchanged, including its
+  # rc 2 "two appeared at once" refusal.
+  for attempt in $(seq 1 90); do
+    AFTER="$(agent_conversation_ids "$(agent_conversations_payload || true)" 2>/dev/null || true)"
+    RC=0
+    CID="$(agent_new_conversation "${BEFORE}" "${AFTER}")" || RC=$?
+    if (( RC == 0 )) && [[ -n "${CID}" ]]; then
+      break
+    fi
+    CID=""
+    if (( RC == 2 )); then
+      AMBIGUOUS=true
+      break
+    fi
+    (( attempt == 5 )) && info "Waiting for the app to register the conversation (it is creating a sandbox first)..."
+    sleep 2
+  done
+fi
+
+# The loud failure. This is the branch that used to be a warning and an exit 0.
+if [[ -n "${FAILED}" ]]; then
+  SANDBOX="$(printf '%s' "${FAILED}" | grep -oE 'oh-agent-server-[A-Za-z0-9]+' || true)"
+  if [[ -n "${SANDBOX}" ]]; then
+    warn "The sandbox it gave up on is still running: ${SANDBOX}. Stop it: docker stop ${SANDBOX}"
   fi
-  CID=""
-  # rc 2 is "more than one appeared", and polling again cannot unmake that —
-  # both are real conversations now. Stop and say so rather than waiting out
-  # nine more rounds to give the same non-answer.
-  if (( RC == 2 )); then
-    AMBIGUOUS=true
-    break
-  fi
-  # Said once, when the wait stops looking instant. The lag is sandbox
-  # creation — up to a minute here, longer on a box pulling the image.
-  (( attempt == 5 )) && info "Waiting for the app to register the conversation (it is creating a sandbox first)..."
-  sleep 2
-done
+  die "Your task was NOT submitted. The app failed to start a conversation for it, and said why:
+
+  ${FAILED}
+
+Nothing is running it and nothing will. This is almost always the sandbox
+answering later than the app was willing to wait -- OpenHands allows 15 seconds
+by default and this box has needed 17. Raise the margin and try again:
+
+  AGENT_SANDBOX_GRACE_SECONDS=120   in ${ENV_FILE}
+  ${REPO_ROOT}/bin/lca agent restart"
+fi
+
 
 if [[ -n "${CID}" ]]; then
   agent_conversation_record "${CID}" \
