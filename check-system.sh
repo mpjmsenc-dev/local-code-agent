@@ -236,7 +236,7 @@ fi
 # The cache lives with the loaded model, so when keep-alive expires mid-thought
 # the next step pays the whole prompt again plus a model load.
 if agent_prompt_cache_at_risk; then
-  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's ~15,000-token prompt is re-read from scratch on the next step (measured: 13,430 tokens the first time, 171 the next while it stayed loaded). Set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} to keep it resident, if you can spare the RAM."
+  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's ~13,800-token prompt is re-read from scratch on the next step (measured on one run: 13,778 tokens of prompt eval the first time — 18 minutes — then 264, 136 and 74 on the turns after it, while the model stayed loaded). Set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} to keep it resident, if you can spare the RAM."
 fi
 
 # The relay itself, whenever it is switched on — with or without the agent,
