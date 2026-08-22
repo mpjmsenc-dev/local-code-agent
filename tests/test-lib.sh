@@ -305,15 +305,74 @@ check "...while the other service is still guarded" \
   grep -qF "Ollama 11434" <<<"$(guarded_without _ abc)"
 # And the health check must name the setting, or the user is left with a
 # stack that fails in three places and never says why.
+# settings_verdict ENABLE_WEBUI WEBUI_PORT OLLAMA_HOST — what 'lca check' really
+# prints for that configuration, from check-system.sh's own Settings block.
+#
+# SOURCE-GREP: extract-to-drive. check-system.sh runs top to bottom with no
+# main(), so the block is pulled out by anchor and evaluated with the reporters
+# stubbed. What this cannot check is that the anchors still bracket the whole
+# block — an empty extraction fails loudly below rather than asserting over
+# nothing.
+settings_verdict() {
+  local block
+  block="$(awk '/^step "Settings"$/ { inb = 1 } inb { print } inb && /^done$/ { exit }' \
+             "${REPO}/check-system.sh")"
+  [[ -n "${block}" ]] || {
+    echo "could not find check-system.sh's Settings block — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'OLLAMA_HOST' <<<"${block}" || {
+    echo "the extracted Settings block does not reach OLLAMA_HOST — the anchors have moved" >&2
+    return 1; }
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    load_env >/dev/null 2>&1
+    ENABLE_WEBUI="$3"; WEBUI_PORT="$4"; OLLAMA_HOST="$5"
+    ENV_FILE="${TMPDIR:-/tmp}/env"; SCRIPT_DIR="${TMPDIR:-/tmp}"
+    step()   { :; }
+    info()   { printf "INFO %s\n" "$*"; }
+    p_pass() { printf "PASS %s\n" "$*"; }
+    p_fail() { printf "FAIL %s\n" "$*"; }
+    p_warn() { printf "WARN %s\n" "$*"; }
+    eval "$2"
+  ' _ "${REPO}/scripts/lib.sh" "${block}" "$1" "$2" "$3" 2>&1
+}
+
+# Driven, not read. The grep version asserted that check-system.sh contained
+# the strings 'valid_port "${WEBUI_PORT}"' and 'is not a port number' — both of
+# which survive the check being moved into a branch that never runs, and
+# neither of which says what happens for any actual value. A bad port is the
+# setting this file checks FIRST because it surfaces three files away as
+# something else entirely.
 check_names_a_bad_port() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
-  grep -qE 'valid_port "[$][{]WEBUI_PORT[}]"' <<<"${body}" || {
-    echo "check-system.sh does not validate WEBUI_PORT" >&2; return 1; }
-  grep -qE 'valid_port "[$][{]OLLAMA_PORT_SEEN[}]"' <<<"${body}" || {
-    echo "check-system.sh does not validate the port OLLAMA_HOST resolves to" >&2; return 1; }
-  grep -q 'is not a port number' <<<"${body}" || {
-    echo "check-system.sh never says a port is not a port number" >&2; return 1; }
+  local out
+  out="$(settings_verdict true abc 127.0.0.1:11434)" || return 1
+  grep -qE "^FAIL WEBUI_PORT='abc' is not a port number" <<<"${out}" || {
+    printf "WEBUI_PORT=abc was not reported as a bad port:\n%s\n" "${out}" >&2
+    return 1; }
+  # The boundary, not just the obviously-wrong string.
+  out="$(settings_verdict true 65536 127.0.0.1:11434)" || return 1
+  grep -q '^FAIL WEBUI_PORT' <<<"${out}" || {
+    printf 'port 65536 was accepted:\n%s\n' "${out}" >&2; return 1; }
+  # ...and a usable one must not be complained about, or the check is noise.
+  out="$(settings_verdict true 3000 127.0.0.1:11434)" || return 1
+  grep -q '^PASS WEBUI_PORT=3000' <<<"${out}" || {
+    printf 'a usable WEBUI_PORT was not reported as usable:\n%s\n' "${out}" >&2; return 1; }
+  # The port OLLAMA_HOST resolves to is the other half, and it is the one a
+  # hand-written check would forget: the value in .env is a host:port pair.
+  out="$(settings_verdict true 3000 127.0.0.1:notaport)" || return 1
+  grep -q "^FAIL OLLAMA_HOST='127.0.0.1:notaport'" <<<"${out}" || {
+    printf 'an OLLAMA_HOST with no usable port was not reported:\n%s\n' "${out}" >&2
+    return 1; }
+  # A disabled chat app has no port to be wrong, and saying so is not the same
+  # as passing it.
+  out="$(settings_verdict false abc 127.0.0.1:11434)" || return 1
+  grep -q '^INFO WEBUI_PORT not checked' <<<"${out}" || {
+    printf 'a bad port was judged for a chat app that is switched off:\n%s\n' "${out}" >&2
+    return 1; }
+  ! grep -q '^PASS WEBUI_PORT' <<<"${out}" || {
+    printf 'a disabled chat app was told its bad port is fine:\n%s\n' "${out}" >&2
+    return 1; }
 }
 check "'lca check' names a port that is not a port" check_names_a_bad_port
 
@@ -6341,33 +6400,95 @@ echo "# AIDER_NO_AUTO_COMMIT — the opt-out from the safety net, off by default
 # per change, so 'git diff HEAD~1' shows it and 'git revert <sha>' undoes just
 # that one. Turning it off is a legitimate preference and a real tradeoff, so
 # it is a setting rather than a rewrite — and it defaults to keeping the net.
+# aider_argv_with VALUE — the argv run-agent.sh really would hand aider, built
+# by run-agent.sh's own code rather than described here a second time. VALUE is
+# what AIDER_NO_AUTO_COMMIT is set to after load_env, or 'unset' to leave what
+# .env ships. Warnings come back on the same stream, prefixed WARN.
+#
+# The block ends in 'exec "${aider}" "${aider_args[@]}" "$@"', so pointing
+# ${aider} at a stub that prints its arguments hands back the real command
+# line — there is nothing to stub about exec itself.
+#
+# The value is assigned AFTER load_env on purpose: load_env sources .env, and
+# .env overrides the environment, so an env prefix on the subshell is silently
+# undone. That cost an afternoon once already, from the other direction.
+#
+# SOURCE-GREP: extract-to-drive. run-agent.sh runs main at the bottom and
+# cannot be sourced, so the block is pulled out by anchor and evaluated. What
+# this cannot check is that the anchors still bracket the right block — an
+# empty or truncated extraction fails loudly below rather than asserting over
+# nothing.
+aider_argv_with() {
+  local block stub="${SANDBOX}/aider-stub/aider"
+  mkdir -p "${stub%/*}"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@"\n' > "${stub}"
+  chmod +x "${stub}"
+  block="$(awk '/^  local -a aider_args=\(/ { inb = 1 }
+                inb { print }
+                inb && /^  exec "\$\{aider\}"/ { exit }' "${REPO}/run-agent.sh")"
+  [[ -n "${block}" ]] || {
+    echo "could not find run-agent.sh's aider argument block — this gate stopped watching" >&2
+    return 1; }
+  # shellcheck disable=SC2016  # the literal ${aider} is the source text searched for
+  grep -qF 'exec "${aider}"' <<<"${block}" || {
+    echo "the extracted block does not end in the exec — the anchors have moved" >&2
+    return 1; }
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    load_env >/dev/null 2>&1
+    [[ "$5" == unset ]] || AIDER_NO_AUTO_COMMIT="$5"
+    info() { :; }
+    warn() { printf "WARN %s\n" "$*"; }
+    REPO_ROOT="$3"; aider="$4"
+    meta_file=/dev/null; MODEL_NAME=m; edit_format=diff; map_tokens=1024
+    input_tokens=1; output_tokens=1; window=2
+    ollama_url() { printf "http://127.0.0.1:11434"; }
+    model_load_notice() { :; }
+    eval "drive() { $2 ; }"
+    drive
+  ' _ "${REPO}/scripts/lib.sh" "${block}" "${REPO}" "${stub}" "$1"
+}
+
+# Driven, not read. The grep version asserted that the string
+# '--no-auto-commits' appeared in run-agent.sh under a guard that mentioned
+# AIDER_NO_AUTO_COMMIT — which stays true if the flag moves into a branch that
+# never runs, and which says nothing about what aider is actually handed. What
+# is at stake is the user's git history: with the flag wrongly present, a small
+# model's unrequested edits stop being commits anyone can revert.
 aider_no_auto_commit_is_wired() {
-  local body; body="$(sed 's/#.*//' "${REPO}/run-agent.sh")"
-  grep -q 'AIDER_NO_AUTO_COMMIT' <<<"${body}" || {
-    echo 'run-agent.sh never reads AIDER_NO_AUTO_COMMIT, so the setting does nothing' >&2
+  local argv
+  argv="$(aider_argv_with true)" || return 1
+  grep -qx -- '--no-auto-commits' <<<"${argv}" || {
+    printf 'AIDER_NO_AUTO_COMMIT=true and aider is still started with auto-commit on:\n%s\n' \
+      "${argv}" >&2
     return 1; }
-  # The flag itself has to be handed to aider, not merely mentioned.
-  grep -qE 'aider_args\+=\( --no-auto-commits \)' <<<"${body}" || {
-    echo 'AIDER_NO_AUTO_COMMIT is read but --no-auto-commits never reaches aider' >&2
+  # ...and it must be said out loud, because the safety net is now off.
+  grep -q '^WARN .*NOT be committed' <<<"${argv}" || {
+    echo 'the auto-commit safety net was switched off without telling anyone' >&2
     return 1; }
-  # ...and only when asked for. Unconditional would silently remove the net.
-  awk '/AIDER_NO_AUTO_COMMIT/           { guard = 1 }
-       /aider_args\+=\( --no-auto-commits \)/ { if (!done) { done = 1; ok = guard } }
-       END { exit (done && ok) ? 0 : 1 }' <<<"${body}" || {
-    echo 'the --no-auto-commits flag is not guarded by the setting' >&2
+  argv="$(aider_argv_with false)" || return 1
+  ! grep -qx -- '--no-auto-commits' <<<"${argv}" || {
+    printf 'AIDER_NO_AUTO_COMMIT=false and the flag is passed anyway — every edit stops being a commit:\n%s\n' \
+      "${argv}" >&2
     return 1; }
-  # Default must keep committing: lib.sh applies it, .env.example ships it.
-  # '[$]{' rather than the literal, so this line is not itself an
-  # unexpanded-expression finding — the bracket idiom used elsewhere here.
-  grep -qE 'AIDER_NO_AUTO_COMMIT="[$][{]AIDER_NO_AUTO_COMMIT:-false[}]"' "${REPO}/scripts/lib.sh" || {
-    echo 'AIDER_NO_AUTO_COMMIT does not default to false' >&2
+  # The shipped default: whatever .env holds on this checkout must still commit.
+  argv="$(aider_argv_with unset)" || return 1
+  ! grep -qx -- '--no-auto-commits' <<<"${argv}" || {
+    printf 'the default configuration starts aider with auto-commit OFF:\n%s\n' "${argv}" >&2
     return 1; }
-  grep -qx 'AIDER_NO_AUTO_COMMIT=false' "${REPO}/.env.example" || {
-    echo '.env.example does not ship AIDER_NO_AUTO_COMMIT=false' >&2
+  # Non-vacuity: an argv missing the flags every run carries would make the
+  # three assertions above pass over nothing.
+  grep -qx -- '--config' <<<"${argv}" || {
+    printf 'the extracted argv carries no --config, so it is not the real one:\n%s\n' \
+      "${argv}" >&2
     return 1; }
 }
-check "AIDER_NO_AUTO_COMMIT maps to --no-auto-commits and defaults off" \
+check "AIDER_NO_AUTO_COMMIT reaches aider as --no-auto-commits, and only when set" \
   aider_no_auto_commit_is_wired
+# .env.example is a text file and the value it ships is a text question.
+check ".env.example ships AIDER_NO_AUTO_COMMIT=false" \
+  grep -qx 'AIDER_NO_AUTO_COMMIT=false' "${REPO}/.env.example"
 
 echo "# ...and the safety net needs a git repo, which \$HOME will never get"
 # Measured in aider's own source (main.py): with no repo it asks "No git repo
@@ -6785,19 +6906,96 @@ check "nothing installed means nothing removed" \
 # start_ollama_bg — the server runs as the invoking user and every blob lands
 # in THEIR home. Nothing removed that, so on the hosts this project supports
 # specially the prompt promised "incl. ALL models" and left the gigabytes.
-uninstall_clears_user_model_dirs() {
-  local body; body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
-  grep -qE 'rm -rf +"\$\{d\}/\.ollama"' <<<"${body}" || {
-    echo 'uninstall.sh leaves per-user model blobs (~/.ollama) on disk' >&2
-    return 1
-  }
-  # Both homes, not just the one sudo happens to expose.
-  grep -q 'SUDO_USER' <<<"${body}" || {
-    echo 'uninstall.sh only cleans the invoking home, not the human who sudo-ed' >&2
-    return 1
-  }
+# uninstall_home_sweep WHO — run uninstall.sh's own model-directory sweep over
+# a sandbox of fake homes and say what it removed. WHO is the value of
+# SUDO_USER, or empty for none.
+#
+# as_root is stubbed to run a command ONLY when one of its arguments is inside
+# the sandbox, and to print SKIPPED otherwise. That is not tidiness: the block
+# being evaluated also removes /usr/local/bin/ollama and /usr/share/ollama, and
+# this suite runs as root.
+#
+# SOURCE-GREP: extract-to-drive. The sweep is inline in uninstall.sh's main(),
+# which runs on sight, so it is pulled out by anchor and evaluated. What this
+# cannot check is that the anchors still bracket the sweep — an empty
+# extraction fails loudly below rather than asserting over nothing.
+uninstall_home_sweep() {
+  local block
+  block="$(awk 'index($0, "local homes=( \"${HOME:-/root}\" )") { inb = 1 }
+                inb { print }
+                inb && /^  done$/ { exit }' "${REPO}/uninstall.sh")"
+  [[ -n "${block}" ]] || {
+    echo "could not find uninstall.sh's model-directory sweep — this gate stopped watching" >&2
+    return 1; }
+  grep -q '\.ollama' <<<"${block}" || {
+    echo "the extracted sweep never reaches the model directories — the anchors have moved" >&2
+    return 1; }
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    SB="$3"; WHO="$4"
+    HOME="${SB}/root"
+    if [[ -n "${WHO}" ]]; then SUDO_USER="${WHO}"; else unset SUDO_USER; fi
+    getent() { [[ "$1" == passwd ]] || return 1
+               printf "%s:x:1000:1000::%s/%s:/bin/bash\n" "$2" "${SB}" "$2"; }
+    have() { return 1; }
+    systemd_available() { return 1; }
+    id() { return 1; }
+    as_root() {
+      local a
+      for a in "$@"; do
+        case "${a}" in "${SB}"/*) command "$@"; return ;; esac
+      done
+      printf "SKIPPED %s\n" "$*"
+    }
+    ok() { printf "OK %s\n" "$*"; }
+    eval "run() { $2 ; }"
+    run
+  ' _ "${REPO}/scripts/lib.sh" "${block}" "${UNINST_SB}" "$1" 2>&1
 }
-check "uninstall clears models pulled without systemd" uninstall_clears_user_model_dirs
+
+# Driven, not read. The grep version asserted that uninstall.sh contained
+# 'rm -rf "${d}/.ollama"' and the word SUDO_USER — both of which survive the
+# loop never running, and neither of which says whether the second home is
+# reached. What is at stake is gigabytes of model blobs left on a machine whose
+# owner was told everything was removed, on exactly the hosts (containers, WSL)
+# where the server runs as a human rather than the ollama account.
+uninstall_clears_user_model_dirs() {
+  local out
+  UNINST_SB="${SANDBOX}/uninstall-homes"
+  rm -rf "${UNINST_SB}"
+  mkdir -p "${UNINST_SB}/root/.ollama/models" \
+           "${UNINST_SB}/human/.ollama/models" \
+           "${UNINST_SB}/human/project"
+  : > "${UNINST_SB}/root/.ollama/models/blob"
+  : > "${UNINST_SB}/human/.ollama/models/blob"
+  : > "${UNINST_SB}/human/project/notes"
+  out="$(uninstall_home_sweep human)" || return 1
+  [[ ! -e "${UNINST_SB}/root/.ollama" ]] || {
+    printf 'the invoking home kept its models:\n%s\n' "${out}" >&2; return 1; }
+  # The half a source grep could never see: the human who typed sudo.
+  [[ ! -e "${UNINST_SB}/human/.ollama" ]] || {
+    printf 'the sudo-ing human kept their models — gigabytes left on a machine reported clean:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # ...and it must take only the model directory with it.
+  [[ -e "${UNINST_SB}/human/project/notes" ]] || {
+    printf 'the sweep removed more than the model directory:\n%s\n' "${out}" >&2; return 1; }
+  # Said out loud, both times: a removal nobody is told about is indistinguishable
+  # from one that did not happen.
+  (( $(grep -c '^OK Removed' <<<"${out}") == 2 )) || {
+    printf 'the sweep did not report both removals:\n%s\n' "${out}" >&2; return 1; }
+  # With nobody sudo-ing, the second home is not this script's business.
+  rm -rf "${UNINST_SB}"
+  mkdir -p "${UNINST_SB}/root/.ollama" "${UNINST_SB}/human/.ollama"
+  out="$(uninstall_home_sweep "")" || return 1
+  [[ ! -e "${UNINST_SB}/root/.ollama" ]] || {
+    printf 'with no SUDO_USER the invoking home was skipped too:\n%s\n' "${out}" >&2; return 1; }
+  [[ -e "${UNINST_SB}/human/.ollama" ]] || {
+    printf 'an unrelated home was swept with no SUDO_USER set:\n%s\n' "${out}" >&2; return 1; }
+}
+check "uninstall removes per-user model blobs from both homes" \
+  uninstall_clears_user_model_dirs
 
 echo "# ...and a chat app it could not even LOOK at is not a chat app it removed"
 # The WebUI block asked 'docker container inspect' straight out. With dockerd
@@ -9818,23 +10016,6 @@ check "check-system.sh reports ollama config drift" check_reports_dropin_drift
 # anyone at. So the half containing the assistant's own system prompt could
 # drift with 'lca check' saying nothing — the exact silence this class of test
 # exists to break.
-check_reports_webui_drift() {
-  grep -qF 'webui_drift' "${REPO}/check-system.sh" || {
-    echo "'lca check' never asks whether the chat app matches .env" >&2
-    return 1
-  }
-  # And it must not claim a match for a container that is not there: with no
-  # container every comparison reads "cannot tell", and "matches .env" about a
-  # thing that does not exist is worse than saying nothing.
-  awk '/webui_drifted="\$\(webui_drift/ { found=1 }
-       found && /p_pass "chat app matches/ { ok=guarded }
-       /if \[\[ -n "\$\{webui_status\}" \]\]/ { guarded=1 }
-       END { exit !ok }' "${REPO}/check-system.sh" || {
-    echo "the chat-app drift check is not scoped to an existing container" >&2
-    return 1
-  }
-}
-check "check-system.sh reports chat app config drift too" check_reports_webui_drift
 
 echo "# every setting baked into the WebUI container must be drift-checked"
 # Editing .env does not change a running container, so each of these can be
@@ -9888,6 +10069,86 @@ every_drift_key_is_reported() {
 }
 check "every key webui_drift can emit is named in 'lca webui status'" \
   every_drift_key_is_reported
+# drift_verdict STATUS DRIFTED COMPARABLE — what 'lca check' really prints for
+# that state of the chat app, from check-system.sh's own reporting block.
+#
+# SOURCE-GREP: extract-to-drive. check-system.sh has no main() and runs on
+# sight, so the block is pulled out by anchor and evaluated with webui_drift,
+# webui_prompt_comparable and the reporters stubbed. What this cannot check is
+# that the anchors still bracket the whole block — an extraction that misses
+# the closing 'fi' fails loudly below rather than asserting over nothing.
+drift_verdict() {
+  local block
+  block="$(awk 'index($0, "if [[ -n \"${webui_status}\" ]]; then") { inb = 1 }
+                inb { print }
+                inb && /^  fi$/ { exit }' "${REPO}/check-system.sh")"
+  [[ -n "${block}" ]] || {
+    echo "could not find check-system.sh's drift-reporting block — this gate stopped watching" >&2
+    return 1; }
+  grep -q 'webui_prompt_comparable' <<<"${block}" || {
+    echo "the extracted drift block does not reach the prompt arm — the anchors have moved" >&2
+    return 1; }
+  bash -c '
+    set -uo pipefail
+    source "$5" >/dev/null 2>&1
+    webui_status="$2"; DRIFT="$3"; CMP="$4"
+    webui_drift() { [[ -n "${DRIFT}" ]] && printf "%s\n" "${DRIFT}"; return 0; }
+    webui_prompt_comparable() { [[ "${CMP}" == yes ]]; }
+    info()   { printf "INFO %s\n" "$*"; }
+    p_pass() { printf "PASS %s\n" "$*"; }
+    p_fail() { printf "FAIL %s\n" "$*"; }
+    p_warn() { printf "WARN %s\n" "$*"; }
+    eval "$1"
+  ' _ "${block}" "$1" "$2" "$3" "${REPO}/scripts/lib.sh" 2>&1
+}
+
+# Driven, not read. The grep version asserted that check-system.sh contained
+# the word 'webui_drift' under an awk-shaped guard — which is exactly what was
+# true on the day WEBUI_BANNERS drift printed nothing at all under a green
+# health line. What is at stake is the one line this file exists to get right:
+# whether a running container is reported as matching a .env it does not match.
+check_reports_webui_drift() {
+  local out
+  # Every key webui_drift can name must reach the message. Hand-written keys
+  # are how the last one went missing, so the list is read from webui_drift.
+  local keys; keys="$(drift_keys)"
+  [[ -n "${keys}" ]] || { echo 'could not read the drift keys' >&2; return 1; }
+  out="$(drift_verdict running "${keys}" yes)" || return 1
+  local key
+  while read -r key; do
+    [[ -n "${key}" ]] || continue
+    grep -qF "${key}" <<<"${out}" || {
+      printf "'lca check' can be handed %s as drifted and never says it:\n%s\n" "${key}" "${out}" >&2
+      return 1; }
+  done <<<"${keys}"
+  grep -q '^WARN ' <<<"${out}" || {
+    printf 'drift was reported at a level that does not stand out:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'lca apply' <<<"${out}" || {
+    printf 'drift was reported without naming the command that fixes it:\n%s\n' "${out}" >&2
+    return 1; }
+  # A container that is not there gets no verdict at all: "matches .env" about
+  # a thing that does not exist is the confidently-wrong line.
+  out="$(drift_verdict "" "" yes)" || return 1
+  [[ -z "${out}" ]] || {
+    printf 'a chat app that does not exist was judged anyway:\n%s\n' "${out}" >&2
+    return 1; }
+  # Clean and comparable: the prompt may be named as checked.
+  out="$(drift_verdict running "" yes)" || return 1
+  grep -q '^PASS .*system prompt' <<<"${out}" || {
+    printf 'a fully comparable chat app was not reported as matching:\n%s\n' "${out}" >&2
+    return 1; }
+  # Clean but NOT comparable: the prompt must not be claimed, and the gap must
+  # be said out loud rather than left to read as a pass.
+  out="$(drift_verdict running "" no)" || return 1
+  ! grep -q '^PASS .*system prompt' <<<"${out}" || {
+    printf 'the assistant prompt was reported as matching when it could not be compared:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf 'a prompt comparison that could not run was passed over in silence:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "check-system.sh reports chat app config drift too" check_reports_webui_drift
 # ...and a floor under the whole thing, because the gate above can only see
 # keys that exist today. A '*)' arm makes an unknown key imprecise; without one
 # it is invisible, and invisible under a green line is worse than absent.
@@ -18078,8 +18339,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 153 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 149 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

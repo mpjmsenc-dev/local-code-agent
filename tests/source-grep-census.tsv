@@ -28,7 +28,7 @@ A	agent_publishes_on_the_tailscale_address	greps agent.sh for docker publish fla
 A	agent_sh_adds_the_host_gateway	greps agent.sh for --add-host
 A	agent_sh_corrects_the_callback_address	greps agent.sh for -e flags
 A	agent_sh_passes_the_sandbox_env	greps the extracted docker run block
-A	aider_no_auto_commit_is_wired	greps run-agent.sh for the flag and its guard
+FP	aider_no_auto_commit_is_wired	extract-to-drive: builds the real aider argv and reads the flag off it
 A	aider_pin_is_watched	greps check-system.sh for pin handling
 A	appliers_check_the_scripts_they_call	source lint standing in for "apply survives a failing sub-script"
 A	apply_asks_before_rendering	awk over apply.sh for the order two calls appear in
@@ -57,10 +57,10 @@ A	both_commands_announce_a_model_load	greps two scripts for a call
 A	both_reporters_ask_lib	greps for who computes the git identity
 A	both_surfaces_report_an_unknown_family	awk for a call inside main()
 A	can_root_now_is_stricter	calls both, then source-greps for the distinction that matters
-A	check_names_a_bad_port	greps check-system.sh for validate calls
+FP	check_names_a_bad_port	extract-to-drive: runs check-system.sh's Settings block over real values
 A	check_reports_dropin_drift	a single grep for one function name
 A	check_reports_the_agent	awk over check-system.sh for a guarded call
-A	check_reports_webui_drift	greps check-system.sh for a call and a guard
+FP	check_reports_webui_drift	extract-to-drive: runs the drift-reporting block over four container states
 A	check_system_asks_for_the_port_list	greps a section of check-system.sh for a call
 A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the expectation
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
@@ -158,7 +158,7 @@ A	tune_consults_the_disk_before_pulling	awk ordering across three regions of tun
 A	tune_reconciles_after_a_model_change	awk over tune.sh for a call inside a branch
 A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch condition and messages
 A	uninstall_answers_help_first	awk ordering inside main()
-A	uninstall_clears_user_model_dirs	two presence-greps in uninstall.sh
+FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over a sandbox of fake homes
 A	uninstall_feeds_every_step_to_the_verdict	greps for a call-plus-status form
 A	uninstall_removals_can_reach_root	exhaustive absence of bare rm plus a counted floor
 A	uninstall_removes_the_agent	two presence-greps in uninstall.sh
@@ -327,3 +327,7 @@ H	tune_builds_on_path	drives tune.sh's PATH construction
 H	tune_dry_run_in	runs lca tune --dry-run
 H	tune_gate_setup	prepares the environment the tune gates need
 H	vol_payload	extracts restore.sh's volume-restore payload
+H	aider_argv_with	builds the real aider argv by evaluating run-agent.sh's own block
+H	settings_verdict	runs check-system.sh's Settings block over a given configuration
+H	drift_verdict	runs check-system.sh's drift-reporting block over a given state
+H	uninstall_home_sweep	runs uninstall.sh's model sweep over a sandbox of fake homes
