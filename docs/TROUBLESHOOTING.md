@@ -113,7 +113,7 @@ faster/smarter? Resize to more RAM/CPU — auto-tune handles the rest.
 **If it was fast and then suddenly was not**, and you have the agent tier on,
 the likely cause is the two models evicting each other: one chat message in the
 middle of an agent session makes the agent's next step reprocess its whole
-~15,000-token prompt — 543 s cold against 3.6 s warm. See
+prompt (13,796 tokens on the current build) — 543 s cold against 3.6 s warm. See
 [PERFORMANCE.md](PERFORMANCE.md#why-it-randomly-gets-slow-the-two-models-evict-each-other).
 
 ## The model ignores earlier context or instructions in a long session
@@ -412,13 +412,24 @@ tool calls are edits against paths that were never mentioned, which is visible
 immediately and invisible to anything that counts steps. Full measurement in
 [docs/AGENT.md](AGENT.md).
 
-**The truncation.** With `max_output_tokens` unset, the client reserved half the
-context window for its own reply. An 18,313-token prompt was cut to 8,194 — the
-agent read **under half** its instructions, and there is no error for this: the
-run proceeds, obeys the part it received, and looks like a model that ignores
-you. `AGENT_MAX_OUTPUT_TOKENS` (default 2048) is the setting; it is capped at
-half the window, because past that the reservation is larger than what it
-leaves.
+**The truncation.** The agent's prompt was **larger than its context window** —
+18,353 tokens against 16,384 — and Ollama does not trim to fit. It cuts the
+prompt to **half the window plus two**, keeping the tail: 8,194 tokens, with
+10,159 thrown away. The agent read **under half** its instructions, including
+the definition of the tool that executes commands, and there is no error for
+this: the run proceeds, obeys the part it received, and looks like a model that
+ignores you.
+
+*Corrected, and it matters for what you should reach for:* this entry used to
+blame `max_output_tokens` being unset, saying the client reserved half the
+window. It does not — measured, Ollama truncates on prompt > window whatever
+the client asks for, and the 8,194 was the halving rule, not a reservation.
+`AGENT_MAX_OUTPUT_TOKENS` is a cap on one reply and worth setting for that; it
+will not make an oversized prompt fit. **What fixes this is a smaller prompt**,
+which this project now ships by default — the skills catalogue the sandbox used
+to fetch is 4,232 tokens of instructions for skills it cannot run, and
+`AGENT_EXTENSIONS_REF` stops it being fetched. See
+[docs/PROMPT-WINDOW.md](PROMPT-WINDOW.md) for the boundary arithmetic.
 
 **The timeout.** The client default of 300 s is shorter than a single step on
 CPU-only hardware — measured at 901 s here. Every step was thrown away
@@ -438,7 +449,10 @@ lca agent logs       # a step that was cut off ends mid-generation, with no erro
 model it is always tempting to blame the model, and twice here that was wrong.
 A model that receives half its instructions and has every long reply discarded
 is not being measured. Rule out the plumbing first — it is cheap, and it is
-where both of these lived.
+where both of these lived. It is worth adding that the *first* explanation of
+the truncation was also wrong, and wrong in a way that pointed at the wrong
+setting: getting from "the model is bad" to "the plumbing is bad" is only half
+the work, and the mechanism has to be measured too.
 
 ## The chat ignores my `config/CONVENTIONS.md`
 

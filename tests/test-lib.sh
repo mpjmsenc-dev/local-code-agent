@@ -3757,27 +3757,30 @@ check "...and port 22 is never guarded, whatever AGENT_PORT says" \
 # hardest kind of failure to read from outside it.
 check "the agent addresses Ollama through its OpenAI-compatible endpoint" \
   test "$(agent_llm_model qwen2.5-coder:7b)" = "openai/qwen2.5-coder:7b"
-# The reply budget, which is really the instruction budget. Unset, the client
-# reserved half the window and Ollama truncated the prompt from 18,313 tokens
-# to 8,194 — the agent read under half its own instructions on every step,
-# measured on the first live run this project ever completed.
+# The reply budget: a cap on how long ONE reply may be, and nothing more. The
+# comment here used to call it "really the instruction budget" and credit it
+# with the 18,313 -> 8,194 truncation. That is retracted — Ollama truncates on
+# prompt > num_ctx whatever the client asks for, cutting to num_ctx/2 + 2, and
+# 16384/2 + 2 happens to equal 16384 - 8190. The assertions below are unchanged
+# because the properties are unchanged; only the reason for wanting them moved.
 max_output_defaults_and_is_guarded() {
   local out
   out="$(AGENT_MAX_OUTPUT_TOKENS="" AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
   [[ "${out}" == "2048" ]] || { echo "unset did not default to 2048: ${out}" >&2; return 1; }
   out="$(AGENT_MAX_OUTPUT_TOKENS=4096 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
   [[ "${out}" == "4096" ]] || { echo "a valid override was not honoured: ${out}" >&2; return 1; }
-  # A word here would be sent as JSON null and reserve the client's default
-  # again — the exact state this exists to end, wearing a configured look.
+  # A word here would be sent as JSON null, which is a setting that looks
+  # configured and asks for nothing.
   out="$(AGENT_MAX_OUTPUT_TOKENS=lots AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
   [[ "${out}" == "2048" ]] || { echo "a non-number was passed through: ${out}" >&2; return 1; }
-  # Past half the window the reservation is bigger than what it leaves.
+  # Past half the window you are asking for a reply longer than the window can
+  # hold, whatever else is in it.
   out="$(AGENT_MAX_OUTPUT_TOKENS=12000 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
-  [[ "${out}" == "2048" ]] || { echo "a reservation larger than half the window was allowed: ${out}" >&2; return 1; }
+  [[ "${out}" == "2048" ]] || { echo "a reply cap larger than half the window was allowed: ${out}" >&2; return 1; }
   out="$(AGENT_MAX_OUTPUT_TOKENS=0 AGENT_MODEL_CONTEXT=16384 agent_max_output_tokens)"
-  [[ "${out}" == "2048" ]] || { echo "zero was allowed, which reserves nothing: ${out}" >&2; return 1; }
+  [[ "${out}" == "2048" ]] || { echo "zero was allowed, which asks for a reply of no length at all: ${out}" >&2; return 1; }
 }
-check "the agent's reply budget defaults, and refuses a value that would starve the prompt" \
+check "the agent's reply cap defaults, and refuses a value the window cannot hold" \
   max_output_defaults_and_is_guarded
 # ...and it must reach the container, as a NUMBER. A quoted "2048" round-trips
 # through the settings API looking correct and reserves nothing.

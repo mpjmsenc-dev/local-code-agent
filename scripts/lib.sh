@@ -3963,12 +3963,18 @@ agent_model_for_run() {
 
 # agent_max_output_tokens — the reply budget to seed, always a usable number.
 #
-# Guarded rather than trusted, because this value is subtracted from the
-# context window to decide how much of the prompt survives. A non-number would
-# be sent as JSON null and reserve the client's own default again — which is
-# the state that truncated 18,313 tokens to 8,194 — and a value at or above the
-# window would leave no room for the prompt at all. Both fall back to the
-# default instead of being passed on.
+# Guarded rather than trusted. A non-number would be sent as JSON null, and a
+# value at or above the window asks for a reply longer than the window can
+# hold. Both fall back to the default instead of being passed on.
+#
+# NOT because it buys prompt room. That claim is retracted: this comment used
+# to say a bad value "reserved the client's own default again — which is the
+# state that truncated 18,313 tokens to 8,194". Measured since, Ollama
+# truncates on prompt > num_ctx whatever the client asks for, and cuts to
+# num_ctx/2 + 2; the 8,194 was that halving, not a reservation. See
+# AGENT_MAX_OUTPUT_TOKENS in load_env and docs/PROMPT-WINDOW.md. The clamp is
+# still worth having — a cap on one reply is a real thing to get right — it
+# just is not what makes the prompt fit.
 # agent_request_timeout — how long the agent waits for ONE model reply.
 #
 # The client default is 300 seconds. On this rung a single step is not close to

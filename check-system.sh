@@ -136,7 +136,7 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
     AGENT_STUCK_STRIKES)
       p_warn "AGENT_STUCK_STRIKES='${value}' is not a whole number, so a run that keeps failing the same way loops until it hits another limit. Set a number (or 0 to never give up, on purpose) in ${ENV_FILE}." ;;
     AGENT_MAX_OUTPUT_TOKENS)
-      p_warn "AGENT_MAX_OUTPUT_TOKENS='${value}' is not a positive number, so the agent falls back to 2048. Unset entirely, the client reserved HALF the window for its reply and truncated an 18,313-token prompt to 8,194 — the agent read under half its instructions. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+      p_warn "AGENT_MAX_OUTPUT_TOKENS='${value}' is not a positive number, so the agent falls back to 2048. It caps ONE reply — it does not make room in the prompt, and a bad value is sent as JSON null. What decides whether the prompt fits is its size against the window (docs/PROMPT-WINDOW.md). Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     AGENT_REQUEST_TIMEOUT)
       p_warn "AGENT_REQUEST_TIMEOUT='${value}' is not a positive number, so the agent falls back to 1800 seconds. Too low and every step is discarded mid-generation: at the client default of 300 this hardware, measured at 901 s per reply, threw away every step and sat 'running' having executed nothing. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     # No catch-all arm on purpose: a setting added to the loop above without a

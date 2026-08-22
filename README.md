@@ -419,7 +419,7 @@ Created from `.env.example` on first run. All keys:
 | `ENABLE_AGENT` | `false` | run the autonomous agent tier (see docs/AGENT.md) |
 | `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
 | `AGENT_MODEL_CONTEXT` | `16384` | context for the agent's own derived model, without raising it server-wide |
-| `AGENT_MAX_OUTPUT_TOKENS` | `2048` | how much of the agent's window it may reserve for its reply — unset, the client took half and the agent read under half its instructions |
+| `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |
 | `AGENT_NATIVE_TOOL_CALLING` | `false` | use the model's native tool-call channel; `false` parses tool calls from the text, which is what `qwen2.5-coder` needs |
 | `ENABLE_OLLAMA_RELAY` | `false` | let containers reach Ollama via the docker bridge, without binding Ollama to 0.0.0.0 |
