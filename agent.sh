@@ -30,7 +30,8 @@ Commands:
   task      Give it a task from here, with the working directory named
             explicitly — the thing two failed runs did not have
   start     Start the agent (pulls the images on first run — several GB)
-  stop      Stop it (its workspace and settings are kept in ~/.openhands)
+  stop      Stop it (settings are kept in ~/.openhands; the agent's workspace
+            is copied to ~/.openhands/workspaces/ when its sandbox is collected)
   restart   Restart it
   status    Container state + HTTP health on port ${AGENT_PORT}
   url       The address to open on your phone, over Tailscale
@@ -394,7 +395,7 @@ seed_agent_settings() {
 # containers" is the kind of line that is either reassuring or alarming
 # depending on whether you knew they were there. Nobody knew they were there.
 remove_orphan_sandboxes() {
-  local orphans n name
+  local orphans n name saved
   orphans="$(agent_orphan_sandboxes 2>/dev/null || true)"
   [[ -n "${orphans}" ]] || return 0
   n="$(grep -c . <<<"${orphans}")"
@@ -402,8 +403,17 @@ remove_orphan_sandboxes() {
   info "The app is down, so these cannot be reached by anything any more."
   while read -r name; do
     [[ -n "${name}" ]] || continue
+    # Save the work BEFORE destroying the container that holds it. The sandbox
+    # has no mounts, so 'docker rm -f' is the only thing standing between the
+    # agent's output and oblivion, and this project used to tell people to go
+    # read it afterwards. Best-effort and quiet when there is nothing to save.
+    saved="$(agent_preserve_workspace "${name}" 2>/dev/null || true)"
     if as_root docker rm -f "${name}" >/dev/null 2>&1; then
-      ok "Removed ${name}."
+      if [[ -n "${saved}" ]]; then
+        ok "Removed ${name}. Its workspace was copied to ${saved} first."
+      else
+        ok "Removed ${name}."
+      fi
     else
       warn "Could not remove ${name} — it is still running. Remove it by hand: sudo docker rm -f ${name}"
     fi
@@ -437,7 +447,14 @@ main() {
       # succeeds and B fails, so a stop that worked could still report that
       # nothing was running.
       if as_root docker stop "${AGENT_CONTAINER}" >/dev/null 2>&1; then
-        ok "Agent stopped. Its workspace and settings are kept in ${HOME}/.openhands."
+        # Not "its workspace is kept in ~/.openhands" — it never was. Stopping
+        # the app leaves the sandbox up, so at this moment the agent's files are
+        # still inside that container; they reach ~/.openhands/workspaces only
+        # when the sandbox is collected, which is what 'lca agent start' does.
+        ok "Agent stopped; its settings are kept in ${HOME}/.openhands."
+        if [[ -n "$(agent_live_sandboxes 2>/dev/null || true)" ]]; then
+          info "Its sandbox is still running and still holds the agent's files. They are copied to ${HOME}/.openhands/workspaces when it is collected: lca agent start"
+        fi
       else
         warn "The agent container was not running."
       fi
@@ -461,7 +478,7 @@ main() {
     # it. --yes is there for a script that has already decided.
     gc)
       require_cmd docker
-      local reclaim="" line name why count=0 assume_yes=false answer=""
+      local reclaim="" line name why count=0 assume_yes=false answer="" saved=""
       for arg in ${@+"$@"}; do
         case "${arg}" in
           -y|--yes) assume_yes=true ;;
@@ -482,7 +499,7 @@ main() {
         [[ -n "${name}" ]] || continue
         info "${name} — ${why}"
       done <<<"${reclaim}"
-      warn "A sandbox has no host mount: removing it deletes anything the agent built inside it that you have not copied out."
+      info "A sandbox has no host mount, so anything the agent built lives only inside it. Whatever it wrote is copied to ${HOME}/.openhands/workspaces before the container goes."
       if [[ "${assume_yes}" != "true" ]]; then
         printf 'Remove %s sandbox container(s)? [y/N] ' "${count}"
         read -r answer || answer=""
@@ -490,8 +507,16 @@ main() {
       fi
       while IFS=$'\t' read -r name why; do
         [[ -n "${name}" ]] || continue
+        # Same order as remove_orphan_sandboxes, for the same reason: this is
+        # the last moment the work exists. This path used to tell the user to
+        # copy it out by hand and then delete it for them if they had not.
+        saved="$(agent_preserve_workspace "${name}" 2>/dev/null || true)"
         if as_root docker rm -f "${name}" >/dev/null 2>&1; then
-          ok "Removed ${name}."
+          if [[ -n "${saved}" ]]; then
+            ok "Removed ${name}. Its workspace was copied to ${saved} first."
+          else
+            ok "Removed ${name}. It had written nothing."
+          fi
         else
           warn "Could not remove ${name} — remove it by hand: sudo docker rm -f ${name}"
         fi

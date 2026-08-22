@@ -385,7 +385,25 @@ main() {
       info "--dry-run: the agent is still running."
     else
       if as_root docker stop "${AGENT_CONTAINER}" >/dev/null 2>&1; then
-        ok "Agent stopped. Its workspace is intact in ${HOME}/.openhands — read it, then start again."
+        # This used to say "Its workspace is intact in ~/.openhands — read it,
+        # then start again", and all three clauses were wrong. The workspace was
+        # never in ~/.openhands: the sandbox has no mounts, so the agent's files
+        # live in that container and nowhere else. Stopping the APP does not
+        # stop the sandbox, so at this moment they still exist. And "start
+        # again" is precisely the command that collects orphaned sandboxes and
+        # 'docker rm -f's them, so following this advice destroyed the work it
+        # had just told you to read. Copy it out here, while it is still there.
+        saved_any=""
+        while read -r sbx; do
+          [[ -n "${sbx}" ]] || continue
+          where="$(agent_preserve_workspace "${sbx}" 2>/dev/null || true)"
+          [[ -n "${where}" ]] && { ok "Saved the workspace of ${sbx} to ${where}"; saved_any=yes; }
+        done < <(agent_live_sandboxes 2>/dev/null || true)
+        if [[ -n "${saved_any}" ]]; then
+          ok "Agent stopped. Its work is in the directory named above — read it, then start again."
+        else
+          ok "Agent stopped. It had written nothing to its workspace, so there is nothing to read."
+        fi
       else
         warn "Could not stop the container; do it by hand: lca agent stop"
       fi

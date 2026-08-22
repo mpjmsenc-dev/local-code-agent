@@ -3049,6 +3049,58 @@ agent_conversation_count() {
         else empty end ) | objects ] | length' 2>/dev/null || return 1
 }
 
+# agent_preserve_workspace NAME [DEST_ROOT] — copy a sandbox's /workspace out
+# before the container is destroyed. Prints the directory it wrote, or nothing.
+#
+# WHY THIS EXISTS, and it is a promise this project was breaking. The sandbox
+# has NO mounts — measured: `docker inspect --format {{.Mounts}}` is empty — so
+# everything the agent writes lives in the container's writable layer and
+# nowhere else. `docker rm -f` in remove_orphan_sandboxes therefore deleted it,
+# while agent-watch.sh said "Its workspace is intact in ~/.openhands — read it,
+# then start again". Nothing of the sort was in ~/.openhands: settings, the db,
+# and the conversation events, but never a file the agent wrote. Worse, "start
+# again" is the instruction that triggers the collection that destroys it.
+#
+# docker cp rather than a bind mount, deliberately. OH_SANDBOX_MOUNTS does work
+# on this build — verified, the sandbox came up with the bind in place — but it
+# is the wrong tool here: the sandbox runs as uid 10001 and could not write to a
+# root-owned host directory, the mount shadowed the git repo the sandbox creates
+# for itself, and one host directory shared by every conversation is a collision
+# waiting for the first concurrent run. Copying out at teardown has none of
+# those properties and needs nothing from OpenHands.
+agent_preserve_workspace() {
+  local name="${1:-}" root="${2:-${HOME}/.openhands/workspaces}" dest
+  [[ -n "${name}" ]] || return 1
+  have docker || return 1
+  # WHAT COUNTS AS WORK. /workspace always holds three entries — project (the
+  # working directory, which arrives with a .git and nothing else), plus
+  # bash_events and conversations, which the agent-server writes for its own
+  # bookkeeping and which are not the user's output. A first attempt at this
+  # guard excluded those two by NAME and so matched every file inside them,
+  # meaning it preserved an untouched sandbox as though it held work. Prune the
+  # trees, not the directory entries.
+  as_root docker exec "${name}" find /workspace \
+      -path /workspace/bash_events -prune -o \
+      -path /workspace/conversations -prune -o \
+      -name .git -prune -o \
+      -type f -print -quit 2>/dev/null | grep -q . || return 1
+  dest="${root}/${name}"
+  mkdir -p "${dest}" 2>/dev/null || return 1
+  # tar rather than 'docker cp', because docker cp cannot exclude and the
+  # bookkeeping trees are far larger than the work: one trivial run wrote eight
+  # bash_events files and a single three-byte deliverable. The agent's own
+  # .git goes too — it is created empty by the sandbox, and a user reading
+  # their recovered files does not want a repo they never made.
+  if as_root docker exec "${name}" tar -cf - -C /workspace \
+       --exclude=./bash_events --exclude=./conversations --exclude-vcs . 2>/dev/null \
+     | tar -xf - -C "${dest}" 2>/dev/null; then
+    printf '%s\n' "${dest}"
+    return 0
+  fi
+  rmdir "${dest}" 2>/dev/null || true
+  return 1
+}
+
 # agent_live_sandboxes — the running sandbox containers, NEWEST FIRST.
 #
 # docker ps already orders by creation time, newest first, which is the one

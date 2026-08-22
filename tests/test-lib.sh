@@ -3674,6 +3674,48 @@ submit_fails_loudly_when_the_app_refused() {
 }
 check "a submission the app refused fails loudly instead of exiting 0" \
   submit_fails_loudly_when_the_app_refused
+# The agent's files live in the sandbox container and nowhere else — measured,
+# 'docker inspect --format {{.Mounts}}' on a sandbox is empty — so whatever
+# destroys the container destroys the work. Two things must hold together, and
+# for months neither did: the collection must copy the work out first, and
+# nothing may tell the user their workspace is somewhere it is not.
+work_is_saved_before_the_sandbox_is_destroyed() {
+  local agent_body watch_body lib_body
+  agent_body="$(sed 's/#.*//' "${REPO}/agent.sh")"
+  watch_body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
+  lib_body="$(sed 's/#.*//' "${REPO}/scripts/lib.sh")"
+  grep -q 'agent_preserve_workspace()' <<<"${lib_body}" || {
+    echo 'agent_preserve_workspace is gone, so nothing rescues the agent output' >&2
+    return 1; }
+  # EVERY site that destroys a sandbox must save first, not just the first one
+  # found. Written as "first preserve, then remove" once, this gate passed while
+  # 'lca agent gc' — a second, entirely separate removal path — still deleted
+  # the work outright. Check each removal site against the lines above it.
+  local sites=0 line ctx
+  while read -r line; do
+    [[ -n "${line}" ]] || continue
+    sites=$((sites+1))
+    ctx="$(sed -n "$(( line > 12 ? line-12 : 1 )),${line}p" "${REPO}/agent.sh")"
+    grep -q 'agent_preserve_workspace' <<<"${ctx}" || {
+      printf 'agent.sh:%s destroys a sandbox with nothing copying its workspace out first\n' "${line}" >&2
+      return 1; }
+  done < <(grep -nE 'docker rm -f "\$\{name\}"' "${REPO}/agent.sh" | grep -v 'by hand' | cut -d: -f1)
+  (( sites >= 2 )) || {
+    printf 'only %s sandbox-removal site(s) found; this gate has stopped watching\n' "${sites}" >&2
+    return 1; }
+  # And the watcher must save at the moment it stops, because "start again" is
+  # what triggers the collection.
+  grep -q 'agent_preserve_workspace' <<<"${watch_body}" || {
+    echo 'the watcher stops the agent without saving the work its own message points at' >&2
+    return 1; }
+  # No script may claim the workspace is in ~/.openhands itself. It never was.
+  if grep -qE 'workspace (is intact|and settings are kept) in' <<<"${agent_body}${watch_body}"; then
+    echo 'a script still claims the workspace lives in ~/.openhands; it lives in the sandbox container' >&2
+    return 1
+  fi
+}
+check "the agent's work is copied out before its sandbox is destroyed" \
+  work_is_saved_before_the_sandbox_is_destroyed
 agent_base_url_is_not_loopback() {
   local u; u="$(agent_llm_base_url)"
   # host.docker.internal, because inside the container 127.0.0.1 is the
