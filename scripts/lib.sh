@@ -3793,6 +3793,27 @@ refresh_agent_model_after_tune() {
 #
 # -1 is Ollama's "keep it resident for ever", and .env.example already documents
 # it. This does not change the setting: it is the user's RAM.
+# agent_skills_catalogue_fetched — true when the agent will fetch OpenHands'
+# public skills catalogue on this box.
+#
+# It is 4,232 tokens of instructions for skills this tier cannot run, and it is
+# the difference between a prompt that fits its window and one that does not.
+# The default AGENT_EXTENSIONS_REF names a ref that does not exist, so nothing
+# is fetched; pointing it at a real one (main) puts the catalogue back.
+#
+# Worth a check of its own because of what overflow costs HERE. Ollama does not
+# trim to fit: past the window it cuts the prompt to num_ctx/2 + 2 and keeps
+# the tail, which on the run that produced this project's worst result deleted
+# the definition of the terminal tool outright. The model was then asked to
+# execute with the description of the tool that executes removed, and there is
+# no error for that anywhere.
+agent_skills_catalogue_fetched() {
+  [[ "${ENABLE_AGENT:-false}" == "true" ]] || return 1
+  local ref="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  [[ -n "${ref}" ]] || return 1
+  [[ "${ref}" != "lca-public-skills-disabled" ]]
+}
+
 agent_prompt_cache_at_risk() {
   [[ "${ENABLE_AGENT}" == "true" ]] || return 1
   [[ "${OLLAMA_KEEP_ALIVE}" != "-1" ]]

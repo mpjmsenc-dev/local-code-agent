@@ -17377,6 +17377,46 @@ usage_on_an_error_path_goes_to_stderr() {
 check "no script prints its usage to stdout on a path that fails" \
   usage_on_an_error_path_goes_to_stderr
 
+echo "# the setting that decides whether the agent's prompt fits, which nothing watched"
+# 4,232 tokens of skills this tier cannot run, and the difference between a
+# prompt that fits and one Ollama halves. Driven, both directions and both
+# switches, because a predicate that answers true on a box with the agent off
+# would put a warning about the agent in front of everyone.
+skills_fetched() {   # ENABLE_AGENT REF -> yes|no
+  if bash -c 'source "$1" >/dev/null 2>&1
+              ENABLE_AGENT="$2"; AGENT_EXTENSIONS_REF="$3"
+              agent_skills_catalogue_fetched' _ "${REPO}/scripts/lib.sh" "$1" "$2"
+  then printf yes; else printf no; fi
+}
+check "the shipped default fetches nothing" \
+  test "$(skills_fetched true lca-public-skills-disabled)" = no
+check "...and pointing it at a real ref does" \
+  test "$(skills_fetched true main)" = yes
+check "...as does any other ref somebody sets" \
+  test "$(skills_fetched true v1.2.3)" = yes
+check "an empty value is the default, not a fetch" \
+  test "$(skills_fetched true '')" = no
+check "...and with the agent off it is nobody's problem" \
+  test "$(skills_fetched false main)" = no
+# ...and 'lca check' must actually say so, with the consequence rather than the
+# setting name alone: the penalty for overflow here is a halved prompt whose
+# missing half held the terminal tool.
+check "'lca check' reports a fetched skills catalogue" \
+  grep -qF 'agent_skills_catalogue_fetched' "${REPO}/check-system.sh"
+# SOURCE-GREP: the subject is the sentence check-system.sh prints, and this
+# file cannot run check-system.sh's agent section without a live agent tier.
+# What it cannot check is that the sentence is reached — the predicate above is
+# driven for that, and this only holds the wording it is printed with.
+skills_warning_names_the_cost() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -qF '4,232' <<<"${body}" || { echo "the warning does not say what the catalogue costs" >&2; return 1; }
+  grep -qiE 'halve|halves' <<<"${body}" || { echo "the warning does not say what overflow does" >&2; return 1; }
+  grep -qF 'lca-public-skills-disabled' <<<"${body}" || { echo "the warning does not name the value that fixes it" >&2; return 1; }
+}
+check "...naming the cost, the penalty and the value that fixes it" \
+  skills_warning_names_the_cost
+
 echo "# keep-alive is a decision this project can make, not a warning to hand over"
 # 'lca check' warned about OLLAMA_KEEP_ALIVE on every box with the agent on,
 # for ever. The two facts needed to decide it — how much RAM this box has and
