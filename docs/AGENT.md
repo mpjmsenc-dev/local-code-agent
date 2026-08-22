@@ -686,7 +686,19 @@ its output as **a first draft that has been executed once** — which is a
 materially better thing than the never-executed draft this section used to
 describe, and still not something to trust unread.
 
-**On evidence strength, honestly:** this is `n = 2` on `wordcount` and `n = 1`
+**A third sample, 2026-08-22**, with the task text captured on both sides this
+time rather than assumed — the earlier "it read the rule three times" was an
+inference, because nothing recorded which text the run received. It wrote both
+files inside its directory, executed the program, and quoted its real output.
+It then reported that the behaviour "matches the specified requirements" while
+the error-handling requirement was never exercised and does not work:
+`except FileNotFoundError or PermissionError:` catches only the first of the
+two. **So it executes its work but does not check it** — the third prohibition
+is the one it fails. Prompt 13,783 tokens, no truncation, four turns, 24.5
+minutes; the SystemPromptEvent, the byte-identical task text, and all three
+error paths tested are in docs/PROMPT-WINDOW.md.
+
+**On evidence strength, honestly:** this is `n = 3` on `wordcount` and `n = 1`
 on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
 derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
 asked to be told the task, and wrote nothing. So the *rate* is unmeasured and
@@ -817,22 +829,49 @@ hour.
 
 ---
 
-## The prompt: two measurements, and which one is the baseline
+## The prompt: one baseline, and an estimate that never described it
 
-**Every token count here now names the configuration it was measured under.**
-Two decompositions of "the agent's prompt" exist in this project, they disagree
-by 3,128 tokens, and for a while both sat in this file with nothing saying what
-produced either. That is how they came to look like a contradiction rather than
-two different measurements.
+**Every token count here now names what produced it.** Two decompositions of
+"the agent's prompt" sat in this file with nothing attached to either, which is
+how they came to look like a contradiction. They are not one, and the
+resolution is not the comfortable one: this was **not two configurations**.
 
-| | 15,225-token decomposition | 18,353-token decomposition |
-|---|---|---|
-| when | earlier, this file | 2026-08-17, `docs/PROMPT-WINDOW.md` |
-| task text | 2,041 tokens (a long hand-written task) | **165 tokens** (`agent_task_prompt`, 824 chars) |
-| tools reported | `Loaded 22 tools from spec` | 26 listed in `system_prompt` |
-| tool JSON | counted inside the system message | 10,280, derived by subtraction |
-| skills catalogue | not separated out | **4,232 tokens**, separated and then cut |
-| status | **superseded** — kept for the tool-knob finding below | **the baseline** |
+The earlier 15,225 was an *estimate*, and Ollama counted the very same run and
+logged `prompt=17820`. It under-counted by 17.1%, mostly by never counting
+`dynamic_context` at all. Every agent prompt in the journal from 08-09 to the
+skills cut sits between 17,820 and 18,742, so **~15k never described a real
+prompt on this box**. `docs/PROMPT-WINDOW.md` has it term by term.
+
+That is worth stating plainly rather than filed as a discrepancy, because the
+first attempt at reconciling it — mine — assumed the two numbers were both
+right about different setups, and looked for the difference in the task text.
+Checking the recorded state of both runs is what showed the window, the
+extensions state, the agent-server version, the tool spec and the 57-skill
+catalogue were **identical on both dates**. An estimate and a measurement do
+not need a configuration difference to disagree; they need one of them to have
+been counted.
+
+> **Superseded as a total, 2026-08-17.** The whole-request figure below is
+> **15,225 and the measured baseline is 18,353** — the difference is almost
+> entirely `dynamic_context`, which this decomposition never counted, plus a
+> task that was 2,041 tokens here and 165 in the later run. It is not a
+> configuration difference: window, extensions state, agent-server version,
+> tool spec and the 57-skill catalogue were all identical on both dates, and
+> that was checked against the state each run recorded rather than assumed.
+> These figures were also estimated. What settles it: **Ollama counted this
+> very run and logged `prompt=17820`** — the 15,225 estimate under-counted the
+> same afternoon's prompt by 17.1%, and every agent prompt in the journal from
+> 08-09 to the cut sits between 17,820 and 18,742. The ~15k figure never
+> described a real prompt on this box. The full reconciliation, term by term,
+> is in docs/PROMPT-WINDOW.md.
+>
+> **What survives unchanged** is everything this section is actually about: the
+> browser share, the dead `agent_settings.tools` knob, and prefix caching. The
+> system message is the one part the two measurements agree on — 12,898 against
+> 13,317, 3.2% apart — so the browser block below is a share of a figure that
+> held up.
+
+### It is one system message, and it is mostly the browser
 
 They are not in conflict. Most of the 3,128-token gap is accounted for by the
 task text alone (2,041 against 165 is 1,876 of it), and the rest by a different
@@ -850,7 +889,7 @@ Measured on the earlier build, with a 2,041-token hand-written task:
 
 | | ~tokens | |
 |---|---|---|
-| whole request | 15,225 | |
+| whole request | 15,225 *(superseded: 18,353)* | |
 | **system message** | **12,898** | **86% of it** |
 | the user's task | 2,041 | a long hand-written task, not `agent_task_prompt`'s 165 |
 | `tools` array | 0 | with `AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system message |

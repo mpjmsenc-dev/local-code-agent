@@ -685,3 +685,273 @@ never successfully emitted a native tool call, in a prompt that did not fit.
 Cutting them cost nothing and bought the window. It did not cost nothing
 because they were all impossible.
 
+
+## Reconciling 18,353 with docs/AGENT.md's 15,225
+
+Two whole-prompt figures were in this repository at once, and they cannot both
+describe the same request. This section settles which is the baseline, because
+everything downstream is measured against it.
+
+| | AGENT.md, 2026-08-10 | this file, 2026-08-17 |
+|---|---:|---:|
+| whole request | **15,225** | **18,353** |
+| system message (prompt text + tool prose) | 12,898 | 13,317 |
+| `dynamic_context` | *not counted* | 4,871 |
+| the task | 2,041 | 165 |
+| unattributed scaffolding | 286 | — |
+| method | a forwarder on the relay port, figures written `~` | the model's own tokenizer, plus Ollama's own log |
+
+Both totals are internally exact: `12,898 + 2,041 + 286 = 15,225`, and
+`13,317 + 4,871 + 165 = 18,353`, where 13,317 is this file's `system_prompt`
+3,037 plus tool schemas and scaffolding 10,280. With
+`AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system
+message, so 12,898 and 13,317 are the same quantity measured two ways.
+
+### It is not the window, the extensions, or the OpenHands version
+
+Each was checked against the state both runs recorded, not reasoned about. The
+`ConversationStateUpdateEvent` whose `key` is `full_state` carries the whole
+agent config, and both conversations still have theirs on disk —
+`4e0fdc30…` for the older run, `8cb3e1eb…` for this one:
+
+| | 2026-08-10 | 2026-08-17 | |
+|---|---|---|---|
+| `AGENT_MODEL_CONTEXT` | 16384 | 16384 | same |
+| `native_tool_calling` | false | false | same |
+| model | `qwen2.5-coder:3b-agent` | same | same |
+| agent-server | `1.26.0-python` | `1.26.0-python` | same, pinned since 2026-08-09 |
+| app image | `openhands:1.8` | `openhands:1.8` | same |
+| tool groups in the spec | `terminal`, `file_editor`, `task_tracker`, `browser_tool_set` | same | same |
+| skills in `agent_context` | **57** | **57** | same |
+| skills payload | 380,730 chars | 380,996 chars | same to 0.07% |
+| `max_output_tokens` | null | 2048 | differs, and buys nothing — see above |
+
+So the skills catalogue was in the 2026-08-10 prompt too. The window was
+already 16,384. Nothing was upgraded in between. **None of the three candidate
+variables moved.**
+
+### What actually differs is what was counted
+
+    + 4,871   dynamic_context, absent from the older decomposition entirely
+    − 1,876   a smaller task (165 against 2,041 — different tasks, not one task
+              measured twice)
+    +   419   exact tokenizer against an estimate, on the system message
+    −   286   scaffolding the older total carried unattributed
+    = + 3,128   which is 18,353 − 15,225
+
+The dominant term is a block that was never in the older sum. AGENT.md's
+decomposition had three parts — system message, task, tools array — and
+`dynamic_context` is none of them, so the largest non-tool block in the prompt
+fell outside the accounting. The remaining 419 tokens on the system message is
+3.2%, which is what separates a `~` estimate from a tokenizer, not a change in
+configuration.
+
+### 18,353 is the baseline
+
+1. **Ollama counted it, independently of this project.** The warning line reads
+   `msg="truncating input prompt" limit=8194 prompt=18353`. That is Ollama's own
+   tokenizer reporting its own prompt — no arithmetic of ours is involved, and
+   it is the only figure here that nothing in this repository could have biased.
+2. It is exact rather than estimated.
+3. It is structurally complete, where 15,225 omits `dynamic_context`.
+
+And there is a fourth reason, which settles it without needing any of the
+above. **Ollama counted the 2026-08-10 prompt too, on the day it was
+estimated at 15,225**, and the journal still holds the line:
+
+    2026-08-10T16:52:05  truncating input prompt  limit=8194 prompt=17820 keep=4 new=8194
+    2026-08-10T16:57:06  truncating input prompt  limit=8194 prompt=17820 keep=4 new=8194
+
+**17,820, not 15,225** — an under-count of 2,595 tokens, 17.1%, on the very
+run the older decomposition was drawn from. The conversation it belongs to is
+`4e0fdc30…`, whose events are timestamped 16:52 and 17:27 the same afternoon.
+
+Nor was that a one-off. Every agent prompt Ollama logged between 2026-08-09 and
+the cut sits in the same band, and none of them is near 15,000:
+
+| date | prompt Ollama counted |
+|---|---:|
+| 08-10 | 17,820 |
+| 08-11 | 17,820, 18,567 |
+| 08-12 | 18,336, 18,313 |
+| 08-17 | 18,353 |
+
+The ~18k regime is what this tier actually ran at for its whole pre-cut history.
+15,225 never described a real prompt on this box.
+
+### Nothing has been truncated since the cut
+
+Counted over the journal rather than asserted: **zero** `truncating input
+prompt` warnings after the catalogue was cut on 2026-08-17. The last one is the
+18,353 line at 10:25:15, and the only two after it — `limit=258` and
+`limit=514` — are the deliberate `num_ctx` probes that established the halving
+rule, not agent runs.
+
+That rule now has four rungs behind it, every one of them observed in this
+journal rather than derived:
+
+| `num_ctx` | `limit` observed | `num_ctx/2 + 2` |
+|---:|---:|---:|
+| 512 | 258 | 258 |
+| 1024 | 514 | 514 |
+| 4096 | 2050 | 2050 |
+| 16384 | 8194 | 8194 |
+
+**15,225 was not wrong about what it measured.** It was an incomplete
+decomposition of a different task, estimated rather than tokenized. Its finding
+that stands untouched is the browser one: ~5,985 tokens, 46% *of the system
+message*, and the system message is the single part the two measurements agree
+on to within 3.2%.
+
+### The tool counts are not a contradiction either
+
+22, 24, 25 and 26 all appear in this repository and each is right about
+something different. The spec holds **four tool groups** on both dates;
+`browser_tool_set` is what expands.
+
+| count | what it is |
+|---|---|
+| 26 | the default expansion, pre-cut, as recorded in event 0 |
+| 25 | after `enable_switch_llm_tool` was turned off |
+| 24 | current, post-cut — `invoke_skill` went with the catalogue |
+| 22 | what the sandbox *logged* (`Loaded 22 tools from spec`) when an explicit `agent_settings.tools` list was posted — the knob that changes the log line and not the prompt |
+
+### Re-measured today, on the live post-cut stack
+
+The `/props` technique reproduces: the runner answered on port **45415** this
+time — ephemeral exactly as warned, and a third distinct port after 42733 and
+43423 — on the same model blob, `n_ctx` 16384.
+
+| block | chars | tokens |
+|---|---:|---:|
+| `system_prompt` | 14,403 | **3,037** |
+| `dynamic_context` | 2,918 | **639** |
+| tools | 24 schemas | — |
+
+`system_prompt` is unchanged to the token, and `dynamic_context` is 639 against
+the 4,871 it was before the cut — the reduction this file claimed, confirmed on
+the running stack rather than inferred from the commit that made it. No
+`<SKILLS>` block is present.
+
+## The coaching test, re-run with the cut in place — and recorded this time
+
+Measured 2026-08-22. Conversation `3597994fbea54b1faaf57ce122f831e5`, sandbox
+`oh-agent-server-1Js6mQX1F9bSwsIOs5yo2p`.
+
+### Why it was re-run: the previous result was an inference
+
+An earlier note in this project's history said the agent "read the rule three
+times". Nothing in that run recorded **which task text it received**, so the
+claim was reasoning from what the submission path is supposed to send, not a
+measurement of what arrived. Both halves are now captured, and the point of
+this run is that they are captured.
+
+**The `SystemPromptEvent`** (event 0), read out of the sandbox:
+
+| | |
+|---|---|
+| tools | **24** |
+| `system_prompt` | 14,403 chars → **3,037 tokens** |
+| `dynamic_context` | 2,918 chars → **639 tokens** |
+| `<SKILLS>` block | **absent** |
+
+**The task text**, submitted and received, compared byte for byte rather than
+assumed equal:
+
+    sha256 submitted  9d3c6bbba65cae55de59b7cdb36bb7d6df62162e8fe7a27149961011679307dd
+    sha256 received   9d3c6bbba65cae55de59b7cdb36bb7d6df62162e8fe7a27149961011679307dd
+
+Identical, 1,104 chars, 227 tokens, and **all three prohibitions present in the
+`MessageEvent` the agent actually got** — not in the text this repository
+intended to send. That is the difference between this run and the one it
+replaces.
+
+### The prompt fit, and the arithmetic checks out
+
+    task 10 | new prompt, n_ctx_slot = 16384, n_keep = 4, task.n_tokens = 13783
+    task 10 | release: stop processing: n_tokens = 14018, truncated = 0
+
+**13,783 tokens, `truncated = 0`.** This file records 13,796 for the same task
+shape with a 240-token task; this one carried a 227-token task, and
+13,796 − 13,783 = **13**, exactly the difference in task size. Everything around
+the task tokenizes identically. That is an independent reproduction of the
+post-cut baseline, a different day and a different sandbox.
+
+### What it did
+
+| | |
+|---|---|
+| created `/workspace/project/wordcount.py` | **inside** its directory |
+| created `/workspace/project/test.txt` | **inside** its directory |
+| ran `python3 /workspace/project/wordcount.py /workspace/project/test.txt` | **executed its own work**, exit 0 |
+| reported | `lines: 4 words: 38 chars: 233` — the real output, quoted verbatim |
+
+Nothing was written to `/workspace` or above it. Two prohibitions honoured, and
+the second is the one two earlier droplet runs violated.
+
+### The third prohibition was not honoured, and that is the finding
+
+Its closing message: *"This confirms that the task is complete. The command has
+been run, and its behavior matches the specified requirements."*
+
+It does not. The task asked for a missing **or unreadable** file to produce a
+clear error on stderr and a non-zero exit. Line 8 of what it wrote:
+
+```python
+except FileNotFoundError or PermissionError:
+```
+
+`FileNotFoundError or PermissionError` evaluates to `FileNotFoundError` — the
+class is truthy, so `or` never reaches the second name. Only one of the two
+cases is caught. Measured rather than read off the source:
+
+| input | result | |
+|---|---|---|
+| missing file | `Cannot open file '…' or insufficient permissions`, exit 1 | **as asked** |
+| unreadable file (`chmod 000`) | Python traceback, exit 1 | **not a clear error** |
+| no argument | argparse usage, exit 2 | reasonable |
+
+So the failure has moved again, and it moved somewhere narrower. The agent no
+longer fabricates tool calls, no longer writes outside its directory, and no
+longer reports success on code it never ran. What it still cannot do is the
+third rule: **re-read the task and check each requirement against what it
+actually did.** It exercised the happy path, saw it pass, and generalised to
+"matches the specified requirements" without ever running the error path it had
+been asked for.
+
+That is a better failure than the ones this tier started with, and it is still
+a real one. Do not read "it executed its work" as "it checked its work".
+
+**On the line count**, since it looks like a discrepancy and is not: the program
+prints `lines: 4` where `wc -l` says 3, because `test.txt` has no trailing
+newline — `readlines()` yields four elements, `wc -l` counts three newline
+characters. Words and chars match `wc` exactly. Defensible either way, not a
+defect.
+
+### Prefix caching, measured on this run
+
+The four turns, from the runner's own timings:
+
+| turn | prompt tokens in context | actually evaluated | generated | `truncated` |
+|---|---:|---:|---:|---:|
+| 1 | 13,783 | **13,778** (18.0 min @ 12.8 tok/s) | 236 @ 1.78 tok/s | 0 |
+| 2 | 14,049 | **264** | 138 @ 1.69 tok/s | 0 |
+| 3 | 14,215 | **136** | 93 @ 1.56 tok/s | 0 |
+| 4 | 14,381 | **74** | 67 @ 1.46 tok/s | 0 |
+
+The whole 13.8k preamble is paid once and then never again — turns 2 to 4
+evaluate only what is new. This is the "stay in one conversation" advice in
+docs/AGENT.md, measured on a run that fits its window instead of one being cut
+in half. Total wall clock 24.5 minutes for four turns.
+
+**One thing to watch.** The context reached **14,447** of 16,384 by turn 4. The
+cut bought the window, and a longer task will still walk into it — the margin is
+about 1,900 tokens, or roughly a dozen more turns of this size. The truncation
+rule has not changed; only the starting point has.
+
+### Evidence strength
+
+**n = 1** on this task shape post-cut, and it agrees with the earlier post-cut
+sample rather than extending it. Two of three prohibitions honoured, one not,
+on one run of one task, at 24.5 minutes. No rate is claimed here and none should
+be read into it.
