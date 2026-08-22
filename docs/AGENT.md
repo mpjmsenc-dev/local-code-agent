@@ -836,13 +836,30 @@ Every step of this tier reads about 15,000 tokens before the model writes one,
 and that is most of what a task costs. This section is what recording the
 agent's actual requests showed.
 
+> **Superseded as a total, 2026-08-17.** The whole-request figure below is
+> **15,225 and the measured baseline is 18,353** — the difference is almost
+> entirely `dynamic_context`, which this decomposition never counted, plus a
+> task that was 2,041 tokens here and 165 in the later run. It is not a
+> configuration difference: window, extensions state, agent-server version,
+> tool spec and the 57-skill catalogue were all identical on both dates, and
+> that was checked against the state each run recorded rather than assumed.
+> These figures were also estimated; the later ones come from the model's own
+> tokenizer and are corroborated by Ollama's own log line. The full
+> reconciliation, term by term, is in docs/PROMPT-WINDOW.md.
+>
+> **What survives unchanged** is everything this section is actually about: the
+> browser share, the dead `agent_settings.tools` knob, and prefix caching. The
+> system message is the one part the two measurements agree on — 12,898 against
+> 13,317, 3.2% apart — so the browser block below is a share of a figure that
+> held up.
+
 ### It is one system message, and it is mostly the browser
 
 The first request the sandbox sends, decomposed:
 
 | | ~tokens | |
 |---|---|---|
-| whole request | 15,225 | |
+| whole request | 15,225 *(superseded: 18,353)* | |
 | **system message** | **12,898** | **86% of it** |
 | the user's task | 2,041 | |
 | `tools` array | 0 | with `AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system message |
