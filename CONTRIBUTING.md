@@ -590,9 +590,46 @@ is a better trade than one clever rule nobody can audit.
 
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
-`tests/source-grep-baseline.txt`, and carries no `SOURCE-GREP:` line, fails the
-suite. The baseline is the 295 that existed when the rule was written — it is a
-record of debt, not permission, and the honest direction for it is down.
+`tests/source-grep-census.tsv`, and carries no `SOURCE-GREP:` line, fails the
+suite. The census is a record of debt, not permission.
+
+### What the census found, from reading all 278 of them
+
+The list started as 286 grandfathered names with no reason beside any of them.
+Two samples of a dozen each disagreed about how much of it was real debt — four
+of twelve, then eight of twelve — so the whole population was read one gate at a
+time instead. That read is `tests/source-grep-census.tsv`, and it is checked in
+because a number nobody can re-derive is a number nobody should trust.
+
+| | count | share | what it is |
+|---|---|---|---|
+| **A** | **153** | 55% | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
+| B | 97 | 35% | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
+| FP | 28 | 10% | not debt: the gate drives its subject and greps the *result* |
+
+153 of the suite's 1,239 checks, then — about one in eight — assert a runtime
+behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
+converting a gate moves its row from A to FP rather than deleting it, so the
+count is a ratchet and not a promise.
+
+Two counting errors surfaced in the same read, and both flattered the old
+number:
+
+- **28 of the 296 names the scanner flags are helpers, not gates.**
+  `probe_region`, `baked_keys`, `agent_run_block` and the rest extract source
+  for a gate to judge. Their debt, if any, belongs to the gate that calls them,
+  and counting them twice made the population look bigger than it was.
+- **Ten gates read repo source only through one of those helpers, and the
+  scanner cannot see them at all.** `agent_publishes_on_loopback` greps the
+  docker-run block that `agent_run_block` pulled out of `agent.sh`; the
+  `${REPO}/` path is in the helper, so the classifier's rule — *mentions a
+  `${REPO}/` path **and** uses a text tool* — never fires on the gate. Moving a
+  read into a helper is therefore a way to silence the meta-gate without
+  changing anything, which is the same shape as everything else in this
+  document: a thing that reports success having done nothing.
+
+The census carries those ten anyway. They are labelled by what they do, not by
+what the scanner can see.
 
 The meta-gate is itself the kind of thing that becomes decoration, so it is
 driven too: its classifier is run over a fixture holding one offending function

@@ -18005,14 +18005,24 @@ check "...and prose explaining the marker is not a marker" \
 # make every assertion below pass over nothing.
 check "the classifier still recognises this suite's source greps" \
   test "$(source_grep_gates "${REPO}/tests/test-lib.sh" | grep -c .)" -ge 100
+# The census replaced a flat list of 286 grandfathered names. That list said
+# only "this existed"; the census says what each one IS, because reading all
+# 278 gates one at a time turned out to be the only way to learn that just over
+# half of them are the debt and the rest are gates whose subject genuinely is
+# text. Two counting errors came out of the same read: 28 of the names the
+# scanner flags are helpers rather than gates, and ten gates read source only
+# through a helper and the scanner cannot see them at all.
+CENSUS="${REPO}/tests/source-grep-census.tsv"
+census_rows() { grep -v '^#' "${CENSUS}" | grep -c . ; }
+census_names() { grep -v '^#' "${CENSUS}" | cut -f2 | sort -u ; }
+
 # SOURCE-GREP: this reads the suite's text because the suite's text is the
 # subject. What it cannot check is whether a justification is honest — only a
 # reader can do that.
 new_source_greps_are_justified() {
-  local base="${REPO}/tests/source-grep-baseline.txt"
-  [[ -r "${base}" ]] || { echo "the source-grep baseline is missing" >&2; return 1; }
+  [[ -r "${CENSUS}" ]] || { echo "the source-grep census is missing" >&2; return 1; }
   local allowed="${SANDBOX}/sg-allowed" found="${SANDBOX}/sg-found" bad
-  sort -u "${base}" > "${allowed}.b"
+  census_names > "${allowed}.b"
   justified_gates "${REPO}/tests/test-lib.sh" > "${allowed}.j"
   sort -u "${allowed}.b" "${allowed}.j" > "${allowed}"
   source_grep_gates "${REPO}/tests/test-lib.sh" > "${found}"
@@ -18025,19 +18035,55 @@ new_source_greps_are_justified() {
 }
 check "a new gate that greps source says why it cannot drive instead" \
   new_source_greps_are_justified
-# The baseline is debt, not permission: it may shrink, never grow.
-# SOURCE-GREP: it counts lines in a checked-in list. There is no behaviour
-# here to drive; what it cannot check is whether the entries still deserve to
-# be on it.
-baseline_has_not_grown() {
+
+# A census whose rows have stopped naming real functions is a census of
+# nothing, and every count below it would be a count of nothing.
+# SOURCE-GREP: it reads a checked-in table and the suite's own definitions.
+# What it cannot check is whether a row's LABEL is still the right one — that
+# needs somebody to read the gate.
+census_names_real_gates() {
+  local label fn rest bad=0 rows
+  rows="$(census_rows)"
+  (( rows >= 250 )) || {
+    printf 'the census has only %s rows — it stopped being read\n' "${rows}" >&2
+    return 1
+  }
+  while IFS=$'\t' read -r label fn rest; do
+    [[ -n "${fn}" ]] || continue
+    case "${label}" in
+      A|B|FP|H) ;;
+      *) printf 'census row for %s carries an unknown label %q\n' "${fn}" "${label}" >&2
+         bad=1; continue ;;
+    esac
+    grep -qE "^${fn}\(\) *\{" "${REPO}/tests/test-lib.sh" || {
+      printf 'the census names %s, which is no longer a function here\n' "${fn}" >&2
+      bad=1
+    }
+    [[ -n "${rest}" ]] || {
+      printf 'the census row for %s says nothing about what it does\n' "${fn}" >&2
+      bad=1
+    }
+  done < <(grep -v '^#' "${CENSUS}")
+  return "${bad}"
+}
+check "every census row names a real gate and says what it does" \
+  census_names_real_gates
+
+# The A rows are the debt: gates whose claim is a runtime behaviour and whose
+# only evidence is that the source still says so. Converting one moves its row
+# to FP. The count may only go down.
+# SOURCE-GREP: it counts rows in a checked-in table. There is no behaviour
+# here to drive; what it cannot check is whether the entries still deserve
+# their label.
+group_a_debt_has_not_grown() {
   local n
-  n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
-  (( n <= 286 )) || {
-    printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
+  n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
+  (( n <= 153 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
-check "...and the grandfathered list never gets longer" baseline_has_not_grown
+check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
 
 echo
 if (( FAILED > 0 )); then
