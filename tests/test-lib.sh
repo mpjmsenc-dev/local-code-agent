@@ -4247,10 +4247,22 @@ check "...and carries the task itself" \
   grep -q 'add a --json flag' <<<"${TASK_PROMPT}"
 # The rule that addresses the actual root cause: it declared completion without
 # executing anything. One run's code died on its first line with a NameError.
-check "...and tells it to run what it built before saying it is done" \
-  grep -q 'run what you built and show its real output' <<<"${TASK_PROMPT}"
+#
+# Reworded as a PROHIBITION, and the gate follows it because the wording is the
+# experiment. Stating the right behaviour is what the two failed runs were
+# already given; forbidding the alternative is what worked for the directory
+# rule, so all three rules now name what must not happen. The properties
+# asserted are unchanged — it must demand execution, and it must demand the
+# real output rather than an expected one.
+check "...and forbids reporting completion without executing what it built" \
+  grep -q 'without executing what you built' <<<"${TASK_PROMPT}"
 check "...and to show what actually happened, not what it expects" \
-  grep -q 'paste what actually happened' <<<"${TASK_PROMPT}"
+  grep -q 'paste the real output' <<<"${TASK_PROMPT}"
+# The third rule, from the same run: a test file and a shown run were asked for
+# in plain words and neither was attempted, so the prompt now sends it back to
+# the task text before it may finish.
+check "...and sends it back to check each requirement before finishing" \
+  grep -q 'check each stated requirement' <<<"${TASK_PROMPT}"
 # A prompt with nothing to do, or nowhere to do it, is a bug rather than an
 # empty task: it would submit a run that cannot mean anything.
 check "a prompt with no directory is refused" \
