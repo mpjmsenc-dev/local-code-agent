@@ -817,21 +817,42 @@ hour.
 
 ---
 
-## The 15,000-token prompt: what it is, and what you can do about it
+## The prompt: two measurements, and which one is the baseline
 
-Every step of this tier reads about 15,000 tokens before the model writes one,
-and that is most of what a task costs. This section is what recording the
-agent's actual requests showed.
+**Every token count here now names the configuration it was measured under.**
+Two decompositions of "the agent's prompt" exist in this project, they disagree
+by 3,128 tokens, and for a while both sat in this file with nothing saying what
+produced either. That is how they came to look like a contradiction rather than
+two different measurements.
 
-### It is one system message, and it is mostly the browser
+| | 15,225-token decomposition | 18,353-token decomposition |
+|---|---|---|
+| when | earlier, this file | 2026-08-17, `docs/PROMPT-WINDOW.md` |
+| task text | 2,041 tokens (a long hand-written task) | **165 tokens** (`agent_task_prompt`, 824 chars) |
+| tools reported | `Loaded 22 tools from spec` | 26 listed in `system_prompt` |
+| tool JSON | counted inside the system message | 10,280, derived by subtraction |
+| skills catalogue | not separated out | **4,232 tokens**, separated and then cut |
+| status | **superseded** — kept for the tool-knob finding below | **the baseline** |
 
-The first request the sandbox sends, decomposed:
+They are not in conflict. Most of the 3,128-token gap is accounted for by the
+task text alone (2,041 against 165 is 1,876 of it), and the rest by a different
+build counting tool schemas differently. **`docs/PROMPT-WINDOW.md` is the
+current measurement**; the numbers below are the older one and are labelled as
+such wherever they appear.
+
+The one thing that carries forward unchanged is the *finding* in "The knob for
+that exists" — that `agent_settings.tools` round-trips and does nothing. That
+was re-checked route by route on the newer build and it still holds.
+
+### The older decomposition: one system message, mostly the browser
+
+Measured on the earlier build, with a 2,041-token hand-written task:
 
 | | ~tokens | |
 |---|---|---|
 | whole request | 15,225 | |
 | **system message** | **12,898** | **86% of it** |
-| the user's task | 2,041 | |
+| the user's task | 2,041 | a long hand-written task, not `agent_task_prompt`'s 165 |
 | `tools` array | 0 | with `AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system message |
 
 And inside that system message, the biggest single block is **~5,985 tokens**
@@ -859,7 +880,9 @@ so nobody spends another evening discovering the setting works and does nothing.
 
 ### What DOES help, and it is large
 
-The 15,000 tokens are paid **once per conversation, not once per step.** That
+This part is configuration-independent: it is about the cache, not the size.
+The prompt — whichever of the two numbers above applies to your build — is paid
+**once per conversation, not once per step.** That
 system message is identical every time, and Ollama caches the prefix. One
 conversation, two consecutive calls:
 
