@@ -256,7 +256,7 @@ confirmed in the agent tier.
 
 ### The speed limit, measured
 
-At 8.99 tok/s of prompt processing, the agent's ~15k-token prompt costs a
+At 8.99 tok/s of prompt processing, the agent's prompt (13,796 tokens now, 18,353 before the skills cut) costs a
 quarter of an hour before the model writes anything, and generation ran at
 **0.59 tok/s**. The LLM client's default `timeout` is 300 s, so it cancels
 first and Ollama logs a `500`; raising it to 2400 s is what let the call above
@@ -520,11 +520,15 @@ What is genuinely open, in order:
    at a larger rung with `AGENT_NATIVE_TOOL_CALLING=false` — which needs a
    bigger box than 7.8 GiB, since the agent runs at a 16384 window where a 7b
    takes 5.9 GB.
-3. **The first prompt is ~15k tokens before the agent's first output token**,
-   and most of that is OpenHands' own framing rather than the task. It is the
-   single change that would make every step cheaper on every box. Upstream of
-   this project; an issue is open about the related finding that
-   `agent_settings.tools` round-trips and is then ignored.
+3. **The first prompt was 18,353 tokens before the agent's first output
+   token** — the ~15k in earlier notes was an estimate that never described a
+   real prompt, and Ollama's own journal logged 17,820 on the day it was made.
+   *Partly closed:* 4,232 of those tokens were a catalogue of GitHub skills
+   this tier cannot use, and `AGENT_EXTENSIONS_REF` now stops them being
+   fetched — the prompt is 13,796 and fits its window for the first time. What
+   remains open is the rest: 72.5% of what is left is tool JSON, and the knob
+   for it (`agent_settings.tools`) round-trips and is ignored. Upstream of this
+   project; docs/PROMPT-WINDOW.md has every closed route.
 
 None of them blocks anyone today. Turn the tier on with `lca agent setup`, run
 `lca agent selftest`, and it reports your own box's figure in about a quarter of

@@ -204,7 +204,7 @@ project's own agent prompt:
 
 | | first call, cold | later call, warm |
 |---|---|---|
-| ~15,000-token prompt | **543 s** | **3.6 s** |
+| the agent's prompt (18,353 when this was measured; 13,796 since the skills cut) | **543 s** | **3.6 s** |
 
 So **one chat message in the middle of an agent session** makes that session's
 next step pay the cold price again — a step that took four seconds now takes

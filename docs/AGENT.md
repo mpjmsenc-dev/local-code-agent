@@ -982,7 +982,7 @@ next call        171 tokens of prompt eval     3.6 s
 
 The cache lives with the **loaded model**. Same prompt twice with it resident:
 **50.2 s, then 0.1 s.** So when `OLLAMA_KEEP_ALIVE` expires while you are
-thinking, the next step pays all 15,000 again *and* a model load.
+thinking, the next step pays the whole prompt again *and* a model load.
 
 Two things follow, and both are yours to choose:
 

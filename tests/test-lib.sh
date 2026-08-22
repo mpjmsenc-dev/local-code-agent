@@ -2882,11 +2882,11 @@ check "no caller reads the setting through jq's // again" \
 # The agent's prompt cache — really a question about OLLAMA_KEEP_ALIVE.
 #
 # Measured by recording the requests the agent actually sends: its first prompt
-# is ~15,000 tokens and 86% of it is one system message that is IDENTICAL on
+# is ~13,800 tokens and most of it is one system message that is IDENTICAL on
 # every step. Ollama caches the prefix, so within one conversation the first
 # call cost 13,430 tokens of prompt eval and the next cost 171. The cache lives
 # with the loaded model — same prompt twice with it resident: 50.2s then 0.1s —
-# so a keep-alive that expires mid-thought makes the next step pay all 15,000
+# so a keep-alive that expires mid-thought makes the next step pay the whole
 # again, plus a model load.
 # shellcheck disable=SC2030  # confining both to this subshell is the point
 cache_risk() ( ENABLE_AGENT="$1"; OLLAMA_KEEP_ALIVE="$2"; agent_prompt_cache_at_risk )
@@ -2895,7 +2895,7 @@ check "...and so is any finite keep-alive"                    cache_risk true 5m
 cache_safe() { cache_risk "$1" "$2" && return 1; return 0; }
 check "a permanently resident model is not flagged"  cache_safe true -1
 # Silent when the tier is off: the chat app re-reads a 600-token prompt, not a
-# 15,000-token one, so this trade is the agent's alone.
+# ~13,800-token one, so this trade is the agent's alone.
 check "...and nothing is said when the agent is off" cache_safe false 30m
 check "'lca check' warns about it"                   grep -q 'agent_prompt_cache_at_risk' "${REPO}/check-system.sh"
 
@@ -17574,7 +17574,7 @@ ka_why()   { local p; p="$(ka_of "$@")"; printf '%s' "${p#*|}"; }
 check "agent off on a small box -> 30m"  test "$(ka_value 4 false)"  = 30m
 check "agent off on a big box -> still 30m, RAM is not the question" \
   test "$(ka_value 64 false)" = 30m
-# Agent on: its prompt is ~15,000 tokens and its steps are 10-25 minutes apart,
+# Agent on: its prompt is ~13,800 tokens and its steps are 10-25 minutes apart,
 # so a 30m timer expires mid-task.
 check "agent on -> pinned"               test "$(ka_value 16 true)"  = -1
 check "...on a mid-sized box too"        test "$(ka_value 8 true)"   = -1

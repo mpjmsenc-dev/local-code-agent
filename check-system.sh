@@ -223,7 +223,7 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
   AGENT_MODEL="$(agent_model_name "${MODEL_NAME}")"
   case "$(agent_model_drift 2>/dev/null || printf ok)" in
     absent)
-      p_warn "the agent is on but '${AGENT_MODEL}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was over 15,000 tokens. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+      p_warn "the agent is on but '${AGENT_MODEL}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was 13,796 tokens, and at the server-wide context it would not fit. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     context)
       p_warn "'${AGENT_MODEL}' exists but Ollama loads it at a different context than $(agent_model_context), so the agent is silently working in a smaller window than it was given. Rebuild it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     *)

@@ -3806,7 +3806,8 @@ refresh_agent_model_after_tune() {
 # allowed to unload, which is the one setting that decides whether its enormous
 # prompt is paid once or over and over.
 #
-# The agent's first prompt is ~15,000 tokens and almost all of it is OpenHands'
+# The agent's first prompt is ~13,800 tokens on the current build (18,353
+# before the skills cut) and almost all of it is OpenHands'
 # own framing, identical on every step of a conversation. Ollama caches the KV
 # prefix of a prompt it has already processed, so that cost is paid ONCE and
 # every later step in the same conversation reads almost nothing. Measured here
@@ -3818,7 +3819,7 @@ refresh_agent_model_after_tune() {
 # ...and the cache lives with the LOADED MODEL. Measured directly, same prompt
 # twice with the model resident: 50.2 s, then 0.1 s. When OLLAMA_KEEP_ALIVE
 # expires the model unloads, the cache goes with it, and the next step of a
-# conversation the user is in the middle of pays the whole 15,000 again — plus
+# conversation the user is in the middle of pays the whole prompt again — plus
 # the model load. On a small box that is the difference between a reply in
 # seconds and a reply in a quarter of an hour, for a step that changed nothing.
 #
@@ -3866,7 +3867,7 @@ agent_prompt_cache_at_risk() {
 #                 it stayed resident.
 #   eviction      OLLAMA_MAX_LOADED_MODELS=1, so the OTHER model arriving
 #                 unloads this one, whatever the timer says. Measured on the
-#                 same ~15,000-token prompt: 543 s cold, 3.6 s warm.
+#                 same prompt: 543 s cold, 3.6 s warm.
 #
 # Keep-alive controls the first and CANNOT TOUCH THE SECOND. Pinning one model
 # with -1 does not stop a chat message evicting the agent's model; it only
@@ -3879,7 +3880,7 @@ agent_prompt_cache_at_risk() {
 #   agent off   one model exists, nothing evicts anything, and the only cost a
 #               timer controls is one model load. 30m. Pinning would hold RAM
 #               permanently to save a single load — a bad trade on a small box.
-#   agent on    the agent's prompt is ~15,000 tokens and its steps are 10-25
+#   agent on    the agent's prompt is ~13,800 tokens and its steps are 10-25
 #               minutes apart, so a 30m timer is a coin-flip on every step and
 #               a certainty across any pause between tasks. It is the surface
 #               whose cold price is 543 s. -1.
@@ -3901,7 +3902,7 @@ keepalive_plan() {
       "${need}" "${ram}"
     return 0
   fi
-  printf -- '-1|the agent tier is on: its prompt is ~15,000 tokens and its steps are 10-25 minutes apart, so a 30m timer expires mid-task and the next step re-reads the whole prompt (measured 13,430 tokens cold against 171 warm)'
+  printf -- '-1|the agent tier is on: its prompt is ~13,800 tokens and its steps are 10-25 minutes apart, so a 30m timer expires mid-task and the next step re-reads the whole prompt (measured 13,430 tokens cold against 171 warm)'
 }
 
 # agent_workspace_dir — where the agent keeps its workspace and settings.
