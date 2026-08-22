@@ -24,7 +24,7 @@ one that would tell you an unattended run is unprotected when it is not.
 | One decision still open: how the agent tier reaches Ollama | **Decided and shipped.** `OLLAMA_HOST` stays on loopback; a `systemd-socket-proxyd` relay carries the bridge, is covered by the inbound guard, survives reboots, and is part of setup, `lca check` and uninstall (`lca relay status\|install\|remove`). |
 | Give the tier a bigger model before judging it again | **Measured instead of assumed, and the answer was no.** A 7b *fits* — 5.1 GB resident at 4096 — but it is 1.9× slower to think, 2.2× slower to generate, and it fails the tool-call channel exactly as the 3b does. What unblocked the tier was `AGENT_NATIVE_TOOL_CALLING=false`, not more parameters. |
 | The app is published on two private addresses | **Three.** Loopback for you, the docker bridge for its own sandboxes, and the Tailscale address for your phone. The third was missing for the tier's whole life, so `lca agent url` printed an address nothing was ever bound to and the documented phone path had never once worked. |
-| The tier completes a loop without doing the work | **Half true, and the half that matters is still open.** The selftest works: one real task, end to end on the droplet, 12 minutes, 19.6 tok/s reading and 8.5 writing, a file actually written. Two LARGER tasks then failed the same way — the agent declares completion without running its own work. This line said "It does the work" for a while; the two runs corrected it. |
+| The tier completes a loop without doing the work | **Overtaken twice, and the current answer is narrower than either.** The two larger tasks that "declared completion without running their own work" were measured against a prompt Ollama was truncating — it deleted the definition of the tool that runs commands. With the prompt fixed and `n = 3`: it writes to the right directory, runs its own work and quotes the real output. What it does **not** do is check its work — the last sample closed with *"matches the specified requirements"* over an error path it never exercised. **It executes its work, it does not check its work.** docs/AGENT.md carries the full sequence of three wrong conclusions, which is the useful part. |
 | **`git push` fails: this machine has no credentials for GitHub** | **Overtaken.** `~/.git-credentials` exists and the push works. The branch was 21 commits ahead of `origin/agent-live-verify` — all of docs/PROMPT-WINDOW.md, the skills cut, the `/props` tokenizer discovery and the `AGENT_MAX_OUTPUT_TOKENS` correction — and is now pushed. A mobile session searching origin found none of it and correctly refused to act; the work was committed locally the whole time, never lost. |
 | The first prompt is **~15k tokens**, and it is upstream and out of reach | **Both halves wrong.** The real figure was ~18k — ollama logged 17,820 on the day ~15k was estimated, and 18,353 later. And 4,232 tokens of it were a GitHub skills catalogue this project could cut and did. The prompt now fits its window for the first time, with zero truncations since. docs/PROMPT-WINDOW.md. |
 | It tracks `origin/claude/local-code-agent-build-dd13qw` (PR #28) | It tracks **`origin/agent-live-verify`**. |
@@ -503,12 +503,17 @@ at the top of this file says what replaced them.
 
 What is genuinely open, in order:
 
-1. **The agent declares completion without executing its own work.** Measured
-   twice, on unrelated tasks, at the 3b rung: one produced a script that dies on
-   its first executed line and reported success. Two rules now travel with every
-   task this project submits, and `lca agent task` names the working directory —
-   but neither has been re-measured against a real run. **That is the next
-   experiment, and it needs a droplet.**
+1. **The agent does not check its own work.** *Closed and reopened narrower.*
+   The old form of this — "declares completion without executing its own work"
+   — was the truncated prompt, not the model, and it is gone: at `n = 3` the
+   agent writes to the right directory, executes what it built and quotes the
+   real output. What remains is the third of its three prohibitions: it closed
+   with *"matches the specified requirements"* having never run the error path
+   it was asked for, and that path was broken. Prompt and task text were
+   captured on both sides this time, so this is recorded rather than inferred.
+   **`n = 3`, no rate claimed** — the open question is whether the rate is
+   worth measuring at 20–40 minutes a run, or whether the honest answer is
+   simply "read the requirement list yourself".
 2. **Is the rung the cause?** Unproven, and the most tempting wrong conclusion
    available. A straight swap to a 7b is *not* the experiment, because the 7b
    fails the tool-call channel identically. The real one is the same two tasks

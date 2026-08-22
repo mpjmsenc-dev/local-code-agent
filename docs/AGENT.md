@@ -626,10 +626,35 @@ the run they came from.
 The practical rule: the only trustworthy answer for a box is that box's own
 `lca agent selftest`.
 
-### What the 3b actually produces — rewritten 2026-08-17, because the prompt was broken
+### What the 3b actually produces
 
-**This section used to say the 3b declares completion without executing its own
-work, and that conclusion was drawn against a prompt that was being truncated.**
+**This section's conclusion has been wrong three times, and the sequence is the
+most useful thing on this page.** Nothing below is deleted, because each
+superseded reading is what the evidence honestly supported at the time, and the
+shape of how they fell is worth more than any one of them:
+
+| | what it said | what overturned it |
+|---|---|---|
+| 1 | **the model is bad** — it declares completion without executing its own work | the prompt was being truncated: 18,353 tokens cut to 8,194, keeping the tail, which deleted the definition of `terminal` outright and severed `file_editor` mid-schema. **A model cannot call a tool whose description was cut out of its prompt.** |
+| 2 | **the plumbing is bad** — `max_output_tokens` was unset, so the client reserved half the window | the arithmetic was a coincidence. `16384−8190` and `16384/2+2` are both 8194. Ollama truncates on *prompt > window* whatever the client asks for, and halves rather than trims. A run carrying `max_output_tokens=2048` was still cut to 8194 |
+| 3 | **the plumbing was bad for a different reason** — and the fix is a smaller prompt, not a reserved reply | this is where it stands. `AGENT_EXTENSIONS_REF` drops a 4,232-token catalogue of skills this tier cannot run, and the prompt fits |
+
+There is a fourth entry in the same spirit, about the *size* rather than the
+cause: the 15,225-token decomposition this file carried was an estimate that
+under-counted the same run by 17.1%, and Ollama's own journal settles it at
+17,820. See the note above "It is one system message".
+
+**The lesson each time was the same and it took three rounds to learn:** on a
+small local model it is always tempting to blame the model, and the first
+correction — "it is the plumbing" — is only half the work, because the
+mechanism has to be measured too. Two of the three wrong answers here were
+confident, arithmetically consistent, and wrong.
+
+---
+
+**Superseded, kept:** this section used to say the 3b declares completion
+without executing its own work, and that conclusion was drawn against a prompt
+that was being truncated.
 Ollama was cutting the agent's 18,353-token prompt down to 8,194 and keeping the
 *tail*, which deleted the definition of `terminal` outright and severed
 `file_editor` halfway through its schema. The model was being asked to execute
@@ -679,12 +704,11 @@ already existed, three times — and then it claimed it could not "interact
 directly with a file system", on a run where it had already created two files
 and executed one.
 
-**So, plainly, at the 3b rung today:** it writes broadly correct code to the
-right place and runs it, catches its own errors by running them, and does not
-claim success it has not earned. It then gets stuck fixing what it found. Treat
-its output as **a first draft that has been executed once** — which is a
-materially better thing than the never-executed draft this section used to
-describe, and still not something to trust unread.
+**Superseded at `n = 2`, kept:** the reading after this sample was that it
+"does not claim success it has not earned". The third sample below is where
+that broke — it claimed exactly that, about a requirement it had never
+exercised. Two samples were not enough to see the difference between *running
+your work* and *checking your work*.
 
 **A third sample, 2026-08-22**, with the task text captured on both sides this
 time rather than assumed — the earlier "it read the rule three times" was an
@@ -698,6 +722,28 @@ is the one it fails. Prompt 13,783 tokens, no truncation, four turns, 24.5
 minutes; the SystemPromptEvent, the byte-identical task text, and all three
 error paths tested are in docs/PROMPT-WINDOW.md.
 
+#### Where it stands, after three samples
+
+**It executes its work. It does not check its work.** That is the finding, and
+it is a narrower one than this section has ever carried before:
+
+| the three prohibitions it is given | at `n = 3` |
+|---|---|
+| never write outside the working directory | **honoured** — both files inside it, every sample since the cut |
+| never report complete without executing what you built | **honoured** — it ran the program and quoted the real output |
+| re-read the task and check each stated requirement | **failed** — it closed with *"matches the specified requirements"* having never run the error path it was asked for |
+
+The failure that used to define this tier — a confident report over code that
+had never run — is gone. What replaced it is smaller and harder to see: the
+program runs, the output is real, and the claim covering it is still broader
+than what was tested. **Treat its output as a first draft that has been
+executed once, on the happy path.** Read the requirement list yourself.
+
+There is a second, separate weakness visible at `n = 2` and not contradicted
+since: **it cannot repair what it wrote.** Four malformed edit attempts in a
+row, and then a claim that it could not "interact directly with a file system"
+on a run where it had already created two files and executed one.
+
 **On evidence strength, honestly:** this is `n = 3` on `wordcount` and `n = 1`
 on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
 derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
@@ -706,17 +752,21 @@ this section does not claim one. What is not in doubt is the mechanism: a model
 cannot call a tool whose description was cut out of its prompt, and that is what
 was happening.
 
-Two things changed because of these runs:
+Three things changed because of these runs:
 
-1. **`config/CONVENTIONS.md` now carries two rules**, and both are keyed so they
-   cannot be quietly dropped: run what you built and show its real output before
-   claiming a task is done, and write files into the working directory you were
-   given rather than the sandbox root. That file feeds all three surfaces.
+1. **The three prohibitions live in `agent_task_prompt`, not in
+   `config/CONVENTIONS.md`.** That correction matters and it was made the hard
+   way: `config/CONVENTIONS.md` is read by aider and the chat app and **has
+   never reached the agent**. The channel that was supposed to carry it there
+   is `system_message_suffix`, which this build overwrites with its own
+   `<HOST>` value. Coaching the agent through that file alone would have
+   changed nothing at all. The rules are mirrored there for the other two
+   surfaces; the agent gets them in the task text, verified present in the
+   `MessageEvent` it received.
 2. **Naming the absolute path works, and this project's own selftest is the
    evidence.** Its task text says *"Create a file
    `/workspace/project/lca_selftest.py`"* — and the file lands there, every run.
    The two failing runs named no path and the file went to the sandbox root.
-
 3. **`lca agent task` exists**, because the web UI cannot be reached but this
    can. It is the answer to "could the working directory be stated at
    submission time rather than hoped for" — for tasks submitted through the

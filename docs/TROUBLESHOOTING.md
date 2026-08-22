@@ -501,13 +501,20 @@ To read a run after it is over, or one you captured earlier:
 `lca agent watch --live --from events.json`. To get the raw JSON out without
 reading it by hand: `lca agent watch --live --dump > events.json`.
 
-## The agent said it finished, and the code does not run
+## The agent said it finished, and a requirement it claimed does not work
 
 This is the failure mode of the agent tier at the small model rungs, and it is
-**expected behaviour to check for**, not a fault to hunt: it declares completion
-without executing its own work. Measured twice on a real droplet at the 3b rung,
-on unrelated tasks. One produced a script that uses `sys` with no import — dead
-on its first executed line — and reported success.
+**expected behaviour to check for**, not a fault to hunt: **it executes its work
+and does not check its work.** Measured three times on a real droplet at the 3b
+rung. The most recent wrote the program, created the test file, ran it and
+quoted the real output — then closed with *"matches the specified
+requirements"*, over an error path it never exercised and which does not work.
+
+*It used to be worse, and the correction is worth knowing if you are reading an
+older note:* it reported success on code it had **never run at all**. That was
+not the model — Ollama was truncating the agent's prompt and deleting the
+definition of the tool that runs commands. See the entry above, and AGENT.md for
+the full sequence.
 
 There is no fix to apply. There is a habit:
 

@@ -176,14 +176,18 @@ tool that runs commands. That is fixed: the prompt is 13,796 tokens and nothing
 is truncated (docs/PROMPT-WINDOW.md).
 
 Re-run since, the same task writes correct-looking code **into the right
-directory**, creates the test file it was asked for, **runs it**, and reports
-the real error it hit rather than claiming success. What it then cannot do is
-repair its own bug. So treat this tier's output as **a first draft that has been
-executed once** — better than the never-executed draft this used to describe,
-and still not something to trust unread. It is genuinely useful for scaffolding
-and for work you were going to read line by line anyway.
+directory**, creates the test file it was asked for, and **runs it**, quoting
+the real output. What it does not do is **check** it: the third sample closed
+with *"matches the specified requirements"* having never exercised the error
+path it was asked for — and that path was broken. It also cannot repair its own
+bug once it finds one.
 
-That is `n = 2`, not a benchmark: another sample of the same task derailed and
+So: **it executes its work, it does not check its work.** Treat this tier's
+output as **a first draft that has been executed once, on the happy path**, and
+read the requirement list yourself. It is genuinely useful for scaffolding and
+for work you were going to read line by line anyway.
+
+That is `n = 3`, not a benchmark: another sample of the same task derailed and
 wrote nothing at all. The *rate* is unmeasured and this project does not claim
 one.
 
