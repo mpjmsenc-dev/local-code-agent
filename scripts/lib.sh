@@ -3135,33 +3135,68 @@ agent_preserve_workspace() {
   local name="${1:-}" root="${2:-${HOME}/.openhands/workspaces}" dest
   [[ -n "${name}" ]] || return 1
   have docker || return 1
+  dest="${root}/${name}"
+
+  # FAST PATH, for a running sandbox on the image this project pins: ask inside
+  # the container, and tar out only the work.
+  #
   # WHAT COUNTS AS WORK. /workspace always holds three entries — project (the
   # working directory, which arrives with a .git and nothing else), plus
   # bash_events and conversations, which the agent-server writes for its own
-  # bookkeeping and which are not the user's output. A first attempt at this
-  # guard excluded those two by NAME and so matched every file inside them,
-  # meaning it preserved an untouched sandbox as though it held work. Prune the
-  # trees, not the directory entries.
-  as_root docker exec "${name}" find /workspace \
-      -path /workspace/bash_events -prune -o \
-      -path /workspace/conversations -prune -o \
-      -name .git -prune -o \
-      -type f -print -quit 2>/dev/null | grep -q . || return 1
-  dest="${root}/${name}"
-  mkdir -p "${dest}" 2>/dev/null || return 1
-  # tar rather than 'docker cp', because docker cp cannot exclude and the
-  # bookkeeping trees are far larger than the work: one trivial run wrote eight
-  # bash_events files and a single three-byte deliverable. The agent's own
-  # .git goes too — it is created empty by the sandbox, and a user reading
-  # their recovered files does not want a repo they never made.
-  if as_root docker exec "${name}" tar -cf - -C /workspace \
-       --exclude=./bash_events --exclude=./conversations --exclude-vcs . 2>/dev/null \
-     | tar -xf - -C "${dest}" 2>/dev/null; then
-    printf '%s\n' "${dest}"
-    return 0
+  # bookkeeping. A first version of this guard excluded those two by NAME and so
+  # matched every file inside them, preserving untouched sandboxes as though
+  # they held work. Prune the trees, not the directory entries.
+  #
+  # A FAILURE HERE FALLS THROUGH rather than returning. This ran as the only
+  # path for one commit, and 'find -quit' / GNU tar are not universal — a
+  # busybox image answers neither, and the function then reported "nothing to
+  # save" about a workspace full of work. Silence about an empty sandbox and
+  # silence about an unreadable one must not look the same.
+  if [[ -n "$(as_root docker ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
+    local probe rc=0
+    probe="$(as_root docker exec "${name}" find /workspace \
+        -path /workspace/bash_events -prune -o \
+        -path /workspace/conversations -prune -o \
+        -name .git -prune -o \
+        -type f -print -quit 2>/dev/null)" || rc=$?
+    if (( rc == 0 )); then
+      # The probe ran and is believable. An empty answer means an untouched
+      # sandbox, which must leave no directory behind.
+      [[ -n "${probe}" ]] || return 1
+      mkdir -p "${dest}" 2>/dev/null || return 1
+      if as_root docker exec "${name}" tar -cf - -C /workspace \
+           --exclude=./bash_events --exclude=./conversations --exclude-vcs . 2>/dev/null \
+         | tar -xf - -C "${dest}" 2>/dev/null; then
+        printf '%s\n' "${dest}"
+        return 0
+      fi
+      rm -rf "${dest}" 2>/dev/null || true
+    fi
   fi
-  rmdir "${dest}" 2>/dev/null || true
-  return 1
+
+  # FALLBACK: 'docker cp', which needs nothing from inside the container and is
+  # the ONLY option for a stopped one — 'docker exec' refuses those outright
+  # ("container ... is not running"), and orphan collection reaches stopped
+  # sandboxes, so without this their work would be deleted unread. Copy
+  # everything and prune on this side instead.
+  mkdir -p "${dest}" 2>/dev/null || return 1
+  if ! as_root docker cp "${name}:/workspace" "${dest}/" >/dev/null 2>&1; then
+    rm -rf "${dest}" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf "${dest}/workspace/bash_events" "${dest}/workspace/conversations" 2>/dev/null || true
+  find "${dest}/workspace" -name .git -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  if [[ -z "$(find "${dest}" -type f -print -quit 2>/dev/null)" ]]; then
+    rm -rf "${dest}" 2>/dev/null || true
+    return 1
+  fi
+  # Flattened to match the fast path, whose tar is rooted AT /workspace, so a
+  # caller reading either result finds project/ in the same place.
+  if [[ -d "${dest}/workspace" ]]; then
+    mv "${dest}/workspace"/* "${dest}/workspace"/.[!.]* "${dest}/" 2>/dev/null || true
+    rmdir "${dest}/workspace" 2>/dev/null || true
+  fi
+  printf '%s\n' "${dest}"
 }
 
 # agent_live_sandboxes — the running sandbox containers, NEWEST FIRST.
@@ -3287,7 +3322,25 @@ agent_orphan_sandboxes() {
   if agent_container_running; then
     return 0
   fi
-  agent_live_sandboxes
+  # Running AND stopped. This used to be agent_live_sandboxes alone, which asks
+  # 'docker ps' and therefore never saw a stopped one — so a sandbox that had
+  # exited was collected by nothing, ever, and sat on the disk holding its
+  # writable layer for the life of the box. Found by stopping one by hand and
+  # watching two restarts walk straight past it.
+  #
+  # Safe to reap now in a way it was not before: agent_preserve_workspace runs
+  # first at every removal site, so "collected" no longer means "deleted
+  # unread". A stopped sandbox is also the one case where the work is certainly
+  # finished being written.
+  agent_all_sandboxes
+}
+
+# agent_all_sandboxes — every sandbox container, running or not, newest first.
+# Separate from agent_live_sandboxes on purpose: the watcher wants the ones
+# still going, collection wants all of them.
+agent_all_sandboxes() {
+  have docker || return 1
+  as_root docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
 }
 
 # agent_conversation_warning — what is ambiguous about this machine right now,

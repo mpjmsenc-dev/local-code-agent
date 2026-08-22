@@ -3708,6 +3708,21 @@ work_is_saved_before_the_sandbox_is_destroyed() {
   grep -q 'agent_preserve_workspace' <<<"${watch_body}" || {
     echo 'the watcher stops the agent without saving the work its own message points at' >&2
     return 1; }
+  # Collection must reach STOPPED sandboxes too. It asked 'docker ps' alone for
+  # months, so an exited sandbox was collected by nothing, ever, and held its
+  # writable layer for the life of the box.
+  grep -q 'agent_all_sandboxes' <<<"${lib_body}" || {
+    echo 'orphan collection no longer sees stopped sandboxes, so they are never reclaimed' >&2
+    return 1; }
+  grep -qE 'docker ps -a --format' <<<"${lib_body}" || {
+    echo 'agent_all_sandboxes does not actually ask for stopped containers' >&2
+    return 1; }
+  # ...and preservation must handle them, or reaching them just deletes the work
+  # faster. 'docker exec' refuses a stopped container, so the fallback is
+  # mandatory, not decorative.
+  grep -q 'docker cp' <<<"${lib_body}" || {
+    echo 'preservation has only the docker-exec path; it silently saves nothing for a stopped sandbox' >&2
+    return 1; }
   # No script may claim the workspace is in ~/.openhands itself. It never was.
   if grep -qE 'workspace (is intact|and settings are kept) in' <<<"${agent_body}${watch_body}"; then
     echo 'a script still claims the workspace lives in ~/.openhands; it lives in the sandbox container' >&2
