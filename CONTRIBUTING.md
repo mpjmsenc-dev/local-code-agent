@@ -700,15 +700,24 @@ lca agent watch --live --once
 |---|---|---|
 | `ollama_relay_healthy` | `sudo lca relay install`, `lca relay status`; then `sudo systemctl stop local-code-agent-ollama-relay.socket` and re-run | healthy **only** in the first case. It must answer false when the socket is bound but Ollama is not answering *through* it — stop `ollama` with the socket up to see that |
 
-**Privilege — the one only a real account can settle.** Run as an ordinary
-sudoer, then as a user with no sudo rights at all.
+**Privilege — settled here, not on the droplet.** This block used to say these
+needed a real account on a real machine. Four of the five needed only a
+*throwaway* account, and the suite now makes one: `useradd -M`, a root-owned
+`0600` file, `runuser`, and the probes driven as that user. The fifth needed
+only a `PATH` without `sudo` on it. They are in `tests/test-lib.sh` under
+"the privilege probes, driven from a real non-root account", and they print a
+loud SKIPPED line rather than vanishing when the suite is not root.
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `can_root_now` | `sudo -k`, then `lca check` | it does **not** prompt for a password and does not hang; the report says what it could not look at |
-| `can_root` | `lca backup` as that user | it may prompt, once, and says why before it does |
-| `am_root` | both accounts | true only under `sudo` |
-| `writable_by_us` | `bash -c 'source $L/scripts/lib.sh; writable_by_us $L/.env; echo $?'` as the non-root user on a root-owned `.env` | `1`. On a suite running as root this arm is unreachable, which is why it is here |
+What that leaves for a real machine is narrower and worth stating exactly:
+**nothing about these functions** — only the end-to-end behaviour built on
+them, which is that `lca check` and the login banner must not hang on a
+password prompt for a human who is a sudoer *with* a password. That is a
+different assertion from any of the five, it needs a configured sudoers entry
+rather than an account, and it is the one row left here:
+
+| Command | Pass condition |
+|---|---|
+| as an ordinary sudoer with a password: `sudo -k`, then `lca check`, then the login banner | neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
 
 **Everything else**
 

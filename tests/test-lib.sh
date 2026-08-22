@@ -17570,6 +17570,67 @@ dry_run_still_says_nothing_when_nothing() {
 check "...and still says nothing when there is nothing" \
   dry_run_still_says_nothing_when_nothing
 
+echo "# the privilege probes, driven from a real non-root account"
+# These five were on the "needs a real machine" list in CONTRIBUTING.md for a
+# reason that turned out to be half true: the suite runs as root, and root
+# reads and writes everything, so the arm that matters is unreachable. What was
+# NOT true is that it needs a droplet. A throwaway account settles four of them
+# here, and the fifth needs only a PATH without sudo on it.
+#
+# Skipped loudly rather than silently when the account cannot be made — a
+# conditional gate that vanishes on CI is a gate that reads as coverage while
+# protecting nothing, which is the thing this suite spent a week removing.
+PROBE_USER=lca_probe_$$
+PROBE_DIR=/tmp/lca-privprobe-$$
+privilege_probe_ready() {
+  [[ "${EUID}" -eq 0 ]] || return 1
+  have useradd && have runuser && have userdel || return 1
+  useradd -M -s /bin/sh "${PROBE_USER}" >/dev/null 2>&1 || return 1
+  rm -rf "${PROBE_DIR}"; mkdir -p "${PROBE_DIR}"
+  cp "${REPO}/scripts/lib.sh" "${PROBE_DIR}/" || return 1
+  printf 'x\n' > "${PROBE_DIR}/rootonly.env"
+  chmod 600 "${PROBE_DIR}/rootonly.env"     # root-owned, root-only
+  chmod 755 "${PROBE_DIR}" "${PROBE_DIR}/lib.sh"
+}
+privilege_probe_cleanup() {
+  [[ -n "${PROBE_USER:-}" ]] && userdel "${PROBE_USER}" >/dev/null 2>&1
+  rm -rf "${PROBE_DIR}"
+  return 0
+}
+as_probe_user() {   # EXPR -> its output, run as the throwaway account
+  # shellcheck disable=SC2016  # the body is a script for the child shell
+  runuser -u "${PROBE_USER}" -- bash -c '
+    source "$1" >/dev/null 2>&1
+    shift
+    eval "$@"' _ "${PROBE_DIR}/lib.sh" "$@" 2>&1
+}
+if privilege_probe_ready; then
+  probe_rc() { as_probe_user "$1 \"${PROBE_DIR}/rootonly.env\" >/dev/null 2>&1; printf '%s' \$?"; }
+  check "a root-owned 0600 file is not writable by an ordinary user" \
+    test "$(probe_rc writable_by_us)" = 1
+  check "...nor readable by one" \
+    test "$(probe_rc readable_by_us)" = 1
+  check "...and that account is not root" \
+    test "$(as_probe_user 'am_root; printf %s $?')" = 1
+  # The distinction this project made deliberately: 'can root be reached
+  # RIGHT NOW, without asking' is not 'is sudo installed'.
+  check "an account with no cached credential cannot become root now" \
+    test "$(as_probe_user 'can_root_now; printf %s $?')" = 1
+  # ...while can_root is the interactive answer and means "sudo exists, so it
+  # can be asked". It is 0 for a user sudo will go on to refuse, and that is
+  # the documented meaning rather than a bug: you cannot know whether a
+  # password will be accepted without asking for it, and an acting script that
+  # asks fails with sudo's own message rather than silently.
+  check "...but the interactive answer is yes while sudo is on the PATH" \
+    test "$(as_probe_user 'can_root; printf %s $?')" = 0
+  check "...and no when it is not" \
+    test "$(as_probe_user 'PATH=/nonexistent; can_root; printf %s $?')" = 1
+  privilege_probe_cleanup
+else
+  privilege_probe_cleanup
+  echo "  SKIPPED - the privilege probes need root and useradd to make a throwaway account; they were NOT checked on this run"
+fi
+
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
 # Every function below survived being stubbed to 'return 0': the whole suite
 # still passed. In each case something LOOKED like coverage. For some it was a
