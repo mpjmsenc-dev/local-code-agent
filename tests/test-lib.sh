@@ -2813,18 +2813,38 @@ check "the stored tool-calling mode is read back and checked" \
 
 # The agent's workspace at uninstall. Nothing removed it at all, and it is the
 # one directory here holding the user's own work rather than settings.
+# Driven, with a real directory. This greped for the call, for 'as_root rm -rf'
+# and for the --keep-data argument — three strings that survive any change to
+# what the function does with them.
+workspace_removal() {   # KEEP_DATA -> "gone|kept|failed", and what it said
+  local home="${SANDBOX}/ws-home-$1"
+  rm -rf "${home}"; mkdir -p "${home}/.openhands/project"
+  printf 'x\n' > "${home}/.openhands/project/checked-out-file"
+  local said
+  said="$(HOME="${home}" bash -c '
+    source "$1" >/dev/null 2>&1
+    set +e
+    HOME="$2"
+    as_root() { "$@"; }
+    step() { :; }; ok() { :; }; warn() { printf "WARN %s\n" "$*"; }; info() { printf "INFO %s\n" "$*"; }
+    remove_agent_workspace "$3"; printf "rc=%s\n" "$?"' _ "${REPO}/uninstall.sh" "${home}" "$1" 2>&1)"
+  if [[ -e "${home}/.openhands" ]]; then printf 'kept|%s' "${said}"
+  else printf 'gone|%s' "${said}"; fi
+}
 uninstall_handles_the_agent_workspace() {
-  local body
-  body="$(cat "${REPO}/uninstall.sh")"
-  grep -q 'remove_agent_workspace' <<<"${body}" || return 1
-  # Through as_root, because the agent container runs as root and creates it:
-  # a plain rm from the user's shell fails with EACCES on a path inside their
-  # own home, and an uninstall that reports success while the workspace is
-  # still there is the shape this repo keeps closing.
-  grep -qE 'as_root rm -rf "\$\{dir\}"' <<<"${body}" || return 1
-  # ...and it follows --keep-data, exactly as the chat app's volume does.
-  # shellcheck disable=SC2016  # the source text is the search string, not an expansion
-  grep -q 'remove_agent_workspace "${keep_data}"' <<<"${body}"
+  local out
+  out="$(workspace_removal false)"
+  grep -q '^gone|' <<<"${out}" || {
+    printf 'the agent workspace survived an uninstall that did not ask to keep it: %s\n' "${out}" >&2
+    return 1; }
+  grep -q 'rc=0' <<<"${out}" || {
+    printf 'the workspace was removed and it reported failure: %s\n' "${out}" >&2; return 1; }
+  out="$(workspace_removal true)"
+  grep -q '^kept|' <<<"${out}" || {
+    printf -- '--keep-data did not keep the agent workspace: %s\n' "${out}" >&2
+    return 1; }
+  grep -qF 'INFO Keeping' <<<"${out}" || {
+    printf -- '--keep-data kept it silently: %s\n' "${out}" >&2; return 1; }
 }
 check "uninstall removes the agent's workspace, as root, unless --keep-data" \
   uninstall_handles_the_agent_workspace
@@ -2950,7 +2970,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 288 )) || {
+  (( n <= 286 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -3363,13 +3383,39 @@ restore_rebuilds_derived() {
 check "restore rebuilds a derived model instead of pulling it" restore_rebuilds_derived
 # ...and uninstall takes this project's models away without touching the
 # gigabytes the user chose to pull.
+# Driven. This greped remove_agent_models' body for '-agent$' and 'ollama rm',
+# which stays true whatever the loop does with them — including removing a
+# user's base models, which is the failure that matters here: those are
+# gigabytes somebody chose to pull, and an uninstall is not the moment to be
+# approximately right about which ones are ours.
 uninstall_removes_only_derived() {
-  local body; body="$(sed -n '/^remove_agent_models()/,/^}/p' "${REPO}/uninstall.sh")"
-  [[ -n "${body}" ]] || return 1
-  # -F: the suffix it matches on ends with '$', which as a pattern would anchor
-  # to end-of-line and never match the line it lives on.
-  grep -qF -- '-agent$' <<<"${body}" || return 1
-  grep -q 'ollama rm' <<<"${body}"
+  # The stub records to a FILE, not to a stream: remove_agent_models runs
+  # 'ollama rm "${name}" >/dev/null 2>&1', so anything a stub prints is
+  # discarded before this could see it. Caught by the first version of this
+  # driver reporting that nothing was removed on a run where the trace showed
+  # every removal happening.
+  local log="${SANDBOX}/ollama-rm.log" out
+  : > "${log}"
+  out="$(OLLAMA_RM_LOG="${log}" bash -c '
+    source "$1" >/dev/null 2>&1
+    set +e
+    have() { [[ "$1" == ollama ]]; }
+    ollama() {
+      case "$1" in
+        list) printf "NAME\nqwen2.5-coder:3b\nqwen2.5-coder:3b-agent\nllama3.1:8b\nmine-agent\n" ;;
+        rm)   printf "REMOVED %s\n" "$2" >> "${OLLAMA_RM_LOG}"; return 0 ;;
+      esac
+    }
+    step() { :; }; ok() { :; }; warn() { :; }; info() { :; }
+    remove_agent_models' _ "${REPO}/uninstall.sh" 2>&1)"
+  out="$(cat "${log}")"
+  grep -qF 'REMOVED qwen2.5-coder:3b-agent' <<<"${out}" || {
+    printf 'the derived model was not removed: %s\n' "${out}" >&2; return 1; }
+  grep -qF 'REMOVED mine-agent' <<<"${out}" || {
+    printf 'a second derived model was left behind: %s\n' "${out}" >&2; return 1; }
+  # The half that matters: the base models are gigabytes the user chose to pull.
+  ! grep -qE 'REMOVED (qwen2\.5-coder:3b|llama3\.1:8b)$' <<<"${out}" || {
+    printf 'uninstall removed a base model the user pulled themselves: %s\n' "${out}" >&2; return 1; }
 }
 check "uninstall removes the derived models and leaves the base ones" \
   uninstall_removes_only_derived
@@ -9128,7 +9174,7 @@ if have jq; then
     # edit that moves it to the end would turn a passing check into a failing
     # one with nothing to see.
     local want="${n}"
-    if (( n <= 288 )); then want="${words[n]}"; fi
+    if (( n <= 286 )); then want="${words[n]}"; fi
     [[ "${claimed}" == "${want}" || "${claimed}" == "${n}" ]] || {
       printf 'PHONE.md claims %s starter questions; the file has %s\n' \
         "${claimed}" "${n}" >&2
@@ -10490,8 +10536,48 @@ check "auto-tune reconciles the rest of the system when the model changes" \
 # ...and the boot unit has to be ordered after Docker, or that reconciliation
 # runs while the daemon is still starting: apply.sh then correctly reports it
 # could not look, and the container keeps the old model anyway.
+# Rendered, not greped. This was one grep for an echo line, with no guard
+# against the block moving, being commented out, or never running — and the
+# consequence it protects against is specific: ordered after network and Ollama
+# alone, the boot tune ran while the Docker daemon was still starting, apply.sh
+# correctly reported it could not look, and the chat app kept the old model.
+#
+# SOURCE-GREP: extracts install_service's unit block in order to RUN it —
+# tune.sh runs main at the bottom. What it cannot check is that install_service
+# is reached; an empty block fails loudly instead of asserting over nothing.
+rendered_tune_unit() {
+  local block
+  # The line that ends the block is '  } | write_root_file ...', so the brace
+  # has to be put back or the extraction is a syntax error that eval swallows.
+  block="$(awk '/^install_service\(\) \{/ { inb=1; next }
+                inb && /\| write_root_file/ { print "}"; exit }
+                inb' "${REPO}/scripts/tune.sh")"
+  [[ -n "${block}" ]] || { echo "could not extract tune.sh's unit block" >&2; return 1; }
+  bash -c 'set -uo pipefail
+    source "$2" >/dev/null 2>&1
+    SCRIPT_DIR=/opt/lca/scripts; TUNE_SERVICE=/tmp/x.service
+    systemd_available() { return 0; }
+    warn() { :; }; info() { :; }; ok() { :; }
+    eval "$1"' _ "${block}" "${REPO}/scripts/lib.sh" 2>/dev/null
+}
 tune_unit_waits_for_docker() {
-  grep -qE '^[[:space:]]*echo "After=.*docker\.service' "${REPO}/scripts/tune.sh"
+  local unit
+  unit="$(rendered_tune_unit)" || return 1
+  local after
+  after="$(grep -m1 '^After=' <<<"${unit}")"
+  [[ -n "${after}" ]] || { printf 'the boot unit orders after nothing: %s\n' "${unit}" >&2; return 1; }
+  local w
+  for w in docker.service ollama.service network-online.target; do
+    grep -qF "${w}" <<<"${after}" || {
+      printf 'the boot tune does not wait for %s (After=%s) — it will run while that is still starting\n' \
+        "${w}" "${after}" >&2
+      return 1; }
+  done
+  # Deliberately not Wants=docker: this must not pull Docker onto a box that
+  # chose not to have it.
+  ! grep -qE '^Wants=.*docker' <<<"${unit}" || {
+    echo 'the boot unit WANTS docker, which pulls it onto a SKIP_DOCKER machine' >&2
+    return 1; }
 }
 check "the auto-tune boot unit is ordered after Docker" tune_unit_waits_for_docker
 
@@ -17946,7 +18032,7 @@ check "a new gate that greps source says why it cannot drive instead" \
 baseline_has_not_grown() {
   local n
   n="$(grep -c . "${REPO}/tests/source-grep-baseline.txt")"
-  (( n <= 288 )) || {
+  (( n <= 286 )) || {
     printf 'the source-grep baseline has grown to %s — it records what existed when the rule was written, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
