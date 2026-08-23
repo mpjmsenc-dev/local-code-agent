@@ -12843,9 +12843,16 @@ ep_sandbox() {
   cat > "${EP_SB}/preamble.sh" <<'EOPRE'
 _acted()  { printf '%s %s\n' "${FUNCNAME[1]}" "$*" >> "${EP_ACTED}"; }
 _looked() { printf '%s %s\n' "${FUNCNAME[1]}" "$*" >> "${EP_LOOKED}"; }
+# 'ln' is here because it escaped. update-motd is stubbed above, but the
+# banner is not installed by running update-motd -- it is installed by linking
+# a file into /etc/update-motd.d, and that path is absolute, so no LCA_DIR
+# redirection contains it. The live evidence was a dangling
+# /etc/update-motd.d/99-local-code-agent pointing into a deleted mktemp
+# sandbox. LCA_MOTD_FILE below is the other half; a stub alone would leave the
+# real path merely un-writable rather than un-named.
 for _c in apt-get apt apt-key dpkg dpkg-reconfigure snap useradd usermod \
           groupadd pip pip3 nft iptables ip6tables modprobe sysctl swapon \
-          mkswap fallocate hostnamectl timedatectl update-motd chpasswd; do
+          mkswap fallocate hostnamectl timedatectl update-motd chpasswd ln; do
   eval "${_c}() { _acted \"\$@\"; return 0; }"
 done
 # The four that both ask and act, told apart by their first word. Anything
@@ -12903,6 +12910,7 @@ ep_run() {
       BASH_ENV="${EP_SB}/preamble.sh" \
       LCA_DIR="${EP_SB}/target" \
       LCA_LOG="${EP_SB}/setup.log" \
+      LCA_MOTD_FILE="${EP_SB}/target/99-local-code-agent" \
       LCA_RUN_SETUP=false \
       LCA_REPO_URL="${EP_SB}/repo" \
       timeout 60 bash "${EP_SB}/repo/${f}" "$@" </dev/null 2>&1
@@ -18275,6 +18283,74 @@ check "every network probe in the login banner bounds itself" \
   banner_network_probes_bound_themselves
 check "a banner that cannot run is not reported as installed" \
   motd_install_is_honest
+# ...and installing it must not be able to reach out of a sandbox and modify
+# the machine the suite is running on.
+#
+# This is not hypothetical and it is not old. Measured on this box, mid-session:
+#
+#   /etc/update-motd.d/99-local-code-agent -> /tmp/tmp.PDSSCvpjBI/dud/target/scripts/motd.sh
+#
+# $(mktemp -d) is what SANDBOX is, and 'dud' is the first-boot fixture two
+# sections down. So a run of THIS SUITE linked the live machine's login banner
+# at a directory that was deleted when that run finished. Every SSH login since
+# has printed "run-parts: failed to stat component" and no banner at all.
+#
+# The reason it escaped is worth stating exactly, because it is general: the
+# entry-point sandbox contains writes two ways -- LCA_DIR moves everything the
+# scripts write, and BASH_ENV stubs the commands that act. MOTD_FILE was
+# subject to NEITHER. It was an absolute path under /etc that no LCA_* variable
+# could move, written with 'ln', which was not in the stub list. Both holes had
+# to be open, and both were.
+#
+# Driven rather than read, and driven against the REAL path: the assertion is
+# that /etc/update-motd.d/99-local-code-agent is byte-for-byte what it was
+# before install_motd ran under the sandbox's environment. A gate that checked
+# only the redirected path would pass with the redirection removed.
+banner_install_cannot_escape_its_sandbox() {
+  local sb="${SANDBOX}/motdescape" real="/etc/update-motd.d/99-local-code-agent"
+  local before after out
+  rm -rf "${sb}"; mkdir -p "${sb}/scripts" "${sb}/etc"
+  cp "${REPO}/scripts/motd.sh" "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+  cp "${REPO}/.env.example" "${sb}/.env"
+  # Whatever the live machine currently has, including "nothing" and including
+  # a link whose target is gone -- readlink is used rather than 'test -e'
+  # precisely so a dangling link is still a state this can compare.
+  before="$(readlink "${real}" 2>/dev/null || printf '(absent)')"
+  out="$( LCA_MOTD_FILE="${sb}/etc/99-local-code-agent" bash -c '
+      source "$1/scripts/lib.sh" >/dev/null 2>&1
+      source "$1/scripts/motd.sh" >/dev/null 2>&1
+      SCRIPT_DIR="$1/scripts"
+      install_motd 2>&1' _ "${sb}" )"
+  after="$(readlink "${real}" 2>/dev/null || printf '(absent)')"
+  [[ "${before}" == "${after}" ]] || {
+    printf 'installing the banner under a redirected MOTD_FILE still rewrote the live one:\n  before: %s\n  after:  %s\nThat is a test modifying the machine it runs on.\n' \
+      "${before}" "${after}" >&2
+    return 1
+  }
+  # Non-vacuity: it has to have actually installed something, or "the real one
+  # is untouched" is true of a function that did nothing at all.
+  [[ -L "${sb}/etc/99-local-code-agent" ]] || {
+    printf 'nothing was installed at the redirected path, so this gate proved nothing:\n%s\n' \
+      "${out}" >&2
+    return 1
+  }
+  # ...and the override has to be the REASON. A hardcoded MOTD_FILE that
+  # happened to be unwritable would satisfy both checks above. Driven, not
+  # grepped: what matters is the value the scripts end up with, and a gate that
+  # matched the assignment's text would go on passing if a later line
+  # overwrote it.
+  local honoured
+  honoured="$( LCA_MOTD_FILE="${sb}/etc/from-the-environment" bash -c '
+      source "$1/scripts/lib.sh" >/dev/null 2>&1
+      printf "%s" "${MOTD_FILE}"' _ "${sb}" )"
+  [[ "${honoured}" == "${sb}/etc/from-the-environment" ]] || {
+    printf 'MOTD_FILE ignores LCA_MOTD_FILE (got %q), so no test can contain where the banner is installed\n' \
+      "${honoured}" >&2
+    return 1
+  }
+}
+check "installing the login banner cannot rewrite the live machine's" \
+  banner_install_cannot_escape_its_sandbox
 # ...and the counterpart for stubs that escalation walks straight past. Every
 # directory this suite puts in front of PATH must be reachable through sudo as
 # well as directly, so a fake is the fake whether the script calls the command
@@ -18626,6 +18702,180 @@ if privilege_probe_ready; then
 else
   privilege_probe_cleanup
   echo "  SKIPPED - the privilege probes need root and useradd to make a throwaway account; they were NOT checked on this run"
+fi
+
+echo "# every command a person types, driven as somebody who is not root"
+# The section above drives the privilege PROBES. This drives the COMMANDS, in
+# the vocabulary of 'lca help' rather than of scripts/lib.sh, because that is
+# the surface a person meets and the rule is about what they typed:
+#
+#   a command that only REPORTS must return. An interactive sudo does not
+#     fail, it WAITS, so the failure is a command that never comes back --
+#     and no '|| true', no '2>/dev/null' and no exit-status assertion notices
+#     that. CONTRIBUTING's table records five measured behaving that way.
+#   a command that ACTS must still be WILLING to wait. Refusing where a
+#     password would have worked is the other half of the same bug, and lib.sh
+#     calls it the worse one: it is how 'lca backup' came to skip the accounts
+#     and the chat history and call a healthy daemon "not usable".
+#
+# WHY THIS EXISTS BESIDE THE REGION GREPS. Those match can_root([^_]|$). The
+# escalation is as_root, and can_root is only one way of deciding to reach it,
+# so a probe can wait for ever without the token appearing anywhere near it.
+# Two did, and both were found by running this, not by reading:
+#
+#   agent_live_sandboxes   bare 'as_root docker ps'. 'lca check' printed seven
+#                          lines and then sat on the password prompt -- reached
+#                          through agent_reclaimable_sandboxes, whose caller
+#                          wraps it in the exact '2>/dev/null || true' that
+#                          cannot see a command that never returns.
+#   agent.sh logs          bare 'as_root docker logs'. One line, then for ever.
+#                          'lca logs' was converted to run_reader when this was
+#                          first found; this is the project's other log reader
+#                          and it was never converted with it.
+#
+# AND WHY THE CONFIGURATION IS THE POINT. A gate of this shape configured from
+# .env.example proves less than it appears to: .env.example ships
+# ENABLE_AGENT=false, so the whole 'if [[ "${ENABLE_AGENT}" == "true" ]]' block
+# in check-system.sh -- which is where the first of those two hangs lives --
+# never executes, and the gate passes over a branch it never ran. Every
+# optional tier is therefore switched ON below, and asserted to be on, because
+# a stub sudo cannot save a gate from the wrong .env.
+TYPED_USER=lca_typed_$$
+TYPED_SB="${SANDBOX}/typed-surface"
+# Reporters. Each must return within the bound AND print something: "nothing at
+# all, then waits for ever" is how the worst of the five presented, and half of
+# that is the silence.
+TYPED_REPORTERS=(
+  "check --quick" "status" "logs" "chat" "model --list" "tune --dry-run"
+  "webui status" "webui logs" "webui url"
+  "agent status" "agent logs" "agent url"
+  "relay status"
+)
+# Actions. Each must BLOCK on the waiting sudo -- the user typed it, so a
+# prompt is fair and a refusal is the regression.
+#
+# NOT the whole action list, and the omissions are named rather than left to be
+# discovered: 'update' and 'restore' refuse before any escalation for reasons
+# that have nothing to do with root (no git checkout, no tarball), 'tune' is a
+# no-op on an already-tuned machine, and 'backup'/'test'/'speed'/'ask' take
+# tens of seconds to minutes because they tar volumes or generate tokens.
+TYPED_ACTIONS=(
+  "apply" "harden" "offline" "webui start" "agent start" "agent stop"
+  "relay install"
+)
+typed_surface_ready() {
+  [[ "${EUID}" -eq 0 ]] || return 1
+  have useradd && have runuser && have userdel && have timeout || return 1
+  useradd -M -s /bin/sh "${TYPED_USER}" >/dev/null 2>&1 || return 1
+  rm -rf "${TYPED_SB}"; mkdir -p "${TYPED_SB}" "${TYPED_SB}/home"
+  ( cd "${REPO}" && git ls-files -z 2>/dev/null | xargs -0 -r cp --parents -t "${TYPED_SB}" ) || return 1
+  [[ -x "${TYPED_SB}/bin/lca" && -f "${TYPED_SB}/scripts/lib.sh" ]] || return 1
+  # The configuration, and this is the load-bearing part. Every optional tier
+  # ON, so the branches that only exist on a configured machine are the ones
+  # being driven.
+  cp "${REPO}/.env.example" "${TYPED_SB}/.env" || return 1
+  sed -i -e 's/^ENABLE_AGENT=.*/ENABLE_AGENT=true/' \
+         -e 's/^ENABLE_OLLAMA_RELAY=.*/ENABLE_OLLAMA_RELAY=true/' \
+         -e 's/^ENABLE_WEBUI=.*/ENABLE_WEBUI=true/' \
+         "${TYPED_SB}/.env"
+  make_stub_dir "${TYPED_SB}/stub"
+  # A sudo that behaves like a real one for somebody who is not a passwordless
+  # sudoer: 'sudo -n' fails at once, anything else prints the prompt and waits.
+  # It SLEEPS rather than reads, because with stdin at /dev/null a read returns
+  # EOF immediately -- which is the one thing that does not reproduce the
+  # stall. Long enough to outlast every bound below, short enough that an
+  # orphan cannot outlive the suite.
+  cat > "${TYPED_SB}/stub/sudo" <<'TYPEDSUDO'
+#!/bin/sh
+for a in "$@"; do
+  [ "$a" = "-n" ] && exit 1
+done
+printf '[sudo] password for %s: ' "$(id -un)" >&2
+sleep 25
+exit 1
+TYPEDSUDO
+  chmod +x "${TYPED_SB}/stub/sudo"
+  chmod -R a+rX "${TYPED_SB}"
+  chmod 711 "${SANDBOX}"
+}
+typed_surface_cleanup() {
+  [[ -n "${TYPED_USER:-}" ]] && userdel "${TYPED_USER}" >/dev/null 2>&1
+  return 0
+}
+typed_run() {   # SECONDS ARG... -> "RC=n" then whatever it printed
+  local secs="$1"; shift
+  local out rc=0
+  # timeout OUTSIDE runuser, never 'sudo timeout ...': the prompt happens
+  # before an inner timeout is ever exec'd, which is why the login banner's own
+  # bound never got to start.
+  out="$( cd "${TYPED_SB}" && timeout "${secs}" runuser -u "${TYPED_USER}" -- \
+        env -i "PATH=$(stub_path "${TYPED_SB}/stub" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+        "HOME=${TYPED_SB}/home" TERM=dumb \
+        "${TYPED_SB}/bin/lca" "$@" </dev/null 2>&1 )" || rc=$?
+  printf 'RC=%s\n%s\n' "${rc}" "${out}"
+}
+typed_surface_answers_or_waits() {
+  local cmd out bad=0
+  # 1. The harness has to be able to SEE a wait before any "it did not hang"
+  # below is worth anything. An ACTION must block on this sudo.
+  out="$(typed_run 4 apply)"
+  grep -qx 'RC=124' <<<"${out}" || {
+    printf 'the waiting sudo did not make an ACTION wait, so nothing below was measured:\n%s\n' \
+      "${out}" >&2
+    return 1
+  }
+  # 2. ...and the configuration has to have reached the scripts. If the agent
+  # tier is off, the branch that carried the first of the two hangs is never
+  # executed and every result below is a result about a machine nobody has.
+  grep -qx 'ENABLE_AGENT=true' "${TYPED_SB}/.env" || {
+    echo 'the sandbox .env does not enable the agent tier — this gate would pass over the branch it exists to drive' >&2
+    return 1
+  }
+  out="$(typed_run 20 check --quick)"
+  grep -qi 'agent' <<<"${out}" || {
+    printf "'lca check' said nothing about the agent tier, so its ENABLE_AGENT branch did not run and this gate is watching a configuration nobody has:\n%s\n" \
+      "${out}" >&2
+    return 1
+  }
+  # 3. Reporters: return, and say something.
+  for cmd in "${TYPED_REPORTERS[@]}"; do
+    # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+    out="$(typed_run 20 ${cmd})"
+    ! grep -qx 'RC=124' <<<"${out}" || {
+      printf "'lca %s' only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
+        "${cmd}" "${out}" >&2
+      bad=1
+      continue
+    }
+    (( $(grep -c . <<<"${out}") > 1 )) || {
+      printf "'lca %s' returned without printing anything at all:\n%s\n" "${cmd}" "${out}" >&2
+      bad=1
+    }
+  done
+  # 4. Actions: still willing to wait. A command the user typed that refuses
+  # where a password would have worked is the other half of the same defect.
+  for cmd in "${TYPED_ACTIONS[@]}"; do
+    # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+    out="$(typed_run 4 ${cmd})"
+    grep -qx 'RC=124' <<<"${out}" || {
+      printf "'lca %s' ACTS, and it refused instead of asking — the user typed it, so a prompt is fair and a refusal is the regression:\n%s\n" \
+        "${cmd}" "${out}" >&2
+      bad=1
+    }
+  done
+  (( ${#TYPED_REPORTERS[@]} >= 13 && ${#TYPED_ACTIONS[@]} >= 7 )) || {
+    echo 'the typed-surface lists have shrunk — this gate has stopped watching' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+if typed_surface_ready; then
+  check "every typed command returns if it reports, and waits if it acts" \
+    typed_surface_answers_or_waits
+  typed_surface_cleanup
+else
+  typed_surface_cleanup
+  echo "  SKIPPED - driving the typed surface needs root, useradd and runuser to make a throwaway account; it was NOT checked on this run"
 fi
 
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"

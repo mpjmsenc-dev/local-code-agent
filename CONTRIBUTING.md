@@ -855,6 +855,32 @@ afternoon of this found five, all invisible as root:
 | `lca webui status` | full report | *nothing at all*, then waits for ever |
 | `lca logs` | full output | ollama section, then waits for ever |
 
+Five is what one afternoon found. It is not the list. The **whole** typed
+surface was later driven the same way — every command in `lca help`, every
+subcommand of the four that have them, and every `--help` — from two throwaway
+accounts (one with no sudo rights, one an ordinary sudoer with a password
+nobody typed), each on a pty, each bounded. Three more came out of it, and the
+fourth was the same defect pointing the other way:
+
+| Command | Was | Why the five-region grep could not see it |
+|---|---|---|
+| `lca check` | seven lines, then waits for ever | `agent_live_sandboxes` used a bare `as_root docker ps`. **`as_root` is the escalation; `can_root` is only one way of deciding to reach it** — the word the gate matches never appears |
+| `lca agent logs` | one line, then waits for ever | bare `as_root docker logs`. `lca logs` was converted to `run_reader`; this is the project's *other* log reader and nothing converted it too |
+| `lca agent status` | `Container 'openhands-app' does not exist` — while it had been up 17 hours | the probe collapses "cannot ask the daemon" into "no" |
+| `lca agent start` | refused in 0.18s, telling an ordinary sudoer to join the docker group | `agent.sh` never set `LCA_MAY_PROMPT=true`, so an ACTION the user typed took the strict answer |
+
+Two lessons that generalise past this rule:
+
+- **Match the escalation, not the decision.** `can_root([^_]|$)` is the right
+  regex for the wrong token. Every one of the hangs above went through
+  `as_root`, and two of them mention `can_root` nowhere at all.
+- **A stub sudo cannot save a gate from the wrong `.env`.** A gate of this
+  shape configured from `.env.example` proves less than it looks like it does:
+  `.env.example` ships `ENABLE_AGENT=false`, so check-system.sh's entire
+  `if [[ "${ENABLE_AGENT}" == "true" ]]` block — where the first hang lived —
+  never executes, and the gate passes over a branch it never ran. Switch every
+  optional tier **on** in the fixture, and assert it is on.
+
 The rule that came out of it, gated in `tests/test-lib.sh`:
 
 - **An action the user asked for** → `can_root`. A password prompt is fair;

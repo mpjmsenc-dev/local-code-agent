@@ -60,7 +60,19 @@ SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
 # must stay free of dots — run-parts --lsbsysinit, which is how pam_motd runs
 # these, skips any name containing one.
 # shellcheck disable=SC2034
-MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
+# Overridable for the same reason SETUP_LOG and OLLAMA_DROPIN_DIR above are,
+# and it was the only one of the three that was not. All three are absolute
+# paths OUTSIDE the checkout, so a test that drives an installer cannot contain
+# the write by pointing LCA_DIR at a sandbox -- and this one is written with
+# 'ln', which no stub in this suite intercepts. The result is on this machine:
+#
+#   /etc/update-motd.d/99-local-code-agent -> /tmp/tmp.PDSSCvpjBI/dud/target/scripts/motd.sh
+#
+# a sandbox that was deleted when the run that made it ended. Every SSH login
+# since has printed "run-parts: failed to stat component" and no banner at all,
+# which is the one screen this project's only real bug report was about. A test
+# reached out of its sandbox and broke the live box it was running on.
+MOTD_FILE="${LCA_MOTD_FILE:-/etc/update-motd.d/99-local-code-agent}"
 
 # Where start_ollama_bg() sends Ollama's output on a host with no service
 # manager — and therefore where 'lca logs ollama' has to look on that host.
@@ -3301,7 +3313,26 @@ agent_preserve_workspace() {
 # listing carries no timestamp this project could sort on.
 agent_live_sandboxes() {
   have docker || return 1
-  as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
+  # Unprivileged first, and the escalation goes through root_for_probe like
+  # every other shared docker helper -- see LCA_MAY_PROMPT at the top of this
+  # file. It was a bare 'as_root docker ps', which is the same defect
+  # select_docker and run_reader carried, in the one vocabulary no gate was
+  # watching: the rule is written about can_root, and this line never mentions
+  # it. as_root IS the escalation; can_root is only one way of deciding to.
+  #
+  # Measured on this box, from an account that is not a passwordless sudoer:
+  # 'lca check' printed seven lines and then sat on "[sudo] password for ..."
+  # for as long as it was left, because check-system.sh reaches here through
+  # agent_reclaimable_sandboxes. The '2>/dev/null || true' around that call is
+  # exactly the wrapper CONTRIBUTING says cannot notice a command that never
+  # returns -- and sudo writes its prompt to the terminal, not to stderr, so
+  # the redirect does not even hide it.
+  local names=""
+  names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  if [[ -z "${names}" ]] && root_for_probe; then
+    names="$(as_root docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  fi
+  printf '%s\n' "${names}" | grep -E '^oh-agent-server-' || true
 }
 
 # agent_reclaimable_sandboxes — running sandboxes whose conversation is over,

@@ -483,6 +483,27 @@ agent_url_line() {
 main() {
   local cmd="${1:-}"
   [[ $# -gt 0 ]] && shift
+  # Which half of this script you are in decides whether it may wait for a
+  # password -- see LCA_MAY_PROMPT in lib.sh, and webui.sh, which carries the
+  # same case for the same reason. This file had NEITHER half right, and the
+  # two halves were wrong in opposite directions:
+  #
+  #   the actions never opted in, so every shared probe took the strict answer
+  #     -> 'lca agent start' died in 0.18s with "Cannot reach the Docker
+  #        daemon as 'lcasudoer'. ... add yourself to the docker group",
+  #        measured on this box against a daemon that was up and an account
+  #        that is an ordinary sudoer. The user TYPED start; refusing where a
+  #        password would have worked is the 'lca backup' regression lib.sh
+  #        calls the worse of the two;
+  #
+  #   the reporters escalated anyway, through bare as_root rather than through
+  #     the shared probes
+  #     -> 'lca agent logs' printed one line and then waited for ever.
+  #
+  # setup and task exec other scripts, which decide for themselves.
+  case "${cmd}" in
+    start|stop|restart|gc) LCA_MAY_PROMPT=true ;;
+  esac
   case "${cmd}" in
     # setup before start in the list because it is the order a new machine
     # needs them in: 'start' assumes six things are already true, and setup is
@@ -573,6 +594,17 @@ main() {
       ;;
     status)
       require_cmd docker
+      # "no container" and "cannot reach the daemon" are different facts, and
+      # collapsing them is how this reported a container that had been up for
+      # seventeen hours as one that "does not exist" -- measured, from an
+      # account that cannot read the daemon, together with the advice to run
+      # 'lca agent start' on something already running. check-system.sh gets
+      # this right two files away ("whether it is running is UNKNOWN"); this is
+      # the same answer, in the command a person actually types.
+      if ! docker_daemon_reachable; then
+        warn "The Docker daemon could not be read as '$(id -un)', so whether '${AGENT_CONTAINER}' is running is UNKNOWN -- this is not a report that it is down. $(docker_unreachable_advice)"
+        return 1
+      fi
       if agent_container_running; then
         ok "Container '${AGENT_CONTAINER}': running"
       elif agent_container_exists; then
@@ -593,8 +625,16 @@ main() {
     url)    printf '%s\n' "$(agent_url_line)" ;;
     logs)
       require_cmd docker
-      as_root docker logs -f --tail 100 "${AGENT_CONTAINER}" \
-        || die "Could not read the agent's logs (is it created? try: lca agent status)"
+      # run_reader, the same escalation scripts/logs.sh uses for exactly this
+      # -- probe cheaply once, and let LCA_MAY_PROMPT above decide whether the
+      # fallback may ask. This was a bare 'as_root docker logs', so on any
+      # account that is not a passwordless sudoer it printed one line and then
+      # sat on the password prompt for ever. 'lca logs' was converted when that
+      # was first found; this is the project's OTHER log reader, and it was
+      # never converted with it.
+      run_reader docker container inspect "${AGENT_CONTAINER}" \
+        -- docker logs -f --tail 100 "${AGENT_CONTAINER}" \
+        || die "Could not read the agent's logs as '$(id -un)'. $(docker_unreachable_advice)"
       ;;
     watch)  "${SCRIPT_DIR}/scripts/agent-watch.sh" "$@" ;;
     help|-h|--help) usage ;;
