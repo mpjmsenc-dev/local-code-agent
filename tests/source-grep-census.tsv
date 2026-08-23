@@ -70,7 +70,7 @@ A	errexit_survives_sourcing_tune	awk over check-system.sh for ordering
 A	every_baked_setting_is_compared	derived list, but the source side is a presence-grep for a call
 A	every_banner_state_gets_the_warning	awk inside headline() for one call
 A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
-A	every_dispatch_forwards_its_arguments	greps exec lines; forwarding is drivable
+FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an argument no script can know and checks it arrived
 FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 A	every_installer_call_in_setup_is_guarded	greps setup.sh main() for the guarded form
@@ -308,6 +308,7 @@ H	example_value	extracts one value from .env.example
 H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
 H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
 H	installed_units	lists the boot units this repo installs
+H	lca_exec_subcommands	lists every word bin/lca dispatches through an exec
 H	lca_subcommands	extracts the subcommands bin/lca dispatches
 H	lib_default_keys	extracts the keys load_env defaults
 H	model_block_says	drives update-model.sh's model block

@@ -14816,19 +14816,71 @@ first_boot_help_touches_nothing() {
 check "...and the first-boot script's --help installs nothing" \
   first_boot_help_touches_nothing
 
-# The scripts answering --help only helps if the flag reaches them. 'chat' was
-# 'exec webui.sh url' with no "$@", so 'lca chat --help' printed the chat
-# address — one line after 'lca help' promises every command explains itself.
-every_dispatch_forwards_its_arguments() {
-  local hits
-  hits="$(grep -nE '^[[:space:]]*[^#]*exec "\$\{REPO\}/[a-z/-]+\.sh"' "${REPO}/bin/lca" \
-            | grep -v '"\$@"' || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'these swallow the arguments, so --help never reaches the script:\n%s\n' "${hits}" >&2
-    return 1
-  }
+# Driven, on the entry-point harness. The grep this replaces read bin/lca for
+# exec lines missing "$@". What is at stake is whether 'lca webui start' still
+# starts anything — an arm that swallows its arguments turns every subcommand
+# that takes one into the subcommand with no arguments, which for several of
+# them is a different command entirely.
+#
+# So each word is dispatched for real with an argument no script can know, and
+# the evidence that it arrived is that the script on the far end NAMES it.
+lca_exec_subcommands() {   # -> every word bin/lca dispatches through an exec
+  awk '
+    # An arm whose exec sits on the NEXT line — the netmode four are written
+    # that way, and a one-line pattern could not see them at all.
+    /^[[:space:]]*[a-z|"*-]+\)[[:space:]]*$/ { pend = $0; sub(/\).*/, "", pend); next }
+    /exec "\$\{REPO\}\// {
+      w = pend
+      if (w == "" && match($0, /^[[:space:]]*[a-z|"*-]+\)/))
+        w = substr($0, RSTART, RLENGTH - 1)
+      pend = ""
+      if (w == "") next
+      gsub(/[[:space:]"]/, "", w)
+      n = split(w, p, "|")
+      for (i = 1; i <= n; i++) if (p[i] != "" && p[i] !~ /^-/ && p[i] != "*") print p[i]
+    }
+    { pend = "" }
+  ' "${REPO}/bin/lca"
 }
-check "every 'lca' branch passes its arguments through" \
+# offline, online and harden apply or remove a firewall, and this suite does
+# not do that on the machine it is running on. They share ONE exec line with
+# 'status', which changes nothing — so the arm is still driven, by its
+# harmless sibling, and the gate below insists that sibling was among the
+# words it saw.
+DISPATCH_NOT_RUN_HERE=( offline online harden )
+every_dispatch_forwards_its_arguments() {
+  local w x skip out bad=0 seen=0 sibling=false flag=--lca-not-a-real-flag
+  entry_harness
+  while read -r w; do
+    [[ -n "${w}" ]] || continue
+    skip=false
+    for x in "${DISPATCH_NOT_RUN_HERE[@]}"; do
+      [[ "${w}" == "${x}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    [[ "${w}" == "status" ]] && sibling=true
+    seen=$(( seen + 1 ))
+    out="$(entry_run bin/lca "${w}" "${flag}")"
+    # Two ways to prove it arrived: the far end refuses it by name, or it went
+    # all the way to aider. 'lca' with no subcommand and 'lca code' forward.
+    [[ "${out}" == *"${flag}"* ]] || {
+      printf "'lca %s' swallowed %s — everything after the subcommand is being dropped:\n%s\n" \
+        "${w}" "${flag}" "${out}" >&2
+      bad=1
+    }
+  done < <(lca_exec_subcommands)
+  (( seen >= 15 )) || {
+    printf 'only %s subcommands were dispatched — the extractor has stopped matching bin/lca\n' \
+      "${seen}" >&2
+    bad=1
+  }
+  [[ "${sibling}" == "true" ]] || {
+    echo "the netmode arm is not driven at all: 'status' was not among the words, and its three siblings are not run here" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every 'lca' subcommand passes what follows it to the script it runs" \
   every_dispatch_forwards_its_arguments
 
 # netmode.sh takes its subcommand as $1 and used to ignore everything after
@@ -19759,8 +19811,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 122 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 31 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 121 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 32 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
