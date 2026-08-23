@@ -4337,45 +4337,101 @@ relay_survival_is_reported() {
 }
 check "...and a unit that survives is reported, not announced as removed" \
   relay_survival_is_reported
-# Every installer call in setup.sh's main() must be GUARDED, so that one
-# failing installer cannot take the rest of the install with it.
+# Driven. The awk this replaces asked that each installer call in setup.sh's
+# main() begins with 'if ! ', with the two core ones exempted by name. A shape
+# check cannot tell you what actually happens when one of them fails, and what
+# happens is the whole claim: a fresh install is the first thing every user
+# does, and one optional component failing must not take the other six with it.
 #
-# This lesson was learned once and lost. setup.sh's own comment at the Tailscale
-# call says the guard is there so a failure does not abort "before the 'lca'
-# command, the login banner, the boot services and the inbound guard" — and
-# install_python.sh and install_ollama.sh sat bare two lines above it. Walking
-# the README in a clean container found the consequence: a pip failure left a
-# machine with no 'lca' on PATH, while the README's next sentence says "verify
-# with lca check", and with no inbound guard, which the README calls always-on.
-#
-# Two calls are deliberately exempt and named here rather than skipped
-# silently: install_dependencies.sh and install_git.sh are hard prerequisites —
-# nothing after them can work without curl, git and jq — so stopping is the
-# honest outcome there, and the EXIT trap's guidance is what makes that
-# survivable. Adding a third name to this list should be an argument somebody
-# has to make in a diff.
+# So every installer setup.sh runs is failed IN TURN, in a copy of the tree
+# with all seven stubbed, and setup.sh is run for real. Each one is classified
+# by what it does — reaches the end, or stops — and the classification is
+# compared against the two that are allowed to stop it.
+SETUP_SB="${SANDBOX}/setupsb"
+# The only two setup.sh may die on: without dependencies it cannot install
+# anything, and without git it cannot even read its own version.
+SETUP_CORE=( install_dependencies.sh install_git.sh )
+setup_installers() {   # -> the install_*.sh that setup.sh actually runs
+  sed 's/#.*//' "${REPO}/setup.sh" \
+    | grep -oE 'scripts/install_[a-z_]+\.sh' | sed 's|scripts/||' | sort -u
+}
+setup_sandbox() {   # FAILING-INSTALLER (or empty) -> a tree where only that one fails
+  local fail="${1:-}" f base
+  rm -rf "${SETUP_SB}"; mkdir -p "${SETUP_SB}" "${SETUP_SB}/bin" "${SETUP_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${SETUP_SB}" )
+  make_stub_dir "${SETUP_SB}/bin"
+  for f in "${SETUP_SB}"/scripts/install_*.sh; do
+    base="${f##*/}"
+    if [[ "${base}" == "${fail}" ]]; then
+      printf '#!/bin/sh\nexit 1\n' > "${f}"
+    else
+      printf '#!/bin/sh\nexit 0\n' > "${f}"
+    fi
+    chmod +x "${f}"
+  done
+  cp "${REPO}/.env.example" "${SETUP_SB}/.env"
+  for base in ollama docker systemctl tailscale apt-get curl nft; do
+    printf '#!/bin/sh\nexit 0\n' > "${SETUP_SB}/bin/${base}"
+    chmod +x "${SETUP_SB}/bin/${base}"
+  done
+}
+setup_run() {   # -> everything setup.sh printed
+  ( cd "${SETUP_SB}" && env -i \
+      "PATH=$(stub_path "${SETUP_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+      "HOME=${SETUP_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
+      timeout 60 bash "${SETUP_SB}/setup.sh" </dev/null 2>&1 ) || true
+}
 every_installer_call_in_setup_is_guarded() {
-  local body line n=0 bad=0
-  body="$(sed 's/#.*//' "${REPO}/setup.sh" | awk '/^main\(\) \{/,/^\}/')"
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    n=$(( n + 1 ))
-    case "${line}" in
-      *install_dependencies.sh*|*install_git.sh*) continue ;;
-    esac
-    grep -qE '^[[:space:]]*if ! ' <<<"${line}" || {
-      printf 'this installer call is unguarded, so its failure aborts everything after it:\n  %s\n' \
-        "${line}" >&2
-      bad=1; }
-  done < <(grep -E '^[[:space:]]*(if ! )?"\$\{SCRIPT_DIR\}/scripts/install_[a-z_]+\.sh"' <<<"${body}")
-  # Non-vacuous: setup.sh runs seven installers, and a sweep that stopped
-  # matching them would otherwise pass by finding nothing to complain about.
-  (( n >= 5 )) || {
-    printf 'the installer sweep matched only %s calls in setup.sh main()\n' "${n}" >&2
-    return 1; }
+  local inst out core c seen=0 bad=0
+  # Control first: with nothing failing, setup.sh must reach its end. Every
+  # verdict below is "did it get there", and a harness that never gets there
+  # would call all seven of them fatal.
+  setup_sandbox ""
+  out="$(setup_run)"
+  grep -q 'Next steps' <<<"${out}" || {
+    printf 'setup.sh does not reach its end even with every installer succeeding, so nothing below measures anything:\n%s\n' \
+      "$(tail -5 <<<"${out}")" >&2
+    return 1
+  }
+  while read -r inst; do
+    [[ -n "${inst}" ]] || continue
+    seen=$(( seen + 1 ))
+    core=false
+    for c in "${SETUP_CORE[@]}"; do [[ "${inst}" == "${c}" ]] && core=true; done
+    setup_sandbox "${inst}"
+    out="$(setup_run)"
+    if [[ "${core}" == "true" ]]; then
+      ! grep -q 'Next steps' <<<"${out}" || {
+        printf 'setup.sh carried on after %s failed, and it cannot install anything without it\n' \
+          "${inst}" >&2
+        bad=1
+      }
+      continue
+    fi
+    grep -q 'Next steps' <<<"${out}" || {
+      printf '%s failed and took the whole install down with it — the other six components never got set up:\n%s\n' \
+        "${inst}" "$(tail -5 <<<"${out}")" >&2
+      bad=1
+      continue
+    }
+    # ...and having carried on, it has to say WHICH step is missing and how to
+    # get it back. Carrying on in silence leaves a half-installed machine that
+    # reports success.
+    grep -qF "${inst}" <<<"${out}" || {
+      printf '%s failed and setup.sh never named it, so nothing tells the reader what to re-run\n' \
+        "${inst}" >&2
+      bad=1
+    }
+  done < <(setup_installers)
+  # Non-vacuity: an extractor that had stopped matching would sweep nothing and
+  # report every installer guarded.
+  (( seen >= 5 )) || {
+    printf 'only %s installers found in setup.sh — this sweep has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
   return "${bad}"
 }
-check "no installer failure in setup.sh can abort the rest of the install" \
+check "one failing installer does not take the rest of setup.sh with it" \
   every_installer_call_in_setup_is_guarded
 # ...and when it does stop early, it must say what is missing rather than leave
 # the reader at the README's next instruction, which is 'lca check' — a command
@@ -20122,8 +20178,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 117 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 36 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 116 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 37 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

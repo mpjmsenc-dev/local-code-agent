@@ -73,7 +73,7 @@ A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
 FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an argument no script can know and checks it arrived
 FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
-A	every_installer_call_in_setup_is_guarded	greps setup.sh main() for the guarded form
+FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
 A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
 A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
@@ -327,6 +327,7 @@ H	render_unit_from	renders a boot unit from its installer
 H	rendered_tune_unit	renders the tune boot unit
 H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
 H	seeded_settings_payload	renders agent.sh's real settings payload
+H	setup_installers	lists the installers setup.sh actually runs
 H	step_source_check_says	drives agent-watch.sh's step-source check
 H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
 H	tune_builds_on_path	drives tune.sh's PATH construction
