@@ -14735,38 +14735,44 @@ every_dispatch_target_is_checked() {
 check "the --help list covers everything bin/lca dispatches to" \
   every_dispatch_target_is_checked
 
-# The two that are NOT dispatched, and are the worst of the lot: './install.sh
-# --help' installed packages and cloned into ${LCA_DIR}, and './setup.sh
-# --help' began installing the whole stack as root. Both were found by running
-# them — each had to be killed by a timeout, and the first left a checkout on
-# disk.
+# Driven, on the entry-point harness above. The awk this replaces asserted the
+# SHAPE — that main()'s first statement is the case for --help. Both bugs on
+# record here were outcomes rather than shapes: "'./setup.sh --help' began
+# installing", and "'./install.sh --help' had to be killed by a timeout, and
+# left a checkout behind". So ask for help and see what happens.
 #
-# Structural, not behavioural. Everywhere else the --help check runs the
-# script, because the claim is about what happens; here a failing check would
-# install packages as root on whoever ran the suite, which is worse than the
-# bug it guards. So it asserts the shape that produces the behaviour — the
-# --help branch must be the FIRST thing main() does, above every side effect —
-# and the behaviour itself was verified by hand once the shape was in place.
+# uninstall.sh joins the list. It was never in it, and it is the one where
+# being wrong costs most: --help answered by removing Ollama, every downloaded
+# model and the chat app's data volume. '-h' is asked as well as '--help',
+# because they are separate arms of the same case and only one was looked at.
+#
+# The assertion is about commands that change a MACHINE, not about the sandbox
+# being byte-identical afterwards: setup.sh writes a .env from .env.example on
+# the way past, because load_env does that wherever it is sourced.
 installers_answer_help_before_acting() {
-  local f
-  # deploy/do-user-data.sh joined this list, as the fourth entry point and the
-  # one that was worst off: it did not even RECEIVE its arguments — the last
-  # line called 'main' without "$@" — so --help ran the full unattended
-  # install. Measured, apt stubbed and the clone pointed at a local mirror:
-  # apt-get, a 33 MB clone, and /etc/update-motd.d rewritten, which is how it
-  # was noticed at all.
-  for f in install.sh setup.sh deploy/do-user-data.sh; do
-    awk '/^main\(\) \{/            { inm = 1; next }
-         inm && /^[[:space:]]*#/   { next }
-         inm && /^[[:space:]]*$/   { next }
-         inm                       { first = $0; exit }
-         END { exit !(first ~ /case "\$\{1:-\}" in/) }' "${REPO}/${f}" || {
-      printf '%s: main() does something before it checks for --help\n' "${f}" >&2
-      return 1
-    }
+  local t flag out bad=0
+  entry_harness
+  for t in install.sh setup.sh uninstall.sh deploy/do-user-data.sh; do
+    for flag in --help -h; do
+      out="$(entry_run "${t}" "${flag}")"
+      [[ "${out}" == "EXIT 0"* ]] || {
+        printf '%s %s did not exit 0:\n%s\n' "${t}" "${flag}" "${out}" >&2
+        bad=1; }
+      # Exiting 0 in silence is also not help. The text has to name the script
+      # it is the help for.
+      [[ "${out}" == *"${t##*/}"* ]] || {
+        printf '%s %s printed nothing naming the script, so that was not help:\n%s\n' \
+          "${t}" "${flag}" "${out}" >&2
+        bad=1; }
+      [[ "${out}" != *$'\nDID '* ]] || {
+        printf '%s %s changed the machine while explaining itself:\n%s\n' \
+          "${t}" "${flag}" "${out}" >&2
+        bad=1; }
+    done
   done
+  return "${bad}"
 }
-check "install.sh, setup.sh and the first-boot script explain themselves before they install anything" \
+check "install.sh, setup.sh, uninstall.sh and the first-boot script explain themselves before they install anything" \
   installers_answer_help_before_acting
 # ...and the flag has to REACH main(), which is a separate fault from handling
 # it. do-user-data.sh's last line was 'main 2>&1 | tee ...' — arguments dropped
@@ -19753,8 +19759,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 123 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 30 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 122 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 31 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

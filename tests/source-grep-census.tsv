@@ -86,7 +86,7 @@ FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both do
 A	install_verifies_the_clone	greps for the existence test
 FP	installer_passes_the_banner	reads the banner off the argv docker was really given
 FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
-A	installers_answer_help_before_acting	awk that main()'s first statement is the case; drivable
+FP	installers_answer_help_before_acting	runs each installer with --help and -h in a stubbed world and checks nothing was installed
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 A	load_env_survives_an_uncreatable_env	greps load_env's body; an unwritable .env would settle it
