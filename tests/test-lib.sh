@@ -7579,34 +7579,109 @@ check "uninstall.sh escalates every removal, so one it cannot do does not end it
   uninstall_removals_can_reach_root
 
 echo "# install.sh is piped into bash — a partial download must do nothing"
-# It is advertised as 'curl -fsSL ... | bash', which streams the file and runs
-# each statement as it arrives. A connection dropping part-way would otherwise
-# execute a PARTIAL installer: far enough to install git and create the target
-# directory, not far enough to clone or hand over to setup.sh, and it would
-# leave that half-state behind without an error. Wrapped in main() called on
-# the last line, a truncated download never reaches the call.
+# Driven. install.sh is advertised as 'curl … | bash', so a dropped connection
+# hands bash a PREFIX of the file, and the claim is that no prefix does
+# anything. The awk this replaces asserted the SHAPE that makes that true — a
+# main() wrapper, called on the last line, with nothing at top level after it —
+# and a shape check cannot see a side effect added ABOVE main(), which that
+# same shape permits and which a partial download reaches first.
+#
+# So the file is cut at every line boundary and every line midpoint below the
+# final call, and every prefix is run both documented ways — as a file, and
+# down a pipe, which is the case this is actually about.
+TRUNC_SB="${SANDBOX}/truncation"
+TRUNC_PATH=""
+truncation_harness() {
+  local bin="${TRUNC_SB}/bin" c
+  rm -rf "${TRUNC_SB}"; mkdir -p "${bin}" "${TRUNC_SB}/run" "${TRUNC_SB}/opt"
+  make_stub_dir "${bin}"
+  # Recorders for everything install.sh can reach that changes a machine. sudo
+  # comes from make_stub_dir and passes through, so a "${SUDO[@]}" git still
+  # lands on the git below.
+  for c in git apt-get apt mkdir chmod chown curl wget systemctl rm useradd dpkg; do
+    cat > "${bin}/${c}" <<STUB
+#!/bin/sh
+printf '%s %s\n' "\${0##*/}" "\$*" >> "${TRUNC_SB}/did"
+exit 0
+STUB
+  done
+  chmod +x "${bin}"/*
+  # Once, not per cut: stub_path records every use, and four hundred identical
+  # entries would bury the one real report that file exists for.
+  TRUNC_PATH="$(stub_path "${bin}")"
+}
+truncation_run() {   # FILE BYTES -> everything the prefix did
+  local src="$1" n="$2" cut="${TRUNC_SB}/cut.sh" run="${TRUNC_SB}/run"
+  : > "${TRUNC_SB}/did"
+  rm -rf "${run}"; mkdir -p "${run}"
+  head -c "${n}" "${src}" > "${cut}"
+  # env rather than an exported assignment: the run happens in a subshell, and
+  # a PATH set there is exactly the thing ShellCheck warns is easy to lose.
+  local -a world=( env "PATH=${TRUNC_PATH}" "LCA_DIR=${TRUNC_SB}/opt/lca"
+                   LCA_RUN_SETUP=false LCA_REPO_URL=file:///nonexistent )
+  (
+    cd "${run}" || exit 1
+    "${world[@]}" bash "${cut}" </dev/null >/dev/null 2>&1
+    "${world[@]}" bash <"${cut}"           >/dev/null 2>&1
+  ) || true
+  cat "${TRUNC_SB}/did"
+  # ...and anything it created in the directory it ran from, which is where a
+  # relative-path redirection would land.
+  find "${run}" -mindepth 1 2>/dev/null
+}
+install_cut_points() {
+  # Every line boundary AND every line midpoint: a cut inside a line is the
+  # interesting one, because it can leave a different, still-valid command.
+  # Stops at the line before 'main "$@"' — a cut inside those last bytes means
+  # the whole file did arrive, so reaching main is correct rather than partial.
+  awk '{ prev = t; t += length($0) + 1
+         if ($0 == "main \"$@\"; exit $?") exit
+         if (int((prev + t) / 2) > prev) print int((prev + t) / 2)
+         print t }' "${REPO}/install.sh"
+}
+install_with_a_top_level_side_effect() {   # -> bytes to cut a copy that acts above main()
+  local out="${TRUNC_SB}/above-main.sh"
+  awk -v probe='git clone --depth 1 http://not-the-real-repo /tmp/lca-truncation-probe' \
+      '/^main\(\) \{/ && !seen { print probe; seen = 1 } { print }' \
+      "${REPO}/install.sh" > "${out}"
+  awk '{ t += length($0) + 1; if (index($0, "not-the-real-repo")) { print t; exit } }' "${out}"
+}
 install_is_truncation_safe() {
-  local src="${REPO}/install.sh"
-  grep -qE '^main\(\) \{' "${src}" || {
-    echo "install.sh has no main() wrapper — a truncated curl|bash would run a partial installer" >&2
-    return 1
+  local src="${REPO}/install.sh" n out bad=0 seen=0
+  truncation_harness
+  while read -r n; do
+    seen=$(( seen + 1 ))
+    out="$(truncation_run "${src}" "${n}")"
+    [[ -z "${out}" ]] || {
+      printf 'install.sh truncated at %s bytes still changed the machine:\n%s\n' \
+        "${n}" "${out}" >&2
+      bad=1
+    }
+  done < <(install_cut_points)
+  # A file that produced no cut points would pass the loop having tested
+  # nothing at all.
+  (( seen > 100 )) || {
+    printf 'only %s truncation points were tried — this gate is checking almost nothing\n' \
+      "${seen}" >&2
+    bad=1
   }
-  # The call must be the LAST statement, or the wrapper buys nothing. The
-  # trailing 'exit $?' is part of it — see the self-rewrite gate below — and it
-  # costs this one nothing: a truncation landing inside those last few bytes
-  # means everything before the call did arrive, so calling main is right.
-  [[ "$(grep -vE '^\s*(#|$)' "${src}" | tail -1)" == 'main "$@"; exit $?' ]] || {
-    echo "install.sh does not end with main \"\$@\"; exit \$? — the wrapper is not the last thing that runs" >&2
-    return 1
+  # Non-vacuity, two ways. First: the whole file DOES act, so the loop above is
+  # not passing because install.sh can do nothing under these stubs.
+  out="$(truncation_run "${src}" "$(wc -c < "${src}")")"
+  [[ "${out}" == *"git clone"* ]] || {
+    printf 'the complete installer cloned nothing either, so "no prefix acts" means nothing here:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
-  # And nothing may execute at top level between the wrapper and the call.
-  awk '/^main\(\) \{/ { seen = 1 }
-       seen && /^\}/   { closed = 1; next }
-       closed && !/^[[:space:]]*(#|$)/ && !/^main "\$@"; exit \$\?$/ { bad = 1 }
-       END { exit bad }' "${src}" || {
-    echo "install.sh runs something at top level after main() — a partial download could reach it" >&2
-    return 1
+  # Second: the harness can see a side effect placed ABOVE main(), which is
+  # precisely what the shape check could not.
+  out="$(truncation_run "${TRUNC_SB}/above-main.sh" "$(install_with_a_top_level_side_effect)")"
+  [[ "${out}" == *"not-the-real-repo"* ]] || {
+    printf 'a deliberate top-level clone above main() went unnoticed — the harness sees nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
+  return "${bad}"
 }
 check "install.sh runs nothing if the curl|bash download is truncated" \
   install_is_truncation_safe
@@ -19614,8 +19689,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 125 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 28 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 124 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 29 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

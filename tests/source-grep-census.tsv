@@ -82,7 +82,7 @@ A	harden_installs_the_boot_service	awk over netmode.sh for calls inside do_harde
 A	help_examples_are_dispatched	greps bin/lca for branch order
 A	honours_skip	one grep for a literal condition
 A	image_pulls_are_never_implicit	presence-grep for a command in two scripts
-A	install_is_truncation_safe	structural awk over install.sh; a truncated file could be run
+FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both documented ways, and watches for side effects
 A	install_verifies_the_clone	greps for the existence test
 FP	installer_passes_the_banner	reads the banner off the argv docker was really given
 FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
@@ -304,6 +304,8 @@ H	drift_keys	extracts the keys webui_drift can report
 H	entry_points	lists the repo's entry points
 H	example_keys	extracts the keys .env.example ships
 H	example_value	extracts one value from .env.example
+H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
+H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
 H	installed_units	lists the boot units this repo installs
 H	lca_subcommands	extracts the subcommands bin/lca dispatches
 H	lib_default_keys	extracts the keys load_env defaults
