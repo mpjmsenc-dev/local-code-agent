@@ -84,8 +84,8 @@ A	honours_skip	one grep for a literal condition
 A	image_pulls_are_never_implicit	presence-grep for a command in two scripts
 A	install_is_truncation_safe	structural awk over install.sh; a truncated file could be run
 A	install_verifies_the_clone	greps for the existence test
-A	installer_passes_the_banner	presence-greps in install_webui.sh
-A	installer_recreates_rather_than_skipping	greps a branch of install_webui.sh
+FP	installer_passes_the_banner	reads the banner off the argv docker was really given
+FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
 A	installers_answer_help_before_acting	awk that main()'s first statement is the case; drivable
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
@@ -100,7 +100,7 @@ A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
 A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
 A	pin_is_sized_before_the_pull	line-number ordering inside main()
-A	port_is_checked_before_the_container_is_destroyed	awk ordering in install_webui.sh
+FP	port_is_checked_before_the_container_is_destroyed	runs the real installer against a stand-in docker and reads what it was asked to do
 A	probes_use_the_stricter_test	presence/absence inside extracted regions (via probe_region)
 A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
 A	prompt_check_is_not_claimed_when_skipped	presence-grep for a guard call in each claimant

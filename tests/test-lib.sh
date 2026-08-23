@@ -1305,6 +1305,134 @@ ensure_ollama_up_announced() { return 1; }'
 check "the agent workspace is restored, and an existing one is moved aside" \
   backup_and_restore_agree_on_the_component
 
+# --- scripts/install_webui.sh, run against a stand-in docker -----------------
+# The installer is entirely a sequence of external commands, so a stub PATH
+# turns "what does it do" into "what did it ask docker to do". Everything it
+# could change goes through those commands, which is why running the real
+# script here is safe.
+#
+# The stubs go in through make_stub_dir/stub_path, because a directory of fakes
+# that sudo cannot see is how a test passes here and fails on a runner that
+# escalates — and this script escalates for every docker call.
+WEBUI_INST_SB=""
+webui_install_run() {   # CONTAINER RUNNING PORT_BUSY -> what it printed
+  WEBUI_INST_SB="${SANDBOX}/webui-install"
+  rm -rf "${WEBUI_INST_SB}"
+  make_stub_dir "${WEBUI_INST_SB}/bin"
+  # The stand-in scripts' own text: every expansion below belongs to THEM, at
+  # the time they run, not to this file.
+  # shellcheck disable=SC2016
+  { printf '#!/usr/bin/env bash\n'
+    printf 'printf "DOCKER %%s\\n" "$*" >> "${WI_LOG}"\n'
+    printf 'case "$1 $2" in\n'
+    printf '  "container inspect") [[ "${WI_CONTAINER}" == yes ]] || exit 1\n'
+    printf '     [[ "$3" == "-f" ]] && printf "%%s\\n" "${WI_RUNNING}"\n'
+    printf '     exit 0 ;;\n'
+    printf '  "volume inspect") [[ "${WI_VOLUME:-no}" == yes ]] || exit 1; exit 0 ;;\n'
+    printf '  "image inspect")  exit 0 ;;\n'
+    printf 'esac\nexit 0\n'; } > "${WEBUI_INST_SB}/bin/docker"
+  # shellcheck disable=SC2016  # ...and the same for the ss stand-in
+  { printf '#!/usr/bin/env bash\n'
+    printf '[[ "${WI_PORT_BUSY}" == yes ]] && printf "LISTEN 0 128 0.0.0.0:%%s 0.0.0.0:*\\n" "${WEBUI_PORT}"\n'
+    printf 'exit 0\n'; } > "${WEBUI_INST_SB}/bin/ss"
+  chmod +x "${WEBUI_INST_SB}/bin/docker" "${WEBUI_INST_SB}/bin/ss"
+  : > "${WEBUI_INST_SB}/docker.log"
+  # shellcheck disable=SC2031  # a one-command env prefix, not a subshell edit
+  WI_LOG="${WEBUI_INST_SB}/docker.log" WI_CONTAINER="$1" WI_RUNNING="$2" WI_PORT_BUSY="$3" \
+    PATH="$(stub_path "${WEBUI_INST_SB}/bin")" \
+    timeout 120 bash "${REPO}/scripts/install_webui.sh" 2>&1 </dev/null || true
+}
+webui_docker_calls() { cat "${WEBUI_INST_SB}/docker.log" 2>/dev/null || true; }
+
+# Non-vacuity: the installer has to get far enough to talk to docker at all.
+webui_installer_harness_works() {
+  webui_install_run no false no >/dev/null
+  grep -q '^DOCKER run -d' <<<"$(webui_docker_calls)"
+}
+check "the chat app installer can be run against a stand-in docker" \
+  webui_installer_harness_works
+
+# Driven. The awk version compared the line numbers of 'ss -ltn' and
+# 'docker rm -f' inside the file. What is at stake is a working chat app being
+# deleted and then NOT replaced, by the one command whose job is to replace it:
+# the old order removed the container first so its own listener could not trip
+# the port check, and paid for it with exactly that.
+port_is_checked_before_the_container_is_destroyed() {
+  local out calls
+  out="$(webui_install_run yes false yes)"
+  calls="$(webui_docker_calls)"
+  grep -q 'DOCKER rm -f' <<<"${calls}" && {
+    printf 'the container was destroyed even though the port is held by something else:\n%s\n%s\n' \
+      "${calls}" "${out}" >&2
+    return 1; }
+  grep -qi 'already in use' <<<"${out}" || {
+    printf 'a port held by another process was not reported:\n%s\n' "${out}" >&2; return 1; }
+  grep -qi 'untouched' <<<"${out}" || {
+    printf 'the refusal does not say the existing container was left alone:\n%s\n' "${out}" >&2
+    return 1; }
+  # ...and the container's OWN listener must not count as another process, or
+  # every re-install would refuse itself.
+  out="$(webui_install_run yes true yes)"
+  calls="$(webui_docker_calls)"
+  grep -q 'DOCKER rm -f' <<<"${calls}" || {
+    printf 'a running container was treated as another process holding its own port:\n%s\n%s\n' \
+      "${calls}" "${out}" >&2
+    return 1; }
+}
+check "the port is checked before the chat app container is destroyed" \
+  port_is_checked_before_the_container_is_destroyed
+
+# Driven. The awk version read the existing-container branch for 'docker rm -f'
+# and the absence of an early return. What is at stake is an update that is
+# never delivered: a re-install that finds a container and leaves it alone
+# keeps whatever .env said when it was first created.
+installer_recreates_rather_than_skipping() {
+  local out calls
+  out="$(webui_install_run yes false no)"
+  calls="$(webui_docker_calls)"
+  grep -q 'DOCKER rm -f' <<<"${calls}" || {
+    printf 'an existing container was left in place, so the new settings never reach it:\n%s\n%s\n' \
+      "${calls}" "${out}" >&2
+    return 1; }
+  grep -q '^DOCKER run -d' <<<"${calls}" || {
+    printf 'the container was removed and never re-created:\n%s\n%s\n' "${calls}" "${out}" >&2
+    return 1; }
+  # ...and in that order.
+  local rm_at run_at
+  rm_at="$(grep -n 'DOCKER rm -f' <<<"${calls}" | head -1 | cut -d: -f1)"
+  run_at="$(grep -n '^DOCKER run -d' <<<"${calls}" | head -1 | cut -d: -f1)"
+  (( rm_at < run_at )) || {
+    printf 'the container was created before the old one was removed:\n%s\n' "${calls}" >&2
+    return 1; }
+}
+check "an existing chat app container is re-created, not skipped" \
+  installer_recreates_rather_than_skipping
+
+# Driven. The grep version asked that install_webui.sh mention WEBUI_BANNERS
+# and 'banners_env[@]' — built and passed are two claims, and only the second
+# one runs. The banner is where 'lca check' tells a phone user their chat is
+# out of date, so a banner that never reaches the container is a warning nobody
+# will ever see.
+installer_passes_the_banner() {
+  local calls
+  webui_install_run no false no >/dev/null
+  calls="$(webui_docker_calls)"
+  grep -q '^DOCKER run -d' <<<"${calls}" || {
+    printf 'no container was created, so there is nothing to check:\n%s\n' "${calls}" >&2
+    return 1; }
+  grep -q 'WEBUI_BANNERS=' <<<"${calls}" || {
+    printf 'the container was created without the banner, so nothing can warn a phone user:\n%s\n' \
+      "$(grep '^DOCKER run' <<<"${calls}" | head -c 400)" >&2
+    return 1; }
+  # ...and it is the banner this repo builds, not an empty one.
+  grep -qE 'WEBUI_BANNERS=[^ ]*[a-z]' <<<"${calls}" || {
+    printf 'the banner reached docker empty:\n%s\n' \
+      "$(grep -o 'WEBUI_BANNERS=[^ ]*' <<<"${calls}" | head -1)" >&2
+    return 1; }
+}
+check "the chat app is created with the banner this repo builds" \
+  installer_passes_the_banner
+
 echo "# ...and a tarball with none of our parts is not a backup at all"
 # Every component of a backup is optional on purpose, so an older or partial
 # one restores what it has and skips the rest. With NONE of them present the
@@ -3229,7 +3357,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 129 )) || {
+  (( n <= 126 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -6640,19 +6768,6 @@ check "...and names the command that does write files" \
 # day thirty. The limitation never goes away, so neither does the banner.
 check "...and cannot be dismissed" \
   test "$(jq -r '.[0].dismissible' <<<"${banner_json}" 2>/dev/null)" = "false"
-# ...and the installer must actually pass it, or all of the above is a string
-# nothing ever reads.
-installer_passes_the_banner() {
-  local body; body="$(sed 's/#.*//' "${REPO}/scripts/install_webui.sh")"
-  grep -q 'WEBUI_BANNERS' <<<"${body}" || {
-    echo 'install_webui.sh never passes WEBUI_BANNERS, so no banner is baked in' >&2
-    return 1; }
-  grep -q 'banners_env\[@\]' <<<"${body}" || {
-    echo 'the banner env array is built but never reaches docker run' >&2
-    return 1; }
-}
-check "install_webui.sh bakes the banner into the container" \
-  installer_passes_the_banner
 # Open WebUI never updates a setting in place, so an install predating the
 # banner keeps a container without one. Drift detection is what tells them.
 #
@@ -8441,41 +8556,6 @@ check "no doc copies every backup when it means the newest" \
   docs_copy_one_backup_not_all
 
 echo "# the one mechanism that delivers a new prompt to an existing install"
-# Everything about improving the assistant is worthless if an improvement
-# cannot reach a droplet that is already running. Exactly one thing carries it:
-# install_webui.sh REMOVES the existing container and rebuilds it, so a repo
-# update followed by 'lca update' (setup.sh -> install_webui.sh) re-bakes the
-# current prompt in. 'lca apply' does the same on demand.
-#
-# An "optimisation" that skipped the rebuild when the container already exists
-# would look entirely reasonable, pass every other test, and silently stop
-# every future prompt and setting change from reaching anyone who had already
-# installed. That is this repo's signature failure, on its most important path.
-installer_recreates_rather_than_skipping() {
-  local blk
-  # Anchored to the RECREATE branch specifically. 'if as_root docker container
-  # inspect' alone also matches the ownership probe added above it (which asks
-  # -f '{{.State.Running}}' before deciding whether the port is ours), and the
-  # block then ended before it ever reached the 'docker rm -f' this checks for.
-  blk="$(awk '/if as_root docker container inspect "\$\{WEBUI_CONTAINER\}" >\/dev\/null/ { inb = 1 }
-              inb { print }
-              inb && /^  fi$/ { exit }' "${REPO}/scripts/install_webui.sh")"
-  [[ -n "${blk}" ]] || {
-    echo "install_webui.sh no longer has an existing-container branch" >&2
-    return 1
-  }
-  grep -q 'docker rm -f' <<<"${blk}" || {
-    echo "install_webui.sh does not remove the existing container — a new prompt would never reach an existing install" >&2
-    return 1
-  }
-  # ...and it must not bail out early instead of rebuilding.
-  if grep -qE '(return|exit) 0' <<<"${blk}"; then
-    echo "install_webui.sh returns early when the container exists — updates would not be delivered" >&2
-    return 1
-  fi
-}
-check "install_webui.sh rebuilds an existing container instead of skipping it" \
-  installer_recreates_rather_than_skipping
 # ...and setup.sh must actually call it, since 'lca update' delivers changes
 # only by way of setup.sh.
 setup_calls_the_webui_installer() {
@@ -14792,19 +14872,6 @@ lca_link_is_reported() { grep -q 'lca_link_state' "${REPO}/check-system.sh"; }
 check "check-system.sh reports on the lca command" lca_link_is_reported
 
 echo "# two installers that destroyed something they could not put back"
-port_is_checked_before_the_container_is_destroyed() {
-  # The old order removed our container first so its own listener could not
-  # trip the port check — at the cost that a port held by anyone ELSE meant a
-  # working chat app was deleted and then not replaced, by the one command
-  # whose job is to replace it.
-  awk '/^[[:space:]]*#/ { next }
-       /ss -ltn/            { if (!removed) checked = NR }
-       /docker rm -f "\$\{WEBUI_CONTAINER\}"/ { removed = NR }
-       END { exit !(checked && removed && checked < removed) }' \
-    "${REPO}/scripts/install_webui.sh" || {
-    echo 'install_webui.sh destroys the container before it checks the port is free' >&2
-    return 1; }
-}
 venv_without_pip_is_rebuilt() {
   # bin/python existing is not a usable venv: an interrupted 'python -m venv'
   # leaves it with no pip, which passed as "already exists" and then failed on
@@ -14826,8 +14893,6 @@ venv_can_lack_pip() {
   printf '#!/bin/sh\nexit 1\n' > "${interp}"; chmod +x "${interp}"
   [[ -x "${interp}" ]] && ! "${interp}" -m pip --version >/dev/null 2>&1
 }
-check "the chat app port is checked before the container is removed" \
-  port_is_checked_before_the_container_is_destroyed
 check "a venv with no working pip is rebuilt, not reused"  venv_without_pip_is_rebuilt
 # ...and a venv that cannot be created must name the cause it actually found.
 # One message covered both failures: "Could not create a virtualenv. On
@@ -19483,7 +19548,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 129 )) || {
+  (( n <= 126 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
