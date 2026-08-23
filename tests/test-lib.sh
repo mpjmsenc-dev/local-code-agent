@@ -1149,6 +1149,162 @@ hostile_restore_continued() {
 }
 check "the rest of the restore still ran" hostile_restore_continued
 
+# --- the restore path, driven over real archives ----------------------------
+# A restore is the one command whose failure is discovered at the worst
+# possible moment, so these build an archive, run the real restore.sh over it
+# in a sandbox, and look at what came out. The stubs for apply.sh and
+# install_webui.sh PRINT what they were asked to do rather than exiting 0, so
+# "the restore reconciled the system" is something to look at.
+#
+# apply.sh is stubbed because the real one reaches 'netmode.sh harden' and
+# would load a firewall on the machine running the tests.
+RESTORE_SB=""
+RESTORE_STAGE=""
+restore_sandbox() {   # NAME [SHIM]
+  RESTORE_SB="${SANDBOX}/restore-$1"
+  RESTORE_STAGE="${RESTORE_SB}/stage"
+  rm -rf "${RESTORE_SB}"
+  mkdir -p "${RESTORE_SB}/scripts" "${RESTORE_SB}/backups" "${RESTORE_STAGE}"
+  cp "${REPO}/restore.sh"      "${RESTORE_SB}/restore.sh"
+  cp "${REPO}/.env.example"    "${RESTORE_SB}/.env.example"
+  cp "${REPO}/.env.example"    "${RESTORE_SB}/.env"
+  cp "${REPO}/scripts/lib.sh"  "${RESTORE_SB}/scripts/lib.sh"
+  printf '#!/usr/bin/env bash\nprintf "RAN apply.sh %%s\\n" "$*"\nexit 0\n' \
+    > "${RESTORE_SB}/scripts/apply.sh"
+  printf '#!/usr/bin/env bash\nprintf "RAN install_webui.sh %%s\\n" "$*"\nexit 0\n' \
+    > "${RESTORE_SB}/scripts/install_webui.sh"
+  chmod +x "${RESTORE_SB}/restore.sh" "${RESTORE_SB}"/scripts/*.sh
+  printf '%s\n' "${2:-}" >> "${RESTORE_SB}/scripts/lib.sh"
+}
+restore_run() {
+  tar czf "${RESTORE_SB}/backups/local-code-agent-backup-20260101-000000.tar.gz" \
+    -C "${RESTORE_STAGE}" . 2>/dev/null
+  (cd "${RESTORE_SB}" && ./restore.sh </dev/null 2>&1) || true
+}
+# Non-vacuity for the three gates below: the harness has to produce a restore
+# that runs at all.
+restore_harness_works() {
+  restore_sandbox smoke 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  printf 'MODEL_NAME=qwen2.5-coder:7b\n' > "${RESTORE_STAGE}/env"
+  grep -q 'Restore complete' <<<"$(restore_run)"
+}
+check "the restore harness restores a minimal backup" restore_harness_works
+
+# Driven. The awk version looked for 'scripts/apply.sh' appearing somewhere
+# after a comment marker in restore.sh. What is at stake is that a restored
+# .env is only settings on disk until something applies it: without this the
+# machine keeps running on the old model, the old port and the old prompt while
+# the file says otherwise, and 'lca check' reports drift the user did not cause.
+restore_reconciles_with_apply() {
+  restore_sandbox reconcile 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  printf 'MODEL_NAME=restored:7b\nWEBUI_PORT=3111\n' > "${RESTORE_STAGE}/env"
+  local out; out="$(restore_run)"
+  grep -q '^RAN apply.sh' <<<"${out}" || {
+    printf 'a restored .env was never applied, so the machine still runs the old settings:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # ...and after the .env is in place, not before it.
+  local env_at apply_at
+  env_at="$(grep -n '\.env restored' <<<"${out}" | head -1 | cut -d: -f1)"
+  apply_at="$(grep -n '^RAN apply.sh' <<<"${out}" | head -1 | cut -d: -f1)"
+  [[ -n "${env_at}" && -n "${apply_at}" ]] || {
+    printf 'could not see both the .env restore and the apply in the output:\n%s\n' "${out}" >&2
+    return 1; }
+  (( env_at < apply_at )) || {
+    printf 'the system was reconciled before the .env it was meant to be reconciled with:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # The restored file really is the backup's.
+  grep -q '^MODEL_NAME=restored:7b$' "${RESTORE_SB}/.env" || {
+    printf 'the .env on disk is not the one from the backup:\n%s\n' \
+      "$(head -3 "${RESTORE_SB}/.env")" >&2
+    return 1; }
+}
+check "a restored .env is applied to the running system, after it lands" \
+  restore_reconciles_with_apply
+
+# Driven. The awk version asked that 'restore_webui_volume' appear inside
+# main(). What is at stake is every account and every conversation in the chat
+# app: a restore that quietly skips the volume returns a machine that looks
+# restored and has none of the history.
+restore_main_calls_the_volume_restore() {
+  # shellcheck disable=SC2016  # the shim is code appended to the sandbox's lib.sh, not a string to expand here
+  restore_sandbox volume 'have() { [[ "$1" == docker ]]; }
+ensure_ollama_up_announced() { return 1; }
+docker_daemon_reachable() { return 0; }
+webui_volume_has_data() { return 1; }
+as_root() { printf "RAN docker %s\n" "$*"; }'
+  printf 'MODEL_NAME=x:7b\n' > "${RESTORE_STAGE}/env"
+  : > "${RESTORE_STAGE}/placeholder"
+  tar czf "${RESTORE_STAGE}/open-webui-volume.tar.gz" \
+    -C "${RESTORE_STAGE}" placeholder 2>/dev/null
+  local out; out="$(restore_run)"
+  grep -qi "Restoring the 'open-webui' docker volume" <<<"${out}" || {
+    printf 'an archive carrying the chat app volume was restored without it:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q '^RAN docker' <<<"${out}" || {
+    printf 'the volume restore was announced and docker was never asked to do it:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # ...and an archive without one says so rather than saying nothing.
+  # shellcheck disable=SC2016  # the shim is code appended to the sandbox's lib.sh, not a string to expand here
+  restore_sandbox novolume 'have() { [[ "$1" == docker ]]; }
+ensure_ollama_up_announced() { return 1; }
+docker_daemon_reachable() { return 0; }
+as_root() { printf "RAN docker %s\n" "$*"; }'
+  printf 'MODEL_NAME=x:7b\n' > "${RESTORE_STAGE}/env"
+  out="$(restore_run)"
+  grep -qi 'no WebUI volume archive' <<<"${out}" || {
+    printf 'a backup with no chat data was restored in silence about it:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q '^RAN docker' <<<"${out}" && {
+    printf 'docker was asked to restore a volume the archive does not contain:\n%s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "a backup's chat data is restored, and its absence is said out loud" \
+  restore_main_calls_the_volume_restore
+
+# Driven. The grep version asked that both backup.sh and restore.sh contain the
+# string 'agent-workspace.tar.gz' and that restore.sh contain 'pre-restore'.
+# Both survive the component never being unpacked. What is at stake is work in
+# progress: the agent's workspace is where an unfinished task lives, and
+# replacing it silently is the loss this component exists to prevent.
+backup_and_restore_agree_on_the_component() {
+  local ws
+  restore_sandbox workspace 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  ws="${RESTORE_SB}/agent-ws"
+  printf 'agent_workspace_dir() { printf "%%s" "%s"; }\n' "${ws}" \
+    >> "${RESTORE_SB}/scripts/lib.sh"
+  printf 'MODEL_NAME=x:7b\n' > "${RESTORE_STAGE}/env"
+  mkdir -p "${RESTORE_SB}/wsbuild/agent-ws"
+  printf 'unfinished work\n' > "${RESTORE_SB}/wsbuild/agent-ws/TASK"
+  tar czf "${RESTORE_STAGE}/agent-workspace.tar.gz" \
+    -C "${RESTORE_SB}/wsbuild" agent-ws 2>/dev/null
+  local out; out="$(restore_run)"
+  [[ -f "${ws}/TASK" ]] || {
+    printf 'the agent workspace in the backup was never unpacked:\n%s\n' "${out}" >&2
+    return 1; }
+  # ...and a workspace already there is moved aside, never overwritten.
+  printf 'work in progress right now\n' > "${ws}/TASK"
+  out="$(restore_run)"
+  [[ -f "${ws}.pre-restore/TASK" ]] || {
+    printf 'an existing agent workspace was not moved aside:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'work in progress right now' "${ws}.pre-restore/TASK" || {
+    printf 'the workspace moved aside is not the one that was there:\n%s\n' \
+      "$(cat "${ws}.pre-restore/TASK")" >&2
+    return 1; }
+  grep -qi 'moved to' <<<"${out}" || {
+    printf 'a workspace was moved aside without telling anyone:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "the agent workspace is restored, and an existing one is moved aside" \
+  backup_and_restore_agree_on_the_component
+
 echo "# ...and a tarball with none of our parts is not a backup at all"
 # Every component of a backup is optional on purpose, so an older or partial
 # one restores what it has and skips the rest. With NONE of them present the
@@ -3073,7 +3229,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 132 )) || {
+  (( n <= 129 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -4884,25 +5040,6 @@ check "a size that could not be read is skipped, not treated as empty" \
   test "$(wsd true '' 2048)" = too-big
 check "...and neither is a non-numeric one" \
   test "$(wsd true abc 2048)" = too-big
-# Both halves have to exist, or the component is written and never read back.
-backup_and_restore_agree_on_the_component() {
-  local b r
-  b="$(sed 's/#.*//' "${REPO}/backup.sh")"
-  r="$(sed 's/#.*//' "${REPO}/restore.sh")"
-  grep -q 'agent-workspace.tar.gz' <<<"${b}" || {
-    echo 'backup.sh never stages the agent workspace' >&2; return 1; }
-  grep -q 'agent-workspace.tar.gz' <<<"${r}" || {
-    echo 'restore.sh does not know the component backup.sh writes, so it is dead weight in every archive' >&2
-    return 1; }
-  # ...and restore must not clobber a live workspace with an older one: that is
-  # where work in progress lives, and replacing it is the loss this feature
-  # exists to prevent.
-  grep -q 'pre-restore' <<<"${r}" || {
-    echo 'restore.sh overwrites an existing agent workspace instead of moving it aside' >&2
-    return 1; }
-}
-check "backup writes the workspace and restore reads it back" \
-  backup_and_restore_agree_on_the_component
 
 echo "# one instructions file, respected on every surface"
 # config/CONVENTIONS.md reached aider alone, through '--read'. Somebody editing
@@ -7927,23 +8064,6 @@ check "the self-test's 'too small to write files' floor is the smallest rung" \
   selftest_floor_matches_the_rung_table
 
 echo "# a restore replaces .env wholesale — the system must be reconciled with it"
-# Every other member of the applied-settings class was found by someone editing
-# one key. Restore changes ALL of them at once, and nothing in it re-rendered
-# the Ollama drop-in; the chat app container was rebuilt only when the backup
-# happened to contain its volume. So a recovery could complete, report success,
-# and leave the box running settings the user had just replaced — during the
-# one operation whose entire purpose is "put it back how it was".
-restore_reconciles_with_apply() {
-  # Scoped to after the .env restore, so this cannot be satisfied by an
-  # unrelated mention of apply somewhere earlier in the file.
-  awk '/^  # 1\. \.env/ { seen = 1 }
-       seen && /scripts\/apply\.sh/ { found = 1 }
-       END { exit !found }' "${REPO}/restore.sh" || {
-    echo "restore.sh never reconciles the running system with the .env it restored" >&2
-    return 1
-  }
-}
-check "restore.sh applies the .env it just restored" restore_reconciles_with_apply
 # ...and says the restored model came from the BACKUP's machine. The commonest
 # reason to restore is moving to different hardware — docs/MIGRATE.md is about
 # exactly that — so the restored MODEL_NAME and context are the old VM's, and
@@ -8258,19 +8378,6 @@ net_guard_still_dies() {
   }
 }
 check "net_guard still dies, which is what the installers need" net_guard_still_dies
-# ...and main() must still call it, or every test here is about dead code.
-restore_main_calls_the_volume_restore() {
-  awk '/^main\(\) \{/       { inmain = 1; next }
-       inmain && /^\}/      { inmain = 0 }
-       inmain && /^[[:space:]]*#/ { next }
-       inmain && /restore_webui_volume/ { found = 1 }
-       END { exit !found }' "${REPO}/restore.sh" || {
-    echo "restore.sh no longer restores the WebUI volume at all" >&2
-    return 1
-  }
-}
-check "restore.sh still restores the WebUI volume" \
-  restore_main_calls_the_volume_restore
 # backup.sh must actually record what restore.sh reads, or the restore has
 # nothing to advise from. Driven: the record is read out of the archive rather
 # than looked for in the source, because a printf that never runs leaves the
@@ -19376,7 +19483,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 132 )) || {
+  (( n <= 129 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

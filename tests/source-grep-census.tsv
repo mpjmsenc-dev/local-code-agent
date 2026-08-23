@@ -41,7 +41,7 @@ A	ask_keeps_its_answer_stream_clean	source lint for stream routing
 A	ask_reports_a_cut_short_answer	greps ask.sh for status capture
 A	ask_slices_without_a_pipe	greps for one literal string
 A	autotune_false_still_converges	awk over tune.sh for a branch shape
-A	backup_and_restore_agree_on_the_component	one side is behaviour: restore could name the file in a dead branch
+FP	backup_and_restore_agree_on_the_component	runs the real restore over a workspace archive, twice, and looks at the disk
 A	backup_asks_the_state_helper	awk over do_backup for a call and a branch
 A	backup_checks_paused_before_running	awk for the order two probes appear in
 FP	backup_cleans_up_a_partial_archive	drives do_backup with a failing tar and looks at what is left
@@ -113,9 +113,9 @@ A	recovery_scripts_survive_offline	absence of net_guard plus a presence-grep for
 A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
 A	restore_asks_for_the_advice	awk inside main() for one call
 A	restore_distinguishes_the_stages	greps restore.sh for message placement
-A	restore_main_calls_the_volume_restore	awk inside main() for one call
+FP	restore_main_calls_the_volume_restore	runs the real restore over an archive with and without the volume
 A	restore_rebuilds_derived	two presence-greps
-A	restore_reconciles_with_apply	awk for a call after a marker
+FP	restore_reconciles_with_apply	runs the real restore over an archive and watches apply.sh being called
 A	restore_tells_unreadable_from_corrupt	line-number ordering plus message content
 A	restore_validates_env_first	awk ordering in restore.sh
 A	retention_ignores_enable_webui	absence inside one function; a helper could reintroduce it
