@@ -6569,6 +6569,7 @@ printf "STILL-RUNNING\n"'
 check "load_env warns and keeps going when it cannot write .env, asked as somebody who cannot" \
   load_env_survives_an_uncreatable_env
 
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has
@@ -19330,6 +19331,155 @@ else
   check "an account sudo lets through without asking can become root now" \
     test "$(priv_rc 'can_root_now')" = 0
 fi
+
+# Two places decide every default: .env.example ships one, and lib.sh resolves
+# one with ':-' for the machine that has no .env yet. Nothing made them agree.
+# A setting decided in two places that disagree is worse than one left as a
+# warning — the reader edits the file, the code uses the other value, and both
+# halves look right on their own.
+#
+# Driven, exhaustively, from .env.example's own keys: load lib.sh with NO .env
+# at all and compare what it resolves against what ships.
+shipped_defaults_disagreeing() {   # -> KEY ships=X resolves=Y, for each that differs
+  local sb="${SANDBOX}/defaults" k v got
+  rm -rf "${sb}"; mkdir -p "${sb}/scripts" "${sb}/config"
+  cp "${REPO}/scripts/lib.sh"        "${sb}/scripts/lib.sh"
+  cp "${REPO}/.env.example"          "${sb}/.env.example"
+  cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/CONVENTIONS.md"
+  while IFS='=' read -r k v; do
+    [[ -n "${k}" ]] || continue
+    # LCA_ENV_READONLY, so load_env creates nothing: the question is what this
+    # resolves to on a machine that has not been set up yet.
+    # shellcheck disable=SC2016  # code for the probe's shell
+    got="$(cd "${sb}" && LCA_ENV_READONLY=true bash -c '
+        source "$1/scripts/lib.sh" >/dev/null 2>&1
+        load_env >/dev/null 2>&1
+        printf "%s" "${!2-<unset>}"' _ "${sb}" "${k}" 2>/dev/null)"
+    v="${v%\"}"; v="${v#\"}"
+    [[ "${got}" == "${v}" ]] || printf '%s ships=%s resolves=%s\n' "${k}" "${v:-<empty>}" "${got:-<empty>}"
+  done < <(grep -E '^[A-Z_]+=' "${REPO}/.env.example")
+}
+shipped_defaults_are_what_lib_resolves() {
+  local out n
+  out="$(shipped_defaults_disagreeing)"
+  [[ -z "${out}" ]] || {
+    printf 'these settings are decided in two places and the two disagree — the reader edits .env.example and the code uses something else:\n%s\n' \
+      "${out}" >&2
+    return 1
+  }
+  # Non-vacuity: a key list that had gone empty would agree about nothing.
+  n="$(grep -cE '^[A-Z_]+=' "${REPO}/.env.example")"
+  (( n >= 20 )) || {
+    printf 'only %s settings read out of .env.example — this comparison has stopped watching\n' "${n}" >&2
+    return 1
+  }
+}
+check "every default is the same in both places that decide it" \
+  shipped_defaults_are_what_lib_resolves
+
+# ...and keep-alive is decided in a THIRD place, which is the one that writes.
+# keepalive_plan chooses it from this box's RAM and whether the agent tier is
+# on; 'lca tune' persists that answer to .env. So the value .env.example ships
+# has to be the one keepalive_plan would choose for the configuration
+# .env.example ships — otherwise the stock default is a value the first boot
+# silently rewrites, and the file the reader was told to edit disagrees with
+# the machine within a minute of the install finishing.
+shipped_keep_alive_is_the_one_tune_would_choose() {
+  local agent want ships
+  agent="$(example_value ENABLE_AGENT)"
+  ships="$(example_value OLLAMA_KEEP_ALIVE)"
+  [[ -n "${ships}" ]] || { echo '.env.example ships no OLLAMA_KEEP_ALIVE' >&2; return 1; }
+  # RAM is not the deciding factor with the agent off, and with it on the
+  # answer only changes below the headroom floor — so any ordinary size settles
+  # it, and 8 GiB is the droplet this project is written for.
+  want="$(keepalive_plan 8 "${agent}" "$(example_value MODEL_NAME)")"
+  want="${want%%|*}"
+  [[ "${ships}" == "${want}" ]] || {
+    printf '.env.example ships OLLAMA_KEEP_ALIVE=%s, and keepalive_plan chooses %s for the configuration it ships (ENABLE_AGENT=%s) — the first tune would overwrite the shipped default\n' \
+      "${ships}" "${want}" "${agent}" >&2
+    return 1
+  }
+}
+check "...and the shipped keep-alive is the one 'lca tune' would choose" \
+  shipped_keep_alive_is_the_one_tune_would_choose
+
+# ...and the other direction, which nothing asked at all: a setting lib.sh
+# HONOURS that .env.example never mentions. The code reads it, the file the
+# reader is told to edit does not have it, and nothing watches it — so setting
+# it is a decision made in one place and recorded in none.
+#
+# WEBUI_IMAGE is the one that made this worth a rule. lib.sh resolves it, four
+# scripts use it, its own comment anticipates somebody pinning the tag — and
+# webui_drift has no key for it. Measured, with a container running v0.3.0 and
+# .env asking for v9.9.9: drift reported []. 'lca apply' answers "already
+# matches .env" and the chat app runs the old image for ever. That is the
+# fourth-setting-of-that-kind shape aider_pin_is_watched already records, one
+# setting further on.
+#
+# Not fixed here, deliberately: adding the image to webui_drift makes 'lca
+# apply' RE-CREATE the chat container, and whether .Config.Image reads back as
+# the tag that was passed or as a digest decides whether that happens once or
+# on every run. Only a real docker settles it, and the one in CI is where that
+# belongs. What this gate does is stop the gap being an accident: every
+# honoured setting is either shipped, or listed here as internal with its
+# reason.
+# SOURCE-GREP: which names lib.sh resolves a default for is a property of
+# lib.sh's text, and which names .env.example ships is a property of that
+# file's. There is no behaviour between them to drive — the point is that the
+# two lists agree about what the reader can set.
+INTERNAL_SETTINGS=(
+  LCA_LIB_LOADED            # a source guard, not a setting
+  LCA_MAY_PROMPT            # the caller's declaration, set in code
+  LCA_ENV_READONLY          # set by load_env_readonly for one call
+  LCA_LOG                   # deploy/do-user-data.sh names its own log
+  LCA_INSPECT_TIMEOUT       # the login banner's short leash on one probe
+  MODEL_PROBE_TIMEOUT       # how long a probe waits, not what it probes
+  WEBUI_START_TIMEOUT       # likewise
+  OLLAMA_DROPIN             # a path this project owns
+  OLLAMA_DROPIN_DIR         # likewise
+  OLLAMA_SYSTEM_MODELS_DIR  # likewise
+  OLLAMA_MODELS             # Ollama's own variable, honoured where it is set
+  AGENT_CONVERSATION_FILE   # a path under the agent workspace
+  CONVENTIONS_AIDER         # shipped as a commented example, with its sibling
+  CONVENTIONS_AGENT         # likewise
+  WEBUI_IMAGE               # honoured, undocumented and UNWATCHED — see above
+)
+honoured_settings() {   # -> every user-shaped name lib.sh resolves a default for
+  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
+    | grep -oE '\$\{(LCA|OLLAMA|WEBUI|AGENT|AIDER|MODEL|ENABLE|SKIP|BACKUP|AUTO|CONVENTIONS|TUNE|VENV)_[A-Z_]+:[-=]' \
+    | sed 's/^\${//; s/:[-=]$//' | sort -u
+}
+every_honoured_setting_is_accounted_for() {
+  local k e skip bad=0 seen=0
+  while read -r k; do
+    [[ -n "${k}" ]] || continue
+    seen=$(( seen + 1 ))
+    grep -qE "^${k}=" "${REPO}/.env.example" && continue
+    skip=false
+    for e in "${INTERNAL_SETTINGS[@]}"; do
+      [[ "${k}" == "${e}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    printf '%s is honoured by lib.sh, is not in .env.example, and is not listed as internal — setting it is a decision recorded nowhere\n' \
+      "${k}" >&2
+    bad=1
+  done < <(honoured_settings)
+  (( seen >= 20 )) || {
+    printf 'only %s honoured settings found in lib.sh — this has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  # ...and the exemption list may not name something that IS shipped: a stale
+  # entry there is how a real setting stops being checked.
+  for e in "${INTERNAL_SETTINGS[@]}"; do
+    grep -qE "^${e}=" "${REPO}/.env.example" && {
+      printf '%s is listed as internal but .env.example ships it\n' "${e}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every setting the code honours is either shipped or declared internal" \
+  every_honoured_setting_is_accounted_for
 
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
 # Every function below survived being stubbed to 'return 0': the whole suite

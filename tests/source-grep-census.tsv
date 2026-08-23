@@ -20,6 +20,45 @@
 # Format: LABEL <TAB> function <TAB> what it actually does.
 # The A rows are the debt and may only go down. Converting one means moving its
 # row to FP, not deleting it.
+#
+# ---------------------------------------------------------------------------
+# WHERE THIS ENDS, read the same way the census was made: all 115 remaining A
+# rows, one at a time, not sampled.
+#
+#   82  are worth driving. The claim is a runtime behaviour, driving it is
+#       feasible with the harnesses that now exist, and a grep of the source
+#       cannot tell "the code does this" from "the code says this".
+#   33  are correctly narrow and should end as B, not FP. Two kinds:
+#       14  the behaviour is ALREADY driven somewhere else — by a converted
+#           sibling in this file, by tests/test-netmode.sh, or by CI — and what
+#           the A row adds is a cheap structural belt. Its row moves to B with
+#           a pointer to what drives it, not to FP.
+#       19  the subject genuinely is text: an exhaustive absence rule, a
+#           uniqueness rule, agreement between two written artefacts, or the
+#           wording of a message.
+#
+# So the end state is A=0, FP≈146, B≈144 — about half of every source-reading
+# gate driving its subject and grepping only the result, and about half with
+# text as its honest subject. Not 100%, and 100% would be the wrong target:
+# a gate that reads a document to check what the document says is doing its
+# job. What ends at zero is the only class that was ever debt — a gate whose
+# claim is a runtime behaviour and whose evidence is that the source still
+# says so.
+#
+# Three of the 115 carry a written argument for why they cannot be driven, and
+# on re-reading all three are beatable with harnesses built since they were
+# written: service_store_is_checked_first (make both candidate directories
+# exist), tune_checks_the_model_is_downloaded (stub model_present), and
+# warm_is_detached (a curl that accepts and never answers is a stub that
+# sleeps). uninstall_answers_help_first says running uninstall.sh "would delete
+# the tester's own stack" — it is already run, safely, in a copy of the tree
+# with recorders, by installers_answer_help_before_acting. An excuse written
+# once is worth re-reading against the tools that exist now.
+#
+# Work order is by cost, not by count: roughly 24 of the 82 would, if they
+# silently stopped holding, cost data, the ability to recover, an exposed port,
+# or a false all-clear about the one thing that is broken. Those first.
+# ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
 FP	agent_can_resolve_the_host	extract-to-drive: reads --add-host and LLM_BASE_URL off the real docker argv
 FP	agent_publishes_on_loopback	extract-to-drive: reads the publications off the real docker argv
@@ -156,6 +195,7 @@ A	tune_consults_the_disk_before_pulling	awk ordering across three regions of tun
 A	tune_reconciles_after_a_model_change	awk over tune.sh for a call inside a branch
 A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch condition and messages
 A	uninstall_answers_help_first	awk ordering inside main()
+FP	shipped_defaults_are_what_lib_resolves	loads lib.sh with no .env at all and compares what it resolves against what ships
 FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over a sandbox of fake homes
 A	uninstall_feeds_every_step_to_the_verdict	greps for a call-plus-status form
 A	uninstall_removals_can_reach_root	exhaustive absence of bare rm plus a counted floor
@@ -176,6 +216,7 @@ B	advice_paths_are_absolute	the subject is the text of message/usage strings
 B	aider_privacy_settings_reach_aider	extract-to-drive: reads the config file aider is actually pointed at
 B	banner_states_are_documented	derived banner states must each be explained in the docs
 B	census_names_real_gates	the subject is a checked-in table and the suite's own definitions
+B	every_honoured_setting_is_accounted_for	the subject is which names lib.sh resolves against which .env.example ships
 B	group_a_debt_has_not_grown	the subject is a recorded-debt table
 B	chmod_lists_agree	seven text artefacts must name the same paths
 B	ci_runs_the_acceptance_test_on_a_shipped_model	derives two lists (CI model, tune rungs) and compares
@@ -310,6 +351,7 @@ H	entry_points	lists the repo's entry points
 H	env_root_for_nobody	builds a checkout at a chosen mode for the dropped-privilege probes
 H	example_keys	extracts the keys .env.example ships
 H	example_value	extracts one value from .env.example
+H	honoured_settings	lists the user-shaped settings lib.sh resolves a default for
 H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
 H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
 H	installed_units	lists the boot units this repo installs
@@ -330,6 +372,7 @@ H	rendered_tune_unit	renders the tune boot unit
 H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
 H	seeded_settings_payload	renders agent.sh's real settings payload
 H	setup_installers	lists the installers setup.sh actually runs
+H	shipped_defaults_disagreeing	lists the settings .env.example and lib.sh disagree about
 H	sourced_scripts	lists the product scripts another product script sources
 H	step_source_check_says	drives agent-watch.sh's step-source check
 H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
