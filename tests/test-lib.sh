@@ -4306,6 +4306,49 @@ check_refuses_a_window_too_small_for_the_prompt() {
     echo 'the prompt floor is no longer near the measured 13,783-token first prompt' >&2
     return 1; }
 }
+# Every limit off at once. Each 0 is legitimate and documented, and each
+# setting's own warning names the OTHERS as the backstop — so the combination is
+# the one state no single validator can see. DRIVEN: the verdict function is
+# called with all three off, which is the actual behaviour, not a description
+# of it.
+every_limit_off_leaves_nothing_to_stop_a_run() {
+  [[ "$(agent_run_verdict 500 0 36000 0 99 0 ok)" == "ok" ]] || {
+    echo 'the premise changed: some limit now fires with all three set to 0, so the warning below may be stale' >&2
+    return 1; }
+  # ...and the one verdict that is NOT configurable still fires, which is what
+  # makes the warning a warning rather than a refusal.
+  [[ "$(agent_run_verdict 500 0 36000 0 99 0 truncated)" == "truncated" ]] || {
+    echo 'with every limit off, even a truncated run would not be stopped' >&2
+    return 1; }
+  # SOURCE-GREP: and that 'lca check' says so. The check runs top to bottom
+  # against the live machine, so driving this branch means setting three
+  # settings on the real box — done by hand, warning fires, and is silent again
+  # when restored. What this cannot check is the wording.
+  local body; body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -q 'every limit on an unattended agent run is off at once' <<<"${body}" || {
+    echo 'nothing warns when every unattended-run limit is off together' >&2
+    return 1; }
+}
+check "with every run limit off, only the verdict nobody can configure still fires" \
+  every_limit_off_leaves_nothing_to_stop_a_run
+
+# SOURCE-GREP: the submission path refuses a stack whose tool-call channel has
+# drifted. Driving it needs a live app to POST a drifted setting into — done by
+# hand: native_tool_calling=true, submit refused with exit 1, restored. What
+# this cannot check is that the refusal still names a remedy.
+submit_refuses_a_drifted_tool_call_channel() {
+  local body; body="$(sed 's/#.*//' "${REPO}/scripts/agent-task.sh")"
+  grep -q 'agent_stored_native_tool_calling' <<<"${body}" || {
+    echo 'the submission path no longer checks native_tool_calling, so a task can be accepted into a stack that will end instantly with an empty workspace' >&2
+    return 1; }
+  # It must DIE, not warn: the whole point is not spending twenty minutes.
+  grep -qE 'die "The agent holds native_tool_calling' <<<"${body}" || {
+    echo 'a drifted tool-call channel no longer refuses the submission' >&2
+    return 1; }
+}
+check "...and refuses a stack whose tool-call channel has drifted" \
+  submit_refuses_a_drifted_tool_call_channel
+
 check "'lca check' fails a window too small to hold the agent's own prompt" \
   check_refuses_a_window_too_small_for_the_prompt
 

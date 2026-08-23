@@ -89,6 +89,24 @@ GOT_MODEL="$(curl -fsS --max-time 10 "${BASE}/api/v1/settings" 2>/dev/null \
 [[ "${GOT_MODEL}" == "${WANT_MODEL}" ]] \
   || die "The agent holds model '${GOT_MODEL:-none}', not '${WANT_MODEL}', so this task would run against the wrong model or none at all. Fix it: lca agent restart"
 
+# ...and the setting this project calls more decisive than the model.
+#
+# The selftest has checked this for months and this path never did, which is the
+# wrong way round: the selftest costs a quarter of an hour and you run it on
+# purpose, while THIS is where a real twenty-minute task goes in. With
+# native_tool_calling stored as true, qwen2.5-coder writes its tool call into
+# the message body, ollama reports zero tool calls, and OpenHands reads that as
+# "the assistant has finished" — the run ends at once with an empty workspace
+# and no error anywhere. Measured at 3b and 7b, so a bigger model is not the fix.
+#
+# Same shape as everything else fixed this week: a precondition list that
+# checked the cheap half. Refusing to submit costs a second; not refusing costs
+# the task and tells you nothing about why.
+GOT_NATIVE="$(agent_stored_native_tool_calling \
+              "$(curl -fsS --max-time 10 "${BASE}/api/v1/settings" 2>/dev/null || true)")"
+[[ "${GOT_NATIVE}" == "${AGENT_NATIVE_TOOL_CALLING}" ]] \
+  || die "The agent holds native_tool_calling='${GOT_NATIVE:-unset}', not '${AGENT_NATIVE_TOOL_CALLING}'. With qwen2.5-coder that is the difference between a run that works and one that ends instantly with an empty workspace and no error at all — this task would be accepted and produce nothing. Fix it: ${REPO_ROOT}/bin/lca agent restart"
+
 # --- the prompt --------------------------------------------------------------
 # One channel, not two, and this is it. The directory goes in the PROMPT TEXT
 # because that is the part the model demonstrably reads — the selftest's task

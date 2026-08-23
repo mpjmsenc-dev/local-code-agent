@@ -266,6 +266,30 @@ if [[ -f "${ENV_FILE}" && -f "${SCRIPT_DIR}/.env.example" ]]; then
   fi
 fi
 
+# Every limit off at once, which no single setting can tell you about.
+#
+# AGENT_MAX_ITERATIONS, AGENT_TIMEOUT_MINUTES and AGENT_STUCK_STRIKES each treat
+# 0 as "no limit", deliberately and documented. The validators above accept 0
+# for exactly that reason, and each one's message reassures you by naming
+# another limit as the backstop -- "bounded only by the wall clock", "the one
+# limit that lets you walk away". Set all three to 0 and every one of those
+# sentences is false, and nothing anywhere says so.
+#
+# Verified rather than reasoned: agent_run_verdict with all three at 0 returns
+# 'ok' after ten simulated hours and 500 steps. So 'lca agent watch' would
+# supervise, for ever, a container that holds the Docker socket.
+#
+# A warning and not a failure: an unbounded run is a legitimate thing to ask
+# for, and this project's whole argument is that the cost should be stated
+# rather than quietly spent. The truncation verdict still fires -- it is the one
+# limit that is not configurable -- but it catches a ruined run, not a runaway.
+if [[ "${ENABLE_AGENT}" == "true" ]] \
+   && [[ "${AGENT_MAX_ITERATIONS}" == "0" ]] \
+   && [[ "${AGENT_TIMEOUT_MINUTES}" == "0" ]] \
+   && [[ "${AGENT_STUCK_STRIKES}" == "0" ]]; then
+  p_warn "every limit on an unattended agent run is off at once (AGENT_MAX_ITERATIONS, AGENT_TIMEOUT_MINUTES and AGENT_STUCK_STRIKES are all 0), so 'lca agent watch' has nothing left to stop a run with — it would supervise a container holding the Docker socket indefinitely. Each 0 is a legitimate choice on its own and each setting's own message points at the others as the backstop; with all three off, none of them is. Set at least one in ${ENV_FILE}."
+fi
+
 # Is the agent's window big enough to hold the agent's own prompt?
 #
 # Nothing asked until now. AGENT_MODEL_CONTEXT was validated as "a positive
