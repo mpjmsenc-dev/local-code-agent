@@ -2475,21 +2475,23 @@ run_reader() {
     "${real[@]}"
     return 0
   fi
-  # Passwordless first, interactive second, and the second says so — the same
-  # order as webui.sh's select_docker, for the same measured reason: 'lca logs'
-  # printed its ollama section and then sat on a bare "[sudo] password for ..."
-  # under the next header. A typed command may ask; it may not ask silently.
-  # elif, not a second if: exactly one escalation attempt, and the sentence
-  # about a password is printed only where a password can actually be asked
-  # for. Root reaching this point has simply failed the probe.
-  if can_root_now; then
-    if as_root "${probe[@]}" >/dev/null 2>&1; then
-      as_root "${real[@]}"
-      return 0
+  # root_for_probe, not a hand-rolled can_root_now / elif can_root pair. The
+  # pair decides INSIDE the function what the comment at the top of this file
+  # says is a property of the CALLER — and it decided "may prompt" for every
+  # caller. 'lca logs' is a reporter: on any account that is not a passwordless
+  # sudoer, the interactive arm ran, and an interactive sudo does not fail, it
+  # WAITS. The announcement below was added when that was first measured, which
+  # made the stall explicable without making it stop.
+  #
+  # The sentence about a password is printed only where a password can actually
+  # be asked for: the caller allows prompting, and sudo -n does not already
+  # work. Root, and a passwordless sudoer, are told nothing because nothing
+  # will be asked of them.
+  if root_for_probe; then
+    if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+      # stderr, so it cannot land inside a log stream someone is piping.
+      warn "Reading this needs root — sudo may ask for your password."
     fi
-  elif can_root; then
-    # stderr, so it cannot land inside a log stream someone is piping.
-    warn "Reading this needs root — sudo may ask for your password."
     if as_root "${probe[@]}" >/dev/null 2>&1; then
       as_root "${real[@]}"
       return 0

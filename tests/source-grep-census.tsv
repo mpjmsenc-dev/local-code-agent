@@ -101,7 +101,7 @@ A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five script
 A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
 A	pin_is_sized_before_the_pull	line-number ordering inside main()
 FP	port_is_checked_before_the_container_is_destroyed	runs the real installer against a stand-in docker and reads what it was asked to do
-A	probes_use_the_stricter_test	presence/absence inside extracted regions (via probe_region)
+FP	probes_use_the_stricter_test	runs each reporting command under a sudo that waits, and bounds it
 A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
 A	prompt_check_is_not_claimed_when_skipped	presence-grep for a guard call in each claimant
 FP	readability_still_wants_x_of_a_directory	calls readable_by_us as uid 65534 over four real directories and files

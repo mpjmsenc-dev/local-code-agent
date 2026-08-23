@@ -520,39 +520,97 @@ probe_region() {  # FILE START_PREFIX END_PREFIX
     inb  && substr($0, 1, length(e)) == e { exit }
     inb'
 }
+# Driven. The greps this replaces read five regions for a bare 'can_root'.
+# What is at stake is not a token: an interactive sudo does not FAIL, it WAITS,
+# so the failure mode is a command that never returns — and no `|| true`, no
+# `2>/dev/null` and no exit-status assertion will ever notice that. CONTRIBUTING
+# records five commands measured behaving exactly that way, and the fix that
+# followed was an announcement, which made the stall explicable without making
+# it stop.
+#
+# So the sudo here behaves like a real one for somebody who is not a
+# passwordless sudoer: 'sudo -n' fails at once, and anything else prints the
+# prompt and waits. Each reporting command is then run under it, bounded, as an
+# account that is not root.
+WAITS_SB="${SANDBOX}/sudowaits"
+# The five from CONTRIBUTING's table, in the vocabulary the reader types:
+# lca check, lca status, lca webui status, lca logs, and the login banner that
+# runs on every SSH login.
+REPORTING_COMMANDS=(
+  "check-system.sh"
+  "netmode.sh status"
+  "webui.sh status"
+  "scripts/logs.sh"
+  "scripts/motd.sh"
+)
+sudo_waits_sandbox() {
+  rm -rf "${WAITS_SB}"; mkdir -p "${WAITS_SB}" "${WAITS_SB}/bin" "${WAITS_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${WAITS_SB}" )
+  cp "${REPO}/.env.example" "${WAITS_SB}/.env"
+  # Sleeps rather than reading: a real sudo reads the password from the
+  # terminal, and with stdin at /dev/null a read returns EOF at once — which
+  # is the one thing that does NOT reproduce the stall. Twelve seconds, so an
+  # orphan left by a bounded run cannot outlive the suite.
+  cat > "${WAITS_SB}/bin/sudo" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  [ "$a" = "-n" ] && exit 1
+done
+printf '[sudo] password for %s: ' "$(id -un)" >&2
+sleep 12
+exit 1
+STUB
+  chmod -R a+rX "${WAITS_SB}"
+  chmod +x "${WAITS_SB}/bin/sudo"
+  chmod 711 "${SANDBOX}"
+}
+reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
+  local secs="$1"; shift
+  local out rc=0
+  local -a as_who=()
+  [[ "${EUID}" -eq 0 ]] && as_who=( setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups )
+  out="$( cd "${WAITS_SB}" && env -i \
+        "PATH=$(stub_path "${WAITS_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+        "HOME=${WAITS_SB}/home" TERM=dumb \
+        "${as_who[@]}" timeout "${secs}" bash "${WAITS_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
+  printf 'RC=%s\n%s\n' "${rc}" "${out}"
+}
 probes_use_the_stricter_test() {
-  local bad=0 spec file start end label body
-  # Single-caller probes, which therefore know their own answer.
-  local -a regions=(
-    "netmode.sh|inbound_loaded() {|}|netmode's inbound_loaded"
-    "netmode.sh|table_loaded() {|}|netmode's table_loaded"
-    "check-system.sh|step \"Docker\"|step \"|'lca check' Docker step"
-    "check-system.sh|step \"Open WebUI\"|step \"|'lca check' Open WebUI step"
-    "check-system.sh|step \"Inbound guard\"|step \"|'lca check' inbound-guard step"
-  )
-  for spec in "${regions[@]}"; do
-    IFS='|' read -r file start end label <<<"${spec}"
-    body="$(probe_region "${file}" "${start}" "${end}")"
-    # Anti-vacuity: a renamed or deleted region extracts nothing, and an empty
-    # body would sail through the "no bare can_root" test below.
-    grep -q 'can_root_now' <<<"${body}" || {
-      printf '%s does not escalate with can_root_now (region empty or renamed?)\n' \
-        "${label}" >&2
+  local cmd out bad=0
+  sudo_waits_sandbox
+  # First, the harness has to be able to SEE a wait. An ACTION is allowed to
+  # ask for a password — the user typed it — so 'webui.sh start' must block on
+  # this sudo. If it does not, the stub is not blocking and every "it did not
+  # hang" below means nothing at all.
+  out="$(reporting_run 6 webui.sh start)"
+  grep -qx 'RC=124' <<<"${out}" || {
+    printf 'the stand-in sudo did not make an ACTION wait, so nothing below was measured:\n%s\n' \
+      "${out}" >&2
+    return 1
+  }
+  for cmd in "${REPORTING_COMMANDS[@]}"; do
+    # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+    out="$(reporting_run 8 ${cmd})"
+    ! grep -qx 'RC=124' <<<"${out}" || {
+      printf "'%s' only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
+        "${cmd}" "${out}" >&2
       bad=1
       continue
     }
-    # can_root_now CONTAINS can_root, so presence is not enough — a leftover
-    # bare call beside a fixed one is exactly how this defect survived the
-    # first fix. Match can_root not followed by '_'.
-    if grep -qE 'can_root([^_]|$)' <<<"${body}"; then
-      printf '%s still has a bare can_root: %s\n' "${label}" \
-        "$(grep -nE 'can_root([^_]|$)' <<<"${body}" | head -1)" >&2
+    # ...and it has to SAY something. "nothing at all, then waits for ever" is
+    # how the worst of the five presented, and half of that is the silence.
+    (( $(grep -c . <<<"${out}") > 1 )) || {
+      printf "'%s' returned without printing anything at all:\n%s\n" "${cmd}" "${out}" >&2
       bad=1
-    fi
+    }
   done
+  (( ${#REPORTING_COMMANDS[@]} >= 5 )) || {
+    echo 'the reporting-command list has shrunk — this gate has stopped watching' >&2
+    bad=1
+  }
   return "${bad}"
 }
-check "no probe asks 'is sudo installed' — it would wait on the password" \
+check "no command that only reports ever waits for a password" \
   probes_use_the_stricter_test
 
 # The shared docker helpers are the other case: the SAME function is a
@@ -20178,8 +20236,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 116 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 37 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 115 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 38 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

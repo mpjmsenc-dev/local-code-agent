@@ -948,6 +948,38 @@ Two traps in gating this:
   point is "this must not hang", the order has to be `timeout sudo`, or the
   escalation must not be interactive at all.
 
+### ...and one of the five was still hanging
+
+The rule above was gated by reading five regions of source for a bare
+`can_root`. Every one of them read clean, and `lca webui status` still waited
+for ever — measured again, months later, under a stand-in `sudo` that refuses
+`-n` and otherwise prints the prompt and sleeps:
+
+```
+webui.sh status              took=8s rc=124 lines=1 <-- HUNG on: sudo docker info
+   output was: [warn] Docker is not reachable as 'nobody' — retrying with sudo,
+                      which may ask for your password.
+```
+
+The announcement added when this was first found made the stall *explicable*
+without making it *stop*. Both `select_docker` in `webui.sh` and `run_reader`
+in `scripts/lib.sh` hand-rolled a `can_root_now` / `elif can_root` pair —
+deciding inside the function what the comment above `root_for_probe` says is a
+property of the **caller**, and deciding it "may prompt" for every caller.
+`select_docker` runs for every `webui.sh` subcommand, `status` included.
+
+Both now call `root_for_probe`, and `webui.sh` sets `LCA_MAY_PROMPT=true` only
+in the arms that act (`start`, `stop`, `restart`). `lca webui status` on an
+account that is not a passwordless sudoer now refuses in a tenth of a second,
+naming the three ways out, instead of printing one line and never returning.
+
+`probes_use_the_stricter_test` is the gate, and it no longer reads source: it
+runs all five commands under that stand-in sudo, bounded, as an account that
+is not root. Its first assertion is the one worth copying — an **action** must
+still be willing to wait, so `webui.sh start` has to block on the same stub.
+If it does not, the stub is not blocking and every "it did not hang" below it
+would mean nothing.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
