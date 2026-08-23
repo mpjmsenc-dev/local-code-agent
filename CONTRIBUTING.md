@@ -796,6 +796,55 @@ Nothing in a source grep of that function looks wrong.
 |---|---|---|
 | `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
 | the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
+| whether `WEBUI_IMAGE` can be drift-checked | a box with a **real docker daemon** and the chat app running | see the three commands below. The answer decides between two implementations, and guessing wrong makes `lca apply` re-create the chat container on every run |
+
+#### The `WEBUI_IMAGE` question, written out
+
+`WEBUI_IMAGE` is honoured by `lib.sh` and four scripts, its own comment
+anticipates somebody pinning the tag, and `webui_drift` has no key for it.
+Measured against a stubbed docker: with the container on `v0.3.0` and `.env`
+asking for `v9.9.9`, drift reported `[]`. `lca apply` says "already matches
+.env" and the chat app runs the old image for ever — the shape
+`aider_pin_is_watched` records, one setting further on.
+
+It was not fixed here because the fix depends on one fact a stub cannot
+supply. Run this on a machine with a real daemon and the chat app up:
+
+```bash
+docker container inspect -f '{{.Config.Image}}' open-webui   # (1) what was PASSED
+docker container inspect -f '{{.Image}}'        open-webui   # (2) the resolved ID
+docker image     inspect -f '{{.Id}}' "$(. scripts/lib.sh; load_env; echo "${WEBUI_IMAGE}")"
+```
+
+**If (1) prints the tag** — `ghcr.io/open-webui/open-webui:main` — then a plain
+string comparison against `${WEBUI_IMAGE}` is stable, and the implementation is
+four lines in `webui_drift`, in the same shape as the six keys already there:
+
+```bash
+live="$(webui_container_image || true)"
+[[ "${live}" == "${WEBUI_IMAGE}" ]] || drifted+=("WEBUI_IMAGE")
+```
+
+A stock install compares equal, so `lca apply` re-creates the container exactly
+once — when the pin actually changes. What this does **not** catch is the tag
+moving under you: `.Config.Image` is fixed at creation, so a `:main` that
+advanced upstream still reads equal. Say so in the comment rather than implying
+otherwise.
+
+**If (1) prints a digest** — `sha256:…`, or `…@sha256:…` — a plain comparison
+reports drift on every run for every stock install, and `lca apply` re-creates
+the chat container each time. The implementation then has to compare (2)
+against (3): the container's resolved image ID against the ID the configured
+tag resolves to locally. That is strictly better — it catches the moved tag as
+well — but it needs the image present to resolve, so it must degrade to "no
+drift" rather than "drifted" when `docker image inspect` fails, or an offline
+box reports a pin problem it does not have.
+
+Either way the gate is the same: create a container from one tag, point `.env`
+at another, and require `webui_drift` to name `WEBUI_IMAGE`; then leave `.env`
+alone and require it not to. The second half is the one that matters, because
+the failure mode of guessing wrong is a chat container re-created on every
+`lca apply`.
 
 `setpriv` narrowed the second row rather than removing it. Running as somebody
 who is not root needs no real account, no sudo and no droplet:

@@ -1373,18 +1373,6 @@ check "a pipeline is refused"                 ei_reject pipe
 check "a redirect is refused"                 ei_reject redirect
 check "a continued line is refused"           ei_reject cont
 check "a missing file is refused"             ei_reject no-such-file
-# ...and restore.sh must actually consult it, BEFORE the load_env that would
-# run the file. Order is the whole point: validating afterwards validates
-# something that has already executed.
-restore_validates_env_first() {
-  # '[^#]*' so a future comment naming the helper cannot satisfy this the way
-  # three earlier scanners in this file were satisfied by their own prose.
-  awk '/^[[:space:]]*[^#]*env_file_is_inert/ { checked = NR }
-       /^[[:space:]]*load_env[[:space:]]*$/ { loaded = NR; exit }
-       END { exit !(checked > 0 && loaded > checked) }' "${REPO}/restore.sh"
-}
-check "restore.sh validates the backed-up .env before sourcing it" \
-  restore_validates_env_first
 
 # ...and the whole thing driven once, end to end, on a hostile archive. The
 # checks above prove the validator and the call order separately; this proves
@@ -1475,6 +1463,76 @@ ensure_ollama_up_announced() { return 1; }'
   grep -q 'Restore complete' <<<"$(restore_run)"
 }
 check "the restore harness restores a minimal backup" restore_harness_works
+
+# Driven. The awk this replaces asked that env_file_is_inert appears before
+# load_env. What is at stake is code execution as root: load_env SOURCES .env,
+# a restore recreates docker volumes so it runs as root, and docs/MIGRATE.md is
+# built on carrying that tarball between machines — so "it is your own backup"
+# is an assumption about a file that has been off-box and back. An ordering
+# grep cannot tell a check that runs from one that has been stubbed to true.
+#
+# So the archive carries an env that WOULD do something, and the test is
+# whether it did.
+restore_env_is_not_run() {
+  local marker="${RESTORE_SB}/THIS-RAN"
+  local out
+  # Rejected by env_file_is_inert (a command substitution), and observable if
+  # anything sources it.
+  # shellcheck disable=SC2016  # the literal text is the trap; expanding it here would spring it
+  printf 'MODEL_NAME=$(touch %q)\n' "${marker}" > "${RESTORE_STAGE}/env"
+  out="$(restore_run)"
+  printf '%s\n' "${out}"
+  [[ -e "${marker}" ]] && printf 'IT-RAN\n'
+  return 0
+}
+restore_validates_env_first() {
+  local out bad=0
+  restore_sandbox envtrap 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  out="$(restore_env_is_not_run)"
+  # 1. Nothing in that file executed. This is the whole gate.
+  ! grep -qx 'IT-RAN' <<<"${out}" || {
+    printf 'a line inside the backup ran as root during the restore:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 2. ...and it was not installed either, so the NEXT command does not run it.
+  # shellcheck disable=SC2016  # likewise: this searches for those characters
+  grep -q 'MODEL_NAME=\$(touch' "${RESTORE_SB}/.env" 2>/dev/null && {
+    echo 'the rejected .env was installed anyway — load_env would run it on the next command' >&2
+    bad=1
+  }
+  # 3. ...and the reader is told, and kept the file, rather than it vanishing.
+  # A conservative validator can refuse a legitimate but unusual file.
+  [[ -f "${RESTORE_SB}/.env.rejected" ]] || {
+    echo 'the refused .env was dropped rather than kept for the reader to look at' >&2
+    bad=1
+  }
+  grep -qi 'NOT installed' <<<"${out}" || {
+    printf 'the refusal is silent — nothing says the .env in the backup was not restored:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. ...and the restore CONTINUED. Refusing an .env must not throw away the
+  # volume and the model list too.
+  grep -qi 'Restore complete' <<<"${out}" || {
+    printf 'refusing the .env ended the whole restore:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 5. Non-vacuity: an ordinary .env in an archive IS installed. Without this,
+  # a restore that refused every .env would satisfy all four above.
+  restore_sandbox envok 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  printf 'MODEL_NAME=restored:7b\n' > "${RESTORE_STAGE}/env"
+  out="$(restore_run)"
+  grep -q '^MODEL_NAME=restored:7b$' "${RESTORE_SB}/.env" || {
+    printf 'a perfectly ordinary .env was not restored, so the refusal above proves nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "an .env inside a backup is read before it is installed, never run" \
+  restore_validates_env_first
 
 # Driven. The awk version looked for 'scripts/apply.sh' appearing somewhere
 # after a comment marker in restore.sh. What is at stake is that a restored
@@ -4192,14 +4250,69 @@ check "...and a model that declares none is unknown, not zero" \
   declared_ctx_is_unknown_without_one
 check "'lca check' names all three states of it" \
   test "$(grep -cE 'absent\)|context\)' "${REPO}/check-system.sh")" -ge 2
-# Restore must REBUILD, never pull: a derived model was never in a registry, so
-# a restore that pulls it fails on that model on every restore, for ever.
-restore_rebuilds_derived() {
-  local body; body="$(cat "${REPO}/restore.sh")"
-  grep -q 'agent_model_is_derived' <<<"${body}" || return 1
-  grep -q 'ensure_agent_model' <<<"${body}"
+# Driven. The greps this replaces asked that restore.sh mentions
+# agent_model_is_derived and ensure_agent_model. Both survive the branch never
+# being taken, and what is at stake is a restore that fails on the same model
+# every time, for ever: a derived model was never in a registry, so pulling it
+# by name cannot work. The archive is what decides which branch runs, so the
+# archive is what this hands it.
+restore_models_run() {   # MODELS... -> what the restore did about them
+  local m
+  printf 'MODEL_NAME=x:7b\n' > "${RESTORE_STAGE}/env"
+  { printf 'NAME\tID\tSIZE\tMODIFIED\n'
+    for m in "$@"; do printf '%s\tabc\t1 GB\tnow\n' "${m}"; done
+  } > "${RESTORE_STAGE}/models.txt"
+  restore_run
 }
-check "restore rebuilds a derived model instead of pulling it" restore_rebuilds_derived
+restore_rebuilds_derived() {
+  local out bad=0
+  # The base is here, the derived one is not — which is exactly the state a
+  # restore onto a fresh machine reaches after the base has been pulled.
+  #
+  # Both recorders print to STDERR. restore.sh calls the rebuild as
+  # 'ensure_agent_model "${derived_base}" >/dev/null', so a stub that printed
+  # to stdout recorded into the same /dev/null and this gate failed against
+  # code that was doing exactly the right thing.
+  # shellcheck disable=SC2016  # the shim is code appended to the sandbox's lib.sh
+  restore_sandbox derived 'have() { [[ "$1" == ollama ]]; }
+ensure_ollama_up_announced() { return 0; }
+model_present() { [[ "$1" == "qwen2.5-coder:7b" ]]; }
+agent_model_is_derived() { [[ "$1" == *-agent ]]; }
+ensure_agent_model() { printf "REBUILT %s\n" "$1" >&2; }
+agent_model_context() { printf 16384; }
+net_blocked() { return 1; }
+pull_model() { printf "PULLED %s\n" "$1" >&2; }'
+  out="$(restore_models_run qwen2.5-coder:7b-agent)"
+  grep -q '^REBUILT qwen2.5-coder:7b$' <<<"${out}" || {
+    printf 'the derived agent model was not rebuilt from its base:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and never pulled. That is the failure this exists to prevent, and it is
+  # the one that repeats on every restore for ever.
+  ! grep -q '^PULLED qwen2.5-coder:7b-agent$' <<<"${out}" || {
+    printf 'the derived model was pulled by name — it was never in a registry, so that fails on every restore:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and an ORDINARY missing model is still pulled, or "never pulls" would be
+  # satisfied by a restore that pulls nothing at all.
+  out="$(restore_models_run some-other:3b)"
+  grep -q '^PULLED some-other:3b$' <<<"${out}" || {
+    printf 'an ordinary missing model was not re-pulled either:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a derived model whose BASE is absent says so rather than failing
+  # silently: rebuilding needs the weights the base owns.
+  out="$(restore_models_run other-base:3b-agent)"
+  grep -qi 'not rebuilt' <<<"${out}" || {
+    printf 'a derived model with no base on this machine was neither rebuilt nor reported:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a restored derived model is rebuilt from its base, never pulled by name" \
+  restore_rebuilds_derived
 # ...and uninstall takes this project's models away without touching the
 # gigabytes the user chose to pull.
 # Driven. This greped remove_agent_models' body for '-agent$' and 'ollama rm',
@@ -20517,8 +20630,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 115 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 38 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 113 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 40 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

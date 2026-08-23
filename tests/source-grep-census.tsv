@@ -153,10 +153,10 @@ A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
 A	restore_asks_for_the_advice	awk inside main() for one call
 A	restore_distinguishes_the_stages	greps restore.sh for message placement
 FP	restore_main_calls_the_volume_restore	runs the real restore over an archive with and without the volume
-A	restore_rebuilds_derived	two presence-greps
+FP	restore_rebuilds_derived	restores an archive naming a derived model and checks it was rebuilt, not pulled
 FP	restore_reconciles_with_apply	runs the real restore over an archive and watches apply.sh being called
 A	restore_tells_unreadable_from_corrupt	line-number ordering plus message content
-A	restore_validates_env_first	awk ordering in restore.sh
+FP	restore_validates_env_first	puts an .env that would execute inside the archive and checks nothing ran
 A	retention_ignores_enable_webui	absence inside one function; a helper could reintroduce it
 A	run_agent_checks_where_it_is_running	presence-greps plus line-number ordering
 A	run_agent_warns_on_an_odd_edit_format	greps run-agent.sh for warn/die forms
@@ -369,6 +369,8 @@ H	recommend_with	drives update-model.sh's recommender
 H	relay_units	renders the relay units from ollama-relay.sh
 H	render_unit_from	renders a boot unit from its installer
 H	rendered_tune_unit	renders the tune boot unit
+H	restore_env_is_not_run	runs a restore over an .env that would execute, and says whether it did
+H	restore_models_run	restores an archive naming the given models
 H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
 H	seeded_settings_payload	renders agent.sh's real settings payload
 H	setup_installers	lists the installers setup.sh actually runs
