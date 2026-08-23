@@ -89,7 +89,7 @@ FP	installer_recreates_rather_than_skipping	runs the real installer and checks t
 FP	installers_answer_help_before_acting	runs each installer with --help and -h in a stubbed world and checks nothing was installed
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
-A	load_env_survives_an_uncreatable_env	greps load_env's body; an unwritable .env would settle it
+FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
 FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
 A	logs_ollama_reads_the_background_log	greps logs_ollama's body for a tail
 A	logs_ollama_separates_absent_from_unreadable	greps logs_ollama's body for test forms
@@ -305,6 +305,7 @@ H	drift_case_block	extracts webui.sh's drift case block
 H	drift_keys	extracts the keys webui_drift can report
 H	duplicate_definitions	lists the names a test file defines more than once
 H	entry_points	lists the repo's entry points
+H	env_root_for_nobody	builds a checkout at a chosen mode for the dropped-privilege probes
 H	example_keys	extracts the keys .env.example ships
 H	example_value	extracts one value from .env.example
 H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at

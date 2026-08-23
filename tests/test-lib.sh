@@ -2111,15 +2111,19 @@ check "a 0600 file is readable, and so is an ordinary directory" \
 # setpriv drops to uid 65534 without a user having to exist, without sudo, and
 # without a real machine. The arm is reachable on the box that is already here.
 NOBODY_UID=65534
-as_nobody() {   # CODE [ARG...] -> what it printed, as nobody, with lib.sh sourced
-  local code="$1"; shift
+as_nobody() {   # LIB CODE [ARG...] -> what it printed, as nobody, with LIB sourced
+  # LIB rather than always the real one: REPO_ROOT is computed from lib.sh's
+  # own location, so which copy is sourced decides which directory the code
+  # under test thinks it lives in — and a directory the caller cannot write is
+  # the whole point of one of the gates below.
+  local lib="$1" code="$2"; shift 2
   # shellcheck disable=SC2016  # the body is code for the dropped shell, not a string to expand here
   setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
     bash -c 'set -uo pipefail
              lib="$1"; shift
              code="$1"; shift
              source "${lib}" >/dev/null 2>&1
-             eval "${code}"' _ "${REPO}/scripts/lib.sh" "${code}" "$@" 2>&1
+             eval "${code}"' _ "${lib}" "${code}" "$@" 2>&1
 }
 readability_still_wants_x_of_a_directory() {
   local d="${SANDBOX}/readx" out bad=0
@@ -2136,7 +2140,7 @@ readability_still_wants_x_of_a_directory() {
   # before any of the modes above mean anything.
   chmod 711 "${SANDBOX}"
   # shellcheck disable=SC2016  # likewise: this runs as nobody, not here
-  out="$(as_nobody 'printf "uid %s\n" "$(id -u)"
+  out="$(as_nobody "${REPO}/scripts/lib.sh" 'printf "uid %s\n" "$(id -u)"
     for p in listable traversable normal private; do
       if readable_by_us "$1/${p}"; then printf "%s YES\n" "${p}"
       else                             printf "%s no\n"  "${p}"; fi
@@ -6039,44 +6043,85 @@ check "the hand-edit rule and the tarball rule are not the same rule" \
   the_two_env_rules_disagree_on_purpose
 
 echo "# ...and a .env it cannot create is a warning, not a raw 'cp:' abort"
-# setup.sh installs to /opt/local-code-agent as root and 'lca' is meant to run
-# as an ordinary user, so a missing .env there hit an unguarded cp:
+# Driven, as somebody who cannot write the checkout. The greps this replaces
+# read load_env's body for the shape of the fix — a guarded cp, the word chown,
+# no die — and every one of them survives the behaviour being gone: a guarded
+# cp that warns and then returns non-zero under errexit looks identical.
 #
-#   cp: cannot create regular file '/opt/local-code-agent/.env': Permission denied
-#
-# ...and the command then aborted under errexit, mid-load_env, having said
-# nothing about what .env is or what to do. Measured as the 'ubuntu' user
-# against a root-owned checkout.
-#
-# Continuing is the right answer, not dying: the branch beside it already
-# treats a missing config as "use the built-in defaults", and every default is
-# set a few lines further down the same function.
-load_env_survives_an_uncreatable_env() {
-  local body
-  body="$(awk '/^load_env\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  # No 'grep ... | head -1' here: head leaves after its line and the grep takes
-  # SIGPIPE, which is the same 141-under-pipefail trap this suite bans
-  # elsewhere. grep -q answers the question without a pipe at all.
-  # shellcheck disable=SC2016  # the literal ${ENV_EXAMPLE} is what we search for
-  grep -q 'cp "${ENV_EXAMPLE}"' <<<"${body}" || {
-    echo 'load_env no longer creates .env from the example — this gate stopped watching' >&2
-    return 1; }
-  # The copy must be a tested condition, not a bare statement that errexit
-  # turns into an abort.
-  grep -qE '(if|elif|\|\||&&|!) *cp "\$\{ENV_EXAMPLE\}"' <<<"${body}" || {
-    echo "load_env runs the copy unguarded, so a read-only checkout aborts on a raw 'cp:' line" >&2
-    return 1; }
-  # ...and the failure arm must say what to do rather than only that it failed.
-  grep -q 'chown' <<<"${body}" || {
-    echo 'load_env reports it could not write .env without naming the fix' >&2
-    return 1; }
-  # ...and must not be fatal.
-  ! grep -qE 'die .*ENV_FILE.*cannot write|die .*Could not create' <<<"${body}" || {
-    echo 'a .env that cannot be created should fall back to defaults, not stop the command' >&2
-    return 1; }
+# What is at stake is every 'lca' command on the documented installation.
+# setup.sh installs to /opt/local-code-agent as root, 'lca' is meant to be run
+# by an ordinary user, and a missing .env there gave a raw "cp: Permission
+# denied" followed by an abort mid-load_env, having said nothing about what
+# .env is or what to do.
+env_root_for_nobody() {   # DIR MODE -> a checkout at DIR that lib.sh will call its own
+  local sb="$1"
+  rm -rf "${sb}"
+  mkdir -p "${sb}/scripts" "${sb}/config"
+  cp "${REPO}/scripts/lib.sh"        "${sb}/scripts/lib.sh"
+  cp "${REPO}/.env.example"          "${sb}/.env.example"
+  cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/CONVENTIONS.md"
+  chmod -R a+rX "${sb}"
+  chmod "$2" "${sb}"
 }
-check "load_env warns and keeps going when it cannot write .env" \
+load_env_survives_an_uncreatable_env() {
+  local ro="${SANDBOX}/roenv" rw="${SANDBOX}/rwenv" out bad=0
+  # shellcheck disable=SC2016  # this is code for the dropped shell, not a string to expand here
+  local env_probe='load_env
+printf "uid %s\n" "$(id -u)"
+printf "MODEL %s\n" "${MODEL_NAME:-unset}"
+[[ -e "${ENV_FILE}" ]] && printf "ENV-CREATED\n" || printf "NO-ENV\n"
+printf "STILL-RUNNING\n"'
+  chmod 711 "${SANDBOX}"
+  env_root_for_nobody "${ro}" 755   # root-owned, world-readable, not writable
+  out="$(as_nobody "${ro}/scripts/lib.sh" "${env_probe}")"
+  grep -qx "uid ${NOBODY_UID}" <<<"${out}" || {
+    printf 'the env_probe did not drop to uid %s, so it was root and could write anywhere:\n%s\n' \
+      "${NOBODY_UID}" "${out}" >&2
+    return 1
+  }
+  # It kept going. This is the whole gate: under errexit an unguarded cp ends
+  # the command here, and every 'lca' command begins with load_env.
+  grep -qx 'STILL-RUNNING' <<<"${out}" || {
+    printf 'load_env stopped the command dead when it could not create .env:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...with the defaults it says it falls back to actually in place.
+  grep -qE '^MODEL .+:' <<<"${out}" || {
+    printf 'it carried on without the built-in defaults it promises:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...having said what happened, and what to do about it. "Could not create"
+  # on its own is a raw tool failure with a nicer font.
+  grep -q 'cannot write to' <<<"${out}" || {
+    printf 'nothing said why .env could not be created:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'chown' <<<"${out}" || {
+    printf 'it reported the failure without naming the fix:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'NO-ENV' <<<"${out}" || {
+    printf 'a .env appeared in a directory the caller cannot write — this measured nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # Non-vacuity: the same env_probe where the caller CAN write must create the
+  # file and warn about nothing. A load_env that had stopped copying at all
+  # would satisfy every assertion above.
+  env_root_for_nobody "${rw}" 777
+  out="$(as_nobody "${rw}/scripts/lib.sh" "${env_probe}")"
+  grep -qx 'ENV-CREATED' <<<"${out}" || {
+    printf 'load_env creates no .env even where it can write, so "it could not" proves nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -q 'cannot write to' <<<"${out}" && {
+    printf 'it warned about a directory it could write to:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "load_env warns and keeps going when it cannot write .env, asked as somebody who cannot" \
   load_env_survives_an_uncreatable_env
 
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
@@ -19875,8 +19920,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 120 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 33 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 119 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 34 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
