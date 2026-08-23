@@ -20,6 +20,11 @@
 # Format: LABEL <TAB> function <TAB> what it actually does.
 # The A rows are the debt and may only go down. Converting one means moving its
 # row to FP, not deleting it.
+#
+# 153 at the census. 149 after the first four were driven. 145 after the four
+# entry-point gates below them — the ones that could only be read because
+# running an installer installs, until the sandbox in test-lib.sh made a
+# package install something a gate can observe instead of perform.
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
 A	agent_can_resolve_the_host	greps the extracted docker run block
 A	agent_publishes_on_loopback	greps the extracted docker run block
@@ -66,13 +71,13 @@ A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the e
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
 A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
 A	drift_says_something_specific	greps webui.sh for a warn line; reachability unobserved
-A	entry_points_forward_their_arguments	greps the last line for main "$@"
+FP	entry_points_forward_their_arguments	runs each installer and requires the value it was handed back out of its refusal
 A	errexit_survives_sourcing_tune	awk over check-system.sh for ordering
 A	every_baked_setting_is_compared	derived list, but the source side is a presence-grep for a call
 A	every_banner_state_gets_the_warning	awk inside headline() for one call
 A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
-A	every_dispatch_forwards_its_arguments	greps exec lines; forwarding is drivable
-A	every_entry_point_refuses_or_forwards	greps for a refusal arm; running with a bogus flag would settle it
+FP	every_dispatch_forwards_its_arguments	runs the real bin/lca against stub targets and reads the argv they were handed
+FP	every_entry_point_refuses_or_forwards	runs every entry point in a sandboxed checkout with a flag none of them takes
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 A	every_installer_call_in_setup_is_guarded	greps setup.sh main() for the guarded form
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
@@ -88,7 +93,8 @@ A	install_is_truncation_safe	structural awk over install.sh; a truncated file co
 A	install_verifies_the_clone	greps for the existence test
 A	installer_passes_the_banner	presence-greps in install_webui.sh
 A	installer_recreates_rather_than_skipping	greps a branch of install_webui.sh
-A	installers_answer_help_before_acting	awk that main()'s first statement is the case; drivable
+FP	installers_answer_help_before_acting	runs each installer with --help in a sandboxed checkout and reads what it did
+H	lca_arms	extracts bin/lca's own dispatch table for the gate below to drive
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 A	load_env_survives_an_uncreatable_env	greps load_env's body; an unwritable .env would settle it

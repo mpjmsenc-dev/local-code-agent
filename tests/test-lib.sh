@@ -12780,25 +12780,221 @@ entry_points() {
     printf '%s\n' "${t}"
   done
 }
+
+# ---------------------------------------------------------------------------
+# Running the entry points for real, which is the only way to ask them anything
+#
+# Everything below this line used to be a source grep, and the reason to stop
+# is in the paragraph above: these files each performed a full system install
+# when handed a flag they did not recognise, and the fix is a case arm. A gate
+# that greps for the arm passes on an arm that is unreachable, on an arm that
+# refuses AFTER the apt-get above it, and on a last line that calls 'main'
+# without "$@" so the arm never sees the flag at all. That last one is not
+# hypothetical: it is exactly how deploy/do-user-data.sh shipped, and it took
+# running the file to notice.
+#
+# So run the file. The problem with running an installer is that it installs,
+# and the previous measurement of this ("apt stubbed and the clone pointed at a
+# local mirror") still managed to apt-get, clone 33 MB and rewrite
+# /etc/update-motd.d on the machine it was measured from. Three things keep
+# that from happening here:
+#
+#   1. A throwaway copy of this checkout, so a script that writes to its own
+#      repo writes to the copy. Tracked files only — .venv is 600 MB.
+#   2. env -i, so nothing this suite has exported (its docker stub included)
+#      leaks in, and every path the scripts read comes from LCA_* pointed at
+#      the sandbox.
+#   3. BASH_ENV, which bash reads before a non-interactive script and every
+#      bash it starts in turn. It defines the side-effecting commands as
+#      functions that record what they were asked to do and return 0. Shell
+#      functions beat PATH lookup, so this catches 'sudo apt-get' as well.
+#
+# Recording rather than refusing is deliberate: a stub that fails stops the
+# script at the first side effect and hides the rest, and what these gates want
+# to report is everything a broken guard would have done. It also keeps ACTING
+# apart from LOOKING — 'systemctl is-active' and 'docker inspect' are how these
+# scripts ask questions, and a gate that called those side effects would have
+# to be weakened until it saw nothing.
+EP_SB="${SANDBOX}/entry-points"
+ep_sandbox() {
+  [[ -z "${EP_READY:-}" ]] || return 0
+  rm -rf "${EP_SB}"
+  mkdir -p "${EP_SB}/repo" "${EP_SB}/home" "${EP_SB}/target" "${EP_SB}/cwd"
+  if git -C "${REPO}" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "${REPO}" ls-files -z | tar -C "${REPO}" --null -T - -cf - \
+      | tar -C "${EP_SB}/repo" -xf -
+  else
+    ( cd "${REPO}" && find . -path ./.git -prune -o -path ./.venv -prune -o -print0 ) \
+      | tar -C "${REPO}" --null -T - -cf - | tar -C "${EP_SB}/repo" -xf -
+  fi
+  [[ -f "${EP_SB}/repo/install.sh" && -f "${EP_SB}/repo/scripts/lib.sh" ]] || {
+    echo "the entry-point sandbox did not get a copy of the checkout" >&2
+    return 1; }
+  # A configuration, so load_env has nothing to ask about and nothing to write
+  # back into the real one.
+  cp "${REPO}/.env.example" "${EP_SB}/repo/.env"
+  # The tool run-agent.sh forwards to. Without it the only thing driving
+  # run-agent.sh can prove is that aider is not installed.
+  mkdir -p "${EP_SB}/repo/.venv/bin"
+  # shellcheck disable=SC2016  # this is the stub's source text, not this shell's
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do printf "EP-FORWARDED [%%s]\\n" "${a}"; done\n' \
+    > "${EP_SB}/repo/.venv/bin/aider"
+  chmod +x "${EP_SB}/repo/.venv/bin/aider"
+  cat > "${EP_SB}/preamble.sh" <<'EOPRE'
+_acted()  { printf '%s %s\n' "${FUNCNAME[1]}" "$*" >> "${EP_ACTED}"; }
+_looked() { printf '%s %s\n' "${FUNCNAME[1]}" "$*" >> "${EP_LOOKED}"; }
+for _c in apt-get apt apt-key dpkg dpkg-reconfigure snap useradd usermod \
+          groupadd pip pip3 nft iptables ip6tables modprobe sysctl swapon \
+          mkswap fallocate hostnamectl timedatectl update-motd chpasswd; do
+  eval "${_c}() { _acted \"\$@\"; return 0; }"
+done
+# The four that both ask and act, told apart by their first word. Anything
+# unrecognised counts as acting: the safe direction for a tripwire is to
+# over-report, and a new verb is a thing somebody should look at.
+systemctl() {
+  case "${1:-}" in
+    is-active|is-enabled|is-failed|show|cat|status|list-units|list-unit-files|--version) _looked "$@" ;;
+    *) _acted "$@" ;;
+  esac
+  return 0
+}
+docker() {
+  case "${1:-}" in
+    ps|images|version|info|port|logs|inspect|--version) _looked "$@" ;;
+    container|volume|network|image)
+      case "${2:-}" in inspect|ls) _looked "$@" ;; *) _acted "$@" ;; esac ;;
+    *) _acted "$@" ;;
+  esac
+  return 0
+}
+ollama()    { case "${1:-}" in list|ps|show|--version) _looked "$@" ;; *) _acted "$@" ;; esac; return 0; }
+tailscale() { case "${1:-}" in status|ip|version) _looked "$@" ;; *) _acted "$@" ;; esac; return 0; }
+# git is the one that must keep working: these scripts read their own branch
+# and revision, and the sandbox is a real checkout. Only the verbs that move
+# bytes are intercepted.
+git() { case "${1:-}" in clone|pull|fetch|push|checkout|reset|commit) _acted "$@"; return 0 ;; esac; command git "$@"; }
+# curl and wget are how a download starts and also how every health probe is
+# made. A method or an output file is the difference.
+curl() { case " $* " in *" -X "*|*" --data"*|*" -o "*|*" --output "*|*" -O "*) _acted "$@" ;; *) _looked "$@" ;; esac; return 0; }
+wget() { _acted "$@"; return 0; }
+# Escalating during --help is a finding in itself, whatever comes after it.
+sudo() { _acted "$@"; return 0; }
+EOPRE
+  EP_READY=1
+}
+
+# ep_run FILE ARG... — run one entry point in the sandbox and print everything
+# it said, with its status in ${EP_SB}/rc and what it did in ${EP_SB}/acted.
+# Status goes to a file because callers read this through $( ), and a subshell
+# cannot hand a variable back.
+ep_run() {
+  local f="$1"; shift
+  local out
+  ep_sandbox || return 1
+  : > "${EP_SB}/acted"; : > "${EP_SB}/looked"
+  out="$(
+    cd "${EP_SB}/cwd" || exit 111
+    env -i \
+      PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      HOME="${EP_SB}/home" \
+      TERM=dumb \
+      EP_ACTED="${EP_SB}/acted" \
+      EP_LOOKED="${EP_SB}/looked" \
+      BASH_ENV="${EP_SB}/preamble.sh" \
+      LCA_DIR="${EP_SB}/target" \
+      LCA_LOG="${EP_SB}/setup.log" \
+      LCA_RUN_SETUP=false \
+      LCA_REPO_URL="${EP_SB}/repo" \
+      timeout 60 bash "${EP_SB}/repo/${f}" "$@" </dev/null 2>&1
+  )"
+  printf '%s' "$?" > "${EP_SB}/rc"
+  printf '%s\n' "${out}"
+}
+ep_rc()    { cat "${EP_SB}/rc"; }
+ep_acted() { cat "${EP_SB}/acted"; }
+
+# ...and the tripwire itself has to be proven before anything is allowed to
+# conclude "nothing happened" from it.
+#
+# BASH_ENV is read only by NON-INTERACTIVE bash, it is ignored entirely when
+# bash is invoked as sh, and a shell built without it would simply not look. In
+# any of those cases every gate below would find an empty record and report
+# that the installers touched nothing — passing, silently, over nothing. That
+# is the same shape this suite keeps finding in the code it watches, so it gets
+# the same treatment: drive the mechanism, do not assume it.
+tripwire_records_what_a_script_does() {
+  local out
+  ep_sandbox || return 1
+  { echo '#!/usr/bin/env bash'
+    echo 'apt-get install -y a-package-that-does-not-exist'
+    echo 'sudo systemctl restart ollama'
+    echo 'systemctl is-active ollama'
+    echo 'curl -fsS http://127.0.0.1:11434/api/version'
+    echo 'echo probe-ran'
+  } > "${EP_SB}/repo/.tripwire-probe.sh"
+  out="$(ep_run .tripwire-probe.sh)"
+  grep -q 'probe-ran' <<<"${out}" || {
+    printf 'the probe did not run at all:\n%s\n' "${out}" >&2; return 1; }
+  grep -q '^apt-get install' "${EP_SB}/acted" || {
+    printf 'apt-get was not recorded — BASH_ENV is not reaching these scripts, and every "nothing was installed" below would pass over nothing:\n%s\n' \
+      "$(ep_acted)" >&2
+    return 1; }
+  # Through sudo as well, which is how these scripts really call it.
+  grep -q '^sudo systemctl restart' "${EP_SB}/acted" || {
+    printf 'an escalated command was not recorded:\n%s\n' "$(ep_acted)" >&2; return 1; }
+  # ...and asking is not acting, or the gates below would have to be blunted
+  # until they saw nothing.
+  grep -q 'is-active' "${EP_SB}/looked" || {
+    printf 'a probe was not recorded as a probe:\n%s\n' "$(cat "${EP_SB}/looked")" >&2; return 1; }
+  grep -q 'is-active\|api/version' "${EP_SB}/acted" && {
+    printf 'a read-only probe was recorded as acting:\n%s\n' "$(ep_acted)" >&2; return 1; }
+  # Nothing may have escaped to the real machine on the way past.
+  ! command -v apt-get >/dev/null 2>&1 || {
+    dpkg -l a-package-that-does-not-exist >/dev/null 2>&1 && {
+      echo 'the probe installed a package for real' >&2; return 1; }
+  }
+  rm -f "${EP_SB}/repo/.tripwire-probe.sh"
+}
+check "the entry-point tripwire records acting, and tells it from looking" \
+  tripwire_records_what_a_script_does
+
+# Driven, not read. The grep version asked whether a file contains a catch-all
+# arm that refuses; this one hands every entry point a flag none of them takes
+# and reads what happens. The distinction is the whole point of the section:
+# an arm that refuses below an apt-get, an arm no path reaches, and a last line
+# that drops "$@" all satisfy the grep and all leave a machine installed.
+#
+# Two answers are legitimate and this asks for exactly one of them:
+#   refuse   — non-zero, and the message names the argument, so the person who
+#              mistyped can see which word was the problem;
+#   forward  — hand it to the tool that does understand arguments, which is
+#              what makes 'lca --no-auto-commits' reach aider.
+# Either way nothing may be installed on the way to the answer.
 every_entry_point_refuses_or_forwards() {
-  local t body arm bad=0 seen=0
+  local t out bad=0 seen=0 acted
+  local flag='--definitely-not-a-real-flag'
   while read -r t; do
     [[ -n "${t}" && -f "${REPO}/${t}" ]] || continue
     seen=$((seen+1))
-    # Comments stripped first: every one of these arms carries a paragraph
-    # explaining the bug it fixes, and a five-line window that counts comments
-    # sees nothing but prose. Measured — this gate reported setup.sh and
-    # do-user-data.sh unguarded hours after they were fixed.
-    body="$(grep -v '^[[:space:]]*#' "${REPO}/${t}")"
-    # Forwarding everything is the other legitimate answer.
-    grep -qE 'exec .*"\$@"' <<<"${body}" && continue
-    arm="$(awk '/^[[:space:]]*(\*\)|-\?\*\)|-\*\))/ { c = 5 } c-- > 0' <<<"${body}")"
-    # 'return 1' and a bare 'echo ... >&2' count too: do-user-data.sh refuses
-    # that way, because it runs under a tee and must not exit the pipeline
-    # itself. A gate that only recognised die/err/exit reported it unguarded.
-    grep -qE '(die |die"|fail |err |exit 1|return 1|>&2)' <<<"${arm}" || {
-      printf '%s neither refuses an argument it does not know nor forwards it — a mistyped flag is silently ignored and it runs anyway\n' \
-        "${t}" >&2
+    out="$(ep_run "${t}" "${flag}")"
+    acted="$(ep_acted)"
+    [[ -z "${acted}" ]] || {
+      printf '%s ACTED on a flag it does not take — a typo installs:\n%s\n' "${t}" "${acted}" >&2
+      bad=1
+    }
+    # Forwarded: the argument arrived, intact, at the tool whose job it is.
+    grep -qxF "EP-FORWARDED [${flag}]" <<<"${out}" && continue
+    (( $(ep_rc) != 0 )) || {
+      printf '%s accepted %s and exited 0 — a mistyped flag is silently ignored and it runs anyway\n' \
+        "${t}" "${flag}" >&2
+      bad=1
+      continue
+    }
+    # Non-zero is not enough on its own: "Backup file not found" is also
+    # non-zero, and restore.sh really did answer a mistyped flag with it.
+    grep -qF -- "${flag}" <<<"${out}" || {
+      printf '%s refused %s without naming it, so nothing says which word was wrong:\n%s\n' \
+        "${t}" "${flag}" "$(tail -3 <<<"${out}")" >&2
       bad=1
     }
   done < <(entry_points)
@@ -14360,55 +14556,97 @@ every_dispatch_target_is_checked() {
 check "the --help list covers everything bin/lca dispatches to" \
   every_dispatch_target_is_checked
 
-# The two that are NOT dispatched, and are the worst of the lot: './install.sh
-# --help' installed packages and cloned into ${LCA_DIR}, and './setup.sh
-# --help' began installing the whole stack as root. Both were found by running
-# them — each had to be killed by a timeout, and the first left a checkout on
-# disk.
+# Driven, not read. The awk version asserted that main()'s first statement is a
+# case on "${1:-}", which is true of a main() whose case has no --help arm, of
+# a script that acts in a function called ABOVE main, and of the shape
+# do-user-data.sh actually shipped — a perfect case statement that never
+# received an argument, because the last line called 'main' without "$@".
 #
-# Structural, not behavioural. Everywhere else the --help check runs the
-# script, because the claim is about what happens; here a failing check would
-# install packages as root on whoever ran the suite, which is worse than the
-# bug it guards. So it asserts the shape that produces the behaviour — the
-# --help branch must be the FIRST thing main() does, above every side effect —
-# and the behaviour itself was verified by hand once the shape was in place.
+# What is at stake is the whole install: './install.sh --help' had to be killed
+# by a timeout and left a checkout behind, and the first-boot script apt-got,
+# cloned 33 MB and rewrote /etc/update-motd.d when asked for help.
+#
+# So: ask each installer for help, in the sandbox, and require that it answered
+# and did nothing. The expected first line is read out of the file's own header
+# rather than written here a second time — these three print their header block
+# as their help text, so a script that prints somebody else's help, or an empty
+# string, fails.
 installers_answer_help_before_acting() {
-  local f
-  # deploy/do-user-data.sh joined this list, as the fourth entry point and the
-  # one that was worst off: it did not even RECEIVE its arguments — the last
-  # line called 'main' without "$@" — so --help ran the full unattended
-  # install. Measured, apt stubbed and the clone pointed at a local mirror:
-  # apt-get, a 33 MB clone, and /etc/update-motd.d rewritten, which is how it
-  # was noticed at all.
+  local f flag out want acted bad=0
   for f in install.sh setup.sh deploy/do-user-data.sh; do
-    awk '/^main\(\) \{/            { inm = 1; next }
-         inm && /^[[:space:]]*#/   { next }
-         inm && /^[[:space:]]*$/   { next }
-         inm                       { first = $0; exit }
-         END { exit !(first ~ /case "\$\{1:-\}" in/) }' "${REPO}/${f}" || {
-      printf '%s: main() does something before it checks for --help\n' "${f}" >&2
-      return 1
+    want="$(sed -n '2s/^# \{0,1\}//p' "${REPO}/${f}")"
+    [[ -n "${want}" ]] || {
+      printf '%s has no header line to answer --help with — this gate stopped watching\n' "${f}" >&2
+      bad=1; continue
     }
+    for flag in --help -h; do
+      out="$(ep_run "${f}" "${flag}")"
+      acted="$(ep_acted)"
+      # The finding, in the order it matters: what it DID comes before what it
+      # said, because an installer that installed and then printed the help is
+      # the exact failure this gate exists for.
+      [[ -z "${acted}" ]] || {
+        printf '%s %s installed something before answering:\n%s\n' "${f}" "${flag}" "${acted}" >&2
+        bad=1
+      }
+      [[ -z "$(ls -A "${EP_SB}/target" 2>/dev/null)" ]] || {
+        printf '%s %s left files where it would have installed\n' "${f}" "${flag}" >&2
+        rm -rf "${EP_SB:?}/target"; mkdir -p "${EP_SB}/target"
+        bad=1
+      }
+      (( $(ep_rc) == 0 )) || {
+        printf '%s %s exited %s — asking a script what it does is not an error:\n%s\n' \
+          "${f}" "${flag}" "$(ep_rc)" "$(tail -3 <<<"${out}")" >&2
+        bad=1
+      }
+      grep -qxF "${want}" <<<"${out}" || {
+        printf '%s %s did not print its own help (looked for %q):\n%s\n' \
+          "${f}" "${flag}" "${want}" "$(head -3 <<<"${out}")" >&2
+        bad=1
+      }
+    done
   done
+  return "${bad}"
 }
-check "install.sh, setup.sh and the first-boot script explain themselves before they install anything" \
+check "the installers answer --help without installing anything" \
   installers_answer_help_before_acting
-# ...and the flag has to REACH main(), which is a separate fault from handling
-# it. do-user-data.sh's last line was 'main 2>&1 | tee ...' — arguments dropped
-# on the floor — so a --help case inside main would have been dead code.
+
+# Driven, not read. The grep version read the last line of each file and looked
+# for the characters 'main "$@"'. That is the right line to worry about — this
+# is the bug it was written for, and it is worth restating because the shape
+# looks harmless:
+#
+#     main            # <- deploy/do-user-data.sh, as shipped
+#
+# ...ran the full unattended install for EVERY argument, --help included,
+# because main saw no arguments and took its empty-string arm. But a grep for
+# the characters cannot tell that line from one inside a comment, and says
+# nothing about the far commoner half of the same failure: a dispatcher that
+# receives the arguments and then drops them on the floor.
+#
+# So hand each of them a value nobody could produce by accident and require it
+# back. Coming back means it travelled the whole way — through the last line,
+# into main, and out of whichever arm handled it — and it is a value rather
+# than a flag so that "$1" being quoted into the message is what proves it,
+# not the shape of the source.
 entry_points_forward_their_arguments() {
-  local f last bad=0
+  local f out bad=0
+  local token='--pass-me-through-4a1c9'
   for f in install.sh deploy/do-user-data.sh; do
-    last="$(grep -vE '^\s*(#|$)' "${REPO}/${f}" | tail -1)"
-    [[ "${last}" == *'main "$@"'* ]] || {
-      printf '%s calls main without "$@" — every flag it accepts is unreachable: %s\n' \
-        "${f}" "${last}" >&2
+    out="$(ep_run "${f}" "${token}")"
+    grep -qF -- "${token}" <<<"${out}" || {
+      printf '%s never saw %s — every flag it accepts is unreachable, and --help runs the install:\n%s\n' \
+        "${f}" "${token}" "$(tail -3 <<<"${out}")" >&2
+      bad=1
+    }
+    [[ -z "$(ep_acted)" ]] || {
+      printf '%s acted on an argument it does not take:\n%s\n' "${f}" "$(ep_acted)" >&2
       bad=1
     }
   done
   return "${bad}"
 }
-check "...and the arguments actually reach main()" \
+check "the installers really are handed their arguments" \
   entry_points_forward_their_arguments
 # ...and asking must still touch nothing. Pointed at a repository that cannot
 # exist, so even a regression cannot get as far as the clone — and therefore
@@ -14435,19 +14673,121 @@ first_boot_help_touches_nothing() {
 check "...and the first-boot script's --help installs nothing" \
   first_boot_help_touches_nothing
 
-# The scripts answering --help only helps if the flag reaches them. 'chat' was
-# 'exec webui.sh url' with no "$@", so 'lca chat --help' printed the chat
-# address — one line after 'lca help' promises every command explains itself.
-every_dispatch_forwards_its_arguments() {
-  local hits
-  hits="$(grep -nE '^[[:space:]]*[^#]*exec "\$\{REPO\}/[a-z/-]+\.sh"' "${REPO}/bin/lca" \
-            | grep -v '"\$@"' || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'these swallow the arguments, so --help never reaches the script:\n%s\n' "${hits}" >&2
-    return 1
-  }
+# lca_arms — bin/lca's own dispatch table, as "TOKENS<TAB>target script".
+#
+# Extracted rather than listed here, so a subcommand added tomorrow is driven
+# the day it ships — and two shapes exist, because one arm wraps: the arm and
+# its exec on one line, and the arm alone with the exec beneath it. Only 2-arg
+# match(), which mawk has too; this suite runs wherever the project does.
+lca_arms() {
+  awk '
+    /exec "\$\{REPO\}\// {
+      if (match($0, /^[[:space:]]*[^#]*\)[[:space:]]*exec/)) {
+        a = $0; sub(/\)[[:space:]]*exec.*/, "", a); gsub(/[[:space:]]/, "", a); arm = a
+      }
+      t = $0; sub(/^.*exec "\$\{REPO\}\//, "", t); sub(/".*$/, "", t)
+      if (arm != "") { print arm "\t" t }
+      arm = ""; next
+    }
+    /^[[:space:]]*[^#[:space:]][^()]*\)[[:space:]]*$/ {
+      a = $0; sub(/\)[[:space:]]*$/, "", a); gsub(/[[:space:]]/, "", a); arm = a; next
+    }
+    { arm = "" }
+  ' "${REPO}/bin/lca"
 }
-check "every 'lca' branch passes its arguments through" \
+
+# lca_run TOKEN ARG... — run the real bin/lca against stub targets and print
+# what the target was handed. TOKEN empty means bare 'lca'.
+#
+# bin/lca resolves its checkout from its own path, so a copy in a directory of
+# stubs dispatches into the stubs. Nothing real runs, which is what makes it
+# safe to drive every arm including 'lca offline' and 'lca uninstall'.
+LCA_SB="${SANDBOX}/lca-dispatch"
+lca_dispatch_sandbox() {
+  [[ -z "${LCA_READY:-}" ]] || return 0
+  local target
+  rm -rf "${LCA_SB}"; mkdir -p "${LCA_SB}/bin"
+  cp "${REPO}/bin/lca" "${LCA_SB}/bin/lca"
+  while IFS=$'\t' read -r _ target; do
+    [[ -n "${target}" ]] || continue
+    # Only when there is one: '${target%/*}' on a bare filename is the
+    # filename, and mkdir then makes a directory where the stub should go.
+    case "${target}" in */*) mkdir -p "${LCA_SB}/${target%/*}" ;; esac
+    { printf '#!/usr/bin/env bash\n'
+      printf 'printf "TARGET %%s\\n" "%s"\n' "${target}"
+      # shellcheck disable=SC2016  # the stub's source text, not this shell's
+      printf 'for a in "$@"; do printf "ARG [%%s]\\n" "${a}"; done\n'
+    } > "${LCA_SB}/${target}"
+    chmod +x "${LCA_SB}/${target}"
+  done < <(lca_arms)
+  LCA_READY=1
+}
+lca_run() {
+  local tok="$1"; shift
+  lca_dispatch_sandbox || return 1
+  if [[ -z "${tok}" ]]; then
+    bash "${LCA_SB}/bin/lca" "$@" 2>&1
+  else
+    bash "${LCA_SB}/bin/lca" "${tok}" "$@" 2>&1
+  fi
+}
+
+# Driven, not read. The grep version listed the exec lines that do not contain
+# the characters "$@" — which is the right worry (dropping them is how 'lca
+# chat --help' printed an address instead of explaining itself, one line after
+# 'lca help' promises every command explains itself) and the wrong instrument.
+# It cannot see an arm whose exec is unreachable, it cannot see the arm that
+# wraps onto two lines unless the regex happens to survive the wrap, and it
+# reads '$@' unquoted as forwarding when it is the opposite: a value with a
+# space in it arrives as two arguments.
+#
+# So run the dispatcher and read the argv the target was handed. The arguments
+# include one with a space precisely because that is the half a grep for the
+# token cannot distinguish.
+every_dispatch_forwards_its_arguments() {
+  local toks tok target out tail_got tail_want bad=0 seen=0
+  local -a args=( --a-flag 'two words' -x )
+  tail_want="$(printf 'ARG [%s]\n' "${args[@]}")"
+  while IFS=$'\t' read -r toks target; do
+    [[ -n "${target}" ]] || continue
+    # '""' is bare 'lca'; '-*' is the arm that makes 'lca --no-auto-commits'
+    # reach aider, driven with the value 'lca help' advertises.
+    for tok in ${toks//|/ }; do
+      case "${tok}" in '""') tok='' ;; '-*') tok='--no-auto-commits' ;; esac
+      seen=$((seen+1))
+      out="$(lca_run "${tok}" "${args[@]}")"
+      grep -qxF "TARGET ${target}" <<<"${out}" || {
+        printf 'lca %s did not reach %s:\n%s\n' "${tok:-<no argument>}" "${target}" "${out}" >&2
+        bad=1; continue
+      }
+      tail_got="$(grep '^ARG \[' <<<"${out}" | tail -n "${#args[@]}")"
+      [[ "${tail_got}" == "${tail_want}" ]] || {
+        printf 'lca %s swallowed or split its arguments — %s was handed:\n%s\nwanted them to end:\n%s\n' \
+          "${tok:-<no argument>}" "${target}" "${out}" "${tail_want}" >&2
+        bad=1
+      }
+    done
+  done < <(lca_arms)
+  # Non-vacuity: an extraction that has stopped matching would make every
+  # assertion above pass over nothing.
+  (( seen >= 18 )) || {
+    printf 'only %s dispatch arms found — this gate has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  # ...and the two arms that answer rather than forward. 'lca help' is the one
+  # every other command's --help is advertised by, and an unknown word must
+  # fail and say so on stderr, which is where it did not used to go.
+  out="$(lca_run help)"
+  grep -q 'Usage: lca' <<<"${out}" || {
+    printf 'lca help does not print the usage:\n%s\n' "${out}" >&2; bad=1; }
+  out="$(bash "${LCA_SB}/bin/lca" not-a-command 2>&1 >/dev/null)"
+  grep -q 'Unknown command: not-a-command' <<<"${out}" || {
+    printf 'an unknown command is not named on stderr:\n%s\n' "${out}" >&2; bad=1; }
+  bash "${LCA_SB}/bin/lca" not-a-command >/dev/null 2>&1 && {
+    echo 'an unknown command exits 0' >&2; bad=1; }
+  return "${bad}"
+}
+check "every lca subcommand forwards its arguments, whitespace intact" \
   every_dispatch_forwards_its_arguments
 
 # netmode.sh takes its subcommand as $1 and used to ignore everything after
@@ -18649,8 +18989,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 149 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 145 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and eight have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

@@ -559,14 +559,38 @@ the end of `tests/test-lib.sh` drives a Tailscale address off a stubbed
 `confirm`'s refusal through a real terminal via `script`.
 
 **Where driving is genuinely impossible** — a real GPU, a real sudo refusal on
-a suite that runs as root, a live container, a package install — a source grep
-is allowed, and it must say so:
+a suite that runs as root, a live container — a source grep is allowed, and it
+must say so:
 
 ```bash
 # SOURCE-GREP: this needs an NVIDIA card, which no runner here has. What it
 # cannot check is that the parse is right for a real nvidia-smi.
 gpu_probe_reads_the_largest_card() { ... }
 ```
+
+**"It would install something" is not one of those cases, and used to be.**
+That sentence sat in the list above for months, and it kept four gates about
+the entry points reading source: a gate that fails by running `apt-get` as root
+on whoever ran the suite is worse than the bug it guards, so they asserted the
+*shape* that produces the behaviour — a `case` as main()'s first statement, the
+characters `main "$@"` on the last line — and none of them could see an arm
+that never runs, or a refusal below the side effect it was meant to prevent.
+
+The answer is a sandbox that makes acting *observable* rather than impossible.
+`ep_sandbox` in `tests/test-lib.sh` builds one: a throwaway copy of the
+checkout (tracked files only), `env -i` so nothing this suite exports leaks in,
+and `BASH_ENV` — which bash reads before every non-interactive script, and
+every bash that script starts — defining `apt-get`, `docker`, `sudo`, `git
+clone` and the rest as functions that *record what they were asked to do* and
+return 0. Shell functions beat `PATH` lookup, so `sudo apt-get install` is
+caught too, and recording rather than refusing is what lets the failure message
+say everything a broken guard would have done instead of stopping at the first.
+It also keeps acting apart from looking: `systemctl is-active` and `docker
+inspect` are how these scripts ask questions, and a tripwire that called those
+side effects would have to be blunted until it saw nothing.
+
+Nothing about it is specific to installers. If a gate is reading source because
+running the thing would change the machine, this is the shape to reach for.
 
 **Extract-to-drive is not a source grep**, and it is the shape to reach for
 when a script cannot be sourced (`agent.sh` and `check-system.sh` both run
@@ -601,11 +625,15 @@ of twelve, then eight of twelve — so the whole population was read one gate at
 time instead. That read is `tests/source-grep-census.tsv`, and it is checked in
 because a number nobody can re-derive is a number nobody should trust.
 
-| | count | share | what it is |
+| | at the census | now | what it is |
 |---|---|---|---|
-| **A** | **153** | 55% | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
-| B | 97 | 35% | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
-| FP | 28 | 10% | not debt: the gate drives its subject and greps the *result* |
+| **A** | **153** | **145** | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
+| B | 98 | 98 | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
+| FP | 28 | 36 | not debt: the gate drives its subject and greps the *result* |
+
+The "now" column moves only in one direction, and only by conversion: eight so
+far — four in `run-agent.sh`, `check-system.sh` and `uninstall.sh`, and the
+four entry-point gates the sandbox above unblocked.
 
 153 of the suite's 1,239 checks, then — about one in eight — assert a runtime
 behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
