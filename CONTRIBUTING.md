@@ -1029,6 +1029,47 @@ still be willing to wait, so `webui.sh start` has to block on the same stub.
 If it does not, the stub is not blocking and every "it did not hang" below it
 would mean nothing.
 
+### ...and a sixth, behind a setting the sandbox never turned on
+
+Three more, found by asking the reverse question of `lca logs`: not "does it
+tell an unreadable log from a missing one", which is what four gates already
+watched, but **which of this project's own logs does it not offer at all?**
+The agent tier's. That led to `agent.sh`, and to three measurements:
+
+| Command | What it did | Why |
+|---|---|---|
+| `lca agent logs` | `rc=124`, nothing on screen but the prompt | bare `as_root docker logs`: no unprivileged attempt, no `root_for_probe`, and `-f` unconditionally so it never returned even when it worked |
+| `lca agent start` | refused: "Cannot reach the Docker daemon as ..." | `agent.sh` never set `LCA_MAY_PROMPT`, so an **action** used the strict probe — the other of the two mistakes, and the one that made `lca backup` skip the chat history on a healthy box |
+| `lca agent stop` | `rc=124`, **no output whatsoever** | `as_root docker stop ... >/dev/null 2>&1` sends sudo's own prompt to the same `/dev/null` as docker's noise |
+
+And then the one that matters most, because a gate was already watching it:
+
+```
+check-system.sh   ENABLE_AGENT=false  rc=1    55 lines   full report
+check-system.sh   ENABLE_AGENT=true   rc=124   7 lines   <-- HUNG
+```
+
+`lca check` — the health command, first in `REPORTING_COMMANDS`, run under the
+blocking sudo stub on every CI run — stalled for ever on any machine with the
+agent tier switched on. The gate held. The **sandbox** always got
+`.env.example`, where `ENABLE_AGENT=false`, so the entire agent half of
+`check-system.sh` was unreachable and `agent_live_sandboxes` — a bare
+`as_root docker ps` with `2>/dev/null` over the prompt — was never called.
+
+Two lessons, and the second is the general one:
+
+- The `no_helper_decides_for_its_caller` gate scans `lib.sh` for `can_root`.
+  `agent_live_sandboxes` named `as_root` directly, so the rule's own gate could
+  not see the rule being broken. A gate that matches the *spelling* of the last
+  instance is a gate for that instance.
+- **A gate that drives its subject still only drives the configuration you gave
+  it.** `probes_use_the_stricter_test` now runs every command under two
+  `.env`s — the shipped default and the agent tier on — and asserts that an
+  acting command which waits has printed something first, with sudo's own
+  prompt subtracted from "printed something". Without that subtraction the
+  hanging `lca agent logs`, whose only output *was* the prompt, counts as
+  having spoken.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:

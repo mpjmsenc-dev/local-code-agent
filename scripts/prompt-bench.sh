@@ -303,7 +303,7 @@ bad_command() {
                   print $i; exit } }' <<<"${line}")"
     [[ -n "${arg}" ]] || continue
     case "${arg}" in
-      ollama|webui|setup|all) ;;
+      ollama|webui|agent|setup|all) ;;
       *) return 0 ;;
     esac
   done < <(grep -oE '^[[:space:]]*([$][[:space:]])?(sudo[[:space:]]+)?lca[[:space:]]+[a-z][a-z-]*.*' <<<"$1")

@@ -547,6 +547,11 @@ REPORTING_COMMANDS=(
   "scripts/speed.sh"
   "scripts/ask.sh why"
   "scripts/selftest.sh"
+  # ...and the agent tier, which nothing here watched. 'lca agent logs' went
+  # straight to 'as_root docker logs' with no unprivileged attempt and no
+  # root_for_probe: measured, RC=124 with nothing on screen but the prompt.
+  "agent.sh logs"
+  "agent.sh status"
 )
 # The other side of the same rule, and the reason it is not simply "never
 # escalate". lib.sh records both mistakes: can_root everywhere stopped 'lca
@@ -558,11 +563,31 @@ REPORTING_COMMANDS=(
 ACTING_COMMANDS=(
   "update-model.sh --list"
   "scripts/apply.sh --dry-run"
+  # Its escalation is 'as_root docker stop ... >/dev/null 2>&1', which takes
+  # sudo's own prompt with docker's noise. It is allowed to wait. It is not
+  # allowed to wait with nothing on screen, which is what it did.
+  "agent.sh stop"
 )
-sudo_waits_sandbox() {
+# ...and the configurations to ask all of that in. The .env the sandbox got was
+# always .env.example, where ENABLE_AGENT=false — so the entire agent half of
+# check-system.sh was unreachable, and the bare 'as_root docker ps' inside
+# agent_live_sandboxes stalled 'lca check' for ever on any box with the tier
+# switched on. Every assertion below passed throughout. The gate held for one
+# configuration, which is the same shape as everything else this week.
+#
+# Second element of each row: an acting command that only exists in that
+# configuration, or empty.
+WAITS_CONFIGS=(
+  "false|"
+  "true|agent.sh start"
+)
+sudo_waits_sandbox() {   # [ENABLE_AGENT]
   rm -rf "${WAITS_SB}"; mkdir -p "${WAITS_SB}" "${WAITS_SB}/bin" "${WAITS_SB}/home"
   ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${WAITS_SB}" )
   cp "${REPO}/.env.example" "${WAITS_SB}/.env"
+  # The tier switch decides which half of check-system.sh is even reached, so
+  # it is a parameter of the sandbox and not a constant in it.
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=${1:-false}/" "${WAITS_SB}/.env"
   # Sleeps rather than reading: a real sudo reads the password from the
   # terminal, and with stdin at /dev/null a read returns EOF at once — which
   # is the one thing that does NOT reproduce the stall. Twelve seconds, so an
@@ -607,42 +632,70 @@ reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
         "${as_who[@]}" timeout "${secs}" bash "${WAITS_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
   printf 'RC=%s\n%s\n' "${rc}" "${out}"
 }
+# What the run printed, minus sudo's own prompt. Without that subtraction a
+# command whose ONLY output is "[sudo] password for ..." counts as having said
+# something — which is precisely how 'lca agent logs' presented, and precisely
+# the case this is trying to catch.
+said_something() {   # WHAT-THE-RUN-PRINTED
+  (( $(grep -v '^RC=' <<<"$1" | grep -v '\[sudo\] password for' | grep -c .) > 0 ))
+}
 probes_use_the_stricter_test() {
-  local cmd out bad=0
-  sudo_waits_sandbox
-  # First, the harness has to be able to SEE a wait, and every command that
-  # ACTS has to still be willing to. If none of them blocks, the stub is not
-  # blocking and every "it did not hang" below means nothing at all — and if
-  # one of them stops blocking later, somebody has made the whole stack strict,
-  # which is the worse of the two mistakes lib.sh records.
-  # shellcheck disable=SC2086  # the command and its argument, deliberately split
-  for cmd in "webui.sh start" "${ACTING_COMMANDS[@]}"; do
-    out="$(reporting_run 5 ${cmd})"
-    grep -qx 'RC=124' <<<"${out}" || {
-      printf "'%s' changes this machine and it is no longer willing to wait for a password — the reader typed it, and refusing where it used to work is the worse trade:\n%s\n" \
-        "${cmd}" "${out}" >&2
-      bad=1
-    }
-  done
-  (( bad == 0 )) || return 1
-  for cmd in "${REPORTING_COMMANDS[@]}"; do
-    # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
-    out="$(reporting_run 8 ${cmd})"
-    ! grep -qx 'RC=124' <<<"${out}" || {
-      printf "'%s' only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
-        "${cmd}" "${out}" >&2
-      bad=1
-      continue
-    }
-    # ...and it has to SAY something. "nothing at all, then waits for ever" is
-    # how the worst of the five presented, and half of that is the silence.
-    (( $(grep -c . <<<"${out}") > 1 )) || {
-      printf "'%s' returned without printing anything at all:\n%s\n" "${cmd}" "${out}" >&2
-      bad=1
-    }
+  local cmd out spec tier extra bad=0
+  for spec in "${WAITS_CONFIGS[@]}"; do
+    IFS='|' read -r tier extra <<<"${spec}"
+    sudo_waits_sandbox "${tier}"
+    # First, the harness has to be able to SEE a wait, and every command that
+    # ACTS has to still be willing to. If none of them blocks, the stub is not
+    # blocking and every "it did not hang" below means nothing at all — and if
+    # one of them stops blocking later, somebody has made the whole stack strict,
+    # which is the worse of the two mistakes lib.sh records.
+    for cmd in "webui.sh start" "${ACTING_COMMANDS[@]}" ${extra:+"${extra}"}; do
+      # shellcheck disable=SC2086  # the command and its argument, deliberately split
+      out="$(reporting_run 5 ${cmd})"
+      grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) changes this machine and it is no longer willing to wait for a password — the reader typed it, and refusing where it used to work is the worse trade:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+        continue
+      }
+      # ...and it may not wait in silence. A command that is allowed to ask is
+      # still not allowed to ask with nothing on screen: 'lca agent stop' sent
+      # sudo's prompt to the same /dev/null as docker's noise and sat there
+      # having printed literally nothing.
+      said_something "${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) waited for a password with nothing on screen:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+      }
+    done
+    (( bad == 0 )) || return 1
+    for cmd in "${REPORTING_COMMANDS[@]}"; do
+      # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+      out="$(reporting_run 8 ${cmd})"
+      ! grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+        continue
+      }
+      # ...and it has to SAY something. "nothing at all, then waits for ever" is
+      # how the worst of the five presented, and half of that is the silence.
+      said_something "${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) returned without printing anything at all:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+      }
+    done
   done
   (( ${#REPORTING_COMMANDS[@]} >= 5 )) || {
     echo 'the reporting-command list has shrunk — this gate has stopped watching' >&2
+    bad=1
+  }
+  # ...and the configurations themselves, because one of them is the whole
+  # reason this gate caught anything: with ENABLE_AGENT=false the agent half of
+  # check-system.sh is never reached.
+  (( ${#WAITS_CONFIGS[@]} >= 2 )) || {
+    echo 'the stall gate is back to asking about one configuration only' >&2
     bad=1
   }
   return "${bad}"
@@ -7441,6 +7494,86 @@ logs_ollama_separates_absent_from_unreadable() {
 }
 check "...and an unreadable log is not reported as a missing one" \
   logs_ollama_separates_absent_from_unreadable
+
+echo "# ...and 'everything' has to mean everything"
+# The reverse question, asked of the four gates above. They all ask whether
+# 'lca logs' tells an unreadable log from a missing one. The reverse is: WHICH
+# of this project's own logs does it not offer at all? The agent tier's. The
+# command is documented as "recent logs from everything" and pitched as
+# 'lca logs | lca ask "why did this fail?"', so on a machine with the tier
+# switched on it handed the model every tier except the one that was failing.
+# 'lca agent logs' existed; nobody reaching for the general command finds it.
+lca_logs_all_with() {   # ENABLE_AGENT  CONTAINER-EXISTS  SOURCE -> what it printed
+  local sb; sb="$(logs_checkout)"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  local code='ENABLE_AGENT="$1"; AGENT_EXISTS="$2"
+    # Neither of this box facts, so the two log readers above take their
+    # no-journal and no-file branches and stay out of the way.
+    systemd_available() { return 1; }
+    SETUP_LOG="/nonexistent"; OLLAMA_BG_LOG="/nonexistent"
+    have() { case "$1" in docker) return 0 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+    docker_daemon_reachable() { return 0; }
+    agent_container_exists() { [[ "${AGENT_EXISTS}" == "true" ]]; }
+    docker() {
+      case "$*" in
+        *"container inspect"*)
+          case "$*" in *openhands-app*) [[ "${AGENT_EXISTS}" == "true" ]] ;; *) return 0 ;; esac ;;
+        *logs*) printf "LOG-OF %s\n" "$*" ;;
+        *) return 1 ;;
+      esac
+    }
+    main "$3"'
+  as_nobody "${sb}/scripts/logs.sh" "${code}" "$1" "$2" "$3"
+}
+logs_offers_the_agent_tier() {
+  local out bad=0
+  # 1. The shipped machine: tier off, no container. Quiet — a section saying
+  # so on every 'lca logs' is noise about something that was never created.
+  out="$(lca_logs_all_with false false all)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" && {
+    printf 'a machine with no agent gets a section about one on every lca logs:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the two tiers it has always read are still read, or the arms below
+  # are measuring a command that prints nothing.
+  grep -q 'open webui (the chat app)' <<<"${out}" || {
+    printf "'lca logs' no longer reads the chat app at all:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  # 2. Tier on: the section is there and the agent's own container was read.
+  out="$(lca_logs_all_with true true all)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" || {
+    printf "'lca logs' still hands the model every tier except the agent:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  grep -q 'LOG-OF logs --tail 50 openhands-app' <<<"${out}" || {
+    printf 'the agent section was printed without the agent container being read:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 3. The switch is off and the container exists anyway. The container
+  # outlives the switch — the same reason retention does not read
+  # ENABLE_WEBUI, and the same reason it was a security hole for the chat app.
+  out="$(lca_logs_all_with false true all)"
+  grep -q 'LOG-OF logs --tail 50 openhands-app' <<<"${out}" || {
+    printf 'a running agent container is skipped because a switch in .env says the tier is off:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. Asked for by name it always answers, tier off or not — otherwise the
+  # quiet in arm 1 would be a source nobody can reach.
+  out="$(lca_logs_all_with false false agent)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" || {
+    printf "'lca logs agent' does not exist as a source:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  grep -qE 'never been started|not running here|not read' <<<"${out}" || {
+    printf 'it printed a heading and then said nothing about what it found:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca logs' reads the agent tier too, where there is one" \
+  logs_offers_the_agent_tier
 # ...and the path itself must exist in exactly one place. It was written as a
 # literal inside start_ollama_bg while logs.sh knew nothing about it, which is
 # precisely how the two drifted.

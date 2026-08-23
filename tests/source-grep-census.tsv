@@ -210,6 +210,7 @@ A	start_seeds_the_settings	two presence-greps in agent.sh
 A	stop_collects_the_sandboxes	awk inside the stop arm for one call
 A	submit_refuses_an_ambiguous_id	presence-greps in agent-task.sh
 A	sudo_asks_out_loud	awk over extracted regions for escalation order (via probe_region)
+H	sudo_waits_sandbox	builds the copy of the tree, the blocking sudo stub and the .env the stall gate drives commands in
 A	switches_are_reported	presence-grep plus an absence rule
 A	tailscale_advice_is_conditional	greps two regions for branch arms
 A	tune_checks_the_model_is_downloaded	awk over tune.sh for two branch shapes

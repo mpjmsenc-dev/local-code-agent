@@ -168,6 +168,21 @@ can_root_now() {
   sudo -n true >/dev/null 2>&1
 }
 
+# announce_possible_prompt WHAT — say a password may be wanted, before an
+# escalation whose own prompt the caller has redirected away.
+#
+# Quiet for root and for a passwordless sudoer, because nothing will be asked
+# of them, and quiet where the caller never opted into prompting, because then
+# nothing will be asked at all. What is left is the one case that needs a
+# sentence: a command the reader typed, on an account where sudo will stop and
+# wait, with sudo's own prompt going to /dev/null.
+
+announce_possible_prompt() {
+  if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+    warn "${1:-This} needs root — sudo may ask for your password."
+  fi
+}
+
 # LCA_MAY_PROMPT / root_for_probe — who decides, for the SHARED helpers.
 #
 # The rule above is a property of the CALLER, not of the function. The three
@@ -2693,7 +2708,16 @@ webui_container_env() {
 docker_daemon_reachable() {
   have docker || return 1
   docker info >/dev/null 2>&1 && return 0
-  root_for_probe && as_root docker info >/dev/null 2>&1
+  # The announcement below is here because sudo's own prompt goes to the same
+  # /dev/null as docker's noise, so without it a command that IS allowed to ask
+  # sits on a password prompt with nothing on screen. Measured on 'lca agent
+  # start': RC=124, no output whatsoever. Kept to one line so the guard stays
+  # inside the window sudo_probes_are_guarded looks at.
+  root_for_probe || return 1
+  announce_possible_prompt "Reaching the Docker daemon"
+  # The outcome stated rather than fallen through to: both callers ask this
+  # from inside a condition, where errexit does not fire.
+  as_root docker info >/dev/null 2>&1 || return 1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -3079,9 +3103,24 @@ agent_conversation_count() {
 # docker ps already orders by creation time, newest first, which is the one
 # piece of ordering here that is documented and reliable — the conversation
 # listing carries no timestamp this project could sort on.
+# Unprivileged first, then root_for_probe — never a bare as_root. Both callers
+# are read-only questions: 'lca check' listing what could be collected, and
+# 'lca agent gc' deciding what to offer. A bare as_root decided for them, and
+# on any account that is not a passwordless sudoer it printed nothing (sudo's
+# prompt goes to the 2>/dev/null with docker's noise) and waited for ever.
+# Measured with ENABLE_AGENT=true: 'lca check' reached the sandbox question and
+# stopped there, RC=124, the summary never printed.
+#
+# Same defect as select_docker and run_reader, through a different door. Those
+# named can_root, which the gate on that rule scans lib.sh for; this one went
+# straight to as_root and was invisible to it. What catches it now does not
+# read lib.sh at all: the reporting commands are run twice, once with the agent
+# tier off and once with it on. The gate held — for the shipped default only.
 agent_live_sandboxes() {
   have docker || return 1
-  as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
+  { docker ps --format '{{.Names}}' 2>/dev/null \
+    || { root_for_probe && as_root docker ps --format '{{.Names}}' 2>/dev/null; } \
+    || true; } | grep -E '^oh-agent-server-' || true
 }
 
 # agent_reclaimable_sandboxes — running sandboxes whose conversation is over,

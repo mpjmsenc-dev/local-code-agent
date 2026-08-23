@@ -31,7 +31,7 @@ Usage: lca [command] [args...]
   lca chat                phone setup: chat URL + SSH address, both as QR codes
   lca apply               make the running system match your .env edits
   lca check [--quick]     full health check (--quick skips the slow model probe)
-  lca logs [-f] [source]  recent logs (ollama | webui | setup | all)
+  lca logs [-f] [source]  recent logs (ollama | webui | agent | setup | all)
   lca speed               measure tokens/second and explain what limits it
   lca test                live end-to-end self-test (proves it really works)
   lca update [--check]    back up, update, re-run setup, verify
