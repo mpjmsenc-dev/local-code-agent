@@ -8574,6 +8574,79 @@ uninstall_removes_the_agent() {
 }
 check "uninstall removes the agent container too" \
   uninstall_removes_the_agent
+REMOVE_SANDBOX_LOG="${SANDBOX}/.remove-sandbox-calls"
+remove_sandboxes_calls() { cat "${REMOVE_SANDBOX_LOG}" 2>/dev/null || true; }
+remove_agent_sandboxes_run() {  # two|none|rmfails -> the output, with "rc=N" last
+  : > "${REMOVE_SANDBOX_LOG}"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    CASE="$2"; LOG="$3"
+    have() { return 0; }
+    docker_daemon_reachable() { return 0; }
+    # The sandbox list, as docker would give it. Two of them, because a loop
+    # that stops after the first is exactly the shape this is watching for.
+    agent_live_sandboxes() {
+      [[ "${CASE}" == "none" ]] && return 0
+      printf "oh-agent-server-a\noh-agent-server-b\n"
+    }
+    as_root() {
+      printf "AS_ROOT %s\n" "$*" >> "${LOG}"
+      case "$*" in *"rm -f"*) [[ "${CASE}" == "rmfails" ]] && return 1 ;; esac
+      return 0
+    }
+    rc=0; remove_agent_sandboxes 2>&1 || rc=$?
+    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${REMOVE_SANDBOX_LOG}"
+}
+# ...and the sandboxes the agent spawned must go with it. Found by asking what
+# an uninstall leaves behind that it never mentions: the app container was
+# removed and every oh-agent-server-* it had created was left RUNNING, under a
+# closing line that said "Uninstall complete". A sandbox belongs to a
+# conversation inside the app container, so once that container is gone nothing
+# can reach them — and step 6 of the same run removes 'lca', taking with it the
+# only two commands ('lca agent stop', 'lca agent gc') that could have
+# collected them. Nothing was left on the machine that could ever clean up.
+uninstall_takes_the_sandboxes_too() {
+  local out calls bad=0
+  out="$(remove_agent_sandboxes_run two)"
+  calls="$(remove_sandboxes_calls)"
+  grep -q 'docker rm -f oh-agent-server-a' <<<"${calls}" || {
+    printf 'an uninstall left the agent sandboxes running:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  grep -q 'docker rm -f oh-agent-server-b' <<<"${calls}" || {
+    printf 'it removed one sandbox and stopped:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  grep -qx 'rc=0' <<<"${out}" || {
+    printf 'removing the sandboxes reported a failure:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # A machine with none is silent and clean — the honest quiet answer.
+  out="$(remove_agent_sandboxes_run none)"
+  grep -qx 'rc=0' <<<"${out}" || {
+    printf 'a machine with no sandboxes is reported as having them:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'sandbox' <<<"${out}" && {
+    printf 'a machine with no sandboxes was told about sandboxes:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and one that will not die is reported as still running, and reaches the
+  # verdict rather than being warned about once and forgotten.
+  out="$(remove_agent_sandboxes_run rmfails)"
+  grep -q 'STILL running on this machine' <<<"${out}" || {
+    printf 'a sandbox that could not be removed was not reported as still running:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'rc=1' <<<"${out}" || {
+    printf 'a sandbox survived and the step reported success:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "uninstall takes the agent's sandbox containers with it" \
+  uninstall_takes_the_sandboxes_too
 # ...and the closing line has to agree with it, because that is the line people
 # read. "Uninstall complete" directly above "Kept on purpose: ..." is a full
 # accounting of what survived, and it was signed off on a machine still holding
@@ -8663,6 +8736,7 @@ uninstall_run() {   # units|webui|workspace|models|none -> the whole run
     # whether main carries the answer to the end.
     remove_boot_units()      { [[ "${FAIL}" != "units" ]]; }
     remove_webui()           { [[ "${FAIL}" != "webui" ]]; }
+    remove_agent_sandboxes() { [[ "${FAIL}" != "sandboxes" ]]; }
     remove_agent_workspace() { [[ "${FAIL}" != "workspace" ]]; }
     remove_agent_models()    { [[ "${FAIL}" != "models" ]]; }
     main --yes 2>&1' _ "${sb}/uninstall.sh" "$1"
@@ -8680,6 +8754,7 @@ uninstall_feeds_every_step_to_the_verdict() {
   # it is the sentence that is checked.
   for case in "units|start again at the next reboot" \
               "webui|chat app was NOT removed" \
+              "sandboxes|sandbox containers could not be removed and are STILL running" \
               "workspace|workspace could not be removed" \
               "models|still listed by: ollama list"; do
     want="${case#*|}"

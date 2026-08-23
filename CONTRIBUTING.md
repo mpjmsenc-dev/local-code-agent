@@ -1070,6 +1070,27 @@ Two lessons, and the second is the general one:
   hanging `lca agent logs`, whose only output *was* the prompt, counts as
   having spoken.
 
+### The reverse question, third instance
+
+The pattern that produced the last three findings, stated so it can be reused:
+take whatever you are looking at and ask it backwards.
+
+| Forward | Reverse | What it found |
+|---|---|---|
+| does `.env.example` document every setting the code reads? | is there a setting the code honours that `.env.example` never mentions? | fifteen candidates, one real |
+| does `lca logs` tell an unreadable log from a missing one? | which of this project's own logs does it not offer at all? | the agent tier — and four stalls behind it |
+| does the switch validator catch a mistyped switch? | which switches does the validator not see? | the two `.env.example` suggests in a comment |
+| does `uninstall` remove what it says it removes? | what does it leave behind that it never mentions? | every `oh-agent-server-*` sandbox, left running |
+
+That last one is the sharpest of the four. `uninstall.sh` removed the agent's
+app container and left every sandbox it had spawned **running**, under a
+closing line that said "Uninstall complete". A sandbox belongs to a
+conversation inside the app container, so once that container is gone nothing
+can reach them — and step 6 of the same run removes `lca`, taking with it the
+only two commands (`lca agent stop`, `lca agent gc`) that could have collected
+them. Nothing was left on the machine that could ever clean up. It is now a
+step of its own, with its own line in the verdict.
+
 ## Configuration blindness
 
 A gate that reads source is dishonest: it claims a runtime behaviour and offers

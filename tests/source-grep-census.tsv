@@ -180,6 +180,7 @@ A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
 A	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call
 A	ready_banner_warns_about_a_stale_chat	awk inside banner_ready for one call
 FP	recovery_scripts_survive_offline	runs a real backup with the kill switch ON: it must still write an archive, say why the volume is missing, KEEP older ones, and never reach the network
+H	remove_agent_sandboxes_run	runs uninstall.sh's sandbox removal against a stand-in docker, with two sandboxes, none, and one that will not die
 A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
 H	restore_archive_sandbox	builds the checkout, the good-but-unopenable archive and the corrupt one a real restore is run against
 A	restore_asks_for_the_advice	awk inside main() for one call

@@ -159,6 +159,44 @@ remove_agent_workspace() {
   return 1
 }
 
+# remove_agent_sandboxes — the containers the agent spawned, which nothing else
+# in this file was ever going to take.
+#
+# A sandbox belongs to a CONVERSATION inside the app container: the app creates
+# it and the app is the only thing that can reach it. remove_webui above has
+# just taken the app container away, so by the time this runs every
+# oh-agent-server-* on the machine is unreachable by anything — and they do not
+# stop on their own. Measured on a 7.8 GiB box: three alive at once, the oldest
+# thirteen hours, 1,062 MiB between them.
+#
+# Found by asking what an uninstall leaves behind that it never mentions. It
+# left these RUNNING and said "Uninstall complete" — and the only two commands
+# that could have collected them, 'lca agent stop' and 'lca agent gc', are
+# removed by step 6 of this same run. Nothing was left that could ever clean up.
+#
+# --keep-data does not spare them: a sandbox has no host mount, so there is no
+# data here to keep, and the flag is about the chat app's volume and the
+# agent's workspace, both of which are on disk.
+remove_agent_sandboxes() {
+  local found name failed=0
+  have docker || return 0
+  docker_daemon_reachable || return 0
+  found="$(agent_live_sandboxes 2>/dev/null || true)"
+  [[ -n "${found}" ]] || return 0
+  step "Removing the agent's sandbox containers"
+  info "The app container is gone, so these cannot be reached by anything any more."
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    if as_root docker rm -f "${name}" >/dev/null 2>&1; then
+      ok "Removed ${name}."
+    else
+      warn "The agent sandbox '${name}' could not be removed and is STILL running on this machine."
+      failed=1
+    fi
+  done <<<"${found}"
+  return "${failed}"
+}
+
 # remove_agent_models — the derived <model>-agent entries this project creates.
 #
 # They are manifests over blobs the base model already owns, so removing them
@@ -331,7 +369,10 @@ main() {
   # Not '|| true'. These two threw their status away on the line that produced
   # it, so a workspace that survived warned once and then never reached the
   # verdict; the end state is read back below, but the intent is recorded here.
-  local workspace_left=0 models_left=0
+  local workspace_left=0 models_left=0 sandboxes_left=0
+  # After remove_webui, never before it: while the app container is up it can
+  # spawn another sandbox behind us.
+  remove_agent_sandboxes || sandboxes_left=1
   remove_agent_workspace "${keep_data}" || workspace_left=1
   remove_agent_models || models_left=1
 
@@ -452,6 +493,9 @@ main() {
     left_behind+=("The agent's workspace ${ws} is still here, including anything it checked out — remove it with: sudo rm -rf ${ws}")
   elif (( workspace_left )); then
     left_behind+=("The agent's workspace could not be removed (see above).")
+  fi
+  if (( sandboxes_left )); then
+    left_behind+=("One or more of the agent's sandbox containers could not be removed and are STILL running — remove them with: sudo docker ps --format '{{.Names}}' | grep ^oh-agent-server- | xargs -r sudo docker rm -f")
   fi
   # Only worth saying if Ollama itself survived: step 4 takes the model store
   # with it, so on a normal run there is nothing left for these to be in.
