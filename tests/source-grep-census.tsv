@@ -44,12 +44,12 @@ A	autotune_false_still_converges	awk over tune.sh for a branch shape
 A	backup_and_restore_agree_on_the_component	one side is behaviour: restore could name the file in a dead branch
 A	backup_asks_the_state_helper	awk over do_backup for a call and a branch
 A	backup_checks_paused_before_running	awk for the order two probes appear in
-A	backup_cleans_up_a_partial_archive	greps backup.sh for trap bookkeeping
-A	backup_is_not_world_readable	awk for a chmod line and a umask ordering
-A	backup_ownership_is_consistent	counts chown forms in the source
-A	backup_records_the_machine	greps backup.sh for printf keys
+FP	backup_cleans_up_a_partial_archive	drives do_backup with a failing tar and looks at what is left
+FP	backup_is_not_world_readable	drives do_backup and reads the modes off what it wrote
+FP	backup_ownership_is_consistent	drives do_backup with a stubbed invoking_user and reads the owners
+FP	backup_records_the_machine	drives do_backup and reads the record out of the archive
 A	backup_serialises_itself	greps the lock function for flock flags
-A	backup_stages_no_empty_model_list	awk for an rm inside a failure branch
+FP	backup_stages_no_empty_model_list	drives do_backup with a failing ollama and lists the archive
 A	banner_network_probes_bound_themselves	greps motd.sh probe lines for --max-time
 A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
 A	both_commands_announce_a_model_load	greps two scripts for a call
@@ -330,3 +330,4 @@ H	settings_verdict	runs check-system.sh's Settings block over a given configurat
 H	drift_verdict	runs check-system.sh's drift-reporting block over a given state
 H	uninstall_home_sweep	runs uninstall.sh's model sweep over a sandbox of fake homes
 H	agent_docker_argv	builds the argv agent.sh really hands docker run, with docker stubbed
+H	backup_run_in	takes a real backup into a sandbox with docker and ollama absent

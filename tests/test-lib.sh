@@ -1968,35 +1968,93 @@ no_script_asks_who_by_hand() {
   return "${bad}"
 }
 check "no script works out who the user is by hand" no_script_asks_who_by_hand
-# ...and the archive must end up owned by the same person as the directory
-# holding it. install_timer chowns backups/ to the human on purpose; the
-# finished tarball was chowned to '$(id -un)', which under the documented
-# 'sudo lca backup' is root — so the line did nothing and the human owned a
-# directory full of files they could not read. umask 077 makes that literal,
-# because the archive holds the chat app's session-signing key. Reproduced:
+# backup_run_in MODE — take a REAL backup into a sandbox and hand back what it
+# printed. Run once per mode and cached, because each run writes an archive.
 #
-#   drwx------ 2 ubuntu root   backups/
-#   -rw------- 1 root   root   local-code-agent-backup-TEST.tar.gz
-#   $ sudo -u ubuntu cat .../local-code-agent-backup-TEST.tar.gz
-#   NO — permission denied
+#   plain     no docker, no ollama: the .env and the machine record only
+#   models    ollama present and its listing FAILING part-way
+#   tarfail   the archive step failing after creating the file, as a full disk does
 #
-# ...with "Copy it off the machine (e.g. scp)" printed seconds later.
-backup_ownership_is_consistent() {
-  local body bad=0 n
-  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/backup.sh")"
-  # Every chown in this file asks the same question.
-  n="$(grep -cE 'chown "\$\(invoking_user\)"' <<<"${body}")"
-  (( n >= 2 )) || {
-    printf 'only %s of backup.sh chowns ask invoking_user; the directory and the archive must agree\n' "${n}" >&2
-    bad=1
-  }
-  grep -qE 'chown "\$\(id -un\)"' <<<"${body}" && {
-    echo "backup.sh chowns to the running account again, which is root under the documented sudo invocation" >&2
-    bad=1
-  }
-  return "${bad}"
+# backup.sh guards its own main(), so this sources it and calls do_backup — no
+# extraction and no eval, the real function. invoking_user is stubbed to an
+# account that is NOT the one running the suite, which is the only way to tell
+# "chown to the human who sudo-ed" from "chown to whoever is running".
+#
+BACKUP_OWNER=nobody
+# SOURCE-GREP: a false positive of the classifier, which asks whether a
+# function names a ${REPO}/ path and uses a text tool. This one SOURCES that
+# path and calls the real function; the text tool is the cat that replays the
+# cached output. Same position as uninstall_says and tune_dry_run_in.
+backup_run_in() {
+  local mode="$1"
+  BACKUP_SB="${SANDBOX}/backup-${mode}"
+  local outfile="${BACKUP_SB}.out"
+  if [[ ! -e "${outfile}" ]]; then
+    rm -rf "${BACKUP_SB}"; mkdir -p "${BACKUP_SB}"
+    bash -c '
+      set -uo pipefail
+      cd "$2"
+      source "$1" >/dev/null 2>&1
+      BACKUP_DIR="$2/backups"
+      MODE="$3"; OWNER="$4"
+      have() { case "$1" in
+                 docker) return 1 ;;
+                 ollama) [[ "${MODE}" == models ]] ;;
+                 *) command -v "$1" >/dev/null 2>&1 ;;
+               esac; }
+      ollama() { return 1; }
+      docker_daemon_reachable() { return 1; }
+      as_root() { "$@"; }
+      invoking_user() { printf "%s\n" "${OWNER}"; }
+      confirm() { return 0; }
+      if [[ "${MODE}" == tarfail ]]; then
+        # A file created and then abandoned, which is what a full disk leaves.
+        tar() { case "${1:-}" in czf) : > "$2"; return 1 ;; *) command tar "$@" ;; esac; }
+      fi
+      do_backup
+      printf "RC=%s\n" "$?"
+    ' _ "${REPO}/backup.sh" "${BACKUP_SB}" "${mode}" "${BACKUP_OWNER}" > "${outfile}" 2>&1
+  fi
+  cat "${outfile}"
 }
-check "a backup ends up owned by the same person as the directory holding it" \
+# backup_archive_in MODE — the archive that run left, or nothing.
+backup_archive_in() {
+  backup_run_in "$1" >/dev/null
+  local f
+  for f in "${SANDBOX}/backup-$1/backups/"*.tar.gz; do
+    [[ -e "${f}" ]] || return 1
+    printf '%s' "${f}"
+    return 0
+  done
+  return 1
+}
+# Non-vacuity for every backup gate below: a run that produced no archive would
+# make several of them pass over nothing.
+backup_wrote_an_archive() { backup_archive_in plain >/dev/null; }
+check "a backup with no docker and no ollama still writes an archive" \
+  backup_wrote_an_archive
+# ...and the archive must end up owned by the same person as the directory.
+# Driven, not read: the old gate counted 'chown "$(invoking_user)"' lines and
+# looked for 'chown "$(id -un)"'. Both survive the chown never running, and
+# neither says who owns the file at the end. The stub makes invoking_user
+# answer with an account that is not the one running the suite, so the two
+# spellings give different answers and only one of them passes.
+backup_ownership_is_consistent() {
+  local tarball dirowner fileowner
+  tarball="$(backup_archive_in plain)" || {
+    echo 'the plain backup wrote no archive' >&2; return 1; }
+  dirowner="$(stat -c %U "${SANDBOX}/backup-plain/backups")"
+  fileowner="$(stat -c %U "${tarball}")"
+  [[ "${dirowner}" == "${BACKUP_OWNER}" ]] || {
+    printf 'backups/ ended up owned by %s, not by the human who ran sudo (%s) — they cannot read their own backups\n' \
+      "${dirowner}" "${BACKUP_OWNER}" >&2
+    return 1; }
+  [[ "${fileowner}" == "${BACKUP_OWNER}" ]] || {
+    printf 'the archive ended up owned by %s, not by %s — the directory and the archive disagree\n' \
+      "${fileowner}" "${BACKUP_OWNER}" >&2
+    return 1; }
+}
+check "a backup belongs to the human who asked for it, not to root" \
   backup_ownership_is_consistent
 # The docker-group branch is the one with a consequence, so it is asserted on
 # its own: it must key off invoking_user, not off a second reading of EUID.
@@ -3029,7 +3087,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 286 )) || {
+  (( n <= 137 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -8201,18 +8259,26 @@ restore_main_calls_the_volume_restore() {
 }
 check "restore.sh still restores the WebUI volume" \
   restore_main_calls_the_volume_restore
-# backup.sh must actually record what restore.sh reads, or the comparison above
-# silently degrades to the "old backup" branch for every new backup.
+# backup.sh must actually record what restore.sh reads, or the restore has
+# nothing to advise from. Driven: the record is read out of the archive rather
+# than looked for in the source, because a printf that never runs leaves the
+# same line in the file.
 backup_records_the_machine() {
-  local key
+  local tarball meta key
+  tarball="$(backup_archive_in plain)" || {
+    echo 'the plain backup wrote no archive' >&2; return 1; }
+  meta="$(tar xzf "${tarball}" -O ./meta 2>/dev/null)"
+  [[ -n "${meta}" ]] || {
+    printf 'the archive carries no machine record at all:\n%s\n' "$(tar tzf "${tarball}")" >&2
+    return 1; }
   for key in ram_gib model context; do
-    grep -qE "printf '${key}=" "${REPO}/backup.sh" || {
-      printf 'backup.sh does not record %s, which restore.sh reads\n' "${key}" >&2
-      return 1
-    }
+    grep -qE "^${key}=.+" <<<"${meta}" || {
+      printf 'the machine record has no %s, which restore.sh reads to advise on this box:\n%s\n' \
+        "${key}" "${meta}" >&2
+      return 1; }
   done
 }
-check "backup.sh records the machine details restore.sh compares" \
+check "a backup records the machine it came from, so a restore can advise" \
   backup_records_the_machine
 # A command printed in a doc is a command being shipped. The first version of
 # the "read the metadata" snippet in docs/BACKUPS.md globbed the backups
@@ -15299,14 +15365,26 @@ update_refuses_unattended_after_a_failed_backup() {
     echo 'update.sh still asks confirm() after a failed backup when nobody can answer' >&2
     return 1; }
 }
+# Driven: the archive is listed rather than the source read. '>' creates
+# models.txt before ollama fails, and restore.sh reads a file that exists as an
+# authoritative "no models" — so what matters is whether the file is IN the
+# archive, which is a thing that can be looked at.
 backup_stages_no_empty_model_list() {
-  # '>' creates models.txt before ollama fails, and restore.sh reads a file
-  # that exists as an authoritative "no models".
-  awk '/ollama list > "\$\{workdir\}\/models.txt"/ { inb = 1 }
-       inb && /rm -f "\$\{workdir\}\/models.txt"/ { found = 1 }
-       inb && /^  fi$/ { exit }
-       END { exit !found }' "${REPO}/backup.sh" || {
-    echo 'backup.sh ships a zero-byte models.txt when ollama list fails' >&2; return 1; }
+  local tarball
+  tarball="$(backup_archive_in models)" || {
+    echo 'the models-mode backup wrote no archive' >&2; return 1; }
+  # Listed once and captured, not piped: 'tar | grep -q' leaves on the first
+  # match and SIGPIPEs tar, which under pipefail reads as 141 — the trap this
+  # suite has its own gate against, and it caught this line.
+  local listing; listing="$(tar tzf "${tarball}")"
+  ! grep -q 'models.txt' <<<"${listing}" || {
+    printf 'a zero-byte models.txt shipped in the archive, which restore.sh reads as "this machine had no models":\n%s\n' \
+      "${listing}" >&2
+    return 1; }
+  # Non-vacuity: the archive has to carry what it does keep, or an empty
+  # listing would satisfy the line above.
+  grep -q './env' <<<"${listing}" || {
+    echo 'the archive carries no .env either — this checked nothing' >&2; return 1; }
 }
 check "check-system restores set +e after sourcing tune.sh" errexit_survives_sourcing_tune
 check "the prompt check is reported as skipped, not passed"  prompt_check_is_not_claimed_when_skipped
@@ -16259,31 +16337,28 @@ umask_really_gives_owner_only() {
   [[ "${mode}" == 600 ]]
 }
 check "umask 077 produces a 600 file" umask_really_gives_owner_only
+# Driven: the modes are read off the files the backup left behind. The old gate
+# read do_backup for a chmod and for 'umask 077' before the tar — both of which
+# survive either one never running, and neither of which is the thing at stake.
+# What is at stake is that every archive holds the .env, and the .env holds the
+# secrets.
 backup_is_not_world_readable() {
-  local body
-  # Scoped to do_backup, not a whole-file grep. install_timer also chmods the
-  # directory, and the first version of this check was satisfied by that one
-  # alone — deleting the chmod from do_backup, which is the one that runs on
-  # every single backup, passed a full green suite. Proved by mutation, which
-  # is the only reason it was noticed.
-  awk '/^do_backup\(\) \{/            { inb = 1; next }
-       inb && /^\}/                   { exit }
-       inb && /^[[:space:]]*#/        { next }
-       inb && /chmod 700 "\$\{BACKUP_DIR\}"/ { found = 1 }
-       END { exit !found }' "${REPO}/backup.sh" || {
-    echo 'do_backup does not restrict backups/ to its owner' >&2; return 1; }
-  body="$(grep -v '^[[:space:]]*#' "${REPO}/backup.sh")"
-  (( $(grep -c 'chmod 700 "[$]{BACKUP_DIR}"' <<<"${body}") >= 2 )) || {
-    echo 'the timer install no longer restricts backups/ either' >&2; return 1; }
-  # umask BEFORE the tar, not a chmod after it: tar creates the file the moment
-  # it starts, so a later chmod only closes it once the secrets are on disk.
-  awk '/^[[:space:]]*#/ { next }
-       /umask 077/       { if (!tarred) umasked = NR }
-       /tar czf .*tarball/ { tarred = NR }
-       END { exit !(umasked && tarred && umasked < tarred) }' "${REPO}/backup.sh" || {
-    echo 'backup.sh writes the tarball before narrowing the umask' >&2; return 1; }
+  local tarball dirmode filemode
+  tarball="$(backup_archive_in plain)" || {
+    echo 'the plain backup wrote no archive to inspect' >&2; return 1; }
+  dirmode="$(stat -c %a "${SANDBOX}/backup-plain/backups")"
+  [[ "${dirmode}" == "700" ]] || {
+    printf 'backups/ came out %s, not 700\n' "${dirmode}" >&2
+    return 1; }
+  # The archive's own mode is the umask claim, observed rather than described:
+  # tar creates the file the moment it starts, so a chmod afterwards would
+  # leave it readable for as long as the archive took to write.
+  filemode="$(stat -c %a "${tarball}")"
+  [[ "${filemode}" == "600" ]] || {
+    printf 'the archive came out %s, not 600 — it holds the .env\n' "${filemode}" >&2
+    return 1; }
 }
-check "backup.sh keeps backups/ and new archives owner-only" \
+check "a backup is readable only by its owner, directory and archive alike" \
   backup_is_not_world_readable
 
 echo "# a backup must not leave the chat app frozen for the next one to inherit"
@@ -16321,45 +16396,28 @@ backup_checks_paused_before_running() {
   }
 }
 echo "# an interrupted backup must not leave a partial archive behind"
-# 'if ! tar ...; then rm -f "${tarball}"; fi' covers tar FAILING. It does not
-# cover tar being INTERRUPTED: bash exits without taking the else branch.
-# Measured directly, with a group SIGINT during tar —
-#
-#   $ bash -c 'if ! tar czf /tmp/probe.tar.gz -C /tmp/bigsrc .; then
-#              echo CLEANUP RAN; rm -f /tmp/probe.tar.gz; fi'
-#   (no output at all)
-#   -rw-r--r-- 1 root root 153616384 /tmp/probe.tar.gz
-#
-# ...and a separate probe confirmed an EXIT trap DOES run on that signal, which
-# is why the fix hangs off the trap this script already had rather than adding
-# INT/TERM/HUP. A truncated archive cannot be restored — restore.sh runs
-# 'tar tzf' first — but it looks like a backup in 'ls' and counts toward
-# BACKUP_KEEP, so enough interrupted runs evict the real ones.
+# A failed archive must not be left where restore.sh would read it as a backup,
+# and a COMPLETE one must survive the same exit path. Driven both ways: the old
+# gate grepped for the marker variable being set, used and cleared, which is
+# three strings that all survive the trap never firing.
 backup_cleans_up_a_partial_archive() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/backup.sh")"
-  # shellcheck disable=SC2016  # the literal ${tarball} is what we search for
-  grep -q 'PARTIAL_TARBALL="${tarball}"' <<<"${body}" || {
-    echo 'backup.sh never records the archive it is part-way through writing' >&2
+  local out left
+  out="$(backup_run_in tarfail)"
+  left="$(find "${SANDBOX}/backup-tarfail/backups" -name '*.tar.gz' 2>/dev/null)"
+  [[ -z "${left}" ]] || {
+    printf 'a failed archive was left on disk, where restore.sh would read it as a backup:\n%s\n%s\n' \
+      "${left}" "${out}" >&2
     return 1; }
-  grep -qE 'PARTIAL_TARBALL:-.*rm -f' <<<"${body}" || {
-    echo 'nothing removes the partial archive on the way out' >&2
+  # ...and it must be said, not tidied away in silence.
+  grep -qi 'partial archive was deleted' <<<"${out}" || {
+    printf 'the partial archive was removed without telling anyone:\n%s\n' "${out}" >&2
     return 1; }
-  grep -q 'PARTIAL_TARBALL=""' <<<"${body}" || {
-    echo 'backup.sh never clears the marker, so a COMPLETE archive gets deleted at exit' >&2
-    return 1; }
-  # Every EXIT trap has to go through the one cleanup, or a future trap
-  # silently opts out of it. Three of them re-arm around the pause/unpause.
-  local traps
-  traps="$(grep -c 'trap .*EXIT' <<<"${body}")"
-  local via
-  via="$(grep -c 'trap .*backup_cleanup.*EXIT' <<<"${body}")"
-  [[ "${traps}" == "${via}" ]] || {
-    printf '%s of backup.sh %s EXIT traps bypass backup_cleanup\n' \
-      "$(( traps - via ))" "${traps}" >&2
-    return 1; }
+  # The other half, and the one a cleanup gets wrong: a complete archive must
+  # survive the same exit trap.
+  backup_archive_in plain >/dev/null || {
+    echo 'the exit cleanup took a complete archive with it' >&2; return 1; }
 }
-check "an interrupted backup takes its half-written archive with it" \
+check "a failed archive is removed, and a complete one is not" \
   backup_cleans_up_a_partial_archive
 # ...and the cleanup itself, driven rather than grepped.
 partial_cleanup_behaves() {
@@ -18401,7 +18459,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 142 )) || {
+  (( n <= 137 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
