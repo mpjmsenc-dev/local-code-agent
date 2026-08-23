@@ -153,13 +153,51 @@ do_install() {
 
 do_remove() {
   step "Removing the Ollama relay"
+  # Every step here is best-effort, and that is fine — what was not fine is
+  # what came after it. "The relay is gone" was printed unconditionally, below
+  # four commands each ending in '|| true' and above a health probe, three
+  # lines up in this same file, that was never consulted. A socket unit that
+  # refuses to disable still holds the bind; this said it was gone.
+  #
+  # Best-effort ACTIONS, then one readback of the real state. The actions stay
+  # forgiving — a unit that was never installed must not make removal fail —
+  # and the sentence at the end comes from what is true afterwards.
   if systemd_available; then
     as_root systemctl disable --now local-code-agent-ollama-relay.socket >/dev/null 2>&1 || true
     as_root systemctl stop local-code-agent-ollama-relay.service >/dev/null 2>&1 || true
   fi
   as_root rm -f "${RELAY_SOCKET_UNIT}" "${RELAY_SERVICE_UNIT}" || true
-  systemd_available && { as_root systemctl daemon-reload >/dev/null 2>&1 || true; }
-  ok "The relay is gone. Ollama is unchanged — it was never moved off loopback."
+  if systemd_available; then
+    as_root systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+
+  local left=()
+  if [[ -e "${RELAY_SOCKET_UNIT}" ]]; then left+=("${RELAY_SOCKET_UNIT}"); fi
+  if [[ -e "${RELAY_SERVICE_UNIT}" ]]; then left+=("${RELAY_SERVICE_UNIT}"); fi
+  if (( ${#left[@]} )); then
+    err "The relay unit file(s) are still on disk: $(printf '%s ' "${left[@]}")"
+    die "Removal did not finish. Remove them as root and reload systemd: sudo rm -f $(printf '%s ' "${left[@]}")&& sudo systemctl daemon-reload"
+  fi
+  # The unit files being gone is not the same as the bind being released: a
+  # socket unit that would not disable keeps listening until systemd is told,
+  # and that is exactly the state this used to call "gone".
+  #
+  # The address is resolved once, and its absence is reported rather than
+  # printed as a gap in a sentence: with an unusable OLLAMA_RELAY_PORT there is
+  # no address to probe, so "nothing is answering there" would be a claim about
+  # a place this cannot name.
+  local addr=""
+  addr="$(ollama_relay_address 2>/dev/null || true)"
+  if [[ -z "${addr}" ]]; then
+    ok "The relay is gone: both unit files removed."
+    info "OLLAMA_RELAY_PORT='${OLLAMA_RELAY_PORT}' is not a port, so there was no address to re-check afterwards — if anything is still listening, find it with: sudo ss -ltnp"
+    return 0
+  fi
+  if ollama_relay_healthy; then
+    warn "The unit files are removed, but something is STILL answering at ${addr} — so the bind was not released. Check what holds it: sudo ss -ltnp | grep $(ollama_relay_port)"
+    die "The relay is not gone yet. If systemd still lists it, clear it with: sudo systemctl reset-failed local-code-agent-ollama-relay.socket && sudo systemctl daemon-reload"
+  fi
+  ok "The relay is gone: both unit files removed and nothing answering at ${addr}. Ollama is unchanged — it was never moved off loopback."
 }
 
 do_status() {

@@ -4,6 +4,10 @@ Local inference on a CPU is a reading pace, not instant. This page explains what
 actually controls the speed, in the order that matters, so you can spend effort
 where it pays.
 
+**If it was fast and then suddenly was not**, read
+[Why it randomly gets slow](#why-it-randomly-gets-slow-the-two-models-evict-each-other)
+first — that one has a cause most people never guess, and it is not your hardware.
+
 ## First: measure, don't guess
 
 ```bash
@@ -176,6 +180,44 @@ nothing to configure. Extra RAM beyond what the model needs does not make
 inference faster; it only lets auto-tune choose a *bigger* (slower) model on the
 next boot. If you resized for RAM and it got slower, that is why.
 
+## Why it randomly gets slow: the two models evict each other
+
+This is the one people experience as *"it was fine, then it randomly got
+slow"*, and it is not the hardware.
+
+With `ENABLE_AGENT=true` this stack runs **two** models, not one:
+
+| | model | window | used by |
+|---|---|---|---|
+| 1 | `MODEL_NAME` | `OLLAMA_CONTEXT_LENGTH` (4096 on the 3b rung) | the chat app, aider |
+| 2 | `<model>-agent` | `AGENT_MODEL_CONTEXT` (16384) | the agent tier |
+
+They are separate models to Ollama, with separate KV caches. **RAM is not the
+problem** — `OLLAMA_MAX_LOADED_MODELS=1` means only one is ever resident, so the
+peak is the larger of the two rather than their sum (2.7 GB on the 3b rung, not
+4.9 GB). The ladder below was derived for one model and one model is still what
+is loaded at any instant.
+
+**Eviction is the problem.** Every switch between surfaces unloads one model and
+loads the other, and the prompt's prefix cache goes with it. Measured on this
+project's own agent prompt:
+
+| | first call, cold | later call, warm |
+|---|---|---|
+| the agent's prompt (18,353 when this was measured; 13,796 since the skills cut) | **543 s** | **3.6 s** |
+
+So **one chat message in the middle of an agent session** makes that session's
+next step pay the cold price again — a step that took four seconds now takes
+nine minutes, for no visible reason.
+
+What to do about it:
+
+- **Use them in blocks**, not alternating. Finish with the chat, then work with
+  the agent.
+- **`OLLAMA_KEEP_ALIVE` does not help here.** It controls the idle timer, and
+  this eviction is the other model *arriving*, not the timer expiring.
+- If you only ever use one surface, nothing above applies to you.
+
 ## What will not help
 
 - **Quantization fiddling.** Ollama's default tags are already q4-ish, which is
@@ -183,6 +225,18 @@ next boot. If you resized for RAM and it got slower, that is why.
   in output quality — on a small local model you cannot spare it.
 - **Running two models at once.** `OLLAMA_MAX_LOADED_MODELS=1` is set on purpose;
   a second resident model competes for the same RAM and cores.
+- **`OLLAMA_KEEP_ALIVE=-1`, as a fix for the section above.** It is not one, and
+  it is worth being exact about why: keep-alive decides what happens when
+  *nothing is asking*. Eviction happens when the *other model arrives*. Pinning
+  one model does not stop the other one loading — it only changes which of them
+  is holding RAM when the switch comes. `lca tune` sets keep-alive from this
+  box's RAM and which tiers are on (`-1` with the agent on, so the agent's own
+  gaps stop costing a full prompt re-read), and says the same thing out loud
+  when it does.
+
+  With `ENABLE_AGENT=true` the stack itself makes a second model, and what that
+  costs is its own section:
+  [Why it randomly gets slow](#why-it-randomly-gets-slow-the-two-models-evict-each-other).
 - **Swap.** If a model does not fit in RAM it will "work" via swap at
   unusable speed. `check-system.sh` warns about the RAM headroom instead —
   believe it, and take a smaller model.

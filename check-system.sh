@@ -104,7 +104,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -139,6 +139,14 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_warn "BACKUP_AGENT_MAX_MB='${value}' is not a whole number, so the agent workspace is skipped rather than risking an unbounded archive. Set a number (or 0 for no ceiling, on purpose) in ${ENV_FILE}." ;;
     AGENT_STUCK_STRIKES)
       p_warn "AGENT_STUCK_STRIKES='${value}' is not a whole number, so a run that keeps failing the same way loops until it hits another limit. Set a number (or 0 to never give up, on purpose) in ${ENV_FILE}." ;;
+    AGENT_MAX_OUTPUT_TOKENS)
+      p_warn "AGENT_MAX_OUTPUT_TOKENS='${value}' is not a positive number, so the agent falls back to 2048. It caps ONE reply — it does not make room in the prompt, and a bad value is sent as JSON null. What decides whether the prompt fits is its size against the window (docs/PROMPT-WINDOW.md). Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+    AGENT_REQUEST_TIMEOUT)
+      p_warn "AGENT_REQUEST_TIMEOUT='${value}' is not a positive number, so the agent falls back to 1800 seconds. Too low and every step is discarded mid-generation: at the client default of 300 this hardware, measured at 901 s per reply, threw away every step and sat 'running' having executed nothing. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+    # No catch-all arm on purpose: a setting added to the loop above without a
+    # message here prints nothing at all, which is the silent failure this whole
+    # section exists to remove. The gate that guards this loop checks only that
+    # a numeric key is IN the list — not that it says anything when it is wrong.
   esac
 done
 
@@ -219,7 +227,7 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
   AGENT_MODEL="$(agent_model_name "${MODEL_NAME}")"
   case "$(agent_model_drift 2>/dev/null || printf ok)" in
     absent)
-      p_warn "the agent is on but '${AGENT_MODEL}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was over 15,000 tokens. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+      p_warn "the agent is on but '${AGENT_MODEL}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was 13,796 tokens, and at the server-wide context it would not fit. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     context)
       p_warn "'${AGENT_MODEL}' exists but Ollama loads it at a different context than $(agent_model_context), so the agent is silently working in a smaller window than it was given. Rebuild it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     *)
@@ -290,13 +298,21 @@ fi
 
 # The agent's prompt cache, which is really a question about OLLAMA_KEEP_ALIVE.
 #
-# Measured: the agent's first prompt is ~15,000 tokens of OpenHands' own framing
+# Measured: the agent's first prompt is ~13,800 tokens of OpenHands' own framing
 # and it is IDENTICAL on every step, so Ollama's prefix cache makes step two
 # nearly free — 13,430 tokens of prompt eval on the first call, 171 on the next.
 # The cache lives with the loaded model, so when keep-alive expires mid-thought
 # the next step pays the whole prompt again plus a model load.
+# The setting that decides whether the agent's prompt fits its window at all.
+# Nothing reported it, and it is the most expensive thing in this tier to get
+# wrong: overflow is not trimmed, it is halved, and the half that goes is the
+# one holding the tool definitions.
+if agent_skills_catalogue_fetched; then
+  p_warn "AGENT_EXTENSIONS_REF='${AGENT_EXTENSIONS_REF}' is not the default that disables it, so the agent fetches OpenHands' public skills catalogue — about 4,232 tokens of instructions for skills this tier cannot run, in every prompt. That is what pushed this project's own agent past its window, and Ollama does not trim past a window: it halves the prompt and keeps the tail, which deleted the definition of the terminal tool. Set AGENT_EXTENSIONS_REF=lca-public-skills-disabled in ${ENV_FILE} unless you know you want it, then: ${SCRIPT_DIR}/bin/lca agent restart. Measurement: docs/PROMPT-WINDOW.md"
+fi
+
 if agent_prompt_cache_at_risk; then
-  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's ~13,800-token prompt is re-read from scratch on the next step (measured on one run: 13,778 tokens of prompt eval the first time — 18 minutes — then 264, 136 and 74 on the turns after it, while the model stayed loaded). Set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} to keep it resident, if you can spare the RAM."
+  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's whole prompt (13,783 tokens measured on the current build) is re-read from scratch on the next step. Measured on one run: 13,778 tokens of prompt eval the first time — 18 minutes — then 264, 136 and 74 on the turns after it, while the model stayed loaded. Auto-tune decides this now: run sudo ${SCRIPT_DIR}/bin/lca tune and it will set it from this box's RAM and which tiers are on, or set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} yourself if AUTO_TUNE is off."
 fi
 
 # The relay itself, whenever it is switched on — with or without the agent,

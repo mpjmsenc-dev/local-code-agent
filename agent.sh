@@ -37,7 +37,10 @@ Commands:
   url       The address to open on your phone, over Tailscale
   logs      Follow the agent's logs (Ctrl-C to stop)
   watch     Supervise a run in progress: stop it at the step ceiling, the
-            wall-clock limit, or when the same failure keeps repeating
+            wall-clock limit, or when the same failure keeps repeating.
+            'watch --live' is the read-only view instead: each turn as it
+            lands — thoughts, tool calls, results, and the clock on the
+            current step, which is how you tell working from stuck here
   selftest  Run one small real task end to end, assert a file appeared, and
             report the timing — the honest answer to "is this usable here?"
 
@@ -100,10 +103,13 @@ start_agent() {
   model="$(agent_llm_model "$(agent_model_for_run)")"
   base_url="$(agent_llm_base_url)"
   bridge_gw="$(docker_bridge_gateway)"
-  # The same instructions file aider reads and the chat app is given, so the
-  # third surface does not become the one place the user's preferences are
-  # ignored. Passed as the agent's default task framing; empty when the file is
-  # absent or AIDER_CONVENTIONS is off, and an empty -e is simply not added.
+  # The same instructions file aider reads — but read what happens to it below
+  # before believing this reaches the agent. It does not: its only destination
+  # is LCA_USER_INSTRUCTIONS, and nothing on the other side reads that name.
+  # This line used to say the agent must not "become the one place the user's
+  # preferences are ignored", and that is exactly what it is; the rules that DO
+  # reach it travel in the task text (agent_task_prompt), measured
+  # sha256-identical on arrival. Kept, and labelled, rather than removed.
   instructions="$(lca_user_instructions)"
   info "Starting the agent on port ${AGENT_PORT}, using ${model} at ${base_url}"
   info "First run downloads several GB of images — this takes a while."

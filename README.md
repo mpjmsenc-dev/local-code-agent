@@ -176,14 +176,18 @@ tool that runs commands. That is fixed: the prompt is 13,796 tokens and nothing
 is truncated (docs/PROMPT-WINDOW.md).
 
 Re-run since, the same task writes correct-looking code **into the right
-directory**, creates the test file it was asked for, **runs it**, and reports
-the real error it hit rather than claiming success. What it then cannot do is
-repair its own bug. So treat this tier's output as **a first draft that has been
-executed once** — better than the never-executed draft this used to describe,
-and still not something to trust unread. It is genuinely useful for scaffolding
-and for work you were going to read line by line anyway.
+directory**, creates the test file it was asked for, and **runs it**, quoting
+the real output. What it does not do is **check** it: the third sample closed
+with *"matches the specified requirements"* having never exercised the error
+path it was asked for — and that path was broken. It also cannot repair its own
+bug once it finds one.
 
-That is `n = 2`, not a benchmark: another sample of the same task derailed and
+So: **it executes its work, it does not check its work.** Treat this tier's
+output as **a first draft that has been executed once, on the happy path**, and
+read the requirement list yourself. It is genuinely useful for scaffolding and
+for work you were going to read line by line anyway.
+
+That is `n = 3`, not a benchmark: another sample of the same task derailed and
 wrote nothing at all. The *rate* is unmeasured and this project does not claim
 one.
 
@@ -388,6 +392,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/agent-task.sh` | `lca agent task` — submits a task with the working directory named explicitly, and returns the conversation id |
 | `scripts/agent-setup.sh` | `lca agent setup` — brings the agent tier up from wherever it is, in dependency order, and says what it changed |
 | `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
+| `scripts/agent-view.sh` | `lca agent watch --live` — the read-only view of a run in progress: thoughts, tool calls, results, and the clock on the current step |
 | `scripts/ollama-relay.sh` | `lca relay` — the docker-bridge→loopback relay, so containers reach Ollama without it leaving 127.0.0.1 |
 | `scripts/prompt-bench.sh` | Measure the assistant's system prompt against the real model (see CONTRIBUTING) |
 
@@ -404,7 +409,8 @@ Created from `.env.example` on first run. All keys:
 | `OLLAMA_CONTEXT_LENGTH` | `8192` | Context window in tokens |
 | `OLLAMA_KEEP_ALIVE` | `30m` | How long the model stays in RAM after last use |
 | `AIDER_VERSION` | *(empty)* | Pin aider-chat version; empty = latest |
-| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only each aider session (tighter edits; costs a little context) |
+| `AIDER_CONVENTIONS` | `true` | Load `config/CONVENTIONS.md` read-only for **aider and the agent** — the two surfaces that edit files (tighter edits; costs a little context). `false` switches all three surfaces off at once. |
+| `CONVENTIONS_CHAT` | `false` | The chat app does **not** get that file by default: it is 618 tokens of file-editing advice re-sent on every message, to a box with no filesystem — double the whole prompt budget on the 4096-token rung. Set `true` to include it, then `sudo lca apply` (the prompt is baked into the container). `CONVENTIONS_AIDER` / `CONVENTIONS_AGENT` default to `AIDER_CONVENTIONS` |
 | `AIDER_NO_AUTO_COMMIT` | `false` | Stop aider committing each edit. You then review a dirty tree yourself — and lose the one-commit-per-change trail that makes `git revert <sha>` precise |
 | `LCA_EDIT_FORMAT` | `auto` | How aider asks for edits. `auto` = `whole` for ≤4B models, `diff` above; or force `whole`/`diff`/`udiff` |
 | `LCA_ASK_TOKENS` | `512` | Longest answer `lca ask` will generate. On CPU an uncapped reply can run for minutes |
@@ -417,6 +423,8 @@ Created from `.env.example` on first run. All keys:
 | `ENABLE_AGENT` | `false` | run the autonomous agent tier (see docs/AGENT.md) |
 | `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
 | `AGENT_MODEL_CONTEXT` | `16384` | context for the agent's own derived model, without raising it server-wide |
+| `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
+| `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |
 | `AGENT_NATIVE_TOOL_CALLING` | `false` | use the model's native tool-call channel; `false` parses tool calls from the text, which is what `qwen2.5-coder` needs |
 | `ENABLE_OLLAMA_RELAY` | `false` | let containers reach Ollama via the docker bridge, without binding Ollama to 0.0.0.0 |
 | `OLLAMA_RELAY_PORT` | `11435` | the port that relay listens on (bridge gateway only) |
@@ -454,7 +462,7 @@ local-code-agent/
 │   ├── logs.sh · speed.sh · motd.sh · prompt-bench.sh
 │   ├── install_dependencies.sh · install_git.sh · install_docker.sh
 │   ├── install_python.sh · install_ollama.sh · install_webui.sh
-│   ├── agent-watch.sh
+│   ├── agent-watch.sh · agent-view.sh
 │   └── install_tailscale.sh
 ├── deploy/do-user-data.sh      # paste-ready DigitalOcean first-boot installer
 ├── config/aider.conf.yml · config/ollama.env · config/CONVENTIONS.md
@@ -559,6 +567,7 @@ the cost of the per-change trail. Full example and reasoning in
 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [FAQ](docs/FAQ.md) ·
 [PERFORMANCE](docs/PERFORMANCE.md) · [GPU](docs/GPU.md) · [BACKUPS](docs/BACKUPS.md) ·
 [AGENT (the autonomous tier)](docs/AGENT.md) ·
+[PROMPT-WINDOW (where the agent's tokens go)](docs/PROMPT-WINDOW.md) ·
 [DESKTOP (a Mac/Windows client — design only, not built)](docs/DESKTOP.md) ·
 [CONTRIBUTING (the AI-assisted dev loop)](CONTRIBUTING.md)
 

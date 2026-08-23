@@ -233,8 +233,13 @@ assumed:
   every phone that tried it while looking perfectly healthy from the server. If
   it still refuses, Tailscale probably came up after the container did:
   `lca agent restart`, and `lca check` reports it either way.
-- **At the 3b rung it reports success on code it never ran.** Two real tasks
-  failed that way. Treat what it produces as a draft that has not been executed.
+- **At the 3b rung it runs its own work but does not check it.** It writes the
+  files, executes them and quotes the real output — and then reports that the
+  task "matches the specified requirements" over a requirement it never
+  exercised. Treat what it produces as a draft that has been executed once, on
+  the happy path, and read the requirement list yourself. (It used to be worse:
+  it reported success on code it had never run at all. That was a truncated
+  prompt, not the model — AGENT.md has the sequence.)
 
 Both are covered properly in [AGENT.md](AGENT.md), which is also where the
 timings and the limits for an unattended run live.

@@ -130,9 +130,9 @@ EOF
   # local model makes tighter, in-style edits. Costs a little context, so it is
   # skippable via AIDER_CONVENTIONS=false for the smallest (4096) windows.
   local conventions="${REPO_ROOT}/config/CONVENTIONS.md"
-  if [[ "${AIDER_CONVENTIONS:-true}" == "true" && -f "${conventions}" ]]; then
+  if [[ "${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" == "true" && -f "${conventions}" ]]; then
     aider_args+=( --read "${conventions}" )
-    info "Priming with coding conventions (config/CONVENTIONS.md; AIDER_CONVENTIONS=false to skip)"
+    info "Priming with coding conventions (config/CONVENTIONS.md; CONVENTIONS_AIDER=false to skip)"
   fi
 
   # Auto-commit is ON by default and that is deliberate: it is the safety net

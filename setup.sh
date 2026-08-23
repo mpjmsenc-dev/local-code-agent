@@ -33,12 +33,46 @@ load_env
 # bare under 'set -e', and any of them aborting exits setup.sh with no verdict
 # by exactly the same route.
 VERDICT_PRINTED=false
+
+# partial_install_guidance — what to do when setup stopped before it finished.
+#
+# The README's very next instruction after ./setup.sh is "Then verify with
+# lca check" — and on this path there may be no 'lca' to run: the symlink is
+# created near the END of main(), so anything that aborts before it leaves the
+# reader typing a command that does not exist. Found by walking the README in a
+# clean container, where a pip failure ended exactly there.
+#
+# So this reports FACTS about the machine rather than assuming what got done,
+# and every command it gives is an absolute path, because PATH is the thing
+# that may be missing.
+partial_install_guidance() {
+  info "Setup stopped before it finished, so part of the stack is not installed yet."
+  info "See exactly what is missing:  sudo ${SCRIPT_DIR}/check-system.sh"
+  if have lca; then
+    info "The 'lca' command is installed, so 'lca check' works too."
+  else
+    info "'lca' is NOT on your PATH yet — that step had not been reached. Until it is, use the full path: ${SCRIPT_DIR}/bin/lca"
+  fi
+  # The guard is the one thing whose absence is a security question rather than
+  # an inconvenience, so it is named separately and checked rather than assumed.
+  # The same probe check-system.sh uses — asking the kernel whether the table is
+  # there. There is no inbound_guard_loaded() helper; writing one from memory is
+  # how a message ends up reporting on a function that does not exist.
+  if can_root && as_root nft list table inet lca_inbound >/dev/null 2>&1; then
+    info "The inbound guard IS loaded, so this machine's ports are not exposed."
+  else
+    warn "The inbound guard is NOT loaded, so any port this stack has already opened is reachable from anywhere that can reach this machine. Close them: sudo ${SCRIPT_DIR}/netmode.sh harden"
+  fi
+  info "Then re-run this script — it resumes rather than starting over: sudo ${SCRIPT_DIR}/setup.sh"
+}
+
 verdict_on_exit() {
   local rc=$?
   # Only on failure, and only when main did not get to say it itself. '--help'
   # exits 0 before any side effect and must stay silent.
   if (( rc != 0 )) && [[ "${VERDICT_PRINTED}" != "true" ]]; then
     setup_verdict false || true
+    partial_install_guidance || true
   fi
   return 0
 }
@@ -112,8 +146,24 @@ main() {
     warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run sudo ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
     setup_ok=false
   fi
-  "${SCRIPT_DIR}/scripts/install_python.sh"
-  "${SCRIPT_DIR}/scripts/install_ollama.sh"
+  # Guarded, like docker above and Tailscale below, and for the reason spelled
+  # out at the Tailscale call: an installer that aborts here takes EVERYTHING
+  # after it with it — the model, the chat app, the 'lca' command, the login
+  # banner, the boot services and the inbound guard. That lesson was learned
+  # once and applied to one call; these two were left bare, and a walk through
+  # the README in a clean container found the consequence. A pip failure — a
+  # corporate proxy, a PyPI outage, an offline mirror — left a machine with no
+  # 'lca' on PATH, while the README's very next sentence says "verify with lca
+  # check", and with no inbound guard, which that same README calls always-on.
+  # A gate now holds every installer call in this function to this shape.
+  if ! "${SCRIPT_DIR}/scripts/install_python.sh"; then
+    warn "aider did not install — continuing so the rest of the stack still gets set up. The chat app, 'lca ask' and the inbound guard are unaffected; only the 'lca' coding agent needs this. Re-run: sudo ${SCRIPT_DIR}/scripts/install_python.sh"
+    setup_ok=false
+  fi
+  if ! "${SCRIPT_DIR}/scripts/install_ollama.sh"; then
+    warn "Ollama did not install, so nothing can generate yet — continuing so the 'lca' command, the login banner and the inbound guard still get installed. Re-run: sudo ${SCRIPT_DIR}/scripts/install_ollama.sh"
+    setup_ok=false
+  fi
 
   # Auto-tune BEFORE the model pull so we download the right model for this
   # machine's RAM straight away.
@@ -214,7 +264,31 @@ main() {
   # /opt. Symlink rather than copy, so it always tracks this checkout.
   if can_root; then
     if as_root ln -sfn "${SCRIPT_DIR}/bin/lca" /usr/local/bin/lca 2>/dev/null; then
-      ok "'lca' is on your PATH — try: lca help"
+      # 'ln exited 0' is not 'lca runs', and this claimed the second from the
+      # first. Two things it did not check: the chmod +x at the top of this
+      # script is '|| true', so bin/lca can be left unrunnable and the link
+      # then points at a file nobody can execute; and a link created over
+      # someone else's /usr/local/bin/lca resolves somewhere else entirely.
+      # The login-banner block immediately below already reads back with
+      # [[ -x ]] and carries a comment about exactly this — the two were
+      # written a day apart and only one of them learned.
+      local lca_link=""
+      lca_link="$(readlink -f /usr/local/bin/lca 2>/dev/null || true)"
+      if [[ "${lca_link}" != "${SCRIPT_DIR}/bin/lca" ]]; then
+        warn "/usr/local/bin/lca does not resolve to ${SCRIPT_DIR}/bin/lca — it resolves to '${lca_link:-nothing at all}'. Use ${SCRIPT_DIR}/bin/lca directly, or remove the other one and re-run."
+        setup_ok=false
+      elif [[ ! -x /usr/local/bin/lca ]]; then
+        warn "/usr/local/bin/lca points at ${SCRIPT_DIR}/bin/lca but that file is not executable, so running 'lca' answers 'Permission denied'. Fix it with: sudo chmod +x ${SCRIPT_DIR}/bin/lca"
+        setup_ok=false
+      else
+        case ":${PATH}:" in
+          *:/usr/local/bin:*)
+            ok "'lca' is on your PATH and runnable — try: lca help" ;;
+          *)
+            ok "'lca' installed at /usr/local/bin/lca and runnable."
+            warn "/usr/local/bin is not on the PATH this install ran with, so 'lca' may not be found by name. Use ${SCRIPT_DIR}/bin/lca, or add it: export PATH=\"/usr/local/bin:\${PATH}\"" ;;
+        esac
+      fi
     else
       warn "Could not create /usr/local/bin/lca — use ${SCRIPT_DIR}/bin/lca directly."
     fi

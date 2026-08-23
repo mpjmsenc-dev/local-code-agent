@@ -110,6 +110,12 @@ smarter but slower per token. First response after idle is slower (model loads
 into RAM; `OLLAMA_KEEP_ALIVE` controls how long it stays warm). Want
 faster/smarter? Resize to more RAM/CPU — auto-tune handles the rest.
 
+**If it was fast and then suddenly was not**, and you have the agent tier on,
+the likely cause is the two models evicting each other: one chat message in the
+middle of an agent session makes the agent's next step reprocess its whole
+prompt (13,796 tokens on the current build) — 543 s cold against 3.6 s warm. See
+[PERFORMANCE.md](PERFORMANCE.md#why-it-randomly-gets-slow-the-two-models-evict-each-other).
+
 ## The model ignores earlier context or instructions in a long session
 
 Everything the model sees — system prompt, chat history, open files, aider's
@@ -383,13 +389,132 @@ So on the base droplet's rung: ask for one file at a time, keep the tests, and
 expect to fix small logic yourself. From ~12 GB of RAM auto-tune moves you to
 7b and the follow-up loop starts working — at roughly three minutes a round.
 
-## The agent said it finished, and the code does not run
+## The agent ignored my instructions, wrote files in the wrong place, or sat "running" for forty minutes doing nothing
+
+**Check the configuration below before concluding the model is too small.** All
+three of those symptoms were produced on this project by two configuration
+defects, and all three were misdiagnosed as "the 3b cannot do it" — by the
+people who wrote this page, for days.
+
+| symptom | what it actually was |
+|---|---|
+| wrote its file outside the repo it was given | the prompt was **truncated** before the working-directory rule |
+| ignored explicit instructions in the task | same — it never received that half of the task |
+| sat *"running"* for 38 minutes having executed nothing | every reply was **discarded at 300 s** while the model took 901 s |
+| worked hard, created nothing, then said it could not access the directory | **not** a configuration fault — see below |
+
+**The last row is the one with no setting behind it.** Measured on a four-file
+task: 28 events, no file created, no create action used once. It edited against
+a path it had invented, got *"The path does not exist"*, listed the directory,
+saw the one file really there — and concluded the environment was broken.
+Nothing in `.env` changes that. Watch it with `lca agent watch --live`: the
+tool calls are edits against paths that were never mentioned, which is visible
+immediately and invisible to anything that counts steps. Full measurement in
+[docs/AGENT.md](AGENT.md).
+
+**The truncation.** The agent's prompt was **larger than its context window** —
+18,353 tokens against 16,384 — and Ollama does not trim to fit. It cuts the
+prompt to **half the window plus two**, keeping the tail: 8,194 tokens, with
+10,159 thrown away. The agent read **under half** its instructions, including
+the definition of the tool that executes commands, and there is no error for
+this: the run proceeds, obeys the part it received, and looks like a model that
+ignores you.
+
+*Corrected, and it matters for what you should reach for:* this entry used to
+blame `max_output_tokens` being unset, saying the client reserved half the
+window. It does not — measured, Ollama truncates on prompt > window whatever
+the client asks for, and the 8,194 was the halving rule, not a reservation.
+`AGENT_MAX_OUTPUT_TOKENS` is a cap on one reply and worth setting for that; it
+will not make an oversized prompt fit. **What fixes this is a smaller prompt**,
+which this project now ships by default — the skills catalogue the sandbox used
+to fetch is 4,232 tokens of instructions for skills it cannot run, and
+`AGENT_EXTENSIONS_REF` stops it being fetched. See
+[docs/PROMPT-WINDOW.md](PROMPT-WINDOW.md) for the boundary arithmetic.
+
+**The timeout.** The client default of 300 s is shorter than a single step on
+CPU-only hardware — measured at 901 s here. Every step was thrown away
+mid-generation, so the conversation stayed open, the container stayed healthy,
+and nothing ever completed. `AGENT_REQUEST_TIMEOUT` (default 1800) is the
+setting. A slower box should raise it; a box with a GPU will never reach it.
+
+Both defaults are correct now, so this bites you only if you have overridden
+them or are running an older checkout. To check what you actually have:
+
+```bash
+lca check            # validates both, and says what a bad value silently does
+lca agent logs       # a step that was cut off ends mid-generation, with no error
+```
+
+**The general lesson, which is why this entry is first:** on a small local
+model it is always tempting to blame the model, and twice here that was wrong.
+A model that receives half its instructions and has every long reply discarded
+is not being measured. Rule out the plumbing first — it is cheap, and it is
+where both of these lived. It is worth adding that the *first* explanation of
+the truncation was also wrong, and wrong in a way that pointed at the wrong
+setting: getting from "the model is bad" to "the plumbing is bad" is only half
+the work, and the mechanism has to be measured too.
+
+## The chat ignores my `config/CONVENTIONS.md`
+
+It is not being sent it. **The chat app does not get that file by default** —
+`CONVENTIONS_CHAT=false` in `.env`, deliberately:
+
+- It is **618 tokens**, re-sent on every message for the whole conversation.
+  The chat's own product prompt is ~577. On the 4096-token 3b rung, `lca check`
+  budgets 614 tokens for this stack's text and the two together are ~1,211 —
+  double the budget. That was a permanent warning on every small box.
+- The chat box has **no filesystem, no shell and no tools**, which its own
+  prompt tells it three lines earlier. `CONVENTIONS.md` is about editing files,
+  keeping diffs small and committing cleanly: advice it cannot act on.
+
+`lca` (aider) and the agent both edit files, and both still get it by default.
+
+To include it in the chat anyway:
+
+```bash
+# in .env
+CONVENTIONS_CHAT=true
+sudo lca apply     # the prompt is baked in at container creation
+```
+
+The `sudo lca apply` is not optional: editing `.env` alone changes nothing for
+a container that already exists. `lca check` reports that drift until you do.
+
+## Is the agent working, or is it stuck?
+
+Run `lca agent watch --live`. It prints each turn as it lands — what the agent
+is thinking, which tool it called with what arguments, what came back — and the
+clock on the current step, ticking live. It is read-only; it cannot stop or
+change the run.
+
+The word at the bottom is the answer:
+
+| | What to do |
+|---|---|
+| `thinking` | Nothing. A single step here is 10–25 minutes. |
+| `running` | Nothing. A tool is running; its output appears when it finishes. |
+| `stalled` | Nothing has arrived for 25 minutes. Check `lca agent status`, then `lca logs`. If `AGENT_REQUEST_TIMEOUT` is low, see the entry above about the agent doing nothing for forty minutes. |
+| `error` | The last event failed and the failure is on screen above the status line. |
+| `finished` | It says it is done. On a small model that is a claim — check the files before believing it. |
+
+To read a run after it is over, or one you captured earlier:
+`lca agent watch --live --from events.json`. To get the raw JSON out without
+reading it by hand: `lca agent watch --live --dump > events.json`.
+
+## The agent said it finished, and a requirement it claimed does not work
 
 This is the failure mode of the agent tier at the small model rungs, and it is
-**expected behaviour to check for**, not a fault to hunt: it declares completion
-without executing its own work. Measured twice on a real droplet at the 3b rung,
-on unrelated tasks. One produced a script that uses `sys` with no import — dead
-on its first executed line — and reported success.
+**expected behaviour to check for**, not a fault to hunt: **it executes its work
+and does not check its work.** Measured three times on a real droplet at the 3b
+rung. The most recent wrote the program, created the test file, ran it and
+quoted the real output — then closed with *"matches the specified
+requirements"*, over an error path it never exercised and which does not work.
+
+*It used to be worse, and the correction is worth knowing if you are reading an
+older note:* it reported success on code it had **never run at all**. That was
+not the model — Ollama was truncating the agent's prompt and deleting the
+definition of the tool that runs commands. See the entry above, and AGENT.md for
+the full sequence.
 
 There is no fix to apply. There is a habit:
 
@@ -475,6 +600,34 @@ API answered on the new one, on every interface, and `lca apply` said
 `.env` / `config/ollama.env` instead, then `sudo lca apply` applies them.
 `check-system.sh` warns when the configured model drifts from the tune
 recommendation.
+
+## `lca update` and my edits to `config/CONVENTIONS.md`
+
+That file is tracked by git and this project tells you to edit it — it is the
+one file that steers aider, the chat app and the agent together. So sooner or
+later a release changes it while your version is still sitting in the checkout.
+
+`lca update` handles that now, and says so as it goes:
+
+```
+[warn] You have local modifications to tracked files:
+    config/CONVENTIONS.md
+[warn] The update changes config/CONVENTIONS.md too, so your version and the new one are about to meet.
+[info] Your edits will be set aside, the new code applied, and your edits replayed on top — automatically, in that order. Nothing is discarded.
+```
+
+Three endings, and only the last one needs you:
+
+| What you see | What happened |
+|---|---|
+| `Your edits to config/CONVENTIONS.md are back, on top of the new code.` | Done. Your rules and the new ones are both in the file. |
+| `The update does not touch any of them, so they carry straight over.` | The release changed other files. Your edits were never at risk and were never moved. |
+| `could not be replayed on top of it — the same lines changed on both sides` | You and the release edited the same lines. **Nothing is lost.** The file now holds both versions between `<<<<<<<` markers — `Updated upstream` is the new code, `Stashed changes` is yours. Keep what you want, then `git -C /opt/local-code-agent stash drop`. To take the new file as it ships instead, the message prints the one command that does it. |
+
+If you are reading this after an older `lca update` dead-ended with *"you have
+local commits or conflicting edits"*: that message was wrong about the cause —
+you had neither — and `git stash` on its own would have thrown your edits away.
+`git stash list` still has them; `git stash pop` brings them back.
 
 ## A script died mid-install (network blip, Ctrl-C, reboot)
 

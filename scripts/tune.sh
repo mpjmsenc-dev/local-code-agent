@@ -249,16 +249,33 @@ main() {
   ram="$(detect_ram_gib)"
   choose_for_ram "${ram}"
 
+  # Keep-alive is decided here, from the same two facts the ladder already has
+  # — how much RAM this box has and which tiers are switched on. It was a
+  # permanent 'lca check' warning: a decision the project could make, left to
+  # the user as a message. keepalive_plan carries the reasoning and the
+  # measurements behind it.
+  local ka_plan ka_want ka_why
+  ka_plan="$(keepalive_plan "${ram}" "${ENABLE_AGENT}" "${TUNE_MODEL}")"
+  ka_want="${ka_plan%%|*}"
+  ka_why="${ka_plan#*|}"
+
   step "Auto-tune: detected ${ram} GiB RAM"
-  info "Ladder decision: model=${TUNE_MODEL}  context=${TUNE_CTX}"
+  info "Ladder decision: model=${TUNE_MODEL}  context=${TUNE_CTX}  keep-alive=${ka_want}"
   info "Current config:  model=${MODEL_NAME}  context=${OLLAMA_CONTEXT_LENGTH}  AUTO_TUNE=${AUTO_TUNE}"
   info "(More vCPUs need no tuning — Ollama automatically uses all cores.)"
 
   if [[ "${dry_run}" == "true" ]]; then
     if [[ "${AUTO_TUNE}" != "true" ]]; then
       info "AUTO_TUNE is '${AUTO_TUNE}', not 'true' — a real run would keep the manual pin and change nothing."
-    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" \
+            && "${ka_want}" == "${OLLAMA_KEEP_ALIVE}" ]]; then
       info "Already tuned — a real run would change nothing."
+    elif [[ "${TUNE_MODEL}" == "${MODEL_NAME}" && "${TUNE_CTX}" == "${OLLAMA_CONTEXT_LENGTH}" ]]; then
+      # Keep-alive alone. Without this arm the dry run said "would change
+      # nothing" about a run that was about to rewrite .env and restart Ollama
+      # — introduced the moment keep-alive became a tuned value, which is
+      # exactly when a dry run stops being able to ignore it.
+      info "A real run would leave the model and context alone and set keep-alive ${OLLAMA_KEEP_ALIVE} -> ${ka_want}: ${ka_why}."
     else
       # ...including what it costs. A dry run exists to show what a real run
       # would do, and the biggest thing a real run does is download a model:
@@ -427,13 +444,35 @@ main() {
   # boot (dropping the loaded model + a ~90s wait) for zero config change.
   MODEL_NAME="${chosen_model}"
   OLLAMA_CONTEXT_LENGTH="${TUNE_CTX}"
-  if [[ "${chosen_model}" != "${old_model}" || "${old_ctx}" != "${TUNE_CTX}" ]] || ! ollama_dropin_matches; then
+  # Keep-alive joins the two the ladder already owns. It is re-derived here
+  # against the model actually chosen — a fallback to a smaller rung changes
+  # the RAM arithmetic the caveat in keepalive_plan depends on.
+  local ka_old="${OLLAMA_KEEP_ALIVE}"
+  ka_plan="$(keepalive_plan "${ram}" "${ENABLE_AGENT}" "${chosen_model}")"
+  ka_want="${ka_plan%%|*}"
+  ka_why="${ka_plan#*|}"
+  OLLAMA_KEEP_ALIVE="${ka_want}"
+  if [[ "${chosen_model}" != "${old_model}" || "${old_ctx}" != "${TUNE_CTX}" \
+        || "${ka_old}" != "${ka_want}" ]] || ! ollama_dropin_matches; then
     # Before render_ollama_dropin on purpose: if .env cannot be written, the
     # drop-in must not be either, or Ollama would run settings .env does not
     # name and every drift check would disagree with itself from then on.
     write_env_or_die MODEL_NAME "${chosen_model}"
     write_env_or_die OLLAMA_CONTEXT_LENGTH "${TUNE_CTX}" \
       "MODEL_NAME was written but the context length was not; Ollama has NOT been restarted, so nothing is running settings .env does not name. Re-run 'lca tune' once there is room."
+    if [[ "${ka_old}" != "${ka_want}" ]]; then
+      write_env_or_die OLLAMA_KEEP_ALIVE "${ka_want}" \
+        "the model and context were written but the keep-alive was not, so .env is half-tuned; set OLLAMA_KEEP_ALIVE=${ka_want} by hand or re-run 'lca tune' once there is room."
+      info "Keep-alive ${ka_old} -> ${ka_want}: ${ka_why}."
+      # Said whenever the agent is on, whatever the timer ends up as, because
+      # the timer is only half of it. docs/PERFORMANCE.md measured 543 s cold
+      # against 3.6 s warm on the agent's prompt, and that cost comes from the
+      # OTHER model arriving — which no keep-alive value can prevent while
+      # OLLAMA_MAX_LOADED_MODELS is 1.
+      if [[ "${ENABLE_AGENT}" == "true" ]]; then
+        info "That covers the idle timer only. Switching between the chat and the agent still unloads one model to load the other (measured: 543s cold against 3.6s warm) — use them in blocks rather than alternating. See docs/PERFORMANCE.md."
+      fi
+    fi
     render_ollama_dropin
     # The agent's derived model is generated FROM the rung, so a rung change
     # invalidates it. Regenerated here rather than at 'lca agent start', because

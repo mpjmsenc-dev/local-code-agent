@@ -534,6 +534,242 @@ And prompt length is a real cost: it is spent on every message, out of a 4096
 token context on the 3b rung. Cut what measurement shows does not work rather
 than layering more words on top.
 
+## Drive the behaviour. Reading the source for evidence of it is not a check
+
+This is the single most common way a gate here has turned out to be
+decoration, and it has now happened four times in two days:
+
+| The gate | What it read | Why it could not fail |
+|---|---|---|
+| the conventions keyed-phrase gate | `config/CONVENTIONS.md`, raw | the editor note at the top lists every keyed phrase, so the grep always matched — for two sessions |
+| `webui.sh` drift reporting | seven hand-written `check` lines naming seven keys | `webui_drift` grew an eighth; nothing noticed, and `WEBUI_BANNERS` drift printed nothing under a green health line |
+| `every_installed_unit_is_removed` | `uninstall.sh`, for each unit's *name* | a file that merely mentions a unit passes; removal was never attempted |
+| `net_guard_still_dies` | `net_guard`'s own body, for the string `die ` | stubbing the function to `return 0` leaves the body, and that string, exactly where they were |
+
+Every one of them read source text as evidence that a behaviour happens, and
+every one of them stayed green while the behaviour was gone. The last was
+found by mutation sweep: stub each function in `scripts/lib.sh` to `return 0`,
+run the suite, and see what still passes. **Forty-four functions survived.**
+
+**So: drive the thing.** Call the function, with the world stubbed around it,
+and assert on what it returns, prints or leaves behind. Nearly everything is
+drivable with less setup than the grep took to write — the survivor section at
+the end of `tests/test-lib.sh` drives a Tailscale address off a stubbed
+`tailscale`, a relay address off a real unit file in the sandbox, and
+`confirm`'s refusal through a real terminal via `script`.
+
+**Where driving is genuinely impossible** — a real GPU, a real sudo refusal on
+a suite that runs as root, a live container, a package install — a source grep
+is allowed, and it must say so:
+
+```bash
+# SOURCE-GREP: this needs an NVIDIA card, which no runner here has. What it
+# cannot check is that the parse is right for a real nvidia-smi.
+gpu_probe_reads_the_largest_card() { ... }
+```
+
+**Extract-to-drive is not a source grep**, and it is the shape to reach for
+when a script cannot be sourced (`agent.sh` and `check-system.sh` both run
+`main` at the bottom). Pull the block out with `awk`, `eval` it with the world
+stubbed, and assert on what it *did* — `numeric_complaints`,
+`seeded_settings_payload` and `drift_case_block` all work this way. It still
+reads source, so it still carries a `SOURCE-GREP:` marker, and the marker says
+the one thing such a helper genuinely cannot check: that the extraction still
+finds the right block. Every one of them fails loudly on an empty block, which
+is what stops it asserting over nothing.
+
+**A known false positive, so nobody thinks they have done something wrong.**
+The classifier asks whether a function mentions a `${REPO}/` path *and* uses a
+text tool. A gate that **runs** a repo script and greps its **output** does
+both, and is the opposite of a source grep — `uninstall_says`,
+`tune_dry_run_in` and `big_unknown_is_elided` are all in that position. They
+carry a marker saying so. That is deliberate: a tighter rule would have to
+guess which tool touched which path, and a classifier that guesses is the thing
+this section exists to stop. Three false positives with an honest sentence each
+is a better trade than one clever rule nobody can audit.
+
+`new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
+that reads repo source with a text tool, is not in
+`tests/source-grep-census.tsv`, and carries no `SOURCE-GREP:` line, fails the
+suite. The census is a record of debt, not permission.
+
+### What the census found, from reading all 278 of them
+
+The list started as 286 grandfathered names with no reason beside any of them.
+Two samples of a dozen each disagreed about how much of it was real debt — four
+of twelve, then eight of twelve — so the whole population was read one gate at a
+time instead. That read is `tests/source-grep-census.tsv`, and it is checked in
+because a number nobody can re-derive is a number nobody should trust.
+
+| | count | share | what it is |
+|---|---|---|---|
+| **A** | **153** | 55% | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
+| B | 97 | 35% | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
+| FP | 28 | 10% | not debt: the gate drives its subject and greps the *result* |
+
+153 of the suite's 1,239 checks, then — about one in eight — assert a runtime
+behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
+converting a gate moves its row from A to FP rather than deleting it, so the
+count is a ratchet and not a promise.
+
+Two counting errors surfaced in the same read, and both flattered the old
+number:
+
+- **28 of the 296 names the scanner flags are helpers, not gates.**
+  `probe_region`, `baked_keys`, `agent_run_block` and the rest extract source
+  for a gate to judge. Their debt, if any, belongs to the gate that calls them,
+  and counting them twice made the population look bigger than it was.
+- **Ten gates read repo source only through one of those helpers, and the
+  scanner cannot see them at all.** `agent_publishes_on_loopback` greps the
+  docker-run block that `agent_run_block` pulled out of `agent.sh`; the
+  `${REPO}/` path is in the helper, so the classifier's rule — *mentions a
+  `${REPO}/` path **and** uses a text tool* — never fires on the gate. Moving a
+  read into a helper is therefore a way to silence the meta-gate without
+  changing anything, which is the same shape as everything else in this
+  document: a thing that reports success having done nothing.
+
+The census carries those ten anyway. They are labelled by what they do, not by
+what the scanner can see.
+
+The meta-gate is itself the kind of thing that becomes decoration, so it is
+driven too: its classifier is run over a fixture holding one offending function
+and one justified one, and asserted to tell them apart. Without that, a
+classifier that silently matched nothing would be the same bug, one level up.
+
+## A tool that parses source must tell code from commentary about code
+
+Three times in one session the tooling was fooled by text *about itself*, and
+all three were the same mistake wearing different clothes:
+
+| What happened | Why |
+|---|---|
+| A gate's `SOURCE-GREP:` marker was matched anywhere in the comment block above it — so the section's own prose *explaining what a marker is for* justified the function underneath it. Deleting that function's real marker changed nothing. | the scanner did not require the marker to *begin* a comment line, so an explanation counted as an excuse |
+| A scanner treated a one-line `f() { …; }` as an unterminated body and attributed **the entire rest of the file** to it. The baseline generated from it was wrong by ~90 entries. | the scanner handled one shape of the thing it parses and met another |
+| A driven test was reclassified as a source grep because a comment in it ends *"and this still passed."* — which contains `sed`. | the scanner matched substrings, in comments, and drew a conclusion about code from prose |
+
+The rule that falls out:
+
+- **Strip or skip comments before drawing a conclusion about code.** A comment
+  mentioning `grep` is not a grep; a comment naming a function is not a call.
+  Several gates here already do `sed 's/#.*//'` first and say why — that is the
+  habit, not a flourish.
+- **Match tokens as tokens.** `sed` inside "passed" is not a call to `sed`.
+- **Handle every shape of the construct you parse,** especially the one-liner.
+  If your scanner finds function bodies by looking for a line that is `}`, a
+  `f() { …; }` will silently swallow the file.
+- **Drive the scanner over a fixture containing the shapes that would fool it.**
+  This is the only one of the four that catches the case you did not think of,
+  and it is why `source_grep_gates` and `justified_gates` are run over
+  `SG_FIXTURE` — which now holds a one-liner, a prose mention of `sed`, and a
+  comment explaining the marker, because those are the three that got through.
+
+The same applies to anything that *edits* source. The mutation harness patches
+function bodies by regex, and `ok()   { … }` — three spaces before the brace —
+did not match the fixed-string shapes it started with. It reported
+`UNPATCHABLE` rather than lying, which is the difference between a harness that
+can be trusted and one that cannot; but the list of functions it sweeps is now
+derived from the same pattern that patches them, so the two cannot disagree
+about what a definition looks like.
+
+And it takes a lock. Two sweeps once ran at the same time — a relaunch whose
+predecessor's `xargs` had been reparented to `init` rather than killed with its
+parent — both appending to one results file and copying trees into the same
+directories. 123 result lines over 73 functions, every tree liable to be
+overwritten mid-run by the other sweep. It looked exactly like a result, which
+is the whole theme: **anything that writes verdicts to a shared place needs to
+be the only thing writing there, and needs to say so rather than assume it.**
+When you kill a background pipeline, kill the process *group* — a bare `kill`
+on the parent leaves the `xargs` running and adopted by `init`.
+
+## What only a real machine can settle, and how to settle it
+
+A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
+ran the suite. Forty-four survived. Most were then driven (see the last section
+of `tests/test-lib.sh`), but some genuinely cannot be: they ask a real kernel, a
+real daemon, a real account. Those are **not** covered by another source grep —
+they are listed here, with the command that would settle each and what a pass
+looks like, so the work is concrete rather than open-ended.
+
+Each row is meant to be run without interpretation: the command is the whole
+command, and the pass condition is a thing you can look at and be sure about.
+`L=/opt/local-code-agent` throughout (wherever your checkout is).
+
+**Agent tier** — needs `ENABLE_AGENT=true`, `sudo lca apply`, `lca agent start`.
+
+```bash
+mkdir -p /tmp/probe && cd /tmp/probe && git init -q
+lca agent task --dir /tmp/probe "create hello.txt containing the word hello"   # note the id it prints
+lca agent watch --live --once
+```
+
+| Function | Pass condition |
+|---|---|
+| `agent_container_running`, `agent_container_exists` | `lca agent status` says running; then `sudo docker stop openhands-app` and it says exists-but-not-running, not "not created" |
+| `agent_live_port` | `bash -c 'source $L/scripts/lib.sh; load_env; agent_live_port'` prints the same number as `AGENT_PORT` in `.env` |
+| `agent_live_sandboxes`, `agent_orphan_sandboxes` | its line count equals `sudo docker ps --format '{{.Names}}' \| grep -c '^oh-agent-server-'`; with the agent stopped and a sandbox left, `agent_orphan_sandboxes` lists exactly that one |
+| `agent_recorded_conversation`, `agent_conversation_record` | prints the id `lca agent task` printed above, character for character |
+| `agent_conversation_warning` | start a second task without stopping the first: it fires and names the **recorded** id, not the newest sandbox |
+| `agent_conversations_payload` | non-empty, and `jq .` parses it |
+| `agent_model_for_run` | with `<model>-agent` pulled it prints that; after `ollama rm <model>-agent` it prints `MODEL_NAME` |
+| `agent_model_loaded_context` | equals `AGENT_MODEL_CONTEXT` from `.env` (16384 by default) |
+
+**Chat container** — any box with docker and the container created.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `webui_container_env` | `bash -c 'source $L/scripts/lib.sh; load_env; webui_container_env PORT'` | equals `sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' open-webui \| grep '^PORT='` |
+| `webui_container_env_list` | same, no argument | every `-e` line `install_webui.sh` bakes in appears once |
+| `webui_container_exists`, `webui_container_running` | `sudo docker stop open-webui`, then both | `exists` true, `running` false. **This distinction is the whole point** — collapsing them is how "already matches .env" was printed about a container that did not exist |
+
+**Ollama lifecycle** — droplet, systemd.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `ensure_ollama_up`, `wait_for_ollama`, `start_ollama_bg`, `restart_ollama` | `sudo systemctl stop ollama`, then `bash -c 'source $L/scripts/lib.sh; load_env; ensure_ollama_up 90; echo rc=$?'` | `rc=0` and `curl -fsS $(ollama_url)/api/version` answers |
+| `ollama_bg_env` | with Ollama up: `bash -c 'source $L/scripts/lib.sh; load_env; ollama_bg_env OLLAMA_CONTEXT_LENGTH'` | equals `OLLAMA_CONTEXT_LENGTH` in `.env` |
+| `warm_model` | `time` it twice in a row | the second call returns in under a second |
+| `resync_dropin_if_drifted` | `sudo sed -i 's/OLLAMA_KEEP_ALIVE=.*/OLLAMA_KEEP_ALIVE=99m/' /etc/systemd/system/ollama.service.d/local-code-agent.conf`, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again, and `lca check` reports no drift |
+| `stale_agent_models` | `ollama cp <model>-agent stale-agent`, then `lca check` | `stale-agent` is named, the current `-agent` model is not |
+
+**Relay** — droplet.
+
+| Function | Command | Pass condition |
+|---|---|---|
+| `ollama_relay_healthy` | `sudo lca relay install`, `lca relay status`; then `sudo systemctl stop local-code-agent-ollama-relay.socket` and re-run | healthy **only** in the first case. It must answer false when the socket is bound but Ollama is not answering *through* it — stop `ollama` with the socket up to see that |
+
+**Privilege — settled here, not on the droplet.** This block used to say these
+needed a real account on a real machine. Four of the five needed only a
+*throwaway* account, and the suite now makes one: `useradd -M`, a root-owned
+`0600` file, `runuser`, and the probes driven as that user. The fifth needed
+only a `PATH` without `sudo` on it. They are in `tests/test-lib.sh` under
+"the privilege probes, driven from a real non-root account", and they print a
+loud SKIPPED line rather than vanishing when the suite is not root.
+
+What that leaves for a real machine is narrower and worth stating exactly:
+**nothing about these functions** — only the end-to-end behaviour built on
+them, which is that `lca check` and the login banner must not hang on a
+password prompt for a human who is a sudoer *with* a password. That is a
+different assertion from any of the five, it needs a configured sudoers entry
+rather than an account, and it is the one row left here:
+
+| Command | Pass condition |
+|---|---|
+| as an ordinary sudoer with a password: `sudo -k`, then `lca check`, then the login banner | neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
+
+**Everything else**
+
+| Function | Where | Pass condition |
+|---|---|---|
+| `systemd_available` | droplet **and** `docker run --rm -it ubuntu:24.04` with the repo mounted | true on the droplet, false in the container, and `lca check` completes on both |
+| `gpu_state`, `has_nvidia_gpu` | **an NVIDIA host — not the droplet** | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string |
+| `apt_get` | already covered by CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
+
+`confirm`'s refusing branch, `netmode_state`, `tailscale_ip4`, `host_listeners`,
+`ollama_relay_unit_address`, `agent_workspace_dir`, `venv_python`,
+`load_env_readonly`, `model_load_notice` and `root_for_probe` were on that list
+too and are **not** any more: each is driven in the suite now, with a stubbed
+command, a real unit file in the sandbox, or a real terminal via `script`.
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide

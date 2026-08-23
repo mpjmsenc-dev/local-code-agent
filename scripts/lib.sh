@@ -497,6 +497,19 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  # Defaulted to a LITERAL false, which is what makes this safe to do at load
+  # time. The comment below is about "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}"
+  # — a default that captures the master switch freezes the fallback, so an
+  # AIDER_CONVENTIONS=false set afterwards loses. This captures nothing:
+  # lca_user_instructions still applies the master switch on top, so off still
+  # means off everywhere.
+  CONVENTIONS_CHAT="${CONVENTIONS_CHAT:-false}"
+  # The three per-surface switches are deliberately NOT defaulted here. Baking
+  # "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}" at load time freezes the
+  # fallback: AIDER_CONVENTIONS=false set afterwards loses to a CONVENTIONS_CHAT
+  # that load_env already resolved to true, and the old single switch silently
+  # stops working. Two gates caught that within a minute. They resolve at CALL
+  # time instead, in lca_user_instructions.
   AIDER_NO_AUTO_COMMIT="${AIDER_NO_AUTO_COMMIT:-false}"
   LCA_EDIT_FORMAT="${LCA_EDIT_FORMAT:-auto}"
   LCA_ASK_TOKENS="${LCA_ASK_TOKENS:-512}"
@@ -566,10 +579,14 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # real truncation; this is the early warning before that.
   AGENT_CONTEXT_WARN_PERCENT="${AGENT_CONTEXT_WARN_PERCENT:-90}"
   # How much of that window the agent may spend on ONE reply.
+  # Both of the keys below were found on a live droplet and both were the
+  # difference between a run that works and a run that does nothing while
+  # looking busy — though not for the reason first written down here.
   #
-  # It is not a cap on verbosity, it is a cap on how much of the window the
-  # client reserves — and what is left is the only room the instructions have.
-  # Measured here, with nothing set, on the very first live run:
+  # How much of the window the agent may spend on ONE reply. It is not a cap on
+  # verbosity, it is a cap on how much of the window the client RESERVES — and
+  # what is left is the only room the instructions have. Measured with nothing
+  # set, on the very first live run:
   #
   #   truncating input prompt   limit=8194  prompt=18313  keep=4  new=8194
   #
@@ -583,30 +600,36 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   #   num_ctx 512   num_predict 1     limit 258   (NumCtx-NumPredict predicts 511)
   #   num_ctx 1024  num_predict 200   limit 514   (predicts 824)
   #
-  # 'limit' in that line is not the threshold. It is the size Ollama cuts the
-  # prompt DOWN TO. Truncation fires when the prompt exceeds num_ctx, and when
-  # it fires the prompt is cut to num_ctx/2 + 2 with keep=4. Confirmed by this
-  # project's own agent after the skills cut: 13,975 tokens at num_ctx 16384,
-  # well above 8,194, processed in full with no warning at all.
+  # 'limit' there is not the threshold, it is the size Ollama cuts the prompt
+  # DOWN TO. Truncation fires when the prompt exceeds num_ctx, and when it fires
+  # the prompt is cut to num_ctx/2 + 2 with keep=4. Confirmed by this project's
+  # own agent after the skills cut: 13,975 tokens at num_ctx 16384, well above
+  # 8,194, processed in full with no warning at all. The product's own data says
+  # the same about the reservation theory: the run of 2026-08-17 carried
+  # max_output_tokens=2048 and was still cut to 8194, where a reservation of
+  # 2048 would have left 14,336.
   #
-  # The product's own data says the same about the reservation: the run of
-  # 2026-08-17 carried max_output_tokens=2048 and was still cut to 8194, where
-  # a reservation of 2048 would have left 14,336.
-  #
-  # So this setting does NOT buy instruction room. Nothing is held back from
-  # the prompt for output; the budget is the whole 16,384. What IS brutal is
-  # the penalty for going over it — 18,353 exceeded the window by 1,969 tokens
-  # and lost 10,159, because Ollama halves rather than trims. It remains worth
-  # setting as a cap on one reply, which is what it says on the tin. What
-  # actually buys room is cutting the prompt (see agent_sandbox_env), and
+  # So this setting does NOT buy instruction room. Nothing is held back from the
+  # prompt for output; the budget is the whole 16,384. What IS brutal is the
+  # penalty for going over — 18,353 exceeded the window by 1,969 tokens and lost
+  # 10,159, because Ollama halves rather than trims. It remains worth setting as
+  # a cap on one reply, which is what it says on the tin. What actually buys
+  # room is cutting the prompt (see agent_sandbox_env), and
   # docs/PROMPT-WINDOW.md has the measurement.
-  # NOT defaulted here, and that is a deliberate limitation with a date on it.
-  # Every key load_env defaults must also appear in .env.example and in the
-  # README's settings table — the suite gates all three against each other — and
-  # the README is off-limits this session while another one is rewriting the
-  # docs. So the fallback lives inside agent_max_output_tokens instead, where it
-  # still honours AGENT_MAX_OUTPUT_TOKENS from the environment or from .env, and
-  # this becomes a documented setting the moment the docs work lands.
+  #
+  # Defaulted HERE rather than inside agent_max_output_tokens, which resolves
+  # the limitation the droplet session wrote down with a date on it: every key
+  # load_env defaults must also appear in .env.example and the README settings
+  # table, three files the suite gates against each other, and the docs were
+  # off-limits to that session. They are not any more — both keys are in
+  # .env.example, in the README table and validated by 'lca check'.
+  # agent_max_output_tokens stays, because it clamps against the context
+  # window, which a default cannot.
+  AGENT_MAX_OUTPUT_TOKENS="${AGENT_MAX_OUTPUT_TOKENS:-2048}"
+  # And the default client timeout discarded every reply that took longer than
+  # 300 s while this hardware was measured taking 901 s, so steps were thrown
+  # away mid-generation and the run sat "running" having executed nothing.
+  AGENT_REQUEST_TIMEOUT="${AGENT_REQUEST_TIMEOUT:-1800}"
   # The relay that lets containers reach Ollama without Ollama leaving
   # loopback. Off by default like every other component here; the agent tier is
   # what needs it, and 'lca check' says so when the agent is on without it.
@@ -2285,14 +2308,75 @@ restart_ollama() {
 # every caller can append unconditionally. The toggle keeps its name: it is
 # what .env.example has always called this, and renaming a setting to widen it
 # would break the files people already have.
+# lca_user_instructions [SURFACE] — the user's instructions for one surface.
+#
+# SURFACE is chat | aider | agent, and defaults to 'agent' because that is the
+# only caller that passes nothing.
+#
+# WHAT THIS FILE COSTS EACH SURFACE, measured rather than assumed, at the sizes
+# this project actually ships (618 tokens of instructions, 577 of base prompt):
+#
+#   chat   4096-token window on the 3b rung. The file DOUBLES the system
+#          prompt, 577 -> 1211 tokens, and that prompt is re-sent on every
+#          message: 30% of the whole window, permanently, before a word is
+#          typed. It is also the surface the content fits worst — the chat has
+#          no filesystem and no tools, so five bash gotchas and "write files
+#          into the working directory you were given" are instructions it
+#          cannot act on. And the prompt is what a sliding window drops first,
+#          which is the "long chat starts sounding generic" symptom PHONE.md
+#          already documents. This is the surface to switch off first.
+#   aider  same 4096 window, but the content is exactly what aider is for, and
+#          it competes with the repo map rather than with chat history.
+#   agent  16384 window against a ~15,200-token prompt, so 618 tokens is over
+#          half of what headroom remains — and it is also where the two newest
+#          rules were added BECAUSE of measured agent failures. Expensive and
+#          load-bearing at the same time; not a switch to flip casually.
 lca_user_instructions() {
+  local surface="${1:-agent}" enabled
+  case "${surface}" in
+    # The chat is the one surface this file is OFF for by default, and the
+    # arithmetic is the reason. Measured on this checkout: CONVENTIONS.md is
+    # 2,472 chars (~618 tokens) and the chat's own product prompt is ~593, so
+    # together they are ~1,211. 'lca check' budgets 15% of the context window
+    # for this stack's own text: at 8192 that cap is 1,228 and it just fits; at
+    # 4096 — the 3b rung, the smallest this project ships — the cap is 614 and
+    # the prompt is DOUBLE it, re-sent on every message, for the life of the
+    # conversation.
+    #
+    # And the chat is the surface that can act on none of it. The file is about
+    # editing files, keeping diffs small and committing cleanly; the chat box
+    # has no filesystem, no shell and no tools, which its own prompt says three
+    # lines above this appendix. aider and the agent both edit files, so both
+    # keep it.
+    #
+    # This was a permanent warning from 'lca check' on every small box — a
+    # decision the project could make, left to the user as a message. Now it is
+    # made, and CONVENTIONS_CHAT=true takes it back.
+    chat)
+      enabled="${CONVENTIONS_CHAT:-false}"
+      # ...and the old single switch still turns all three off at once, which
+      # three gates hold this file to. An explicit CONVENTIONS_CHAT=true does
+      # not survive AIDER_CONVENTIONS=false: off means off.
+      [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || enabled=false
+      ;;
+    aider) enabled="${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" ;;
+    # CONVENTIONS_AGENT gates a channel that does not carry. Measured: the
+    # agent's only route for this text is LCA_USER_INSTRUCTIONS, which nothing
+    # in OpenHands reads, and the CONVENTIONS.md bind mount, which nothing reads
+    # either — none of the file's keyed phrases appear anywhere in the agent's
+    # first prompt. So this switch costs the agent nothing when true and saves
+    # it nothing when false. Kept for the day OpenHands honours one of them, and
+    # labelled so the per-surface token argument in .env.example is not read as
+    # applying here. docs/AGENT.md has the audit.
+    *)     enabled="${CONVENTIONS_AGENT:-${AIDER_CONVENTIONS:-true}}" ;;
+  esac
+  [[ "${enabled}" == "true" ]] || return 0
   # Defaulted, not bare. This is called from lca_system_prompt, which the login
   # banner reaches through load_env_readonly — a path that does not apply the
   # .env defaults — so a bare ${AIDER_CONVENTIONS} is an unbound variable under
   # 'set -u'. Measured: the banner then computed a prompt WITHOUT this appendix,
   # compared it to the container's, and reported the chat app out of date on a
   # machine where nothing had drifted.
-  [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || return 0
   local f="${REPO_ROOT:-}/config/CONVENTIONS.md"
   [[ -r "${f}" ]] || return 0
   # HTML comments are stripped, and that is a feature rather than tidiness.
@@ -2366,7 +2450,7 @@ The server manages itself through one command, 'lca':
 Only mention these when they are actually relevant to the question.
 EOF
 )"
-  extra="$(lca_user_instructions)"
+  extra="$(lca_user_instructions chat)"
   if [[ -n "${extra}" ]]; then
     printf '%s\n\n--- the owner of this machine also asked for the following ---\n%s\n' \
       "${base}" "${extra}"
@@ -3086,10 +3170,21 @@ agent_start_task_state() {
   local id="${1:-}"
   [[ -n "${id}" ]] || return 1
   have curl || return 1
+  agent_start_task_parse \
+    "$(curl -fsS --max-time 10 \
+        "$(agent_api_base)/api/v1/app-conversations/start-tasks/search?limit=100" 2>/dev/null)" \
+    "${id}"
+}
+
+# agent_start_task_parse PAYLOAD ID — the reading half, split out so it can be
+# driven. The fetch above is one curl; everything that can be WRONG is here, and
+# a gate that greps for this logic instead of running it would be exactly the
+# thing this suite refuses.
+agent_start_task_parse() {
+  local payload="${1:-}" id="${2:-}"
+  [[ -n "${payload}" && -n "${id}" ]] || return 1
   have jq || return 1
-  curl -fsS --max-time 10 \
-    "$(agent_api_base)/api/v1/app-conversations/start-tasks/search?limit=100" 2>/dev/null \
-    | jq -r --arg id "${id}" '
+  printf '%s' "${payload}" | jq -r --arg id "${id}" '
         [ (.items // .results // [])[] | select(.id == $id) ] | first
         | select(. != null)
         | [ (.status // "?"), (.app_conversation_id // ""), (.detail // "") ]
@@ -3381,6 +3476,302 @@ agent_event_steps() {
   return 1
 }
 
+# --- reading the event stream as something a person can watch ----------------
+#
+# The same stream the ceiling counts also carries what the agent is thinking,
+# which tool it called with what arguments, what came back and when. Nothing
+# rendered it, so following a run meant cat-ing raw JSON out of a container —
+# which is how the shape below is known, and it is worth being precise about
+# how well it is known.
+#
+# THIS IS SOMEBODY ELSE'S FORMAT AND IT IS NOT A DOCUMENTED INTERFACE. The same
+# caveat AGENT_STEP_PATTERN carries, for the same reason: a field name that
+# silently matches nothing would render an empty screen that looks exactly like
+# a quiet agent. So every accessor below tries the spellings that have been
+# seen, in order — and when none of them match, the event is still printed, raw
+# and whole, rather than dropped. An unreadable event is a thing the watcher
+# says out loud; it is never a thing it hides.
+#
+# jq's '//' is used only where the alternatives are strings. It treats FALSE as
+# absent — the bug that made agent_stored_native_tool_calling a function — so
+# anything boolean or numeric below is tested explicitly.
+
+# agent_event_lines PAYLOAD — one compact JSON object per line.
+#
+# The search route answers {"items":[...]}, the older one answered a bare array,
+# and two more spellings are in circulation. Returns rc 1 for a payload that
+# holds no events at all, so a caller can tell "nothing yet" from "unreadable".
+agent_event_lines() {
+  local payload="${1:-}" out
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  # Captured, then tested for emptiness, and this is not a style choice. jq
+  # exits 0 for a filter that matches nothing, so the first version returned
+  # SUCCESS with no output for a payload holding no events at all — and the
+  # caller that asked "are there events here?" was told yes and then rendered
+  # an empty screen. An empty screen is what this whole view exists to stop
+  # meaning "nothing happened".
+  #
+  # No 'head' in the pipeline either: a reader that exits early SIGPIPEs jq,
+  # which under pipefail fails the assignment. The search route this reads is
+  # already limited by its own query.
+  out="$(jq -c '
+    ( .. | objects | select(has("items")) | .items ),
+    ( .. | objects | select(has("events")) | .events ),
+    ( .. | objects | select(has("results")) | .results ),
+    ( .. | objects | select(has("data")) | .data ),
+    ( select(type == "array") )
+    | select(type == "array") | .[]' <<<"${payload}" 2>/dev/null)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s\n' "${out}"
+}
+
+# agent_event_at JSON — the event's own time, in epoch seconds, or nothing.
+agent_event_at() {
+  local raw
+  have jq || return 1
+  raw="$(jq -r '[ .timestamp?, .time?, .created_at?, .asctime?,
+                  .event?.timestamp?, .action?.timestamp? ]
+                | map(select(type == "string")) | .[0] // empty' <<<"${1:-}" 2>/dev/null)"
+  [[ -n "${raw}" ]] || return 1
+  # Already epoch seconds in some builds; ISO 8601 in others.
+  if [[ "${raw}" =~ ^[0-9]{9,11}(\.[0-9]+)?$ ]]; then
+    printf '%s' "${raw%%.*}"
+    return 0
+  fi
+  date -d "${raw}" +%s 2>/dev/null || return 1
+}
+
+# agent_event_class JSON — what KIND of thing just happened, in one word.
+#
+# This is the word the status line is built from, so it answers the question a
+# person actually has: is it thinking, is it running something, or has it
+# stopped. Everything unrecognised is 'unknown', which prints rather than
+# vanishing.
+agent_event_class() {
+  local kind
+  have jq || { printf 'unknown'; return 0; }
+  kind="$(jq -r '[ .kind?, .type?, .event_type?, ._type?, .event?.kind? ]
+                 | map(select(type == "string")) | .[0] // ""' <<<"${1:-}" 2>/dev/null)"
+  # Errors first: an error that also matches "observation" must not be filed as
+  # a routine result. Tonight's 300-second failure looked identical to working,
+  # and that is the whole reason this ordering is deliberate.
+  if agent_event_is_error "${1:-}"; then printf 'error'; return 0; fi
+  # A finish is an action, and telling them apart is the difference between a
+  # status line that says "running" for ever and one that says the agent
+  # believes it is done. Which, on this tier, is a claim worth showing rather
+  # than trusting: the measured re-run in docs/AGENT.md finished exactly this
+  # way having executed nothing.
+  case "$(agent_event_tool "${1:-}" 2>/dev/null || true)" in
+    *Finish*|*finish*) printf 'finished'; return 0 ;;
+  esac
+  # The FIRST event of every conversation, and the largest thing in the stream
+  # by a wide margin: a system prompt measured at 14,387 characters plus the
+  # schemas for 26 tools. Unrecognised it fell to the raw fallback, so the very
+  # first thing a viewer printed was tens of thousands of characters of JSON
+  # with the run underneath it. It is worth a class of its own because the ONE
+  # number in it a reader wants — how big the prompt is — is the number that
+  # decides whether it fits the window at all.
+  case "${kind}" in
+    *SystemPrompt*|*system_prompt*) printf 'prompt'; return 0 ;;
+  esac
+  case "${kind}" in
+    *Action*|*action*)        printf 'action' ;;
+    *Observation*|*observation*) printf 'observation' ;;
+    *Message*|*message*)      printf 'message' ;;
+    *Error*|*error*)          printf 'error' ;;
+    *)                        printf 'unknown' ;;
+  esac
+}
+
+# agent_event_tool_label TOOLNAME — the short word a person reads.
+#
+# 'ExecuteBashAction' and 'result of ExecuteBashObservation' are what the wire
+# says; 'bash' is what the reader wants, and the difference between those two
+# is most of why this view exists rather than a cat of the JSON. Unmapped names
+# keep their own spelling minus the Action/Observation suffix, so a tool nobody
+# here has heard of still reads as a tool.
+agent_event_tool_label() {
+  local raw="${1:-}" base="${1:-}"
+  base="${base%Action}"; base="${base%Observation}"; base="${base%Event}"
+  case "${base}" in
+    ExecuteBash|Bash|Terminal|Cmd*) printf 'bash' ;;
+    FileEditor|StrReplaceEditor|Edit*) printf 'edit' ;;
+    Read|View|FileRead)   printf 'read' ;;
+    Write|FileWrite)      printf 'write' ;;
+    Think|Reason*)        printf 'think' ;;
+    TaskTracker|Task*)    printf 'tasks' ;;
+    Finish)               printf 'finish' ;;
+    Browser|Browse*)      printf 'browse' ;;
+    '')                   printf '%s' "${raw}" ;;
+    *)                    printf '%s' "${base}" ;;
+  esac
+}
+
+# agent_event_arg JSON — the short argument that belongs ON the headline: the
+# command, the path, the thing being acted on. Separate from agent_event_body
+# so 'edit · create /workspace/project/wordcount.py' reads as one line instead
+# of a bare 'create' under a heading.
+agent_event_arg() {
+  local out
+  have jq || return 1
+  out="$(jq -r '
+    [ ( if (.action?.command? | type) == "string" and (.action?.path? | type) == "string"
+        then (.action.command + " " + .action.path) else empty end ),
+      .action?.command?, .command?, .action?.path?, .path?, .action?.file_path? ]
+    | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null)"
+  # One line only — a headline that wraps is not a headline.
+  printf '%s' "${out%%$'\n'*}"
+}
+
+# agent_event_is_error JSON — true when this event is a failure.
+#
+# Numeric and boolean fields, so tested explicitly rather than through '//'.
+agent_event_is_error() {
+  have jq || return 1
+  jq -e '
+    ( [ .error?, .error_message?, .exception? ]
+      | map(select(type == "string" and length > 0)) | length > 0 )
+    or ( [ .exit_code?, .observation?.exit_code?, .extras?.exit_code? ]
+         | map(select(type == "number")) | map(select(. != 0)) | length > 0 )
+    or ( .success == false )
+    or ( [ .kind?, .type?, .levelname? ]
+         | map(select(type == "string"))
+         | map(select(test("Error|ERROR|Rejected|Failed"))) | length > 0 )
+  ' <<<"${1:-}" >/dev/null 2>&1
+}
+
+# agent_event_tool JSON — the tool or action name, or nothing.
+agent_event_tool() {
+  have jq || return 1
+  jq -r '[ .action?.kind?, .tool_name?, .action?.name?, .name?,
+           .observation?.kind?, .tool?, .action? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_thought JSON — what it said it was thinking, or nothing.
+agent_event_thought() {
+  have jq || return 1
+  jq -r '[ .thought?, .reasoning_content?, .llm_message?.content?,
+           .message?.content?, .content?, .action?.thought? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_body JSON — the detail worth printing under the headline: the
+# command it ran, the text it wrote, or what came back.
+agent_event_body() {
+  have jq || return 1
+  jq -r '[ .action?.command?, .command?, .action?.code?,
+           .observation?.output?, .output?, .stdout?, .result?, .text?,
+           .observation?.content?, .error?, .error_message?,
+           .action?.path?, .action?.file_text? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_prompt_summary JSON — "N chars · M tools", or nothing.
+#
+# The size, not the content. Reading a 14,387-character system prompt in a
+# terminal is not what anybody is doing here; knowing it is 14,387 against a
+# 16,384-token window is.
+agent_event_prompt_summary() {
+  have jq || return 1
+  jq -r '
+    [ (.system_prompt?.text? // .system_prompt? // .text? | strings | length),
+      ( [ .tools?, .system_prompt?.tools? ] | map(arrays) | .[0] | length )
+    ] as $p
+    | if ($p[0] // null) == null then empty
+      else "\($p[0]) chars" + (if ($p[1] // null) == null then "" else " · \($p[1]) tools" end)
+      end' <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_headline JSON — one line: what this event IS, at a glance.
+#
+# Falls back through progressively weaker descriptions and never to silence:
+# the last resort names the event's raw kind, and if even that is unreadable it
+# says so. A line a person cannot read is still a line they can see.
+agent_event_headline() {
+  local json="${1:-}" class tool first
+  class="$(agent_event_class "${json}")"
+  tool="$(agent_event_tool "${json}" || true)"
+  local arg label
+  arg="$(agent_event_arg "${json}" 2>/dev/null || true)"
+  label=""
+  [[ -n "${tool}" ]] && label="$(agent_event_tool_label "${tool}")"
+  case "${class}" in
+    action|finished)
+      if [[ -n "${label}" && -n "${arg}" ]]; then printf '%s · %s' "${label}" "${arg}"
+      elif [[ -n "${label}" ]]; then printf '%s' "${label}"
+      else printf 'an action'; fi ;;
+    observation)
+      if [[ -n "${label}" ]]; then printf '%s returned' "${label}"; else printf 'a result'; fi ;;
+    message)   printf 'message' ;;
+    prompt)
+      local size
+      size="$(agent_event_prompt_summary "${json}" 2>/dev/null || true)"
+      if [[ -n "${size}" ]]; then printf 'system prompt · %s' "${size}"
+      else printf 'system prompt'; fi ;;
+    error)
+      if [[ -n "${label}" ]]; then printf 'ERROR from %s' "${label}"; else printf 'ERROR'; fi ;;
+    *)
+      first=""
+      if have jq; then
+        first="$(jq -r '[ .kind?, .type?, .event_type? ]
+                  | map(select(type == "string")) | .[0] // empty' <<<"${json}" 2>/dev/null || true)"
+      fi
+      if [[ -n "${first}" ]]; then printf 'unrecognised event: %s' "${first}"
+      else printf 'unreadable event (printed raw below)'; fi ;;
+  esac
+}
+
+# agent_view_state CLASS SECONDS_SINCE — the one word at the top of the screen.
+#
+# The question this whole view exists to answer is "is it working or stuck",
+# and on this hardware a step takes 10-25 minutes, so silence is normal and
+# indistinguishable from failure by eye. The rule:
+#
+#   the last thing that happened was an ACTION      -> a tool is running
+#   the last thing was a result, a message, nothing -> it is thinking
+#   an error                                        -> error, and it stays said
+#   a finish action                                 -> finished
+#   nothing at all for longer than the stall window -> stalled, said plainly
+#
+# STALL_SECONDS is the one number here that is a judgement rather than a
+# measurement, so it is a parameter with the reasoning attached: the longest
+# single reply measured on this hardware was 901 s, so anything under about
+# twenty minutes is still ordinary. It is not an error, and this does not call
+# it one — it says nothing has arrived, which is a fact.
+agent_view_state() {
+  local class="${1:-unknown}" since="${2:-0}" stall="${3:-1500}"
+  [[ "${since}" =~ ^[0-9]+$ ]] || since=0
+  [[ "${stall}" =~ ^[0-9]+$ ]] || stall=1500
+  case "${class}" in
+    finished) printf 'finished'; return 0 ;;
+    error)    printf 'error';    return 0 ;;
+  esac
+  if (( since > stall )); then printf 'stalled'; return 0; fi
+  case "${class}" in
+    action) printf 'running' ;;
+    *)      printf 'thinking' ;;
+  esac
+}
+
+# agent_view_state_words STATE — what that word means, for the first time a
+# reader sees it. Kept beside the state so the two cannot drift apart.
+agent_view_state_words() {
+  case "${1:-}" in
+    running)  printf 'a tool is running' ;;
+    thinking) printf 'waiting for the model' ;;
+    stalled)  printf 'nothing has arrived for a long time' ;;
+    finished) printf 'the agent says it is done' ;;
+    error)    printf 'the last event was a failure' ;;
+    *)        printf 'no events yet' ;;
+  esac
+}
+
 # agent_stored_native_tool_calling PAYLOAD — 'true' | 'false' | 'unset', out of
 # a settings response.
 #
@@ -3670,7 +4061,8 @@ refresh_agent_model_after_tune() {
 # allowed to unload, which is the one setting that decides whether its enormous
 # prompt is paid once or over and over.
 #
-# The agent's first prompt is ~15,000 tokens and almost all of it is OpenHands'
+# The agent's first prompt is ~13,800 tokens on the current build (18,353
+# before the skills cut) and almost all of it is OpenHands'
 # own framing, identical on every step of a conversation. Ollama caches the KV
 # prefix of a prompt it has already processed, so that cost is paid ONCE and
 # every later step in the same conversation reads almost nothing. Measured here
@@ -3682,15 +4074,90 @@ refresh_agent_model_after_tune() {
 # ...and the cache lives with the LOADED MODEL. Measured directly, same prompt
 # twice with the model resident: 50.2 s, then 0.1 s. When OLLAMA_KEEP_ALIVE
 # expires the model unloads, the cache goes with it, and the next step of a
-# conversation the user is in the middle of pays the whole 15,000 again — plus
+# conversation the user is in the middle of pays the whole prompt again — plus
 # the model load. On a small box that is the difference between a reply in
 # seconds and a reply in a quarter of an hour, for a step that changed nothing.
 #
 # -1 is Ollama's "keep it resident for ever", and .env.example already documents
 # it. This does not change the setting: it is the user's RAM.
+# agent_skills_catalogue_fetched — true when the agent will fetch OpenHands'
+# public skills catalogue on this box.
+#
+# It is 4,232 tokens of instructions for skills this tier cannot run, and it is
+# the difference between a prompt that fits its window and one that does not.
+# The default AGENT_EXTENSIONS_REF names a ref that does not exist, so nothing
+# is fetched; pointing it at a real one (main) puts the catalogue back.
+#
+# Worth a check of its own because of what overflow costs HERE. Ollama does not
+# trim to fit: past the window it cuts the prompt to num_ctx/2 + 2 and keeps
+# the tail, which on the run that produced this project's worst result deleted
+# the definition of the terminal tool outright. The model was then asked to
+# execute with the description of the tool that executes removed, and there is
+# no error for that anywhere.
+agent_skills_catalogue_fetched() {
+  [[ "${ENABLE_AGENT:-false}" == "true" ]] || return 1
+  local ref="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  [[ -n "${ref}" ]] || return 1
+  [[ "${ref}" != "lca-public-skills-disabled" ]]
+}
+
 agent_prompt_cache_at_risk() {
   [[ "${ENABLE_AGENT}" == "true" ]] || return 1
   [[ "${OLLAMA_KEEP_ALIVE}" != "-1" ]]
+}
+
+# keepalive_plan RAM_GIB AGENT_ON MODEL — "VALUE|WHY", the keep-alive this box
+# should run and the sentence that says why.
+#
+# This was a permanent warning from 'lca check' — a decision the project could
+# make from things it already knows, left to the user as a message. It is made
+# here, and the rule comes out of the measurements rather than out of headroom.
+#
+# WHAT THE MEASUREMENTS ACTUALLY SAY. There are two different costs and only
+# one of them is a timer:
+#
+#   idle expiry   the model unloads while you think, and the next request pays
+#                 a load plus a full prompt re-read. Measured on the agent's
+#                 own prompt: 13,430 prompt tokens on the first call, 171 while
+#                 it stayed resident.
+#   eviction      OLLAMA_MAX_LOADED_MODELS=1, so the OTHER model arriving
+#                 unloads this one, whatever the timer says. Measured on the
+#                 same prompt: 543 s cold, 3.6 s warm.
+#
+# Keep-alive controls the first and CANNOT TOUCH THE SECOND. Pinning one model
+# with -1 does not stop a chat message evicting the agent's model; it only
+# decides what happens when nothing is asking. docs/PERFORMANCE.md is right
+# that pinning moves which model loses rather than solving it — so this rule
+# does not pretend otherwise, and tune says so out loud.
+#
+# WHO IS BEING STARVED, which is what decides it:
+#
+#   agent off   one model exists, nothing evicts anything, and the only cost a
+#               timer controls is one model load. 30m. Pinning would hold RAM
+#               permanently to save a single load — a bad trade on a small box.
+#   agent on    the agent's prompt is ~13,800 tokens and its steps are 10-25
+#               minutes apart, so a 30m timer is a coin-flip on every step and
+#               a certainty across any pause between tasks. It is the surface
+#               whose cold price is 543 s. -1.
+#
+# ...with one headroom caveat, and it is a caveat rather than the rule: -1
+# means the weights stay resident with nothing running, so on a box where the
+# model is most of the RAM that is a permanent cost for an intermittent gain.
+# Below two spare GiB this stays at 30m and says which constraint won.
+keepalive_plan() {
+  local ram="${1:-0}" agent_on="${2:-false}" model="${3:-${MODEL_NAME:-}}" need=""
+  [[ "${ram}" =~ ^[0-9]+$ ]] || ram=0
+  if [[ "${agent_on}" != "true" ]]; then
+    printf '30m|the agent tier is off, so only one model is ever loaded and nothing evicts it — a timer here saves one model load and pinning would hold the RAM for it permanently'
+    return 0
+  fi
+  need="$(model_ram_gb "${model}" 2>/dev/null || true)"
+  if [[ -n "${need}" ]] && awk -v r="${ram}" -v n="${need}" 'BEGIN { exit !(r - n < 2) }'; then
+    printf '30m|the agent tier is on, but %s GB of model in %s GiB of RAM leaves under 2 GiB spare — pinning it resident would cost this box more than the reload saves' \
+      "${need}" "${ram}"
+    return 0
+  fi
+  printf -- '-1|the agent tier is on: its prompt is ~13,800 tokens and its steps are 10-25 minutes apart, so a 30m timer expires mid-task and the next step re-reads the whole prompt (measured 13,430 tokens cold against 171 warm)'
 }
 
 # agent_workspace_dir — where the agent keeps its workspace and settings.
@@ -3804,12 +4271,18 @@ agent_model_for_run() {
 
 # agent_max_output_tokens — the reply budget to seed, always a usable number.
 #
-# Guarded rather than trusted, because this value is subtracted from the
-# context window to decide how much of the prompt survives. A non-number would
-# be sent as JSON null and reserve the client's own default again — which is
-# the state that truncated 18,313 tokens to 8,194 — and a value at or above the
-# window would leave no room for the prompt at all. Both fall back to the
-# default instead of being passed on.
+# Guarded rather than trusted. A non-number would be sent as JSON null, and a
+# value at or above the window asks for a reply longer than the window can
+# hold. Both fall back to the default instead of being passed on.
+#
+# NOT because it buys prompt room. That claim is retracted: this comment used
+# to say a bad value "reserved the client's own default again — which is the
+# state that truncated 18,313 tokens to 8,194". Measured since, Ollama
+# truncates on prompt > num_ctx whatever the client asks for, and cuts to
+# num_ctx/2 + 2; the 8,194 was that halving, not a reservation. See
+# AGENT_MAX_OUTPUT_TOKENS in load_env and docs/PROMPT-WINDOW.md. The clamp is
+# still worth having — a cap on one reply is a real thing to get right — it
+# just is not what makes the prompt fit.
 # agent_request_timeout — how long the agent waits for ONE model reply.
 #
 # The client default is 300 seconds. On this rung a single step is not close to

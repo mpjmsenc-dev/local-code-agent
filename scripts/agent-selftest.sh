@@ -65,7 +65,7 @@ link_model() {
   want="$(agent_model_context)"
   case "$(agent_model_drift 2>/dev/null || printf ok)" in
     absent)
-      fail "'${model}' does not exist, so the agent would run at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) — its first prompt on a real run was over 15,000 tokens. Build it: sudo ${SCRIPT_DIR}/tune.sh" ;;
+      fail "'${model}' does not exist, so the agent would run at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) — its first prompt on a real run was 13,796 tokens, and at the server-wide context it would not fit. Build it: sudo ${SCRIPT_DIR}/tune.sh" ;;
     context)
       got="$(agent_model_loaded_context "${model}" 2>/dev/null || printf unknown)"
       fail "'${model}' exists but Ollama loads it at ${got}, not ${want}, so the agent would silently truncate mid-task. Rebuild it: sudo ${SCRIPT_DIR}/tune.sh" ;;
