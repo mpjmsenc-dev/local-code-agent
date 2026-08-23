@@ -4425,7 +4425,13 @@ same_group_branch_kills_nothing() {
   # A COMMAND, not the word. This arm's whole output is a message telling the
   # user to "kill the pids it prints", and a bare word match failed on correct
   # code because of its own remedy text.
-  ! grep -qE '^[[:space:]]*(kill|pkill)\b' <<<"${arm}" || {
+  # At a COMMAND position, not at the start of a line. 'foo && kill -9 -- -PGID'
+  # is the same defect standing one word to the right, and the line-start form
+  # could not see it — the same blind spot that hid a command-less exec inside
+  # an 'if' from the gate written to ban it. The remedy text in this arm's own
+  # warn() says "then kill the pids it prints", and no ';', '&&' or '||' sits
+  # immediately before that word, so it still does not match itself.
+  ! grep -qE '(^|;|&&|\|\|)[[:space:]]*(kill|pkill)\b' <<<"${arm}" || {
     printf 'the same-group arm of stop_followers signals something, which kills the watcher mid-report:\n%s\n' "${arm}" >&2
     return 1; }
 }
@@ -12523,7 +12529,14 @@ setup_refusal_precedes_every_side_effect() {
   # nothing at all and this gate silently found no side effect to compare
   # against. It said so rather than passing, which is why the guard below is
   # not decoration.
-  body="$(grep -v '^[[:space:]]*#' "${REPO}/setup.sh")"
+  # Scoped to main(), because the comparison is between POSITIONS and only
+  # main() executes top to bottom. partial_install_guidance's body sits above
+  # it and contains 'as_root nft list' — a line that never runs unless the exit
+  # trap fires, and one this gate would otherwise read as setup.sh's first side
+  # effect.
+  body="$(grep -v '^[[:space:]]*#' "${REPO}/setup.sh" | awk '/^main\(\) \{/ { inb = 1 } inb')"
+  [[ -n "${body}" ]] || {
+    echo 'could not find setup.sh main() — this gate stopped watching' >&2; return 1; }
   # The catch-all arm of main()'s argument case, naming what it refused.
   # Assembled, or the literal ${1} reads to ShellCheck as an expansion that
   # failed to expand — the same reason lca_subcommands matches on '^case '.
@@ -12534,7 +12547,19 @@ setup_refusal_precedes_every_side_effect() {
     return 1; }
   # The first thing that changes the machine. chmod on the checkout is the
   # earliest; step/info only print.
-  first_effect_at="$(grep -nE '^[[:space:]]*(chmod|as_root|"\$\{SCRIPT_DIR\}"/scripts/install_)' <<<"${body}" \
+  #
+  # Matched at a COMMAND position rather than at the start of a line: written
+  # as 'can_root && as_root mkdir …' a side effect sits one word to the right
+  # and the anchored form could not see it. Double-quoted strings are removed
+  # first — with the line count preserved, so the numbering still lines up with
+  # the marker above — because a message that NAMES chmod is prose, and reading
+  # it as code is the trap this suite keeps re-learning.
+  # sed, not ${var//…}: parameter expansion has no regex, and a glob cannot
+  # express "up to the next quote" without eating the rest of the file.
+  local code
+  # shellcheck disable=SC2001
+  code="$(sed 's/"[^"]*"//g' <<<"${body}")"
+  first_effect_at="$(grep -nE '(^|;|&&|\|\||then|else|do|!)[[:space:]]*(chmod|as_root|\$\{SCRIPT_DIR\}/scripts/install_)' <<<"${code}" \
                      | head -1 | cut -d: -f1)"
   [[ -n "${first_effect_at}" ]] || {
     echo 'could not find setup.sh first side effect — this gate has stopped watching' >&2
@@ -18520,6 +18545,81 @@ conversation_record_round_trips() {
 }
 check "a conversation id round-trips, and a junk one is refused" \
   conversation_record_round_trips
+
+conversations_payload_comes_from_the_app() {
+  local out
+  out="$(lib_probe 'curl() { printf "{\"items\":[]}"; }' 'agent_conversations_payload')" || {
+    echo 'the app answered and no payload came back' >&2; return 1; }
+  [[ "${out}" == '{"items":[]}' ]] || {
+    printf 'the payload was not passed through as the app sent it: %q\n' "${out}" >&2
+    return 1; }
+  ! lib_probe 'curl() { return 1; }' 'agent_conversations_payload' || {
+    echo 'an unreachable app still produced a payload' >&2; return 1; }
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'have() { [[ "$1" != curl ]]; }' 'agent_conversations_payload' || {
+    echo 'a machine with no curl produced a payload anyway' >&2; return 1; }
+  # ...and it must ask the AGENT's own API. Echoing the arguments back is the
+  # only way to see which address was dialled.
+  # shellcheck disable=SC2016  # ...and here
+  out="$(lib_probe 'curl() { printf "%s\n" "$*"; }' 'agent_conversations_payload')"
+  grep -q 'app-conversations' <<<"${out}" || {
+    printf 'the conversation list was fetched from somewhere other than the conversations endpoint: %s\n' \
+      "${out}" >&2
+    return 1; }
+  local base; base="$(lib_probe ':' 'agent_api_base')"
+  [[ -n "${base}" ]] || { echo 'agent_api_base answered nothing' >&2; return 1; }
+  grep -qF "${base}" <<<"${out}" || {
+    printf 'the request did not go to the agent API base (%s): %s\n' "${base}" "${out}" >&2
+    return 1; }
+}
+check "the conversation list is fetched from the agent's own API" \
+  conversations_payload_comes_from_the_app
+
+# CONTRIBUTING.md is the document that names this project's own machinery — its
+# gates, its helpers, its variables — and a name it gets wrong reads as
+# authoritative. This session deleted agent_run_block and left two paragraphs
+# describing it, which is how the class announces itself.
+#
+# Scoped to CONTRIBUTING.md deliberately. docs/ names foreign vocabulary
+# (num_ctx, native_tool_calling, invoke_skill) that belongs to Ollama and
+# OpenHands and is correctly not defined here; CONTRIBUTING talks about this
+# repo, so every underscored name it puts in backticks should be findable in
+# it — as a definition, a call, or a variable.
+#
+# SOURCE-GREP: the subject is a document and the repo's own text. What it
+# cannot check is whether the sentence around a name is still true — only that
+# the thing named still exists.
+contributing_names_things_that_exist() {
+  local name missing=() seen=0
+  local -a sources=()
+  mapfile -t sources < <(git -C "${REPO}" ls-files '*.sh' 'bin/*' '.githooks/*' 2>/dev/null || true)
+  (( ${#sources[@]} > 10 )) || {
+    echo 'could not list the repo scripts (not a git checkout?)' >&2; return 1; }
+  local -a paths=()
+  for name in "${sources[@]}"; do paths+=("${REPO}/${name}"); done
+  # A backtick PAIR inside single quotes reads to ShellCheck as a command
+  # substitution (SC2016), and this pattern is nothing but backticks — the same
+  # trap the README gates in this file already record.
+  local named
+  # shellcheck disable=SC2016
+  named="$(grep -ohE '`[a-z_][a-z0-9_]*_[a-z0-9_]+`' "${REPO}/CONTRIBUTING.md" \
+             | tr -d '`' | sort -u)"
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    seen=$(( seen + 1 ))
+    grep -qF -- "${name}" "${paths[@]}" || missing+=("${name}")
+  done <<<"${named}"
+  (( seen >= 20 )) || {
+    printf 'only %s names read out of CONTRIBUTING.md — this gate stopped watching\n' \
+      "${seen}" >&2
+    return 1; }
+  (( ${#missing[@]} == 0 )) || {
+    printf 'CONTRIBUTING.md names these, and they are nowhere in the repo:\n' >&2
+    printf '  %s\n' "${missing[@]}" >&2
+    return 1; }
+}
+check "CONTRIBUTING names nothing this repo does not have" \
+  contributing_names_things_that_exist
 
 ambiguity_warning_counts_both_sources() {
   local one='agent_live_sandboxes() { printf "oh-agent-server-a\n"; }

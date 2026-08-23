@@ -550,6 +550,8 @@ Every one of them read source text as evidence that a behaviour happens, and
 every one of them stayed green while the behaviour was gone. The last was
 found by mutation sweep: stub each function in `scripts/lib.sh` to `return 0`,
 run the suite, and see what still passes. **Forty-four functions survived.**
+(Most have since been driven; the section below on what a real machine can
+settle carries the current count and how the rest were dealt with.)
 
 **So: drive the thing.** Call the function, with the world stubbed around it,
 and assert on what it returns, prints or leaves behind. Nearly everything is
@@ -585,8 +587,10 @@ both, and is the opposite of a source grep — `uninstall_says`,
 `tune_dry_run_in` and `big_unknown_is_elided` are all in that position. They
 carry a marker saying so. That is deliberate: a tighter rule would have to
 guess which tool touched which path, and a classifier that guesses is the thing
-this section exists to stop. Three false positives with an honest sentence each
-is a better trade than one clever rule nobody can audit.
+this section exists to stop. A handful of false positives with an honest
+sentence each is a better trade than one clever rule nobody can audit — and the
+count only grows as gates are converted, because a driver is exactly the shape
+the classifier mistakes for a source grep.
 
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
@@ -616,12 +620,12 @@ Two counting errors surfaced in the same read, and both flattered the old
 number:
 
 - **28 of the 296 names the scanner flags are helpers, not gates.**
-  `probe_region`, `baked_keys`, `agent_run_block` and the rest extract source
+  `probe_region`, `baked_keys`, `drift_case_block` and the rest extract source
   for a gate to judge. Their debt, if any, belongs to the gate that calls them,
   and counting them twice made the population look bigger than it was.
 - **Ten gates read repo source only through one of those helpers, and the
-  scanner cannot see them at all.** `agent_publishes_on_loopback` greps the
-  docker-run block that `agent_run_block` pulled out of `agent.sh`; the
+  scanner cannot see them at all.** `every_drift_key_is_reported` compares two
+  lists that `drift_keys` and `drift_arms` pulled out of the source; the
   `${REPO}/` path is in the helper, so the classifier's rule — *mentions a
   `${REPO}/` path **and** uses a text tool* — never fires on the gate. Moving a
   read into a helper is therefore a way to silence the meta-gate without
@@ -683,92 +687,64 @@ on the parent leaves the `xargs` running and adopted by `init`.
 
 ## What only a real machine can settle, and how to settle it
 
-A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
-ran the suite. Forty-four survived. Most were then driven (see the last section
-of `tests/test-lib.sh`), but some genuinely cannot be: they ask a real kernel, a
-real daemon, a real account. Those are **not** covered by another source grep —
-they are listed here, with the command that would settle each and what a pass
-looks like, so the work is concrete rather than open-ended.
+A mutation sweep stubs every function in `scripts/lib.sh` to `return 0` and
+runs the suite. Forty-four survived the first round. Most were then driven, and
+the twenty-nine that were left were listed here — grouped by tier, with a
+command and a pass condition for each — as work that needed a droplet.
 
-Each row is meant to be run without interpretation: the command is the whole
-command, and the pass condition is a thing you can look at and be sure about.
-`L=/opt/local-code-agent` throughout (wherever your checkout is).
+**Most of that list was an excuse.** Twenty-six of the twenty-nine are parsers
+over the output of one command: `docker container inspect`, `docker container
+port`, `docker ps`, `ollama list`, `curl …/api/ps`. A recorded sample of that
+output settles each of them here, in a second, with **both** answers — so a
+probe that always says yes and one that always says no each fail. They are
+driven in `tests/test-lib.sh` under *"the probes a mutation sweep could not
+kill"*, and the stubs are shell **functions**, because `have docker` asks
+`command -v`, which finds a function.
 
-**Agent tier** — needs `ENABLE_AGENT=true`, `sudo lca apply`, `lca agent start`.
+They were then mutation-checked rather than assumed: each target stubbed to
+`return 0` in a complete copy of the repo, the suite run, the gate expected to
+fail. **Twenty-six of twenty-seven killed, control passing.** The one survivor
+was a gate that stubbed the very function it was meant to be testing, which is
+the failure this whole document is about arriving from the inside; it now
+drives the real one with `curl` stubbed instead.
 
-```bash
-mkdir -p /tmp/probe && cd /tmp/probe && git init -q
-lca agent task --dir /tmp/probe "create hello.txt containing the word hello"   # note the id it prints
-lca agent watch --live --once
-```
+Two of the twenty-six cannot be stubbed and are not:
 
-| Function | Pass condition |
-|---|---|
-| `agent_container_running`, `agent_container_exists` | `lca agent status` says running; then `sudo docker stop openhands-app` and it says exists-but-not-running, not "not created" |
-| `agent_live_port` | `bash -c 'source $L/scripts/lib.sh; load_env; agent_live_port'` prints the same number as `AGENT_PORT` in `.env` |
-| `agent_live_sandboxes`, `agent_orphan_sandboxes` | its line count equals `sudo docker ps --format '{{.Names}}' \| grep -c '^oh-agent-server-'`; with the agent stopped and a sandbox left, `agent_orphan_sandboxes` lists exactly that one |
-| `agent_recorded_conversation`, `agent_conversation_record` | prints the id `lca agent task` printed above, character for character |
-| `agent_conversation_warning` | start a second task without stopping the first: it fires and names the **recorded** id, not the newest sandbox |
-| `agent_conversations_payload` | non-empty, and `jq .` parses it |
-| `agent_model_for_run` | with `<model>-agent` pulled it prints that; after `ollama rm <model>-agent` it prints `MODEL_NAME` |
-| `agent_model_loaded_context` | equals `AGENT_MODEL_CONTEXT` from `.env` (16384 by default) |
+- `ollama_bg_env` reads `/proc/<pid>/environ`, so its gate launches a **real**
+  process named `ollama` — a copy of `sleep` — with the environment under test.
+- `start_ollama_bg` launches through `nohup env … ollama serve`, and `env(1)`
+  cannot run a shell function, so its gate puts a real file on `PATH` (through
+  `make_stub_dir`/`stub_path`, because a stub directory `sudo` cannot see is
+  how a test passes here and fails on a runner that escalates).
 
-**Chat container** — any box with docker and the container created.
+Driving `start_ollama_bg` is also what found the command-less `exec` that
+silenced stderr for the rest of every `lca` command on a host without systemd.
+Nothing in a source grep of that function looks wrong.
 
-| Function | Command | Pass condition |
+### What is actually left
+
+| What | Where | Pass condition |
 |---|---|---|
-| `webui_container_env` | `bash -c 'source $L/scripts/lib.sh; load_env; webui_container_env PORT'` | equals `sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' open-webui \| grep '^PORT='` |
-| `webui_container_env_list` | same, no argument | every `-e` line `install_webui.sh` bakes in appears once |
-| `webui_container_exists`, `webui_container_running` | `sudo docker stop open-webui`, then both | `exists` true, `running` false. **This distinction is the whole point** — collapsing them is how "already matches .env" was printed about a container that did not exist |
+| `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
+| the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
 
-**Ollama lifecycle** — droplet, systemd.
+`systemd_available` is half-settled and honestly so: a host with no `systemctl`
+cannot have systemd, and the suite asserts that anywhere. Which of the two
+answers a given machine gives is that machine's business, not a gate's.
+`apt_get` is covered by CI's `minimal-base` job, on a bare `ubuntu:24.04`.
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `ensure_ollama_up`, `wait_for_ollama`, `start_ollama_bg`, `restart_ollama` | `sudo systemctl stop ollama`, then `bash -c 'source $L/scripts/lib.sh; load_env; ensure_ollama_up 90; echo rc=$?'` | `rc=0` and `curl -fsS $(ollama_url)/api/version` answers |
-| `ollama_bg_env` | with Ollama up: `bash -c 'source $L/scripts/lib.sh; load_env; ollama_bg_env OLLAMA_CONTEXT_LENGTH'` | equals `OLLAMA_CONTEXT_LENGTH` in `.env` |
-| `warm_model` | `time` it twice in a row | the second call returns in under a second |
-| `resync_dropin_if_drifted` | `sudo sed -i 's/OLLAMA_KEEP_ALIVE=.*/OLLAMA_KEEP_ALIVE=99m/' /etc/systemd/system/ollama.service.d/local-code-agent.conf`, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again, and `lca check` reports no drift |
-| `stale_agent_models` | `ollama cp <model>-agent stale-agent`, then `lca check` | `stale-agent` is named, the current `-agent` model is not |
+Everything else that used to be on this list — `confirm`'s refusing branch,
+`netmode_state`, `tailscale_ip4`, `host_listeners`, `ollama_relay_unit_address`,
+`agent_workspace_dir`, `venv_python`, `load_env_readonly`, `model_load_notice`,
+`root_for_probe`, and the twenty-six above — is driven in the suite now.
 
-**Relay** — droplet.
+The rule that came out of it, and it is the useful part:
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `ollama_relay_healthy` | `sudo lca relay install`, `lca relay status`; then `sudo systemctl stop local-code-agent-ollama-relay.socket` and re-run | healthy **only** in the first case. It must answer false when the socket is bound but Ollama is not answering *through* it — stop `ollama` with the socket up to see that |
+> **Assume it does not need a real machine until you have tried to settle it
+> here.** A function that only parses one command's output needs a sample of
+> that output, not the machine that produces it. Writing "needs a droplet"
+> beside it costs nothing today and buys a list nobody works through.
 
-**Privilege — settled here, not on the droplet.** This block used to say these
-needed a real account on a real machine. Four of the five needed only a
-*throwaway* account, and the suite now makes one: `useradd -M`, a root-owned
-`0600` file, `runuser`, and the probes driven as that user. The fifth needed
-only a `PATH` without `sudo` on it. They are in `tests/test-lib.sh` under
-"the privilege probes, driven from a real non-root account", and they print a
-loud SKIPPED line rather than vanishing when the suite is not root.
-
-What that leaves for a real machine is narrower and worth stating exactly:
-**nothing about these functions** — only the end-to-end behaviour built on
-them, which is that `lca check` and the login banner must not hang on a
-password prompt for a human who is a sudoer *with* a password. That is a
-different assertion from any of the five, it needs a configured sudoers entry
-rather than an account, and it is the one row left here:
-
-| Command | Pass condition |
-|---|---|
-| as an ordinary sudoer with a password: `sudo -k`, then `lca check`, then the login banner | neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
-
-**Everything else**
-
-| Function | Where | Pass condition |
-|---|---|---|
-| `systemd_available` | droplet **and** `docker run --rm -it ubuntu:24.04` with the repo mounted | true on the droplet, false in the container, and `lca check` completes on both |
-| `gpu_state`, `has_nvidia_gpu` | **an NVIDIA host — not the droplet** | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string |
-| `apt_get` | already covered by CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
-
-`confirm`'s refusing branch, `netmode_state`, `tailscale_ip4`, `host_listeners`,
-`ollama_relay_unit_address`, `agent_workspace_dir`, `venv_python`,
-`load_env_readonly`, `model_load_notice` and `root_for_probe` were on that list
-too and are **not** any more: each is driven in the suite now, with a stubbed
-command, a real unit file in the sandbox, or a real terminal via `script`.
 
 ## Run it broken, not working
 
