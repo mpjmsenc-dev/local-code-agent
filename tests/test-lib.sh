@@ -3773,6 +3773,48 @@ truncation_stops_the_run() {
 }
 check "a run whose prompt was truncated is stopped, and nothing is stopped on a guess" \
   truncation_stops_the_run
+# The preventive half of the same limit. 'lca agent watch' stops a run that HAS
+# been truncated; 'lca check' must refuse to let you start one that must be.
+# AGENT_MODEL_CONTEXT was validated only as "a positive number" for months, so
+# 4096 passed and every run on that box was ruined before the model read a word.
+check_refuses_a_window_too_small_for_the_prompt() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -q 'AGENT_PROMPT_FLOOR' <<<"${body}" || {
+    echo 'lca check no longer compares the agent window against the prompt it has to hold' >&2
+    return 1; }
+  # It must FAIL, not warn: a window under the floor cannot produce a usable run
+  # at all, and a warning among warnings is how this went unnoticed.
+  grep -qE 'p_fail "the agent.s window is' <<<"${body}" || {
+    echo 'a window too small for the agent prompt no longer fails the check' >&2
+    return 1; }
+  # And the floor must stay tied to a measured prompt size rather than drifting
+  # to something convenient.
+  grep -qE 'AGENT_PROMPT_FLOOR=1[34][0-9]{3}' <<<"${body}" || {
+    echo 'the prompt floor is no longer near the measured 13,783-token first prompt' >&2
+    return 1; }
+}
+check "'lca check' fails a window too small to hold the agent's own prompt" \
+  check_refuses_a_window_too_small_for_the_prompt
+
+# .env is written once at install and nothing has ever merged into it, so a
+# setting added afterwards is invisible on every existing machine. Measured on
+# the box this was written on: five missing, including AGENT_MODEL_CONTEXT and
+# AGENT_NATIVE_TOOL_CALLING.
+check_names_settings_the_env_predates() {
+  local body
+  body="$(sed 's/#.*//' "${REPO}/check-system.sh")"
+  grep -q 'MISSING_SETTINGS' <<<"${body}" || {
+    echo 'lca check no longer notices settings this release ships that .env lacks' >&2
+    return 1; }
+  # Named, never written: .env belongs to the user.
+  grep -qE '(sed -i|printf|echo)[^"]*>>[^"]*ENV_FILE' <<<"${body}" && {
+    echo 'lca check now writes to the user .env; it must name missing settings, not add them' >&2
+    return 1; }
+  return 0
+}
+check "...and names the settings your .env predates rather than writing them" \
+  check_names_settings_the_env_predates
 agent_base_url_is_not_loopback() {
   local u; u="$(agent_llm_base_url)"
   # host.docker.internal, because inside the container 127.0.0.1 is the

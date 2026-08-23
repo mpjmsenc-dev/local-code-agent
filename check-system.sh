@@ -230,6 +230,64 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
     || p_warn "derived agent models left over from an earlier rung: ${AGENT_STALE}— they are manifests over shared blobs, but they are yours to remove: ollama rm ${AGENT_STALE}"
 fi
 
+# Settings this release ships that your .env has never heard of.
+#
+# The backfill for this already exists — sync_env_keys, called from setup.sh, and
+# 'lca update' re-runs setup — so on a machine that updates normally this check
+# passes and says so. What it catches is the gap between the two: a checkout
+# that has moved ahead of the last setup run, which is exactly where a
+# maintainer lives. Measured on this project's own build box, five settings were
+# missing, including AGENT_MODEL_CONTEXT (which decides whether the agent tier
+# can function at all) and AGENT_NATIVE_TOOL_CALLING (which this project's own
+# docs call the difference between a run that works and one that ends instantly
+# with an empty workspace). Behaviour was correct throughout — load_env defaults
+# them — but nothing said the file was stale.
+#
+# Named rather than written, even though sync_env_keys would happily write them:
+# 'lca check' is the read-only command in this project and must stay that way.
+# It points at the thing that does the writing instead.
+if [[ -f "${ENV_FILE}" && -f "${SCRIPT_DIR}/.env.example" ]]; then
+  MISSING_SETTINGS="$(comm -23 \
+    <(grep -oE '^[A-Z_]+=' "${SCRIPT_DIR}/.env.example" | tr -d '=' | sort -u) \
+    <(grep -oE '^[A-Z_]+=' "${ENV_FILE}" | tr -d '=' | sort -u) | tr '\n' ' ')"
+  MISSING_SETTINGS="${MISSING_SETTINGS% }"
+  if [[ -n "${MISSING_SETTINGS}" ]]; then
+    p_warn "your ${ENV_FILE} predates $(printf '%s' "${MISSING_SETTINGS}" | wc -w) setting(s) this release ships, so they are running on built-in defaults and are invisible in the file you read to understand this box: ${MISSING_SETTINGS}. Their documented defaults and the reasoning are in ${SCRIPT_DIR}/.env.example — catch this box up with: sudo ${SCRIPT_DIR}/setup.sh (or ${SCRIPT_DIR}/update.sh, which re-runs it). Values you have already set are never touched."
+  else
+    p_pass ".env carries every setting this release ships"
+  fi
+fi
+
+# Is the agent's window big enough to hold the agent's own prompt?
+#
+# Nothing asked until now. AGENT_MODEL_CONTEXT was validated as "a positive
+# number", so 4096 passed and 'lca check' reported PASS on a configuration where
+# EVERY run is ruined before the model reads a word: ollama truncates a prompt
+# longer than the window to num_ctx/2 + 2, keeping the first 4 tokens and the
+# TAIL, so at 4096 the agent would see 2,050 of its 13,783 tokens -- no role, no
+# security policy, no filesystem rules, and no definition of the tool that runs
+# commands. Silently, and looking like a successful run.
+#
+# The floor is measured, not chosen: 13,783 tokens is this tier's first prompt
+# after the skills cut, on 24 tools with a small task (docs/PROMPT-WINDOW.md).
+# 14000 rounds it up rather than pretending to more precision than one
+# measurement supports.
+#
+# This is the preventive half of the ceiling 'lca agent watch' enforces at
+# runtime: the watcher stops a run that has been truncated, and this stops you
+# from starting one that must be.
+if [[ "${ENABLE_AGENT}" == "true" ]]; then
+  AGENT_WINDOW="$(agent_model_context)"
+  AGENT_PROMPT_FLOOR=14000
+  if [[ "${AGENT_WINDOW}" =~ ^[0-9]+$ ]] && (( AGENT_WINDOW < AGENT_PROMPT_FLOOR )); then
+    p_fail "the agent's window is ${AGENT_WINDOW} tokens and its own first prompt is about 13,800 before your task is added, so every run would be truncated before the model reads a word — ollama keeps the first 4 tokens and the TAIL, discarding the role, the security policy, the filesystem rules and the definition of the tool that runs commands. Raise AGENT_MODEL_CONTEXT to at least 16384 in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh — or set ENABLE_AGENT=false. See docs/PROMPT-WINDOW.md."
+  elif [[ "${AGENT_WINDOW}" =~ ^[0-9]+$ ]] && (( AGENT_WINDOW < 16384 )); then
+    p_warn "the agent's window is ${AGENT_WINDOW} tokens against a first prompt of about 13,800, leaving roughly $(( AGENT_WINDOW - 13800 )) for the whole conversation — and every observation is added and never removed, so one 100-line file read (about 1,300 tokens) can end it. 16384 is what this tier is measured at. Raise AGENT_MODEL_CONTEXT in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+  else
+    p_pass "the agent's window (${AGENT_WINDOW}) holds its own prompt with about $(( AGENT_WINDOW - 13800 )) tokens left for the conversation"
+  fi
+fi
+
 # The agent's prompt cache, which is really a question about OLLAMA_KEEP_ALIVE.
 #
 # Measured: the agent's first prompt is ~15,000 tokens of OpenHands' own framing
