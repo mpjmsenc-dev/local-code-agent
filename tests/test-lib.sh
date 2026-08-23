@@ -1976,52 +1976,122 @@ SAME_1="$(unique_backup_path "${SAME_DIR}" 20250101-000000)"; : > "${SAME_1}"
 SAME_2="$(unique_backup_path "${SAME_DIR}" 20250101-000000)"
 check "the collision suffix counts as NEWER, so retention drops the plain one" \
   test "$(prune_sel 1 "${SAME_2}" "${SAME_1}")" = "${SAME_1}"
-# ...and the lock itself, which is what stops the two runs interleaving on the
-# container pause — the one thing that pause exists to make consistent.
+# Driven. The greps this replaces read acquire_backup_lock's body for the
+# strings 'flock -n', 'flock -w' and 'have flock', and asked awk whether the
+# call appears above unique_backup_path. Every one of them survives the lock
+# never being taken: a body that still contains the words while something else
+# returns early reads identically, and the gate's own comment records a
+# mutation that replaced the acquiring call with 'true' and was missed.
+#
+# So a second process really holds the lock, and backup.sh is run against it.
+LOCK_SB="${SANDBOX}/lock"
+LOCK_HOLDER_PID=""
+lock_sandbox() {
+  rm -rf "${LOCK_SB}"; mkdir -p "${LOCK_SB}/scripts" "${LOCK_SB}/backups" "${LOCK_SB}/config"
+  cp "${REPO}/backup.sh"             "${LOCK_SB}/backup.sh"
+  cp "${REPO}/scripts/lib.sh"        "${LOCK_SB}/scripts/lib.sh"
+  cp "${REPO}/.env.example"          "${LOCK_SB}/.env"
+  cp "${REPO}/config/CONVENTIONS.md" "${LOCK_SB}/config/CONVENTIONS.md"
+}
+hold_the_lock() {   # SECONDS -> a real flock held by another process, or non-zero
+  local ready="${LOCK_SB}/backups/held" i=0
+  rm -f "${ready}"
+  # Not inside a command substitution, and with streams of its own: a
+  # background job started in $( ) inherits the substitution's pipe, and the
+  # caller then waits on a descriptor its own child is holding open. Written
+  # that way first, and the holder appeared to take no lock at all.
+  bash -c 'exec {fd}>"$1/.backup.lock"; flock -n "${fd}" || exit 1; : > "$1/held"; sleep "$2"' \
+    _ "${LOCK_SB}/backups" "$1" >/dev/null 2>&1 &
+  LOCK_HOLDER_PID=$!
+  # Waits for the lock to be HELD rather than for the process to exist: a
+  # probe that raced the holder would report "nobody was holding it" as a pass.
+  while [[ ! -e "${ready}" ]] && (( i < 200 )); do i=$(( i + 1 )); sleep 0.05; done
+  [[ -e "${ready}" ]]
+}
+release_the_lock() {
+  [[ -n "${LOCK_HOLDER_PID}" ]] || return 0
+  # By PID. Never by pattern: a 'pkill -f backup' matches the command line of
+  # whatever is running the tests, this suite included.
+  kill "${LOCK_HOLDER_PID}" 2>/dev/null || true
+  wait "${LOCK_HOLDER_PID}" 2>/dev/null || true
+  LOCK_HOLDER_PID=""
+}
+lock_probe() {   # WAIT_SECONDS CODE -> what backup.sh printed running CODE
+  bash -c '
+    set -uo pipefail
+    cd "$1"
+    export BACKUP_LOCK_WAIT="$2"
+    source "$1/backup.sh" >/dev/null 2>&1
+    BACKUP_DIR="$1/backups"
+    eval "$3"
+  ' _ "${LOCK_SB}" "$1" "$2" 2>&1
+}
 backup_serialises_itself() {
-  local body; body="$(sed 's/#.*//' "${REPO}/backup.sh")"
-  grep -q 'acquire_backup_lock' <<<"${body}" || {
-    echo "backup.sh no longer takes a lock — the timer and a manual run can interleave" >&2
+  local free held whole waited noflock archives bad=0
+  lock_sandbox
+  # 1. Nobody holding it: straight through — and stderr still WORKS afterwards.
+  # acquire_backup_lock opens its descriptor with a command-less 'exec', which
+  # applies the redirection to the shell itself; with a 2>/dev/null on that
+  # line it silenced stderr for the rest of the backup, and a full disk then
+  # failed with a completely blank error. That is a runtime property of the
+  # shell and no grep of the line can see it.
+  # shellcheck disable=SC2016  # code for the probe's shell
+  free="$(lock_probe 5 'acquire_backup_lock; printf "RC=%s\n" "$?"; warn "STILL-SPEAKING"')"
+  hold_the_lock 30 || {
+    release_the_lock
+    echo 'the harness could not take the lock itself, so nothing below was contended' >&2
     return 1
   }
-  # Scoped to the function, and to the two calls that DO the work rather than
-  # to the word "flock" anywhere in the file. The loose version passed a
-  # mutation that replaced the acquiring call with 'true' — every mention of
-  # flock survived in the comments and the degrade check, so the gate saw a
-  # lock that was no longer taken.
-  local lockfn; lockfn="$(probe_region backup.sh 'acquire_backup_lock() {' '}')"
-  [[ -n "${lockfn}" ]] || {
-    echo "acquire_backup_lock is gone (renamed?)" >&2
+  # 2. Held by somebody else: it says so, waits, and then refuses rather than
+  # running a second backup alongside the first.
+  # shellcheck disable=SC2016  # code for the probe's shell
+  held="$(lock_probe 1 'acquire_backup_lock; printf "RC=%s\n" "$?"')"
+  # 3. ...and a WHOLE backup against a held lock leaves no archive at all,
+  # which is the ordering claim the awk was standing in for: a name cannot be
+  # chosen, still less written, before the lock is held.
+  # shellcheck disable=SC2016  # code for the probe's shell
+  whole="$(lock_probe 1 'do_backup; printf "RC=%s\n" "$?"')"
+  archives="$(find "${LOCK_SB}/backups" -name '*.tar.gz' | grep -c . || true)"
+  release_the_lock
+  # 4. ...and it WAITS rather than giving up, because update.sh takes a backup
+  # before it updates and must not proceed unbacked.
+  hold_the_lock 1 || {
+    release_the_lock
+    echo 'the harness could not take the lock for the waiting case' >&2
     return 1
   }
-  # flock, not a lockfile someone has to clean up: it releases even on kill -9,
-  # so a crashed run cannot wedge every future nightly backup.
-  grep -q 'flock -n' <<<"${lockfn}" || {
-    echo "backup.sh never actually takes the lock (no 'flock -n')" >&2
-    return 1
-  }
-  # ...and waits rather than giving up, because update.sh depends on the backup
-  # really being taken.
-  grep -q 'flock -w' <<<"${lockfn}" || {
-    echo "backup.sh does not wait for a running backup — update.sh would proceed unbacked" >&2
-    return 1
-  }
-  # A missing flock must not stop the backup happening at all.
-  grep -q 'have flock' <<<"${lockfn}" || {
-    echo "backup.sh requires flock outright instead of degrading" >&2
-    return 1
-  }
-  # The lock has to be held BEFORE the tarball path is chosen, or two runs can
-  # still pick the same one.
-  # END decides, and only END. A rule-level 'exit N' in awk still RUNS the END
-  # block, so an 'END { exit 1 }' underneath silently overwrites the status —
-  # this check reported the ordering as wrong while the code had it right.
-  awk '/acquire_backup_lock$/ { locked = 1 }
-       /unique_backup_path "/ { if (!seen) { seen = 1; in_order = locked } }
-       END { exit (seen && in_order) ? 0 : 1 }' <<<"${body}" || {
-    echo "backup.sh picks its tarball name before taking the lock" >&2
-    return 1
-  }
+  # shellcheck disable=SC2016  # code for the probe's shell
+  waited="$(lock_probe 20 'acquire_backup_lock; printf "RC=%s\n" "$?"')"
+  release_the_lock
+  # 5. A machine with no flock degrades rather than refusing: a backup that
+  # will not run is worse than one that might overlap.
+  # shellcheck disable=SC2016  # code for the probe's shell
+  noflock="$(lock_probe 5 'have() { [[ "$1" != flock ]]; }; acquire_backup_lock; printf "RC=%s\n" "$?"')"
+
+  grep -qx 'RC=0' <<<"${free}" || {
+    printf 'an uncontended backup could not take its own lock:\n%s\n' "${free}" >&2; bad=1; }
+  grep -q 'STILL-SPEAKING' <<<"${free}" || {
+    printf 'stderr was silenced for the rest of the run by taking the lock — a failing nightly backup would report nothing at all:\n%s\n' \
+      "${free}" >&2; bad=1; }
+  grep -q 'Another backup is already running' <<<"${held}" || {
+    printf 'a second backup started while the first was running, and said nothing:\n%s\n' \
+      "${held}" >&2; bad=1; }
+  grep -q 'really is a running process' <<<"${held}" || {
+    printf 'it never gave up on a lock it could not get, so a wedged nightly backup waits for ever:\n%s\n' \
+      "${held}" >&2; bad=1; }
+  [[ "${archives}" == "0" ]] || {
+    printf 'a backup running against a held lock wrote %s archive(s) anyway:\n%s\n' \
+      "${archives}" "${whole}" >&2; bad=1; }
+  grep -qx 'RC=0' <<<"${waited}" || {
+    printf 'the lock was released and the waiting backup still did not get in — update.sh would proceed with no restore point:\n%s\n' \
+      "${waited}" >&2; bad=1; }
+  grep -q 'flock is not installed' <<<"${noflock}" || {
+    printf 'a machine without flock is not told why two backups could overlap:\n%s\n' \
+      "${noflock}" >&2; bad=1; }
+  grep -qx 'RC=0' <<<"${noflock}" || {
+    printf 'no flock means no backup at all, which is worse than an overlap:\n%s\n' \
+      "${noflock}" >&2; bad=1; }
+  return "${bad}"
 }
 check "backup.sh runs one at a time" backup_serialises_itself
 
@@ -20052,8 +20122,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 118 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 35 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 117 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 36 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

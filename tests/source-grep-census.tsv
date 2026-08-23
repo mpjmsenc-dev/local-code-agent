@@ -48,7 +48,7 @@ FP	backup_cleans_up_a_partial_archive	drives do_backup with a failing tar and lo
 FP	backup_is_not_world_readable	drives do_backup and reads the modes off what it wrote
 FP	backup_ownership_is_consistent	drives do_backup with a stubbed invoking_user and reads the owners
 FP	backup_records_the_machine	drives do_backup and reads the record out of the archive
-A	backup_serialises_itself	greps the lock function for flock flags
+FP	backup_serialises_itself	runs backup.sh against a lock another process really holds
 FP	backup_stages_no_empty_model_list	drives do_backup with a failing ollama and lists the archive
 A	banner_network_probes_bound_themselves	greps motd.sh probe lines for --max-time
 A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
