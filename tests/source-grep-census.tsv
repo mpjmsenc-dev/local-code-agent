@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now             105   of the 115 the projection was made from
-#   still worth driving     72
+#   A rows now             103   of the 115 the projection was made from
+#   still worth driving     70
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (9):
+#   Of the ~24 highest-cost, driven so far (11):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -78,6 +78,8 @@
 #     logs_setup_tells_the_two_apart        absent vs unopenable, three arms
 #     logs_ollama_separates_absent_from_unreadable   the same, for the bg log
 #     logs_ollama_reads_the_background_log  the log itself, on a journal-less box
+#     signup_reported_by_check              open signups warned about
+#     check_system_asks_for_the_port_list    a disabled-but-live chat app's port
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -120,7 +122,8 @@ FP	check_names_a_bad_port	extract-to-drive: runs check-system.sh's Settings bloc
 A	check_reports_dropin_drift	a single grep for one function name
 A	check_reports_the_agent	awk over check-system.sh for a guarded call
 FP	check_reports_webui_drift	extract-to-drive: runs the drift-reporting block over four container states
-A	check_system_asks_for_the_port_list	greps a section of check-system.sh for a call
+H	check_sandbox	builds the copy of the tree and the stubs a real 'lca check' is run in
+FP	check_system_asks_for_the_port_list	runs a real 'lca check' with the chat app off in .env but still listening, and reads the inbound section
 A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the expectation
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
 A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
@@ -198,7 +201,7 @@ A	setup_refusal_precedes_every_side_effect	line-number ordering in setup.sh
 A	setup_skips_only_what_it_already_proved	awk over setup.sh for how --quick is gated
 A	setup_uses_verdict	presence-grep for the call plus an absence rule
 A	shared_probes_let_the_caller_decide	presence-greps inside three lib function bodies
-A	signup_reported_by_check	one grep for a setting name
+FP	signup_reported_by_check	runs a real 'lca check' with signups open and with them closed, and reads the two verdicts
 A	skip_is_understood	one grep for a condition
 A	sources_the_real_ladder	one grep for a source line
 A	speed_classifies_the_placement	awk proximity in speed.sh

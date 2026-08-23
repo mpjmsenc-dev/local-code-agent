@@ -12180,12 +12180,132 @@ else
   echo "skip - no 'timeout' command, cannot bound the docker read"
 fi
 
+# --- running 'lca check' and reading its report -----------------------------
+#
+# Several gates below claim things about what 'lca check' SAYS, and each of
+# them used to grep check-system.sh for a token. A grep cannot tell a sentence
+# that is printed from one that sits in an unreachable branch, and it cannot
+# tell which of two branches a given machine lands in — which is the whole
+# subject of the two most expensive of them.
+#
+# So the report is produced. A copy of the tree, every external command
+# answered by a stub that returns at once, and an .env assembled per case.
+CHECK_SB="${SANDBOX}/checkreport"
+check_sandbox() {
+  [[ -e "${CHECK_SB}/check-system.sh" ]] && return 0
+  mkdir -p "${CHECK_SB}" "${CHECK_SB}/bin" "${CHECK_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${CHECK_SB}" )
+  # WEBUI_STATE is the one fact these gates vary: what docker says about the
+  # chat app's container. Empty means there is no container.
+  cat > "${CHECK_SB}/bin/docker" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *openhands-app*)        exit 1 ;;
+  info*)                  exit 0 ;;
+  *"Config.Env"*)         if [ -n "${WEBUI_STATE:-}" ]; then printf 'PORT=%s\n' "${WEBUI_LIVE_PORT:-3000}"; exit 0; fi; exit 1 ;;
+  *"{{.State.Running}}"*) if [ "${WEBUI_STATE:-}" = "running" ]; then echo true; else echo false; fi; exit 0 ;;
+  *"{{.State.Status}}"*)  if [ -n "${WEBUI_STATE:-}" ]; then echo "${WEBUI_STATE}"; exit 0; fi; exit 1 ;;
+  *"container inspect"*)  if [ -n "${WEBUI_STATE:-}" ]; then exit 0; fi; exit 1 ;;
+  *)                      exit 1 ;;
+esac
+STUB
+  # A ruleset that covers exactly the ports NFT_COVERS names, in the shape
+  # inbound_guard_uncovered parses.
+  cat > "${CHECK_SB}/bin/nft" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *"list table inet lca_inbound"*)
+    printf 'table inet lca_inbound {\n  chain lca_in {\n    tcp dport { %s } drop\n  }\n}\n' "${NFT_COVERS:-11434}" ;;
+  *) exit 1 ;;
+esac
+STUB
+  # A passwordless sudoer. These gates are about what the report SAYS; whether
+  # a report may wait for a password is probes_use_the_stricter_test's subject,
+  # and it uses the opposite stub. Without this, every branch guarded by
+  # can_root_now would answer "could not look" on a suite that is not root.
+  cat > "${CHECK_SB}/bin/sudo" <<'STUB'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in -n|-E) shift ;; *) break ;; esac
+done
+[ $# -eq 0 ] && exit 0
+exec "$@"
+STUB
+  local c
+  for c in ollama tailscale systemctl curl; do
+    printf '#!/bin/sh\nexit 1\n' > "${CHECK_SB}/bin/${c}"
+  done
+  chmod -R a+rX "${CHECK_SB}"
+  chmod +x "${CHECK_SB}/bin/"*
+}
+check_report() {   # ENV-LINES [WEBUI_STATE] [NFT_COVERS] -> the whole report
+  check_sandbox
+  cp "${REPO}/.env.example" "${CHECK_SB}/.env"
+  printf '%s\n' "$1" >> "${CHECK_SB}/.env"
+  # The status is discarded rather than swallowed with '|| true': the report is
+  # the product, and check-system.sh exits non-zero whenever anything FAILed,
+  # which is most of these cases. That the report exists at all is asserted
+  # separately, just below.
+  local out rc=0
+  out="$( cd "${CHECK_SB}" \
+          && PATH="$(stub_path "${CHECK_SB}/bin")" \
+             WEBUI_STATE="${2:-}" NFT_COVERS="${3:-11434}" \
+             timeout 120 bash "${CHECK_SB}/check-system.sh" 2>&1 )" || rc=$?
+  printf '%s\n' "${out}"
+  return 0
+}
+# Non-vacuity for every gate that reads this report: a run that produced no
+# report at all would satisfy most "must not say X" assertions.
+check_report_is_a_report() {
+  local out; out="$(check_report '' running)"
+  grep -q 'SUMMARY' <<<"${out}" || {
+    printf 'check-system.sh did not run to a summary in the sandbox:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+check "the 'lca check' harness produces a whole report" check_report_is_a_report
+
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
+#
+# Driven. The grep this replaces asked that the string WEBUI_ENABLE_SIGNUP
+# appeared anywhere in check-system.sh — satisfied by a comment, by a variable
+# nothing prints, and by a branch no machine reaches. What is at stake is the
+# one setting on the documented happy path whose last step is manual
+# (YOUR-TURN.md 4.3): forget it and anyone who can reach the chat app can
+# register an account on the private AI this project exists to keep private.
 signup_reported_by_check() {
-  grep -qF 'WEBUI_ENABLE_SIGNUP' "${REPO}/check-system.sh"
+  local out bad=0
+  # Open. It has to be a WARNING, not a line of prose: the reader is scanning
+  # for the things that are wrong.
+  out="$(check_report 'WEBUI_ENABLE_SIGNUP=true' running)"
+  grep -qE '\[warn\].*signups are OPEN' <<<"${out}" || {
+    printf 'open signups are not reported as a warning by lca check:\n%s\n' \
+      "$(grep -i signup <<<"${out}" || echo '(the word signup never appeared)')" >&2
+    bad=1
+  }
+  # ...and it names the fix, because the setting lives in .env and takes a
+  # container re-creation to reach the running app.
+  grep -q 'lca apply' <<<"$(grep -i 'signups are OPEN' <<<"${out}" || true)" || {
+    echo 'the open-signup warning does not say how to close them' >&2
+    bad=1
+  }
+  # Closed. The complement, or "warn about signups" is satisfied by a check
+  # that warns always — which is a check nobody reads twice.
+  out="$(check_report 'WEBUI_ENABLE_SIGNUP=false' running)"
+  grep -qE '\[ ?ok ?\].*signups are closed' <<<"${out}" || {
+    printf 'closed signups are not reported as closed:\n%s\n' \
+      "$(grep -i signup <<<"${out}" || echo '(the word signup never appeared)')" >&2
+    bad=1
+  }
+  grep -qi 'signups are OPEN' <<<"${out}" && {
+    echo 'a box with signups closed is warned that they are open' >&2
+    bad=1
+  }
+  return "${bad}"
 }
-check "check-system.sh reports the signup setting" signup_reported_by_check
+check "'lca check' reports open signups as a warning, and closed ones as closed" \
+  signup_reported_by_check
 
 echo "# every drift message must name the one command that fixes drift"
 # 'lca apply' exists precisely so nobody has to remember which script applies
@@ -14838,21 +14958,56 @@ check "...and netmode's ruleset really does cover it, so the report is closable"
 # entirely. The note in its own else-branch already said why that is wrong:
 # "'lca apply' now fixes what this reports, and the two must not be able to
 # disagree about which ports count."
+# Driven, because the awk this replaces read the section for the ABSENCE of
+# the string ENABLE_WEBUI. That is satisfied by a section that reads a variable
+# holding the same value, by one that asks a helper which reads it, and by one
+# that never runs. What it is protecting is a measured security hole: with
+# ENABLE_WEBUI=false and the container left running, 'lca check' said "no
+# public service ports to guard" while curl on port 3000 answered
+# {"status":true} from every interface. Turning a feature off in .env made the
+# box more exposed, and the health check agreed there was nothing there.
+#
+# So the machine is built and the section is read: chat app off in .env, its
+# container still running on 3000, and a guard that covers 11434 only.
 check_system_asks_for_the_port_list() {
-  local body
-  body="$(sed -n '/^step "Inbound guard"$/,/^step /p' "${REPO}/check-system.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo "could not find check-system.sh's inbound guard section — this gate stopped watching" >&2
-    return 1; }
-  grep -q 'guarded_ports' <<<"${body}" || {
-    echo 'check-system.sh decides what needs guarding without asking guarded_ports' >&2
-    return 1; }
-  # The regression exactly: the section must not branch on ENABLE_WEBUI itself.
-  ! grep -q 'ENABLE_WEBUI' <<<"${body}" || {
-    echo 'check-system.sh is back to reading ENABLE_WEBUI directly — a chat app left running while .env disables it goes unreported' >&2
-    return 1; }
+  local out bad=0
+  out="$(check_report 'ENABLE_WEBUI=false' running '11434')"
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"${out}")"
+  [[ -n "${out}" ]] || {
+    echo "the report has no inbound guard section — this gate stopped watching" >&2
+    return 1
+  }
+  # The regression, in the words the reader would have seen.
+  grep -qi 'no public service ports to guard\|Nothing binds a public service port' <<<"${out}" && {
+    printf 'a chat app that .env says is off, still listening on 3000, is reported as nothing to guard:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and the port is named, so the claim can be checked by eye rather than
+  # taken on trust.
+  grep -q '3000' <<<"${out}" || {
+    printf 'the live chat-app port is not named anywhere in the inbound section:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # The other direction, and it matters as much: with no container there is
+  # nothing on 3000, and demanding the guard cover it would be a gap nothing
+  # can close — 'lca webui stop' leaves the container and its baked-in port in
+  # place. An unfixable failure is worse than saying nothing.
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"$(check_report 'ENABLE_WEBUI=false' '' '11434')")"
+  grep -q '3000' <<<"${out}" && {
+    printf 'a port nothing is listening on is demanded of the guard:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a guard that DOES cover the live port reports clean, or the first
+  # arm is satisfied by a section that fails no matter what.
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"$(check_report 'ENABLE_WEBUI=false' running '11434, 3000')")"
+  grep -qi 'does NOT cover' <<<"${out}" && {
+    printf 'a guard that covers every live port is still reported stale:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
-check "'lca check' asks lib.sh which ports need guarding" \
+check "'lca check' guards the port a disabled-but-running chat app is really on" \
   check_system_asks_for_the_port_list
 # ...and 'lca apply', whose one promise is to make the running system match
 # .env, must not answer "nothing to apply" about the single setting that turns
@@ -21061,8 +21216,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 105 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 48 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 103 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 50 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
