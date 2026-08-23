@@ -550,6 +550,8 @@ Every one of them read source text as evidence that a behaviour happens, and
 every one of them stayed green while the behaviour was gone. The last was
 found by mutation sweep: stub each function in `scripts/lib.sh` to `return 0`,
 run the suite, and see what still passes. **Forty-four functions survived.**
+(Most have since been driven; the section below on what a real machine can
+settle carries the current count and how the rest were dealt with.)
 
 **So: drive the thing.** Call the function, with the world stubbed around it,
 and assert on what it returns, prints or leaves behind. Nearly everything is
@@ -609,8 +611,10 @@ both, and is the opposite of a source grep — `uninstall_says`,
 `tune_dry_run_in` and `big_unknown_is_elided` are all in that position. They
 carry a marker saying so. That is deliberate: a tighter rule would have to
 guess which tool touched which path, and a classifier that guesses is the thing
-this section exists to stop. Three false positives with an honest sentence each
-is a better trade than one clever rule nobody can audit.
+this section exists to stop. A handful of false positives with an honest
+sentence each is a better trade than one clever rule nobody can audit — and the
+count only grows as gates are converted, because a driver is exactly the shape
+the classifier mistakes for a source grep.
 
 `new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
 that reads repo source with a text tool, is not in
@@ -640,16 +644,22 @@ behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
 converting a gate moves its row from A to FP rather than deleting it, so the
 count is a ratchet and not a promise.
 
+That table is the measurement as taken. The population has grown since, because
+the classifier was widened twice (see the blind spots below), and the A count
+has come down as gates were converted; `tests/source-grep-census.tsv` is always
+the current answer, and the ratchet in `group_a_debt_has_not_grown` moves with
+it. What must never happen is the A count going up.
+
 Two counting errors surfaced in the same read, and both flattered the old
 number:
 
 - **28 of the 296 names the scanner flags are helpers, not gates.**
-  `probe_region`, `baked_keys`, `agent_run_block` and the rest extract source
+  `probe_region`, `baked_keys`, `drift_case_block` and the rest extract source
   for a gate to judge. Their debt, if any, belongs to the gate that calls them,
   and counting them twice made the population look bigger than it was.
 - **Ten gates read repo source only through one of those helpers, and the
-  scanner cannot see them at all.** `agent_publishes_on_loopback` greps the
-  docker-run block that `agent_run_block` pulled out of `agent.sh`; the
+  scanner cannot see them at all.** `every_drift_key_is_reported` compares two
+  lists that `drift_keys` and `drift_arms` pulled out of the source; the
   `${REPO}/` path is in the helper, so the classifier's rule — *mentions a
   `${REPO}/` path **and** uses a text tool* — never fires on the gate. Moving a
   read into a helper is therefore a way to silence the meta-gate without
@@ -659,10 +669,73 @@ number:
 The census carries those ten anyway. They are labelled by what they do, not by
 what the scanner can see.
 
+**And a third route past the classifier, found later: a repo path held in a
+variable.** `${APPLY}`, `${TESTS_DIR}`, `${CENSUS}` and `${DOC_SURFACES[@]}`
+all hold paths inside the checkout, and the rule looked for the literal
+`${REPO}/`. Seventeen more gates read source through one of them — including
+three checks that grepped `apply.sh` for the *name* of an applier, which is the
+weakest shape this document describes, sitting unclassified. The classifier
+knows those four variables now. The lesson is not the variable list: it is that
+a rule written as "the body contains this literal" will keep meeting shapes it
+was not written for, and each one is invisible in exactly the way that matters.
+
 The meta-gate is itself the kind of thing that becomes decoration, so it is
 driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
+
+## A gate that is never run is worse than no gate
+
+`tests/test-lib.sh` is a linear script: a function is a gate only because a
+`check` line names it. Converting `install_is_truncation_safe` from a source
+grep to a driven test replaced the body *and* the `check` line that ran it. The
+suite stayed green, the census still counted the gate, `make gates` passed, and
+the gate was dead — noticed only because a mutation of `install.sh` came back
+killed by three *other* gates and not by that one.
+
+Nothing in 19,000 lines could see it, so now something can. `tests/reachable.awk`
+builds a test file's call graph — roots are `check` invocations and top-level
+calls, edges are names mentioned inside a function body — and
+`no_test_function_is_defined_and_never_run` fails on anything the graph cannot
+reach, across every `tests/*.sh`.
+
+It over-approximates deliberately: a name inside a string counts as a call, so
+it errs towards silence rather than towards accusing live code. Two things it
+found on its first run:
+
+- `command_not_found_handle`, which bash calls itself. Exempt by name, with its
+  reason, in `reachable.awk`'s own `exempt` list — and not in a shell array
+  beside the gate, because an array naming it would be a top-level mention, so
+  the exemption would root the name and the exemption machinery would be doing
+  nothing.
+- a whole verdict category in `tests/live-verify.sh` — WRONG, documented at the
+  top of that file, counted, printed in the summary and included in the exit
+  condition — whose reporting function no line ever called, so the column could
+  only ever read zero. A column that always reads zero looks like a check being
+  made. It was removed.
+
+Its non-vacuity check is worth reading before you copy it: the probe file is a
+*copy of `test-lib.sh` itself*, so the deliberately-dead function's name has to
+be assembled from pieces. Written as one literal, the name appears in the copy
+as a mention inside a live function — an edge — and the dead function comes
+back reachable. That is the fourth time a scanner here has been fooled by text
+about itself, and the first where the text was the fixture.
+
+The other half of the same trap is a function defined **twice**. A test suite
+here is a linear script, so the second definition silently replaces the first:
+every call above it gets one implementation and every call below gets another,
+with nothing said. `url_for` was defined twice eleven thousand lines apart —
+once over `OLLAMA_HOST`, once over `WEBUI_PORT` — and the only thing keeping
+that from being a wrong answer was that no caller happened to sit on the wrong
+side of the second one. `tests/duplicate-defs.awk` and
+`no_test_function_is_defined_twice` now refuse it.
+
+Both scanners have to skip the same two kinds of data, because this suite is
+full of both and each contains real function definitions on purpose: quoted
+heredocs (the fixtures, which exist to be scanned) and single-quoted strings
+spanning several lines (the shims handed to `restore_sandbox`, which are code
+for *another* shell). A naive grep reports ten duplicates here; nine of them
+are fixtures, and the tenth is the real one.
 
 ## A tool that parses source must tell code from commentary about code
 
@@ -711,92 +784,118 @@ on the parent leaves the `xargs` running and adopted by `init`.
 
 ## What only a real machine can settle, and how to settle it
 
-A mutation sweep stubbed every function in `scripts/lib.sh` to `return 0` and
-ran the suite. Forty-four survived. Most were then driven (see the last section
-of `tests/test-lib.sh`), but some genuinely cannot be: they ask a real kernel, a
-real daemon, a real account. Those are **not** covered by another source grep —
-they are listed here, with the command that would settle each and what a pass
-looks like, so the work is concrete rather than open-ended.
+A mutation sweep stubs every function in `scripts/lib.sh` to `return 0` and
+runs the suite. Forty-four survived the first round. Most were then driven, and
+the twenty-nine that were left were listed here — grouped by tier, with a
+command and a pass condition for each — as work that needed a droplet.
 
-Each row is meant to be run without interpretation: the command is the whole
-command, and the pass condition is a thing you can look at and be sure about.
-`L=/opt/local-code-agent` throughout (wherever your checkout is).
+**Most of that list was an excuse.** Twenty-six of the twenty-nine are parsers
+over the output of one command: `docker container inspect`, `docker container
+port`, `docker ps`, `ollama list`, `curl …/api/ps`. A recorded sample of that
+output settles each of them here, in a second, with **both** answers — so a
+probe that always says yes and one that always says no each fail. They are
+driven in `tests/test-lib.sh` under *"the probes a mutation sweep could not
+kill"*, and the stubs are shell **functions**, because `have docker` asks
+`command -v`, which finds a function.
 
-**Agent tier** — needs `ENABLE_AGENT=true`, `sudo lca apply`, `lca agent start`.
+They were then mutation-checked rather than assumed: each target stubbed to
+`return 0` in a complete copy of the repo, the suite run, the gate expected to
+fail. **Twenty-six of twenty-seven killed, control passing.** The one survivor
+was a gate that stubbed the very function it was meant to be testing, which is
+the failure this whole document is about arriving from the inside; it now
+drives the real one with `curl` stubbed instead.
+
+Two of the twenty-six cannot be stubbed and are not:
+
+- `ollama_bg_env` reads `/proc/<pid>/environ`, so its gate launches a **real**
+  process named `ollama` — a copy of `sleep` — with the environment under test.
+- `start_ollama_bg` launches through `nohup env … ollama serve`, and `env(1)`
+  cannot run a shell function, so its gate puts a real file on `PATH` (through
+  `make_stub_dir`/`stub_path`, because a stub directory `sudo` cannot see is
+  how a test passes here and fails on a runner that escalates).
+
+Driving `start_ollama_bg` is also what found the command-less `exec` that
+silenced stderr for the rest of every `lca` command on a host without systemd.
+Nothing in a source grep of that function looks wrong.
+
+### What is actually left
+
+| What | Where | Pass condition |
+|---|---|---|
+| `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
+| the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
+
+`setpriv` narrowed the second row rather than removing it. Running as somebody
+who is not root needs no real account, no sudo and no droplet:
 
 ```bash
-mkdir -p /tmp/probe && cd /tmp/probe && git init -q
-lca agent task --dir /tmp/probe "create hello.txt containing the word hello"   # note the id it prints
-lca agent watch --live --once
+setpriv --reuid=65534 --regid=65534 --clear-groups bash -c '...'
 ```
 
-| Function | Pass condition |
-|---|---|
-| `agent_container_running`, `agent_container_exists` | `lca agent status` says running; then `sudo docker stop openhands-app` and it says exists-but-not-running, not "not created" |
-| `agent_live_port` | `bash -c 'source $L/scripts/lib.sh; load_env; agent_live_port'` prints the same number as `AGENT_PORT` in `.env` |
-| `agent_live_sandboxes`, `agent_orphan_sandboxes` | its line count equals `sudo docker ps --format '{{.Names}}' \| grep -c '^oh-agent-server-'`; with the agent stopped and a sandbox left, `agent_orphan_sandboxes` lists exactly that one |
-| `agent_recorded_conversation`, `agent_conversation_record` | prints the id `lca agent task` printed above, character for character |
-| `agent_conversation_warning` | start a second task without stopping the first: it fires and names the **recorded** id, not the newest sandbox |
-| `agent_conversations_payload` | non-empty, and `jq .` parses it |
-| `agent_model_for_run` | with `<model>-agent` pulled it prints that; after `ollama rm <model>-agent` it prints `MODEL_NAME` |
-| `agent_model_loaded_context` | equals `AGENT_MODEL_CONTEXT` from `.env` (16384 by default) |
+So every *permission* arm in `scripts/lib.sh` — the family root can never
+reach, because root reads and writes everything — is drivable here now.
+`readability_still_wants_x_of_a_directory` was the first to move: it used to
+assert that `readable_by_us` still contains `-x `, with a comment saying the
+directory half was "the code, because no account here can exercise it". It now
+calls the function as uid 65534 over a directory with r and no x, one with x
+and no r, an ordinary one, and a 0600 file the caller owns. Two more things it
+has to check first, and they are the ones worth copying: that the probe really
+dropped (a run as root looks exactly like a run that passed), and that the two
+directories it expects a **yes** for still get one, or "unreadable" would be
+the answer to everything.
 
-**Chat container** — any box with docker and the container created.
+What the row still means is the other half. `sudo -n` and an interactive sudo
+behave completely differently, and setpriv gives you an unprivileged uid, not a
+password prompt. A prompt does not fail, it **waits** — so the failure mode is
+a command that never returns, and that still needs a box with a sudoers entry.
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `webui_container_env` | `bash -c 'source $L/scripts/lib.sh; load_env; webui_container_env PORT'` | equals `sudo docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' open-webui \| grep '^PORT='` |
-| `webui_container_env_list` | same, no argument | every `-e` line `install_webui.sh` bakes in appears once |
-| `webui_container_exists`, `webui_container_running` | `sudo docker stop open-webui`, then both | `exists` true, `running` false. **This distinction is the whole point** — collapsing them is how "already matches .env" was printed about a container that did not exist |
+The privilege probes it replaced are worth reading as a cautionary tale, not
+just as dead code. They made a throwaway account with `useradd`, ran through
+`runuser`, and skipped — *loudly*, said the comment — where they could not:
 
-**Ollama lifecycle** — droplet, systemd.
+> Skipped loudly rather than silently when the account cannot be made — a
+> conditional gate that vanishes on CI is a gate that reads as coverage while
+> protecting nothing.
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `ensure_ollama_up`, `wait_for_ollama`, `start_ollama_bg`, `restart_ollama` | `sudo systemctl stop ollama`, then `bash -c 'source $L/scripts/lib.sh; load_env; ensure_ollama_up 90; echo rc=$?'` | `rc=0` and `curl -fsS $(ollama_url)/api/version` answers |
-| `ollama_bg_env` | with Ollama up: `bash -c 'source $L/scripts/lib.sh; load_env; ollama_bg_env OLLAMA_CONTEXT_LENGTH'` | equals `OLLAMA_CONTEXT_LENGTH` in `.env` |
-| `warm_model` | `time` it twice in a row | the second call returns in under a second |
-| `resync_dropin_if_drifted` | `sudo sed -i 's/OLLAMA_KEEP_ALIVE=.*/OLLAMA_KEEP_ALIVE=99m/' /etc/systemd/system/ollama.service.d/local-code-agent.conf`, then `sudo lca tune` | `systemctl show ollama -p Environment` matches `.env` again, and `lca check` reports no drift |
-| `stale_agent_models` | `ollama cp <model>-agent stale-agent`, then `lca check` | `stale-agent` is named, the current `-agent` model is not |
+They never skipped loudly anywhere. The cleanup ran `userdel` on a user it had
+just declined to create; `userdel` exits **6** for "no such user"; and under
+`errexit` a failing command ends the *function*, so the `return 0` written at
+the bottom to make it safe was never reached. The suite died at that line. No
+SKIPPED message, no verdict, no FAIL — a bare exit 6 — and the several hundred
+checks below it had not run. Every CI run of `tests/test-lib.sh` had been
+ending there, on every machine that is not root, which is every runner.
 
-**Relay** — droplet.
+Two things came out of it:
 
-| Function | Command | Pass condition |
-|---|---|---|
-| `ollama_relay_healthy` | `sudo lca relay install`, `lca relay status`; then `sudo systemctl stop local-code-agent-ollama-relay.socket` and re-run | healthy **only** in the first case. It must answer false when the socket is bound but Ollama is not answering *through* it — stop `ollama` with the socket up to see that |
+- `tests/test-lib.sh` now sets `SUITE_FINISHED=true` before its verdict, and
+  its `EXIT` trap prints **"the suite ENDED EARLY"** otherwise. A check that
+  fails prints FAIL and the run continues; anything else stops the process
+  where it stands, and the difference between those two has to be legible from
+  the outside.
+- The probes themselves no longer need an account, so nothing is skipped:
+  `as_nobody` drops to 65534 when the suite is root, and runs directly when it
+  is not — because then it already *is* the account the questions are about.
+  Which answer `can_root_now` must give depends on whether sudo lets that
+  account through without asking, so that is measured first and both
+  directions are asserted. Six checks, on every machine, where CI had zero.
 
-**Privilege — settled here, not on the droplet.** This block used to say these
-needed a real account on a real machine. Four of the five needed only a
-*throwaway* account, and the suite now makes one: `useradd -M`, a root-owned
-`0600` file, `runuser`, and the probes driven as that user. The fifth needed
-only a `PATH` without `sudo` on it. They are in `tests/test-lib.sh` under
-"the privilege probes, driven from a real non-root account", and they print a
-loud SKIPPED line rather than vanishing when the suite is not root.
+`systemd_available` is half-settled and honestly so: a host with no `systemctl`
+cannot have systemd, and the suite asserts that anywhere. Which of the two
+answers a given machine gives is that machine's business, not a gate's.
+`apt_get` is covered by CI's `minimal-base` job, on a bare `ubuntu:24.04`.
 
-What that leaves for a real machine is narrower and worth stating exactly:
-**nothing about these functions** — only the end-to-end behaviour built on
-them, which is that `lca check` and the login banner must not hang on a
-password prompt for a human who is a sudoer *with* a password. That is a
-different assertion from any of the five, it needs a configured sudoers entry
-rather than an account, and it is the one row left here:
+Everything else that used to be on this list — `confirm`'s refusing branch,
+`netmode_state`, `tailscale_ip4`, `host_listeners`, `ollama_relay_unit_address`,
+`agent_workspace_dir`, `venv_python`, `load_env_readonly`, `model_load_notice`,
+`root_for_probe`, and the twenty-six above — is driven in the suite now.
 
-| Command | Pass condition |
-|---|---|
-| as an ordinary sudoer with a password: `sudo -k`, then `lca check`, then the login banner | neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
+The rule that came out of it, and it is the useful part:
 
-**Everything else**
+> **Assume it does not need a real machine until you have tried to settle it
+> here.** A function that only parses one command's output needs a sample of
+> that output, not the machine that produces it. Writing "needs a droplet"
+> beside it costs nothing today and buys a list nobody works through.
 
-| Function | Where | Pass condition |
-|---|---|---|
-| `systemd_available` | droplet **and** `docker run --rm -it ubuntu:24.04` with the repo mounted | true on the droplet, false in the container, and `lca check` completes on both |
-| `gpu_state`, `has_nvidia_gpu` | **an NVIDIA host — not the droplet** | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string |
-| `apt_get` | already covered by CI's `minimal-base` job | a bare `ubuntu:24.04` resolves every tool |
-
-`confirm`'s refusing branch, `netmode_state`, `tailscale_ip4`, `host_listeners`,
-`ollama_relay_unit_address`, `agent_workspace_dir`, `venv_python`,
-`load_env_readonly`, `model_load_notice` and `root_for_probe` were on that list
-too and are **not** any more: each is driven in the suite now, with a stubbed
-command, a real unit file in the sandbox, or a real terminal via `script`.
 
 ## Run it broken, not working
 
@@ -902,6 +1001,38 @@ Two traps in gating this:
   bounds `cmd`; the prompt happens before `timeout` is ever exec'd. If the
   point is "this must not hang", the order has to be `timeout sudo`, or the
   escalation must not be interactive at all.
+
+### ...and one of the five was still hanging
+
+The rule above was gated by reading five regions of source for a bare
+`can_root`. Every one of them read clean, and `lca webui status` still waited
+for ever — measured again, months later, under a stand-in `sudo` that refuses
+`-n` and otherwise prints the prompt and sleeps:
+
+```
+webui.sh status              took=8s rc=124 lines=1 <-- HUNG on: sudo docker info
+   output was: [warn] Docker is not reachable as 'nobody' — retrying with sudo,
+                      which may ask for your password.
+```
+
+The announcement added when this was first found made the stall *explicable*
+without making it *stop*. Both `select_docker` in `webui.sh` and `run_reader`
+in `scripts/lib.sh` hand-rolled a `can_root_now` / `elif can_root` pair —
+deciding inside the function what the comment above `root_for_probe` says is a
+property of the **caller**, and deciding it "may prompt" for every caller.
+`select_docker` runs for every `webui.sh` subcommand, `status` included.
+
+Both now call `root_for_probe`, and `webui.sh` sets `LCA_MAY_PROMPT=true` only
+in the arms that act (`start`, `stop`, `restart`). `lca webui status` on an
+account that is not a passwordless sudoer now refuses in a tenth of a second,
+naming the three ways out, instead of printing one line and never returning.
+
+`probes_use_the_stricter_test` is the gate, and it no longer reads source: it
+runs all five commands under that stand-in sudo, bounded, as an account that
+is not root. Its first assertion is the one worth copying — an **action** must
+still be willing to wait, so `webui.sh start` has to block on the same stub.
+If it does not, the stub is not blocking and every "it did not hang" below it
+would mean nothing.
 
 ## Reviewing a PR
 

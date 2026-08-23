@@ -28,12 +28,17 @@
 # stops and removes nothing — so it is safe to run against a working box while
 # a task is in flight.
 #
-# Verdicts are three, not two, and the third is the point:
+# Three verdicts:
 #
 #   ok      the real machine agrees with what the stubbed gate asserts
 #   FAIL    the real machine disagrees — the stub was wrong, or the code is
-#   WRONG   the gate passes, but it is not asserting what it claims to
 #   skip    the precondition is absent, so nothing was measured
+#
+# A fourth, WRONG ("the gate passes, but it is not asserting what it claims
+# to"), was declared here, counted, printed in the summary and included in the
+# exit condition — and no line in this file could ever produce it. A column
+# that always reads zero looks like a check being made. Removed rather than
+# left saying so; it can come back the day something actually reports it.
 #
 # Usage: tests/live-verify.sh [--slow]
 #   --slow  also run the checks that cost a model load (minutes on a CPU box,
@@ -51,12 +56,10 @@ SLOW=false
 [[ "${1:-}" == "--slow" ]] && SLOW=true
 
 FAILED=0
-WRONG=0
 SKIPPED=0
 PASSED=0
 t_ok()    { printf 'ok    - %s\n' "$*"; PASSED=$((PASSED+1)); }
 t_fail()  { printf 'FAIL  - %s\n' "$*"; FAILED=$((FAILED+1)); }
-t_wrong() { printf 'WRONG - %s\n' "$*"; WRONG=$((WRONG+1)); }
 t_skip()  { printf 'skip  - %s\n' "$*"; SKIPPED=$((SKIPPED+1)); }
 sect()    { printf '\n=== %s\n' "$*"; }
 # note — evidence under a verdict. Indented so a reader can tell at a glance
@@ -478,7 +481,7 @@ fi
 
 # =============================================================================
 printf '\n=============================================================\n'
-printf '%s passed, %s failed, %s asserting the wrong thing, %s skipped\n' \
-  "${PASSED}" "${FAILED}" "${WRONG}" "${SKIPPED}"
+printf '%s passed, %s failed, %s skipped\n' \
+  "${PASSED}" "${FAILED}" "${SKIPPED}"
 printf '=============================================================\n'
-(( FAILED == 0 && WRONG == 0 ))
+(( FAILED == 0 ))

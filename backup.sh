@@ -83,6 +83,16 @@ do_backup() {
   # could read all of it. Applied to an existing directory too, since the ones
   # already out there were created wide open.
   chmod 700 "${BACKUP_DIR}" 2>/dev/null || true
+  # ...and owned by the human, not by root. install_timer does this when the
+  # timer is installed, and nothing did it on the manual path: 'sudo lca backup'
+  # on a box with no timer left backups/ owned by root at 0700 with the archive
+  # inside it owned by the human — who then could not list their own backup
+  # directory. Found by driving the gate that claimed the directory and the
+  # archive must agree; it counted chowns across the whole file, so it never
+  # noticed that no single path performs both.
+  if can_root; then
+    as_root chown "$(invoking_user)" "${BACKUP_DIR}" 2>/dev/null || true
+  fi
   # ...and the archives inside it, which the directory mode alone was covering.
   local tightened
   tightened="$(tighten_backup_modes "${BACKUP_DIR}")"

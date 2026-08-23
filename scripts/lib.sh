@@ -2118,7 +2118,14 @@ start_ollama_bg() {
   # the kernel on exit, so a killed lca cannot wedge the next one.
   local lock_fd=""
   if have flock; then
-    if exec {lock_fd}>"${logf}.lock" 2>/dev/null; then
+    # Braced, and that is not style. Written as 'if exec {lock_fd}>FILE
+    # 2>/dev/null', the 2>/dev/null is a redirection on a COMMAND-LESS exec —
+    # so it applies to this shell and stays applied: every warn, every die and
+    # every error from anything called afterwards went to /dev/null for the
+    # rest of the command. On a host without systemd, which is the only host
+    # that reaches this function, that is every message 'lca' had left to give.
+    # The braces make the redirection the group's, and temporary.
+    if { exec {lock_fd}>"${logf}.lock"; } 2>/dev/null; then
       flock -w 60 "${lock_fd}" 2>/dev/null || true
       if wait_for_ollama 2; then
         exec {lock_fd}>&-
@@ -2519,21 +2526,23 @@ run_reader() {
     "${real[@]}"
     return 0
   fi
-  # Passwordless first, interactive second, and the second says so — the same
-  # order as webui.sh's select_docker, for the same measured reason: 'lca logs'
-  # printed its ollama section and then sat on a bare "[sudo] password for ..."
-  # under the next header. A typed command may ask; it may not ask silently.
-  # elif, not a second if: exactly one escalation attempt, and the sentence
-  # about a password is printed only where a password can actually be asked
-  # for. Root reaching this point has simply failed the probe.
-  if can_root_now; then
-    if as_root "${probe[@]}" >/dev/null 2>&1; then
-      as_root "${real[@]}"
-      return 0
+  # root_for_probe, not a hand-rolled can_root_now / elif can_root pair. The
+  # pair decides INSIDE the function what the comment at the top of this file
+  # says is a property of the CALLER — and it decided "may prompt" for every
+  # caller. 'lca logs' is a reporter: on any account that is not a passwordless
+  # sudoer, the interactive arm ran, and an interactive sudo does not fail, it
+  # WAITS. The announcement below was added when that was first measured, which
+  # made the stall explicable without making it stop.
+  #
+  # The sentence about a password is printed only where a password can actually
+  # be asked for: the caller allows prompting, and sudo -n does not already
+  # work. Root, and a passwordless sudoer, are told nothing because nothing
+  # will be asked of them.
+  if root_for_probe; then
+    if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+      # stderr, so it cannot land inside a log stream someone is piping.
+      warn "Reading this needs root — sudo may ask for your password."
     fi
-  elif can_root; then
-    # stderr, so it cannot land inside a log stream someone is piping.
-    warn "Reading this needs root — sudo may ask for your password."
     if as_root "${probe[@]}" >/dev/null 2>&1; then
       as_root "${real[@]}"
       return 0

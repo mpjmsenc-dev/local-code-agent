@@ -56,15 +56,20 @@ select_docker() {
     DOCKER=(docker)
     return 0
   fi
-  if can_root_now; then
-    if as_root docker info >/dev/null 2>&1; then
-      DOCKER=(as_root docker)
-      return 0
+  # root_for_probe, not a hand-rolled can_root_now / elif can_root pair. Written
+  # by hand it decided inside this function that every caller may prompt, and
+  # select_docker runs for EVERY webui.sh subcommand — so 'lca webui status',
+  # which only reports, took the interactive arm on any account that is not a
+  # passwordless sudoer. An interactive sudo does not fail, it WAITS. Measured:
+  # one warning line, then nothing, for ever. main() below says which
+  # subcommands are allowed to ask.
+  if root_for_probe; then
+    # Only where a password can actually be asked for. warn, not info: 'lca
+    # webui logs' can be piped, and an announcement that lands in the middle of
+    # a captured log stream is its own small bug.
+    if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+      warn "Docker is not reachable as '$(id -un)' — retrying with sudo, which may ask for your password."
     fi
-  elif can_root; then
-    # warn, not info: 'lca webui logs' can be piped, and an announcement that
-    # lands in the middle of a captured log stream is its own small bug.
-    warn "Docker is not reachable as '$(id -un)' — retrying with sudo, which may ask for your password."
     if as_root docker info >/dev/null 2>&1; then
       DOCKER=(as_root docker)
       return 0
@@ -220,6 +225,13 @@ main() {
   fi
 
   have docker || die "Docker is not installed. Run sudo ${SCRIPT_DIR}/scripts/install_docker.sh first."
+  # Which half of this script you are in decides whether it may wait for a
+  # password — see LCA_MAY_PROMPT in lib.sh. start/stop/restart ACT: the user
+  # typed the command, so a prompt is fair. status/url/logs only REPORT, and a
+  # prompt in a report is a stall in something nobody asked to run.
+  case "${cmd}" in
+    start|stop|restart) LCA_MAY_PROMPT=true ;;
+  esac
   select_docker || die "Cannot reach the Docker daemon as '$(id -un)'. $(docker_unreachable_advice)."
 
   case "${cmd}" in
