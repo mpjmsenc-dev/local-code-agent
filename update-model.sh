@@ -14,6 +14,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. 'lca model X' pulls
+# gigabytes and re-pins .env; the reader asked for that, so it may ask them
+# for a password to start the server it is about to pull into.
+LCA_MAY_PROMPT=true
 load_env
 
 usage() {

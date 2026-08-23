@@ -542,6 +542,22 @@ REPORTING_COMMANDS=(
   "webui.sh status"
   "scripts/logs.sh"
   "scripts/motd.sh"
+  # ...and the three that reach Ollama through ensure_ollama_up, which chose
+  # the interactive answer on behalf of all seven of its callers.
+  "scripts/speed.sh"
+  "scripts/ask.sh why"
+  "scripts/selftest.sh"
+)
+# The other side of the same rule, and the reason it is not simply "never
+# escalate". lib.sh records both mistakes: can_root everywhere stopped 'lca
+# check' and the banner dead on a password prompt; can_root_now everywhere made
+# 'lca backup' skip the chat history and call a healthy daemon unusable. A
+# command the reader typed to CHANGE something may ask them for a password, and
+# a gate that only checks the first half would be satisfied by making
+# everything strict — which is the worse of the two.
+ACTING_COMMANDS=(
+  "update-model.sh --list"
+  "scripts/apply.sh --dry-run"
 )
 sudo_waits_sandbox() {
   rm -rf "${WAITS_SB}"; mkdir -p "${WAITS_SB}" "${WAITS_SB}/bin" "${WAITS_SB}/home"
@@ -560,8 +576,24 @@ printf '[sudo] password for %s: ' "$(id -un)" >&2
 sleep 12
 exit 1
 STUB
+  # Everything the stack shells out to, answering "no" at once. Without them
+  # the real docker client is in the sandbox, and against an unreachable daemon
+  # it blocks for seconds on its own — which reads exactly like the hang this
+  # gate is looking for. Nearly reported one as the other.
+  local c
+  for c in docker nft tailscale ollama systemctl; do
+    printf '#!/bin/sh\nexit 1\n' > "${WAITS_SB}/bin/${c}"
+  done
+  printf '#!/bin/sh\nexit 7\n' > "${WAITS_SB}/bin/curl"
+  # ...and the two facts a droplet has that this container does not. Without
+  # systemd, ensure_ollama_up never reaches its escalation at all, so the arm
+  # that hung for seven callers is unreachable here; without a refusing
+  # wait_for_ollama, the commands that start Ollama sit in their own announced
+  # 60-second wait instead of reaching the question under test.
+  printf '\nsystemd_available() { return 0; }\nwait_for_ollama() { return 1; }\n' \
+    >> "${WAITS_SB}/scripts/lib.sh"
   chmod -R a+rX "${WAITS_SB}"
-  chmod +x "${WAITS_SB}/bin/sudo"
+  chmod +x "${WAITS_SB}/bin/"*
   chmod 711 "${SANDBOX}"
 }
 reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
@@ -578,16 +610,21 @@ reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
 probes_use_the_stricter_test() {
   local cmd out bad=0
   sudo_waits_sandbox
-  # First, the harness has to be able to SEE a wait. An ACTION is allowed to
-  # ask for a password — the user typed it — so 'webui.sh start' must block on
-  # this sudo. If it does not, the stub is not blocking and every "it did not
-  # hang" below means nothing at all.
-  out="$(reporting_run 6 webui.sh start)"
-  grep -qx 'RC=124' <<<"${out}" || {
-    printf 'the stand-in sudo did not make an ACTION wait, so nothing below was measured:\n%s\n' \
-      "${out}" >&2
-    return 1
-  }
+  # First, the harness has to be able to SEE a wait, and every command that
+  # ACTS has to still be willing to. If none of them blocks, the stub is not
+  # blocking and every "it did not hang" below means nothing at all — and if
+  # one of them stops blocking later, somebody has made the whole stack strict,
+  # which is the worse of the two mistakes lib.sh records.
+  # shellcheck disable=SC2086  # the command and its argument, deliberately split
+  for cmd in "webui.sh start" "${ACTING_COMMANDS[@]}"; do
+    out="$(reporting_run 5 ${cmd})"
+    grep -qx 'RC=124' <<<"${out}" || {
+      printf "'%s' changes this machine and it is no longer willing to wait for a password — the reader typed it, and refusing where it used to work is the worse trade:\n%s\n" \
+        "${cmd}" "${out}" >&2
+      bad=1
+    }
+  done
+  (( bad == 0 )) || return 1
   for cmd in "${REPORTING_COMMANDS[@]}"; do
     # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
     out="$(reporting_run 8 ${cmd})"
@@ -612,6 +649,100 @@ probes_use_the_stricter_test() {
 }
 check "no command that only reports ever waits for a password" \
   probes_use_the_stricter_test
+
+# ...and the shape underneath both of the above, stated once.
+#
+# select_docker, run_reader and ensure_ollama_up each decided, inside the
+# helper, something the comment above root_for_probe says is a property of the
+# CALLER: whether this command may wait for a password. That is a distinct
+# defect from a gate that cannot fail — it is a function taking a decision that
+# belongs to whoever called it, and no gate written about the caller can see
+# it, because the caller never asks.
+#
+# The rule that falls out is asymmetric, and that is the whole of why it is
+# checkable: choosing the STRICT answer can only under-escalate, which is a
+# reporting error somebody notices. Choosing the INTERACTIVE one can WAIT, and
+# a wait is invisible — no exit status, no output, no timeout catches it. So
+# can_root_now may be called anywhere; a bare can_root may not.
+#
+# Three functions are exempt because the distinction IS their subject: the two
+# answers themselves, the switch that picks between them, and sudo_would_block,
+# whose entire job is to say whether the interactive one would stall.
+# SOURCE-GREP: which function names which helper is a property of lib.sh's
+# text. The consequence — that nothing which only reports ever waits — is
+# driven, above. What this adds is that the shape cannot come back by a route
+# the eight commands up there do not happen to walk.
+MAY_DECIDE_ESCALATION=( can_root root_for_probe sudo_would_block )
+no_helper_decides_for_its_caller() {
+  local fn e skip bad=0 seen=0
+  while IFS=$'\t' read -r fn _; do
+    [[ -n "${fn}" ]] || continue
+    seen=$(( seen + 1 ))
+    skip=false
+    for e in "${MAY_DECIDE_ESCALATION[@]}"; do
+      [[ "${fn}" == "${e}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    printf '%s picks the interactive answer itself, so every caller of it may wait for a password — ask root_for_probe instead\n' \
+      "${fn}" >&2
+    bad=1
+  done < <(sed 's/#.*//' "${REPO}/scripts/lib.sh" | awk '
+      /^[a-z_][a-z0-9_]*\(\) *\{/ { fn = $0; sub(/\(\).*/, "", fn); inb = 1; hit = 0 }
+      inb && /(^|[^a-z_])can_root([^_a-z]|$)/ { hit = 1 }
+      inb && /^\}/ { if (hit) printf "%s\t\n", fn; inb = 0 }')
+  # Non-vacuity: the three exempt ones must still be found, or the scanner has
+  # stopped matching and every helper reads as clean.
+  (( seen >= 3 )) || {
+    printf 'the escalation scanner found only %s functions naming can_root — it has stopped matching lib.sh\n' \
+      "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no lib.sh helper decides for its caller whether to wait for a password" \
+  no_helper_decides_for_its_caller
+
+# ...and the same decision must not arrive through the back door. A script that
+# another script SOURCES runs its top-level lines in the CALLER's shell, so a
+# declaration meant for its own run lands in theirs. check-system.sh and
+# update-model.sh both source tune.sh for its ladder; 'LCA_MAY_PROMPT=true'
+# written beside tune.sh's source line — where every other acting script
+# correctly puts it — turned 'lca check' into a command that stops for a
+# password. Measured, and caught by the gate above before it shipped. The same
+# file already carries a gate for the same leak in the other direction: its
+# top-level 'set -euo pipefail' lands in check-system's shell too.
+# SOURCE-GREP: which lines a sourced file executes at top level is a property
+# of that file's text; what the leak DOES is what the driven gate above sees.
+sourced_scripts() {   # -> the product scripts another product script sources
+  grep -rhoE '^[[:space:]]*source "\$\{SCRIPT_DIR\}/[a-z/._-]+\.sh"' \
+      "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+    | sed 's|.*/||; s|"$||' | grep -vx 'lib.sh' | sort -u
+}
+no_sourced_script_declares_for_its_caller() {
+  local name path body bad=0 seen=0
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    path="${REPO}/scripts/${name}"
+    [[ -f "${path}" ]] || path="${REPO}/${name}"
+    [[ -f "${path}" ]] || continue
+    seen=$(( seen + 1 ))
+    # Top level only: an assignment inside a function runs when that function
+    # is called, which a sourcing caller does not do.
+    body="$(sed 's/#.*//' "${path}" | grep -n '^LCA_MAY_PROMPT=' || true)"
+    [[ -z "${body}" ]] || {
+      printf '%s is sourced by another script, and sets LCA_MAY_PROMPT at top level — that assignment runs in the SOURCING shell:\n  %s\n' \
+        "${name}" "${body}" >&2
+      bad=1
+    }
+  done < <(sourced_scripts)
+  (( seen >= 1 )) || {
+    echo 'no product script sources another any more — this gate has stopped watching' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and a script that is sourced does not declare it in its caller's shell" \
+  no_sourced_script_declares_for_its_caller
 
 # The shared docker helpers are the other case: the SAME function is a
 # reporter's question inside the login banner and an action's question inside

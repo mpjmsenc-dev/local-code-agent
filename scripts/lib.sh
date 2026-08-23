@@ -2126,9 +2126,17 @@ ensure_ollama_up() {
   if systemd_available; then
     # Never call as_root unguarded here: with neither root nor sudo it die()s,
     # and that exit kills the CALLER mid-run — '|| true' cannot catch an exit,
-    # and the redirect below would swallow the explanation. can_root() returns
-    # false instead, so callers (selftest.sh, tune.sh) degrade gracefully.
-    if can_root; then
+    # and the redirect below would swallow the explanation.
+    #
+    # root_for_probe, not can_root. can_root is the INTERACTIVE answer, and
+    # choosing it here decided for every caller that this command may wait for
+    # a password — which is the one decision the comment above root_for_probe
+    # says belongs to the caller. Seven scripts call this and only two of them
+    # act. Measured, with systemd present and an account that is not a
+    # passwordless sudoer: 'sudo systemctl start ollama' asked for a password
+    # into a discarded stream and waited. '|| true' cannot catch a wait, and
+    # the 2>&1 meant nothing was on screen to explain the silence.
+    if root_for_probe; then
       as_root systemctl start ollama >/dev/null 2>&1 || true
     fi
     wait_for_ollama "${timeout}"

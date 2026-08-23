@@ -12,6 +12,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. It installs the whole
+# stack. Usually it is already root and this changes nothing; run with sudo
+# by an ordinary sudoer, it is what stops the shared probes answering
+# strictly and reporting components it could perfectly well have reached.
+LCA_MAY_PROMPT=true
 load_env
 
 # Every failing exit has to carry a verdict line, not just the orderly one at
