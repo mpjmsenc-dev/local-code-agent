@@ -2075,7 +2075,14 @@ start_ollama_bg() {
   # the kernel on exit, so a killed lca cannot wedge the next one.
   local lock_fd=""
   if have flock; then
-    if exec {lock_fd}>"${logf}.lock" 2>/dev/null; then
+    # Braced, and that is not style. Written as 'if exec {lock_fd}>FILE
+    # 2>/dev/null', the 2>/dev/null is a redirection on a COMMAND-LESS exec —
+    # so it applies to this shell and stays applied: every warn, every die and
+    # every error from anything called afterwards went to /dev/null for the
+    # rest of the command. On a host without systemd, which is the only host
+    # that reaches this function, that is every message 'lca' had left to give.
+    # The braces make the redirection the group's, and temporary.
+    if { exec {lock_fd}>"${logf}.lock"; } 2>/dev/null; then
       flock -w 60 "${lock_fd}" 2>/dev/null || true
       if wait_for_ollama 2; then
         exec {lock_fd}>&-

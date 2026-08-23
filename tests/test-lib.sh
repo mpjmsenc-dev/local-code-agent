@@ -17327,7 +17327,13 @@ check "no unbounded listing is piped into 'grep -q'" \
 # own diagnostic rather than killing the shell, so it needs no muffling.
 no_commandless_exec_redirects_the_shell() {
   local hits bad=0 line rest
-  hits="$(grep -rnE '^[[:space:]]*exec[[:space:]]+([0-9]*[<>]|\{[A-Za-z_]+\}[<>]|&>)' \
+  # Anchored at a COMMAND POSITION, not at the start of a line. The first
+  # version required 'exec' to open the line, and scripts/lib.sh had one inside
+  # an 'if' — 'if exec {lock_fd}>FILE 2>/dev/null; then' — which is the same
+  # defect standing one word to the right. It silenced stderr for the rest of
+  # every 'lca' command on a host without systemd, and this gate could not see
+  # it for as long as both existed.
+  hits="$(grep -rnE '(^|[[:space:]]|;|&&|\|\|)exec[[:space:]]+([0-9]*[<>]|\{[A-Za-z_]+\}[<>]|&>)' \
             "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh \
             "${REPO}"/tests/*.sh "${REPO}/bin/lca" 2>/dev/null \
           | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
@@ -17338,6 +17344,11 @@ no_commandless_exec_redirects_the_shell() {
     # Strip the legitimate '{VAR}>target' opening, then see what redirection
     # syntax is left — anything at all is aimed at the shell.
     rest="$(sed -E 's/\{[A-Za-z_]+\}[<>]+[^[:space:]]*//g' <<<"${line#*:*:}")"
+    # A redirection that comes after a CLOSING BRACE belongs to the group, not
+    # to the shell: '{ exec {fd}>FILE; } 2>/dev/null' applies for the length of
+    # the group and is the correct way to write this. That is the shape lib.sh
+    # uses now, and flagging it would push the code back to the broken form.
+    [[ "${rest}" =~ \}[[:space:]]*[0-9\&]*[\<\>] ]] && continue
     grep -qE '[0-9&]?[<>]' <<<"${rest}" && {
       printf 'this exec redirects the SHELL, silencing everything after it:\n%s\n' \
         "${line}" >&2
@@ -18238,6 +18249,598 @@ check "a read-only load writes no .env" \
   grep -q '^untouched|' <<<"$(readonly_load)"
 check "...and still hands the caller its settings" \
   grep -qv '|unset$' <<<"$(readonly_load)"
+echo
+echo "# the probes a mutation sweep could not kill, driven against recorded output"
+# Every function below survived the sweep that stubs each lib.sh function to
+# 'return 0', and every one of them was listed in CONTRIBUTING.md as needing a
+# real machine. None of them does. Each is a parser over the output of one
+# command, and a recorded sample of that output settles it here — with both
+# answers, so a function that always says yes and one that always says no both
+# fail. What a real daemon would add is confidence that docker's output format
+# is what these samples say; that is a different and much smaller assertion
+# than "this function is untested".
+#
+# The stubs are shell FUNCTIONS, not files on PATH, and that is deliberate:
+# 'have docker' asks 'command -v', which finds a function — so defining one
+# makes the probe believe docker exists, which is what these need.
+
+# lib_probe STUBS SCRIPT — run SCRIPT with lib.sh sourced, .env loaded and
+# STUBS defined in between. Prints what SCRIPT printed; returns its status.
+lib_probe() {
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    load_env >/dev/null 2>&1
+    root_for_probe() { return 1; }   # never escalate inside a test
+    # timeout(1) is a real program and cannot run a shell function, so a probe
+    # that wraps its docker call in one would never reach the stub — and
+    # webui_container_env_list does exactly that, with LCA_INSPECT_TIMEOUT.
+    # Standing in for it here keeps the real code path and lets the stub answer.
+    timeout() { shift; "$@"; }
+    eval "$2"
+    eval "$3"
+  ' _ "${REPO}/scripts/lib.sh" "$1" "$2"
+}
+
+# Non-vacuity for everything below: the harness itself has to work, or every
+# assertion under it is an assertion about a subshell that died early.
+check "the probe harness reaches lib.sh" \
+  test "$(lib_probe ':' 'printf ok')" = ok
+
+webui_exists_reads_the_daemon() {
+  lib_probe 'docker() { return 0; }' 'webui_container_exists' || {
+    echo 'a container the daemon confirms is reported as absent' >&2; return 1; }
+  ! lib_probe 'docker() { return 1; }' 'webui_container_exists' || {
+    echo 'a container the daemon denies is reported as present' >&2; return 1; }
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'have() { [[ "$1" != docker ]]; }' 'webui_container_exists' || {
+    echo 'a machine with no docker at all reports the chat container as present' >&2
+    return 1; }
+}
+check "webui_container_exists answers from the daemon, both ways" \
+  webui_exists_reads_the_daemon
+
+webui_running_is_not_exists() {
+  lib_probe 'docker() { printf "true\n"; }' 'webui_container_running' || {
+    echo 'a running container is reported as not running' >&2; return 1; }
+  # The distinction that matters: a container that EXISTS and is stopped.
+  # Collapsing these is how "already matches .env" got printed about a
+  # container that was not running.
+  ! lib_probe 'docker() { printf "false\n"; }' 'webui_container_running' || {
+    echo 'a stopped container is reported as running' >&2; return 1; }
+  lib_probe 'docker() { printf "false\n"; }' 'webui_container_exists' || {
+    echo 'a stopped container is reported as not existing either' >&2; return 1; }
+}
+check "...and running is a different question from existing" \
+  webui_running_is_not_exists
+
+webui_env_is_read_off_the_container() {
+  local stub='docker() { printf "PORT=3000\nWEBUI_NAME=lca\nOLLAMA_BASE_URL=http://x\n"; }'
+  local out
+  out="$(lib_probe "${stub}" 'webui_container_env PORT')" || {
+    echo 'the port could not be read out of the container environment' >&2; return 1; }
+  [[ "${out}" == "3000" ]] || {
+    printf 'the container reports PORT=3000 and the reader said %q\n' "${out}" >&2
+    return 1; }
+  # A key the container does not carry must FAIL, not come back empty: empty
+  # and absent are the two answers this project keeps having to tell apart.
+  ! lib_probe "${stub}" 'webui_container_env NOT_SET_HERE' || {
+    echo 'a key the container does not carry was answered rather than refused' >&2
+    return 1; }
+  # ...and a prefix must not match: PORT and PORT_EXTRA are different keys.
+  out="$(lib_probe 'docker() { printf "PORTAL=9\nPORT=3000\n"; }' 'webui_container_env PORT')"
+  [[ "${out}" == "3000" ]] || {
+    printf 'a key with a longer name was matched instead: %q\n' "${out}" >&2; return 1; }
+  # The whole list, for the comparison that reports drift.
+  out="$(lib_probe "${stub}" 'webui_container_env_list | grep -c .')"
+  [[ "${out}" == "3" ]] || {
+    printf 'the environment list came back with %s lines, not 3\n' "${out}" >&2; return 1; }
+  ! lib_probe 'docker() { return 1; }' 'webui_container_env_list' || {
+    echo 'an unreadable container yielded an environment anyway' >&2; return 1; }
+}
+check "webui_container_env reads the real container environment" \
+  webui_env_is_read_off_the_container
+
+agent_container_probes_answer_from_the_daemon() {
+  lib_probe 'docker() { return 0; }' 'agent_container_exists' || {
+    echo 'an agent container the daemon confirms is reported as absent' >&2; return 1; }
+  ! lib_probe 'docker() { return 1; }' 'agent_container_exists' || {
+    echo 'an agent container the daemon denies is reported as present' >&2; return 1; }
+  lib_probe 'docker() { printf "true\n"; }' 'agent_container_running' || {
+    echo 'a running agent is reported as stopped' >&2; return 1; }
+  ! lib_probe 'docker() { printf "false\n"; }' 'agent_container_running' || {
+    echo 'a stopped agent is reported as running' >&2; return 1; }
+}
+check "the agent container probes answer from the daemon, both ways" \
+  agent_container_probes_answer_from_the_daemon
+
+agent_live_port_takes_the_first_publication() {
+  # Three publications now — loopback, the bridge and Tailscale — so 'docker
+  # port' answers with three lines and the reader has to take one.
+  local stub='docker() { printf "3000/tcp -> 127.0.0.1:3001\n3000/tcp -> 172.17.0.1:3001\n3000/tcp -> 100.64.0.7:3001\n"; }'
+  local out
+  out="$(lib_probe "${stub}" 'agent_live_port')" || {
+    echo 'the live port could not be read from a container publishing three addresses' >&2
+    return 1; }
+  [[ "${out}" == "3001" ]] || {
+    printf 'the live port came back as %q, not 3001\n' "${out}" >&2; return 1; }
+  ! lib_probe 'docker() { return 1; }' 'agent_live_port' || {
+    echo 'a container that publishes nothing still yielded a port' >&2; return 1; }
+  # Not a number is not an answer.
+  ! lib_probe 'docker() { printf "3000/tcp -> unix:/var/run/x\n"; }' 'agent_live_port' || {
+    echo 'a publication with no port number was reported as one' >&2; return 1; }
+}
+check "agent_live_port reads the published port, not the container's own" \
+  agent_live_port_takes_the_first_publication
+
+sandbox_listing_is_only_sandboxes() {
+  local stub='docker() { printf "oh-agent-server-a\nopen-webui\noh-agent-server-b\nollama\n"; }
+              as_root() { "$@"; }'
+  local out
+  out="$(lib_probe "${stub}" 'agent_live_sandboxes')"
+  [[ "$(grep -c . <<<"${out}")" == "2" ]] || {
+    printf 'the sandbox listing picked up %s containers, not the 2 that are sandboxes:\n%s\n' \
+      "$(grep -c . <<<"${out}")" "${out}" >&2
+    return 1; }
+  grep -q 'open-webui' <<<"${out}" && {
+    printf 'the chat app was listed as an agent sandbox:\n%s\n' "${out}" >&2; return 1; }
+  # Orphans are sandboxes with no agent to own them. With the agent up there
+  # are none by definition, and reporting some would have 'lca agent stop'
+  # kill containers belonging to a live run.
+  out="$(lib_probe "${stub}"'
+              agent_container_running() { return 0; }' 'agent_orphan_sandboxes')"
+  [[ -z "${out}" ]] || {
+    printf 'sandboxes were called orphans while the agent was still running:\n%s\n' "${out}" >&2
+    return 1; }
+  out="$(lib_probe "${stub}"'
+              agent_container_running() { return 1; }' 'agent_orphan_sandboxes')"
+  [[ "$(grep -c . <<<"${out}")" == "2" ]] || {
+    printf 'with the agent stopped, %s orphans were found rather than 2:\n%s\n' \
+      "$(grep -c . <<<"${out}")" "${out}" >&2
+    return 1; }
+}
+check "the sandbox listing names sandboxes and nothing else" \
+  sandbox_listing_is_only_sandboxes
+
+bridge_gateway_is_asked_for_and_falls_back() {
+  local out
+  out="$(lib_probe 'docker() { printf "172.30.77.1\n"; }' 'docker_bridge_gateway')"
+  [[ "${out}" == "172.30.77.1" ]] || {
+    printf 'the gateway docker reported was not the one used: %q\n' "${out}" >&2; return 1; }
+  # A daemon that cannot answer must not stop the agent starting: the usual
+  # gateway is a better guess than nothing, and it is documented as a guess.
+  out="$(lib_probe 'docker() { return 1; }' 'docker_bridge_gateway')"
+  [[ "${out}" == "172.17.0.1" ]] || {
+    printf 'with no answer from docker the fallback was %q, not the usual gateway\n' \
+      "${out}" >&2
+    return 1; }
+  # Rubbish is not an address.
+  out="$(lib_probe 'docker() { printf "not-an-address\n"; }' 'docker_bridge_gateway')"
+  [[ "${out}" == "172.17.0.1" ]] || {
+    printf 'a non-address answer was passed through to docker run: %q\n' "${out}" >&2
+    return 1; }
+}
+check "the docker bridge gateway is asked for, and guessed only when it must be" \
+  bridge_gateway_is_asked_for_and_falls_back
+
+stale_agent_models_keeps_the_current_one() {
+  local stub='ollama() { printf "NAME\tID\nqwen2.5-coder:7b\ta\nqwen2.5-coder:7b-agent\tb\nold-model-agent\tc\n"; }
+              MODEL_NAME=qwen2.5-coder:7b'
+  local out
+  out="$(lib_probe "${stub}" 'stale_agent_models')"
+  grep -qx 'old-model-agent' <<<"${out}" || {
+    printf 'a stale derived model was not reported:\n%s\n' "${out}" >&2; return 1; }
+  # The current one is not stale, and neither is a base model the user pulled.
+  grep -qx 'qwen2.5-coder:7b-agent' <<<"${out}" && {
+    printf 'the model in use was reported as stale:\n%s\n' "${out}" >&2; return 1; }
+  grep -qx 'qwen2.5-coder:7b' <<<"${out}" && {
+    printf 'a base model the user pulled was reported as a stale derived one:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'have() { [[ "$1" != ollama ]]; }' 'stale_agent_models' || {
+    echo 'a machine with no ollama reported on its models anyway' >&2; return 1; }
+}
+check "stale derived models are named and the current one is not" \
+  stale_agent_models_keeps_the_current_one
+
+agent_run_model_prefers_the_derived_one() {
+  local out
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(lib_probe 'MODEL_NAME=m:7b
+                    model_present() { [[ "$1" == *-agent ]]; }' 'agent_model_for_run')"
+  [[ "${out}" == "m:7b-agent" ]] || {
+    printf 'the derived model exists and the run would use %q\n' "${out}" >&2; return 1; }
+  out="$(lib_probe 'MODEL_NAME=m:7b
+                    model_present() { return 1; }' 'agent_model_for_run')"
+  [[ "${out}" == "m:7b" ]] || {
+    printf 'with no derived model the run would use %q, not the base model\n' "${out}" >&2
+    return 1; }
+}
+check "the agent runs the derived model when it is there, the base one when it is not" \
+  agent_run_model_prefers_the_derived_one
+
+systemd_needs_systemctl_and_a_running_systemd() {
+  # A host with no systemctl cannot have systemd, whatever else is true. This
+  # is the half that can be asserted anywhere; the other half is which of the
+  # two answers a given machine gives, and that is the machine's business.
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'have() { [[ "$1" != systemctl ]]; }' 'systemd_available' || {
+    echo 'a host with no systemctl was reported as having systemd' >&2; return 1; }
+}
+check "systemd is not reported on a host with no systemctl" \
+  systemd_needs_systemctl_and_a_running_systemd
+
+nvidia_probe_needs_the_tool_to_answer() {
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'have() { [[ "$1" != nvidia-smi ]]; }' 'has_nvidia_gpu' || {
+    echo 'a host with no nvidia-smi was reported as having a card' >&2; return 1; }
+  # Present but refusing — a driver mismatch answers exactly this way — is not
+  # a card either.
+  ! lib_probe 'nvidia-smi() { return 1; }' 'has_nvidia_gpu' || {
+    echo 'an nvidia-smi that fails was read as a working card' >&2; return 1; }
+  lib_probe 'nvidia-smi() { return 0; }' 'has_nvidia_gpu' || {
+    echo 'an nvidia-smi that answers was not read as a card' >&2; return 1; }
+}
+check "the GPU probe believes nvidia-smi, and only when it answers" \
+  nvidia_probe_needs_the_tool_to_answer
+
+# --- the rest of the sweep's survivors, same treatment -----------------------
+
+conversation_record_round_trips() {
+  local f="${SANDBOX}/conv-id" out
+  rm -f "${f}"
+  local stub='AGENT_CONVERSATION_FILE='"${f}"
+  lib_probe "${stub}" 'agent_conversation_record abc-123' || {
+    echo 'recording a conversation id failed' >&2; return 1; }
+  [[ "$(cat "${f}")" == "abc-123" ]] || {
+    printf 'the id on disk is %q\n' "$(cat "${f}")" >&2; return 1; }
+  # An id that is not one must be refused rather than written: this file is
+  # what 'lca agent watch' follows, and a junk value sends it after nothing.
+  ! lib_probe "${stub}" 'agent_conversation_record "a b; rm -rf /"' || {
+    echo 'a conversation id with a space and a semicolon was recorded' >&2; return 1; }
+  [[ "$(cat "${f}")" == "abc-123" ]] || {
+    echo 'the refused id overwrote the good one anyway' >&2; return 1; }
+  # ...and reading it back only counts when the app still knows it. A recorded
+  # id the server has forgotten is worse than none: the watcher would follow a
+  # conversation that no longer exists and report silence as progress.
+  out="$(lib_probe "${stub}"'
+        agent_conversations_payload() { printf "{\"items\":[{\"id\":\"abc-123\"}]}"; }' \
+        'agent_recorded_conversation')" || {
+    echo 'a recorded id the server still knows was not returned' >&2; return 1; }
+  [[ "${out}" == "abc-123" ]] || {
+    printf 'the recorded id came back as %q\n' "${out}" >&2; return 1; }
+  ! lib_probe "${stub}"'
+        agent_conversations_payload() { printf "{\"items\":[{\"id\":\"other\"}]}"; }' \
+        'agent_recorded_conversation' || {
+    echo 'a recorded id the server has forgotten was returned as current' >&2; return 1; }
+  ! lib_probe "${stub}"'
+        agent_conversations_payload() { return 1; }' 'agent_recorded_conversation' || {
+    echo 'an unreachable app still yielded a current conversation' >&2; return 1; }
+}
+check "a conversation id round-trips, and a junk one is refused" \
+  conversation_record_round_trips
+
+ambiguity_warning_counts_both_sources() {
+  local one='agent_live_sandboxes() { printf "oh-agent-server-a\n"; }
+             agent_conversation_count() { printf "1\n"; }
+             curl() { printf "{}"; }'
+  local two='agent_live_sandboxes() { printf "oh-agent-server-a\noh-agent-server-b\n"; }
+             agent_conversation_count() { printf "1\n"; }
+             curl() { printf "{}"; }'
+  local convs='agent_live_sandboxes() { printf "oh-agent-server-a\n"; }
+               agent_conversation_count() { printf "2\n"; }
+               curl() { printf "{}"; }'
+  ! lib_probe "${one}" 'agent_conversation_warning' || {
+    echo 'one sandbox and one conversation was reported as ambiguous' >&2; return 1; }
+  lib_probe "${two}" 'agent_conversation_warning' >/dev/null || {
+    echo 'two sandboxes did not raise the ambiguity warning' >&2; return 1; }
+  # Either source is enough: a second conversation with one sandbox is the
+  # same ambiguity arriving from the other direction.
+  lib_probe "${convs}" 'agent_conversation_warning' >/dev/null || {
+    echo 'a second conversation did not raise the warning' >&2; return 1; }
+  # ...and the message has to carry both numbers, or the reader cannot tell
+  # which of the two it is.
+  local out; out="$(lib_probe "${two}" 'agent_conversation_warning')"
+  grep -q '2 running sandbox' <<<"${out}" || {
+    printf 'the warning does not say how many sandboxes: %s\n' "${out}" >&2; return 1; }
+}
+check "the ambiguity warning fires on either source and names both counts" \
+  ambiguity_warning_counts_both_sources
+
+loaded_context_is_read_from_the_server() {
+  local ok_stub='curl() {
+      case "$*" in
+        *api/ps*) printf "{\"models\":[{\"name\":\"m:7b\",\"context_length\":16384}]}" ;;
+        *) return 0 ;;
+      esac
+    }'
+  local out
+  out="$(lib_probe "${ok_stub}" 'agent_model_loaded_context m:7b')" || {
+    echo 'the loaded context could not be read from a server that answered' >&2; return 1; }
+  [[ "${out}" == "16384" ]] || {
+    printf 'the loaded context came back as %q, not 16384\n' "${out}" >&2; return 1; }
+  # A model the server is not holding has no window, and reporting one would
+  # be a number about nothing.
+  ! lib_probe "${ok_stub}" 'agent_model_loaded_context other:7b' || {
+    echo 'a model the server is not holding was given a context length' >&2; return 1; }
+  ! lib_probe 'curl() { return 1; }' 'agent_model_loaded_context m:7b' || {
+    echo 'an unreachable server still yielded a context length' >&2; return 1; }
+  ! lib_probe "${ok_stub}" 'agent_model_loaded_context' || {
+    echo 'no model name still produced an answer' >&2; return 1; }
+}
+check "the loaded context is read off the server, for the right model" \
+  loaded_context_is_read_from_the_server
+
+bg_env_is_read_from_the_running_server() {
+  # A REAL process called ollama, because that is exactly what this reads: the
+  # launch environment out of /proc. A stub cannot stand in for it, and it does
+  # not have to — a copy of sleep with the right name is a real process with a
+  # real environ.
+  local bin="${SANDBOX}/bgenv/bin" pid out rc=0
+  rm -rf "${bin}"; mkdir -p "${bin}"
+  cp "$(command -v sleep)" "${bin}/ollama"
+  OLLAMA_CONTEXT_LENGTH=4242 OLLAMA_KEEP_ALIVE=7m "${bin}/ollama" 30 &
+  pid=$!
+  # Give the kernel the moment it needs to have the process visible to pgrep.
+  local waited=0
+  while ! pgrep -x ollama >/dev/null 2>&1; do
+    sleep 0.2; waited=$((waited+1))
+    (( waited < 25 )) || { kill "${pid}" 2>/dev/null; echo 'the stand-in server never appeared to pgrep' >&2; return 1; }
+  done
+  out="$(lib_probe ':' 'ollama_bg_env OLLAMA_CONTEXT_LENGTH')" || rc=$?
+  local out2; out2="$(lib_probe ':' 'ollama_bg_env NOT_SET_AT_ALL')" || true
+  kill "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+  (( rc == 0 )) || { echo 'the launch environment of a running server could not be read' >&2; return 1; }
+  [[ "${out}" == "4242" ]] || {
+    printf 'the server was launched with 4242 and the reader said %q\n' "${out}" >&2
+    return 1; }
+  [[ -z "${out2}" ]] || {
+    printf 'a variable the server was not launched with came back as %q\n' "${out2}" >&2
+    return 1; }
+}
+check "the running server's launch environment is read out of /proc" \
+  bg_env_is_read_from_the_running_server
+
+waiting_for_ollama_ends_both_ways() {
+  # Answers immediately: no sleeping, no waiting.
+  lib_probe 'curl() { return 0; }' 'wait_for_ollama 60' || {
+    echo 'a server that answers was waited out anyway' >&2; return 1; }
+  # Never answers: it must give up rather than block, and it must not report
+  # success. sleep is stubbed so the timeout is arithmetic, not wall clock.
+  ! lib_probe 'curl() { return 1; }
+               sleep() { :; }' 'wait_for_ollama 6' || {
+    echo 'a server that never answered was reported as up' >&2; return 1; }
+  # ensure_ollama_up must not claim success on a box with no ollama to start.
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  ! lib_probe 'curl() { return 1; }
+               sleep() { :; }
+               have() { [[ "$1" != ollama ]]; }' 'ensure_ollama_up 6' || {
+    echo 'a machine with no ollama installed reported the server as up' >&2; return 1; }
+}
+check "waiting for Ollama ends when it answers, and gives up when it does not" \
+  waiting_for_ollama_ends_both_ways
+
+relay_health_is_asked_through_the_relay() {
+  lib_probe 'ollama_relay_address() { printf "127.0.0.1:11435\n"; }
+             curl() { return 0; }' 'ollama_relay_healthy' || {
+    echo 'a relay that answers was reported unhealthy' >&2; return 1; }
+  # The point of this probe: the socket can be bound while Ollama behind it is
+  # not answering, and only a request THROUGH the relay tells the two apart.
+  ! lib_probe 'ollama_relay_address() { printf "127.0.0.1:11435\n"; }
+               curl() { return 1; }' 'ollama_relay_healthy' || {
+    echo 'a relay whose backend does not answer was reported healthy' >&2; return 1; }
+  ! lib_probe 'ollama_relay_address() { return 1; }
+               curl() { return 0; }' 'ollama_relay_healthy' || {
+    echo 'a relay with no address at all was reported healthy' >&2; return 1; }
+}
+check "relay health is a request through the relay, not a bound socket" \
+  relay_health_is_asked_through_the_relay
+
+warming_happens_and_does_not_block() {
+  local mark="${SANDBOX}/warm-mark" out waited=0
+  rm -f "${mark}"
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(lib_probe 'MARK='"${mark}"'
+                    curl() { : > "${MARK}"; }' 'warm_model m:7b' 2>&1)" || {
+    echo 'warming reported failure' >&2; return 1; }
+  # Detached: warm_model returns while the request is still in flight, so the
+  # mark may arrive after it. What must not happen is that it never arrives.
+  while [[ ! -e "${mark}" ]]; do
+    sleep 0.2; waited=$((waited+1))
+    (( waited < 25 )) || {
+      echo 'the warming request was never made — the model is loaded on the first message instead' >&2
+      return 1; }
+  done
+  # ...and it says so, because otherwise a slow first message looks like a hang.
+  grep -qi 'warming' <<<"${out}" || {
+    printf 'the model is being warmed and nothing says so: %s\n' "${out}" >&2; return 1; }
+  # No model, no request: warming "" would ask the server to load nothing.
+  rm -f "${mark}"
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  lib_probe 'MARK='"${mark}"'
+             MODEL_NAME=""
+             curl() { : > "${MARK}"; }' 'warm_model ""' >/dev/null 2>&1 || true
+  sleep 0.5
+  [[ ! -e "${mark}" ]] || {
+    echo 'a warming request was made with no model to warm' >&2; return 1; }
+}
+check "warming fires a real request, in the background, and only with a model" \
+  warming_happens_and_does_not_block
+
+resync_only_acts_on_real_drift() {
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  local base='have() { [[ "$1" == ollama ]] || command -v "$1" >/dev/null 2>&1; }
+              systemd_available() { return 0; }
+              render_ollama_dropin() { printf "RENDERED\n"; }
+              restart_ollama() { printf "RESTARTED\n"; }'
+  local out
+  # No drift: nothing is rendered and nothing is restarted. A restart here
+  # costs every loaded model on the box.
+  out="$(lib_probe "${base}"'
+         ollama_dropin_matches() { return 0; }' 'resync_dropin_if_drifted' 2>&1)" || true
+  grep -q 'RENDERED\|RESTARTED' <<<"${out}" && {
+    printf 'a machine with no drift was re-rendered and restarted anyway:\n%s\n' "${out}" >&2
+    return 1; }
+  # Drift: both, and in that order.
+  out="$(lib_probe "${base}"'
+         ollama_dropin_matches() { return 1; }' 'resync_dropin_if_drifted' 2>&1)" || {
+    echo 'a drifted drop-in was not resynced' >&2; return 1; }
+  grep -q 'RENDERED' <<<"${out}" || {
+    printf 'drift was found and nothing was re-rendered:\n%s\n' "${out}" >&2; return 1; }
+  grep -q 'RESTARTED' <<<"${out}" || {
+    printf 'the drop-in was re-rendered and Ollama never restarted, so it is still running the old settings:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # Without systemd there is no drop-in to resync, and pretending otherwise
+  # would restart something that is not managed here.
+  out="$(lib_probe "${base}"'
+         systemd_available() { return 1; }
+         ollama_dropin_matches() { return 1; }' 'resync_dropin_if_drifted' 2>&1)" || true
+  grep -q 'RESTARTED' <<<"${out}" && {
+    printf 'a host without systemd was restarted through systemd anyway:\n%s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "a drifted drop-in is resynced, and an undrifted one is left alone" \
+  resync_only_acts_on_real_drift
+
+# SOURCE-GREP: a false positive of the classifier. This LAUNCHES a stand-in
+# server and reads the environment it was really given; config/ollama.env is
+# read only to derive the list of keys that must have arrived, so that adding
+# one there cannot leave this behind.
+background_server_is_launched_with_the_settings() {
+  # A REAL file on PATH called ollama, because start_ollama_bg launches it
+  # through 'nohup env ... ollama serve' and env(1) cannot run a shell
+  # function. The stand-in records the environment it was given and waits.
+  local sb="${SANDBOX}/bgserve" envfile logf out
+  rm -rf "${sb}"
+  # Through make_stub_dir/stub_path, not a hand-built front-load: the suite has
+  # a gate insisting on that, because a stub directory sudo cannot see is how a
+  # test passes here and fails on a runner that escalates.
+  make_stub_dir "${sb}/bin"
+  envfile="${sb}/launched.env"; logf="${sb}/ollama.log"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'env > %q\n' "${envfile}"
+    printf 'exec sleep 30\n'; } > "${sb}/bin/ollama"
+  chmod +x "${sb}/bin/ollama"
+  # wait_for_ollama answers "not up" for the two probes before the launch and
+  # "up" for the one after it, so the function runs end to end without a real
+  # server. The counter lives in a file because each call is its own subshell.
+  # shellcheck disable=SC2016,SC2031  # the stub is code for the child shell; the PATH prefix is a one-command env, not a subshell edit
+  out="$(PATH="$(stub_path "${sb}/bin")" lib_probe '
+      OLLAMA_BG_LOG='"${logf}"'
+      CALLS='"${sb}"'/calls
+      : > "${CALLS}"
+      wait_for_ollama() {
+        printf "x" >> "${CALLS}"
+        (( $(wc -c < "${CALLS}") > 2 ))
+      }
+      OLLAMA_CONTEXT_LENGTH=4096
+      OLLAMA_KEEP_ALIVE=11m' 'start_ollama_bg' 2>&1)" || {
+    printf 'starting the background server reported failure: %s\n' "${out}" >&2
+    return 1; }
+  local waited=0
+  while [[ ! -e "${envfile}" ]]; do
+    sleep 0.2; waited=$((waited+1))
+    (( waited < 30 )) || {
+      printf 'nothing was ever launched — the command reported success and started no server: %s\n' \
+        "${out}" >&2
+      return 1; }
+  done
+  # The settings must reach the process, not merely be printed at it.
+  grep -qx 'OLLAMA_CONTEXT_LENGTH=4096' "${envfile}" || {
+    printf 'the server was launched without the configured context length:\n%s\n' \
+      "$(grep '^OLLAMA_' "${envfile}")" >&2
+    return 1; }
+  grep -qx 'OLLAMA_KEEP_ALIVE=11m' "${envfile}" || {
+    printf 'the server was launched without the configured keep-alive:\n%s\n' \
+      "$(grep '^OLLAMA_' "${envfile}")" >&2
+    return 1; }
+  # ...and so must config/ollama.env, which is the file this reads rather than
+  # copies. OLLAMA_NO_CLOUD is the one that went missing when it was copied.
+  local key
+  while IFS='=' read -r key _; do
+    [[ -n "${key}" ]] || continue
+    grep -qE "^${key}=" "${envfile}" || {
+      printf '%s is set in config/ollama.env and never reached the server:\n%s\n' \
+        "${key}" "$(grep '^OLLAMA_' "${envfile}")" >&2
+      return 1; }
+  done < <(grep -E '^OLLAMA_[A-Z_]+=' "${REPO}/config/ollama.env")
+  # A background server with no unit file must say it is not persistent.
+  grep -qi 'not persistent' <<<"${out}" || {
+    printf 'a background server was started without saying it does not survive a reboot: %s\n' \
+      "${out}" >&2
+    return 1; }
+  pkill -x -f "${sb}/bin/ollama" 2>/dev/null || true
+  return 0
+}
+check "the background server is launched with the settings, from the shared file" \
+  background_server_is_launched_with_the_settings
+
+restart_reloads_before_it_restarts() {
+  local sb="${SANDBOX}/restart" order out
+  rm -rf "${sb}"; mkdir -p "${sb}"
+  order="${sb}/order"
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  local base='
+      ORDER='"${order}"'
+      : > "${ORDER}"
+      systemd_available() { return 0; }
+      as_root() { "$@"; }
+      systemctl() { printf "%s\n" "$1" >> "${ORDER}"; return 0; }
+      wait_for_ollama() { return 0; }
+      die() { printf "DIE %s\n" "$*"; exit 1; }
+      ok() { printf "OK %s\n" "$*"; }
+      warn() { printf "WARN %s\n" "$*"; }'
+  out="$(lib_probe "${base}" 'restart_ollama' 2>&1)" || {
+    printf 'a restart that should have worked reported failure: %s\n' "${out}" >&2
+    return 1; }
+  [[ "$(sed -n 1p "${order}")" == "daemon-reload" ]] || {
+    printf 'systemd was asked to restart before it was asked to re-read the unit, so the restart comes back on the OLD settings:\n%s\n' \
+      "$(cat "${order}")" >&2
+    return 1; }
+  grep -qx 'restart' "${order}" || {
+    printf 'nothing was restarted at all:\n%s\n' "$(cat "${order}")" >&2; return 1; }
+  grep -q '^OK ' <<<"${out}" || {
+    printf 'a successful restart said nothing: %s\n' "${out}" >&2; return 1; }
+  # A daemon-reload that fails must stop there: restarting now would bring the
+  # service back on the definition systemd is still holding.
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(lib_probe "${base}"'
+      systemctl() { printf "%s\n" "$1" >> "${ORDER}"; [[ "$1" != daemon-reload ]]; }' \
+      'restart_ollama' 2>&1)" || true
+  grep -q '^DIE ' <<<"${out}" || {
+    printf 'a failed daemon-reload was carried on from: %s\n' "${out}" >&2; return 1; }
+  grep -qx 'restart' "${order}" && {
+    printf 'a failed daemon-reload was followed by a restart anyway:\n%s\n' \
+      "$(cat "${order}")" >&2
+    return 1; }
+  # The API answering is not the same as OUR service running: something else
+  # holding port 11434 answers exactly like a working install.
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(lib_probe "${base}"'
+      systemctl() {
+        printf "%s\n" "$1" >> "${ORDER}"
+        [[ "$1" != is-active ]]
+      }' 'restart_ollama' 2>&1)" || true
+  grep -q '^DIE ' <<<"${out}" || {
+    printf 'an API answered by something other than the ollama service was reported as a good restart: %s\n' \
+      "${out}" >&2
+    return 1; }
+  # ...and without systemd there is nothing to restart, so it must say so
+  # rather than pretend.
+  out="$(lib_probe "${base}"'
+      systemd_available() { return 1; }' 'restart_ollama' 2>&1)" || true
+  grep -q '^WARN ' <<<"${out}" || {
+    printf 'a host with no systemd was given no advice at all: %s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "a restart re-reads the unit first, and refuses to go on when it cannot" \
+  restart_reloads_before_it_restarts
+
 
 echo "# ...and the rule that stops the list growing back"
 # Four gates in two days read source text as evidence of a behaviour, and all
