@@ -7199,23 +7199,127 @@ cache_writes_cannot_abort() {
 }
 check "cached state is written without risking the run" cache_writes_cannot_abort
 
-# "Not readable" is not "not there", and the two need opposite advice. 'lca
-# logs' tested -r on the install log and then called the absence normal — so on
-# a box where that root-written log is not world-readable it announced that a
-# file sitting right there did not exist, and the reader stopped looking. The
-# other two sources have always escalated through run_reader.
+# 'lca logs' has to tell a log it cannot READ from one that is not THERE, and
+# the two need opposite advice. All four gates below used to read logs.sh for
+# the test forms it contains — '-e' good, '-r' bad — which is evidence about
+# the source and not about what a reader sees. They now run the real readers,
+# as somebody who is not root, over a log that is absent, one that is there
+# and unopenable, and one that is there and fine.
+#
+# The bug they exist for: '-r' collapsed "there is no log" into the same branch
+# as "there is a log and this account cannot open it". The install log is
+# written by root through tee on a droplet, and the background Ollama log by
+# 'nohup ollama serve >LOG' under whatever umask started it — so both are
+# routinely 0600 root-owned, and both told the reader the file did not exist
+# while it sat at the path they were being shown.
+LOG_MARKER="A-LINE-FROM-THE-LOG-ITSELF"
+LOGS_FIXTURES="${SANDBOX}/logfix"
+LOGS_ESCALATIONS="${LOGS_FIXTURES}/escalations"
+# logs.sh ends in a bare 'main "$@"' with no BASH_SOURCE guard, so sourcing it
+# runs it. The copy is the file minus that one line — function definitions,
+# with SCRIPT_DIR resolving to a sandbox holding a copy of lib.sh beside them.
+# The same cut netmode's harden probe makes, for the same reason.
+logs_checkout() {   # -> a checkout whose logs.sh can be sourced without running
+  local sb="${SANDBOX}/logsroot"
+  if [[ ! -e "${sb}/scripts/logs.sh" ]]; then
+    mkdir -p "${sb}/scripts" "${sb}/config"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/lib.sh"
+    grep -v '^main "\$@"$' "${REPO}/scripts/logs.sh" > "${sb}/scripts/logs.sh"
+    cp "${REPO}/.env.example" "${sb}/.env.example"
+    # A .env already in place: logs.sh calls load_env as it loads, and the
+    # dropped probe cannot write this directory. Without it every arm below
+    # would also be measuring load_env's fallback.
+    cp "${REPO}/.env.example" "${sb}/.env"
+    cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/CONVENTIONS.md"
+    chmod -R a+rX "${sb}"
+    chmod 711 "${SANDBOX}"
+  fi
+  printf '%s' "${sb}"
+}
+logs_fixture() {   # absent|unreadable|readable -> a log path in that state
+  mkdir -p "${LOGS_FIXTURES}"; chmod 755 "${LOGS_FIXTURES}"
+  local f="${LOGS_FIXTURES}/$1.log"
+  case "$1" in
+    absent) rm -f "${f}" ;;
+    # 0000 rather than 0600-owned-by-somebody-else: a file with no permission
+    # bits at all is unreadable to its own owner too, so this arm is reachable
+    # whether the suite is root and drops to 65534, or is already an ordinary
+    # account and stays there. Nothing here needs an account to exist.
+    unreadable) printf '%s\n' "${LOG_MARKER}" > "${f}"; chmod 000 "${f}" ;;
+    readable)   printf '%s\n' "${LOG_MARKER}" > "${f}"; chmod 644 "${f}" ;;
+  esac
+  printf '%s' "${f}"
+}
+lca_logs_says() {   # ollama|setup  STATE -> what the real reader printed, as not-root
+  local sb path
+  sb="$(logs_checkout)"
+  path="$(logs_fixture "$2")"
+  : > "${LOGS_ESCALATIONS}"; chmod 666 "${LOGS_ESCALATIONS}"
+  # shellcheck disable=SC2016  # code for the dropped shell, not a string to expand here
+  local code='LOG_PATH="$1"; ESC="$2"
+    # Both captured up front. run_reader calls as_root as "as_root test -r
+    # PATH", so inside the stub "$2" is the word -r and not the recorder.
+    can_root_now() { return 0; }
+    as_root() { printf "ESCALATED %s\n" "$*" >> "${ESC}"; return 1; }
+    # The no-service-manager host: containers and WSL, which is where
+    # start_ollama_bg writes the log this reads. On a systemd box the ollama
+    # reader takes the journal branch instead, which is not what these gates
+    # are about.
+    systemd_available() { return 1; }
+    case "$3" in
+      setup)  SETUP_LOG="${LOG_PATH}";     logs_setup  50 false ;;
+      ollama) OLLAMA_BG_LOG="${LOG_PATH}"; logs_ollama 50 false ;;
+    esac'
+  as_nobody "${sb}/scripts/logs.sh" "${code}" "${path}" "${LOGS_ESCALATIONS}" "$1"
+}
+# Did the run just made try root? The probe's own output cannot say: run_reader
+# discards the probe call's output, which is where the attempt happens.
+logs_escalated() { grep -q 'ESCALATED test -r' "${LOGS_ESCALATIONS}" 2>/dev/null; }
 logs_setup_tells_the_two_apart() {
-  local body
-  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  grep -q 'run_reader' <<<"${body}" || {
-    echo 'logs.sh reads the install log without escalating, unlike its two siblings' >&2
-    return 1; }
-  # The "normal, nothing to see" message belongs to absence alone.
-  grep -qE '\[\[ ! -e ' <<<"${body}" || {
-    echo 'logs.sh still decides "no install log" from readability rather than existence' >&2
-    return 1; }
-  ! grep -qE '\[\[ ! -r ' <<<"${body}"
+  local out bad=0
+  # 1. Nothing there. "Normal unless this machine was built from
+  # do-user-data.sh" is the correct answer here and the wrong answer anywhere
+  # else.
+  out="$(lca_logs_says setup absent)"
+  grep -q 'No install log at' <<<"${out}" || {
+    printf 'a machine with no install log was not told so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  logs_escalated && {
+    echo 'it asked for root over a file that is not there' >&2
+    bad=1
+  }
+  # 2. There, and this account cannot open it. This is the regression: '-r'
+  # sent it to branch 1, and the reader stopped looking at a file sitting at
+  # the path they had just been shown.
+  out="$(lca_logs_says setup unreadable)"
+  grep -q 'No install log at' <<<"${out}" && {
+    printf 'an install log that is right there was reported as missing:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'could not be read' <<<"${out}" || {
+    printf 'an unopenable install log produced no explanation:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and it escalated first, like the other two sources here always have.
+  # The message says "even as root", which is only true if root was tried.
+  logs_escalated || {
+    echo 'it gave up on the install log without asking root, while telling the reader it had' >&2
+    bad=1
+  }
+  # 3. There and readable: the log, and none of the advice. Without this the
+  # two arms above are satisfied by a reader that never reads anything.
+  out="$(lca_logs_says setup readable)"
+  grep -qF "${LOG_MARKER}" <<<"${out}" || {
+    printf 'a readable install log was not read out, so the two arms above prove nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qE 'No install log at|could not be read' <<<"${out}" && {
+    printf 'a log that was read out was also called missing or unreadable:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca logs' separates an unreadable install log from a missing one" \
   logs_setup_tells_the_two_apart
@@ -7225,18 +7329,31 @@ check "'lca logs' separates an unreadable install log from a missing one" \
 # an install eight days earlier, sitting directly under Ollama requests from
 # seconds ago. It reads as something that just happened; it takes a trip to
 # .env to learn it never did.
+#
+# Driven against the file's real mtime rather than grepped for 'date -r': the
+# grep could not tell the heading from a comment, and says nothing about
+# whether the date shown is the log's.
 logs_setup_dates_the_install_log() {
-  local body
-  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  grep -q 'date -r' <<<"${body}" || {
-    echo 'the install log is shown undated, beside per-request timestamps, so old lines read as current' >&2
-    return 1; }
-  # From the file, not from its contents: nothing in that log is reliably
-  # stamped, so a parse would go stale the first time a message changed.
-  grep -qE 'date -r "\$\{SETUP_LOG\}"' <<<"${body}" || {
-    echo 'the install log heading is dated from something other than the file itself' >&2
-    return 1; }
+  local out want bad=0
+  want="$(date -r "$(logs_fixture readable)" +'%Y-%m-%d %H:%M' 2>/dev/null || true)"
+  [[ -n "${want}" ]] || {
+    echo 'the fixture has no mtime to compare the heading against' >&2
+    return 1
+  }
+  out="$(lca_logs_says setup readable)"
+  grep -qF "last written ${want}" <<<"${out}" || {
+    printf 'the install log is shown undated beside per-request timestamps, so old lines read as current (wanted %s):\n%s\n' \
+      "${want}" "${out}" >&2
+    bad=1
+  }
+  # ...and a log that is not there is not given a date, which would be a date
+  # for nothing.
+  out="$(lca_logs_says setup absent)"
+  grep -q 'last written' <<<"${out}" && {
+    printf 'a log that does not exist was dated:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and says when it was last written" \
   logs_setup_dates_the_install_log
@@ -7251,18 +7368,25 @@ echo "# ...and on a host with no systemd it must read the log THIS project wrote
 # TROUBLESHOOTING.md both point at when Ollama misbehaves, so the one host type
 # without a journal is the one that most needs an answer.
 logs_ollama_reads_the_background_log() {
-  local body
-  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
-  grep -q 'OLLAMA_BG_LOG' <<<"${body}" || {
-    echo "'lca logs ollama' never looks at the background log this project writes" >&2
-    return 1; }
-  # ...and actually prints it, rather than only naming it in a hint.
-  grep -qE 'tail .*OLLAMA_BG_LOG' <<<"${body}" || {
-    echo "'lca logs ollama' names the background log but never reads it out" >&2
-    return 1; }
+  local out bad=0
+  out="$(lca_logs_says ollama readable)"
+  grep -qF "${LOG_MARKER}" <<<"${out}" || {
+    printf "'lca logs ollama' did not read out the background log this project writes:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  # ...and says which file it read, because nothing else on the machine points
+  # at that path.
+  grep -qF "$(logs_fixture readable)" <<<"${out}" || {
+    printf 'it printed the log without ever naming it:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the sentence written for having no log at all is gone from this arm.
+  grep -q 'check that terminal' <<<"${out}" && {
+    printf 'it read the log and still sent the reader to a terminal that does not exist:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca logs ollama' reads the background log where there is no journal" \
   logs_ollama_reads_the_background_log
@@ -7281,30 +7405,39 @@ check "'lca logs ollama' reads the background log where there is no journal" \
 # The last line names the log in the subjunctive while the log exists. And the
 # first is the sentence this whole branch was written to remove.
 logs_ollama_separates_absent_from_unreadable() {
-  local body
-  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
-  # Existence, not readability, decides which branch you land in.
-  grep -qE '\[\[ -e "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" || {
-    echo 'logs_ollama still branches on whether it can READ the log, so an unreadable one is treated as an absent one' >&2
-    return 1; }
-  grep -qE '\[\[ -r "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" && {
-    echo 'logs_ollama is back to deciding the branch on readability' >&2
-    return 1; }
-  # ...and the read escalates, the same way the journal branch below it does,
-  # so somebody who can sudo gets their log rather than an explanation.
-  # 'run_reader test -r', not bare 'run_reader': the journal branch at the
-  # bottom of this same function uses run_reader too, and matching that one let
-  # the background-log read lose its escalation entirely while the gate passed.
-  grep -qE 'run_reader test -r "\$\{OLLAMA_BG_LOG\}"' <<<"${body}" || {
+  local out bad=0
+  # No log: the three lines about there being no journal and no log are right.
+  out="$(lca_logs_says ollama absent)"
+  grep -q 'check that terminal' <<<"${out}" || {
+    printf 'a host with no journal and no background log was told nothing useful:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'cannot read it' <<<"${out}" && {
+    printf 'a log that does not exist was called unreadable:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # A log that is there and unopenable: the opposite advice, and none of the
+  # sentences above.
+  out="$(lca_logs_says ollama unreadable)"
+  grep -qi 'cannot read it' <<<"${out}" || {
+    printf 'an unopenable background log was not reported as a permission problem:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'check that terminal' <<<"${out}" && {
+    printf 'a log sitting right there produced the sentence written for having none:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'would be at' <<<"${out}" && {
+    printf 'it named the log in the subjunctive while the log was there:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and it escalated, the same way the journal branch below it does, so a
+  # reader who can sudo gets their log rather than an explanation.
+  logs_escalated || {
     echo 'the background log is read without the escalation the journal gets' >&2
-    return 1; }
-  # ...and if it still cannot be read, that is said as a permission problem.
-  grep -qi 'cannot read it' <<<"${body}" || {
-    echo 'an unreadable background log is not reported as a permission problem' >&2
-    return 1; }
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and an unreadable log is not reported as a missing one" \
   logs_ollama_separates_absent_from_unreadable
@@ -20795,8 +20928,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 109 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 44 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 105 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 48 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

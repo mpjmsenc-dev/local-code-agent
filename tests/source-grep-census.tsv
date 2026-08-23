@@ -63,18 +63,22 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now             109   of the 115 the projection was made from
-#   still worth driving     76
+#   A rows now             105   of the 115 the projection was made from
+#   still worth driving     72
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (6):
+#   Of the ~24 highest-cost, driven so far (9):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
 #     recovery_scripts_survive_offline      the kill switch on, archive kept
 #     image_pulls_are_never_implicit        inspect before run, both scripts
 #     retention_ignores_enable_webui        a switched-off app still backed up
+#     logs_setup_tells_the_two_apart        absent vs unopenable, three arms
+#     logs_ollama_separates_absent_from_unreadable   the same, for the bg log
+#     logs_ollama_reads_the_background_log  the log itself, on a journal-less box
+#   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
 FP	agent_can_resolve_the_host	extract-to-drive: reads --add-host and LLM_BASE_URL off the real docker argv
@@ -147,10 +151,11 @@ A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
 FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
-A	logs_ollama_reads_the_background_log	greps logs_ollama's body for a tail
-A	logs_ollama_separates_absent_from_unreadable	greps logs_ollama's body for test forms
-A	logs_setup_dates_the_install_log	greps logs_setup's body for date -r
-A	logs_setup_tells_the_two_apart	greps logs_setup's body for test forms
+H	logs_checkout	builds a checkout of logs.sh minus its 'main "$@"' line so the readers can be sourced and driven
+FP	logs_ollama_reads_the_background_log	runs the real reader, as not-root, over a background log that is there: its lines and its path must both appear
+FP	logs_ollama_separates_absent_from_unreadable	runs the real reader over an absent log and an unopenable one: opposite advice, and root asked for only in the second
+FP	logs_setup_dates_the_install_log	reads the heading of a real run back against the fixture's own mtime
+FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, unopenable and readable: three outcomes, and root asked for only in the middle one
 A	motd_bounds_the_docker_read	awk inside chat_stale_row for a timeout
 A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
