@@ -13104,27 +13104,91 @@ entry_points() {
     printf '%s\n' "${t}"
   done
 }
+# Driven. The awk this replaces asked whether a file has a refusing catch-all
+# SOMEWHERE, and its own comment recorded what that cannot tell you: webui.sh
+# has three catch-all arms, and replacing the argument guard with ':' still
+# satisfied it. What the reader actually gets is a runtime question, so it is
+# now asked at runtime — every entry point is handed an argument it cannot
+# know, in a world where every command that could change a machine records its
+# argv instead of running, and against a COPY of the tracked tree, so one that
+# turns out not to refuse cannot reach the real installation.
+#
+# Two answers are right, and they are the two the old gate named: refuse and
+# say which argument, or forward it to the program you are a front end for.
+# Both are now observed rather than inferred.
+ENTRY_SB="${SANDBOX}/entry"
+ENTRY_PATH=""
+entry_harness() {
+  local bin="${ENTRY_SB}/bin" c
+  rm -rf "${ENTRY_SB}"; mkdir -p "${bin}" "${ENTRY_SB}/repo" "${ENTRY_SB}/home"
+  make_stub_dir "${bin}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${ENTRY_SB}/repo" )
+  for c in apt-get apt systemctl docker ollama tailscale useradd usermod \
+           nft iptables pip pip3 npm curl wget; do
+    cat > "${bin}/${c}" <<STUB
+#!/bin/sh
+printf '%s %s\n' "\${0##*/}" "\$*" >> "${ENTRY_SB}/did"
+exit 0
+STUB
+  done
+  chmod +x "${bin}"/*
+  # The forwarders — run-agent.sh, and 'lca' with no subcommand — parse nothing
+  # and hand everything to aider, so the recorder has to be where they look for
+  # it, and reaching that exec needs an Ollama that answers.
+  mkdir -p "${ENTRY_SB}/repo/.venv/bin"
+  cat > "${ENTRY_SB}/repo/.venv/bin/aider" <<STUB
+#!/bin/sh
+printf 'aider %s\n' "\$*" >> "${ENTRY_SB}/did"
+exit 0
+STUB
+  chmod +x "${ENTRY_SB}/repo/.venv/bin/aider"
+  printf '\nensure_ollama_up_announced() { return 0; }\n' >> "${ENTRY_SB}/repo/scripts/lib.sh"
+  ENTRY_PATH="$(stub_path "${bin}" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')"
+}
+entry_run() {   # SCRIPT ARGS... -> EXIT n, then what it printed, then a DID line per command it ran
+  local t="$1"; shift
+  : > "${ENTRY_SB}/did"
+  local out rc=0
+  # env -i, so nothing this suite happens to export leaks in and answers a
+  # question the user's shell would not have answered.
+  out="$( cd "${ENTRY_SB}/repo" && env -i "PATH=${ENTRY_PATH}" \
+            "HOME=${ENTRY_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
+            timeout 25 bash "${ENTRY_SB}/repo/${t}" "$@" </dev/null 2>&1 )" || rc=$?
+  printf 'EXIT %s\n%s\n' "${rc}" "${out}"
+  sed 's/^/DID /' "${ENTRY_SB}/did"
+}
+# Non-vacuity for both gates below: the harness has to be able to SEE an entry
+# point that ignores its argument and installs something. Everything here turns
+# on "nothing happened", which is also what a broken harness reports.
+entry_harness_sees_a_side_effect() {
+  entry_harness
+  printf '#!/usr/bin/env bash\napt-get install anything\n' > "${ENTRY_SB}/repo/lca-probe.sh"
+  [[ "$(entry_run lca-probe.sh --whatever)" == *"DID apt-get install anything"* ]]
+}
+check "the entry-point harness sees a script that installs anyway" \
+  entry_harness_sees_a_side_effect
 every_entry_point_refuses_or_forwards() {
-  local t body arm bad=0 seen=0
+  local t out bad=0 seen=0 flag=--lca-not-a-real-flag
+  entry_harness
   while read -r t; do
-    [[ -n "${t}" && -f "${REPO}/${t}" ]] || continue
-    seen=$((seen+1))
-    # Comments stripped first: every one of these arms carries a paragraph
-    # explaining the bug it fixes, and a five-line window that counts comments
-    # sees nothing but prose. Measured — this gate reported setup.sh and
-    # do-user-data.sh unguarded hours after they were fixed.
-    body="$(grep -v '^[[:space:]]*#' "${REPO}/${t}")"
-    # Forwarding everything is the other legitimate answer.
-    grep -qE 'exec .*"\$@"' <<<"${body}" && continue
-    arm="$(awk '/^[[:space:]]*(\*\)|-\?\*\)|-\*\))/ { c = 5 } c-- > 0' <<<"${body}")"
-    # 'return 1' and a bare 'echo ... >&2' count too: do-user-data.sh refuses
-    # that way, because it runs under a tee and must not exit the pipeline
-    # itself. A gate that only recognised die/err/exit reported it unguarded.
-    grep -qE '(die |die"|fail |err |exit 1|return 1|>&2)' <<<"${arm}" || {
-      printf '%s neither refuses an argument it does not know nor forwards it — a mistyped flag is silently ignored and it runs anyway\n' \
-        "${t}" >&2
-      bad=1
-    }
+    [[ -n "${t}" && -f "${ENTRY_SB}/repo/${t}" ]] || continue
+    seen=$(( seen + 1 ))
+    out="$(entry_run "${t}" "${flag}")"
+    # Forwarding, observed at the far end: the flag reached aider.
+    [[ "${out}" == *"DID aider"*"${flag}"* ]] && continue
+    [[ "${out}" == "EXIT 0"* ]] && {
+      printf '%s accepted %s and ran anyway:\n%s\n' "${t}" "${flag}" "${out}" >&2
+      bad=1; continue; }
+    # Non-zero is not enough. A script that took a default and died further
+    # along on an unrelated cause also exits non-zero and also prints
+    # something; the refusal has to NAME the argument the reader got wrong.
+    [[ "${out}" == *"${flag}"* ]] || {
+      printf '%s failed without naming %s, so a mistyped flag is indistinguishable from a broken machine:\n%s\n' \
+        "${t}" "${flag}" "${out}" >&2
+      bad=1; continue; }
+    [[ "${out}" != *$'\nDID '* ]] || {
+      printf '%s changed something before refusing %s:\n%s\n' "${t}" "${flag}" "${out}" >&2
+      bad=1; }
   done < <(entry_points)
   (( seen >= 15 )) || {
     printf 'only %s entry points found — this gate has stopped watching\n' "${seen}" >&2
@@ -19689,8 +19753,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 124 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 29 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 123 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 30 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
@@ -19707,33 +19771,27 @@ check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
 # invocation, or from top-level code, through the call graph.
 # tests/reachable.awk builds it; its header says what it over-approximates and
 # why it errs towards silence.
-UNREACHED_EXEMPT=( command_not_found_handle )   # bash calls this one itself
 # SOURCE-GREP: reachability inside a file IS a property of that file's text,
 # so there is nothing here to drive. What it cannot see is a name assembled at
-# run time — "${fn}" — which reads as unreachable; that belongs in the
-# exemption list above, with its reason.
+# run time — "${fn}" — which reads as unreachable; reachable.awk's own exempt
+# list is where such a case belongs, with its reason.
 unreached_functions() {   # FILE -> the functions in it nothing can reach
   awk -f "${TESTS_DIR}/reachable.awk" "$1" "$1" | sort
 }
 # SOURCE-GREP: same subject, same reason.
 no_test_function_is_defined_and_never_run() {
-  local f fn e skip dead=0 nfiles=0 reach_probe="${SANDBOX}/reach-reach_probe.sh"
+  local f fn dead=0 nfiles=0 reach_probe="${SANDBOX}/reach-probe.sh"
   for f in "${TESTS_DIR}"/*.sh; do
     nfiles=$(( nfiles + 1 ))
     while read -r fn; do
       [[ -n "${fn}" ]] || continue
-      skip=false
-      for e in "${UNREACHED_EXEMPT[@]}"; do
-        [[ "${fn}" == "${e}" ]] && skip=true
-      done
-      [[ "${skip}" == "true" ]] && continue
       printf '%s defines %s and nothing reaches it — a gate that never runs cannot fail\n' \
         "${f##*/}" "${fn}" >&2
       dead=1
     done < <(unreached_functions "${f}")
   done
   (( nfiles >= 5 )) || {
-    printf 'only %s test nfiles were read — this stopped watching\n' "${nfiles}" >&2
+    printf 'only %s test files were read — this stopped watching\n' "${nfiles}" >&2
     dead=1
   }
   # Non-vacuity: the scanner must still be able to SEE an unreachable function.

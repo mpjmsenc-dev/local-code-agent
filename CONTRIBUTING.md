@@ -675,8 +675,11 @@ It over-approximates deliberately: a name inside a string counts as a call, so
 it errs towards silence rather than towards accusing live code. Two things it
 found on its first run:
 
-- `command_not_found_handle`, which bash calls itself. Exempt by name, with the
-  reason beside it in `UNREACHED_EXEMPT`.
+- `command_not_found_handle`, which bash calls itself. Exempt by name, with its
+  reason, in `reachable.awk`'s own `exempt` list — and not in a shell array
+  beside the gate, because an array naming it would be a top-level mention, so
+  the exemption would root the name and the exemption machinery would be doing
+  nothing.
 - a whole verdict category in `tests/live-verify.sh` — WRONG, documented at the
   top of that file, counted, printed in the summary and included in the exit
   condition — whose reporting function no line ever called, so the column could

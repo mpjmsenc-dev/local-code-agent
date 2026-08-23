@@ -14,6 +14,15 @@
 # call — so this errs towards calling things reachable. False silence, never a
 # false accusation.
 
+# Names something other than this file calls. Anything listed here is excused
+# from the report, so it carries its reason. The list lives in the scanner
+# rather than beside the gate because a shell array naming these would itself
+# be a top-level mention — the exemption would root them, and the exemption
+# machinery would then be doing nothing.
+BEGIN {
+  exempt["command_not_found_handle"] = "bash calls it for any unqualified name it cannot resolve"
+}
+
 # --- pass 1: what does this file define? ------------------------------------
 FNR == NR {
   # A quoted heredoc is data, not code. Fixtures in this suite deliberately
@@ -79,5 +88,5 @@ END {
       if ((p[1] in live) && !(p[2] in live)) { live[p[2]] = 1; changed = 1 }
     }
   }
-  for (f in defined) if (!(f in live)) print f
+  for (f in defined) if (!(f in live) && !(f in exempt)) print f
 }

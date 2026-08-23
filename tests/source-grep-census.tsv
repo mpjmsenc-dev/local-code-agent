@@ -71,7 +71,7 @@ A	every_baked_setting_is_compared	derived list, but the source side is a presenc
 A	every_banner_state_gets_the_warning	awk inside headline() for one call
 A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
 A	every_dispatch_forwards_its_arguments	greps exec lines; forwarding is drivable
-A	every_entry_point_refuses_or_forwards	greps for a refusal arm; running with a bogus flag would settle it
+FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 A	every_installer_call_in_setup_is_guarded	greps setup.sh main() for the guarded form
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
