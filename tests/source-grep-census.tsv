@@ -32,7 +32,7 @@ A	aider_pin_is_watched	greps check-system.sh for pin handling
 A	appliers_check_the_scripts_they_call	source lint standing in for "apply survives a failing sub-script"
 A	apply_asks_before_rendering	awk over apply.sh for the order two calls appear in
 A	apply_does_not_read_ollama_ps	greps for the absence of a command in two function bodies
-A	apply_reconciles_the_agent	greps apply.sh for defined-and-called and a branch shape
+FP	apply_reconciles_the_agent	drives apply_agent over five states of the container and .env
 A	apply_survives_a_failed_rebuild	awk for a guarded invocation line; the behaviour is drivable
 A	apt_failure_checks_sudo_first	greps the apt branch for message order
 A	ask_announces_a_cold_load	greps ask.sh and lib.sh for notice placement
@@ -77,7 +77,6 @@ A	every_installer_call_in_setup_is_guarded	greps setup.sh main() for the guarded
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
 A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
 A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
-A	guard_is_reported_and_applied	presence-greps plus an awk for a call in main()
 A	guard_message_names_only_guarded_ports	structural awk; the behaviour itself is driven in test-netmode.sh
 A	harden_installs_the_boot_service	awk over netmode.sh for calls inside do_harden
 A	help_examples_are_dispatched	greps bin/lca for branch order
@@ -331,3 +330,14 @@ H	drift_verdict	runs check-system.sh's drift-reporting block over a given state
 H	uninstall_home_sweep	runs uninstall.sh's model sweep over a sandbox of fake homes
 H	agent_docker_argv	builds the argv agent.sh really hands docker run, with docker stubbed
 H	backup_run_in	takes a real backup into a sandbox with docker and ollama absent
+B	doc_blocks_establish_their_directory	the subject is the fenced blocks and prose of the docs
+B	docs_copy_one_backup_not_all	the subject is an instruction written in the docs
+B	docs_read_backups_safely	the subject is an instruction written in the docs
+B	docs_show_the_prompt_recipe	docs vs the recipe the driven prompt really emits
+B	every_path_stub_survives_sudo	meta lint over the suite's own source
+B	no_restart_as_apply_instruction	the subject is the wording of messages and docs
+B	no_test_breaks_docker_through_the_environment	meta lint over the suite's own source
+B	no_unannounced_long_wait	exhaustive absence rule for a silent wait
+B	root_docs_are_swept_or_exempt	coverage bookkeeping over the root documents
+H	census_rows	counts the rows of this table
+H	census_names	lists the names in this table

@@ -616,6 +616,12 @@ behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
 converting a gate moves its row from A to FP rather than deleting it, so the
 count is a ratchet and not a promise.
 
+That table is the measurement as taken. The population has grown since, because
+the classifier was widened twice (see the blind spots below), and the A count
+has come down as gates were converted; `tests/source-grep-census.tsv` is always
+the current answer, and the ratchet in `group_a_debt_has_not_grown` moves with
+it. What must never happen is the A count going up.
+
 Two counting errors surfaced in the same read, and both flattered the old
 number:
 
@@ -634,6 +640,16 @@ number:
 
 The census carries those ten anyway. They are labelled by what they do, not by
 what the scanner can see.
+
+**And a third route past the classifier, found later: a repo path held in a
+variable.** `${APPLY}`, `${TESTS_DIR}`, `${CENSUS}` and `${DOC_SURFACES[@]}`
+all hold paths inside the checkout, and the rule looked for the literal
+`${REPO}/`. Seventeen more gates read source through one of them — including
+three checks that grepped `apply.sh` for the *name* of an applier, which is the
+weakest shape this document describes, sitting unclassified. The classifier
+knows those four variables now. The lesson is not the variable list: it is that
+a rule written as "the body contains this literal" will keep meeting shapes it
+was not written for, and each one is invisible in exactly the way that matters.
 
 The meta-gate is itself the kind of thing that becomes decoration, so it is
 driven too: its classifier is run over a fixture holding one offending function

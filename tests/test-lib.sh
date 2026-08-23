@@ -3073,7 +3073,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 134 )) || {
+  (( n <= 132 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -4829,42 +4829,6 @@ start_seeds_the_settings() {
 }
 check "'lca agent start' seeds the settings a task cannot run without" \
   start_seeds_the_settings
-# 'lca apply' has to know the agent exists. docs/AGENT.md told people to run it
-# and, until this, apply reconciled the guard while never once looking at the
-# container — so the doc described work the code did not do.
-apply_reconciles_the_agent() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/scripts/apply.sh")"
-  grep -q 'apply_agent' <<<"${body}" || {
-    echo 'lca apply never looks at the agent, while docs/AGENT.md tells people to run it' >&2
-    return 1; }
-  # ...and it must be CALLED, not merely defined. A applier that is written and
-  # never dispatched is the quietest kind of dead code.
-  awk '/^apply_agent\(\) \{/ { defined = 1 }
-       /^  apply_agent$/     { called = 1 }
-       END { exit (defined && called) ? 0 : 1 }' <<<"${body}" || {
-    echo 'apply_agent is defined but never called from main' >&2
-    return 1; }
-  # The disabled-but-running case, which is this project'"'"'s hardest-won rule:
-  # a container still serving after ENABLE_AGENT=false must be named, because
-  # this one hands out a session that runs commands on the machine.
-  # Bounded to the DISABLED branch — between the ENABLE_AGENT test and the
-  # "disabled in .env" line it ends with. The first version of this only asked
-  # that agent_container_running appear somewhere after ENABLE_AGENT anywhere
-  # in the function, and the enabled path below uses it too: replacing the
-  # disabled branch's check with 'false' left the string in place and the gate
-  # green. Caught by mutation, not by reading it.
-  awk '/^apply_agent\(\) \{/                { inb = 1 }
-       inb && /ENABLE_AGENT.*!=.*true/      { arm = 1; next }
-       inb && arm && /disabled in .env/     { arm = 0 }
-       inb && arm && /agent_container_running/ { found = 1 }
-       inb && /^\}/                         { exit }
-       END { exit found ? 0 : 1 }' <<<"${body}" || {
-    echo 'apply_agent trusts ENABLE_AGENT without asking whether the container is still running' >&2
-    return 1; }
-}
-check "'lca apply' reports the agent, including one running while .env says off" \
-  apply_reconciles_the_agent
 # An uninstall that leaves the agent behind is this file's own worst failure
 # shape repeated: it once printed "Uninstall complete" while the chat app's
 # container and every account in it were still on the machine. The agent is the
@@ -9999,10 +9963,280 @@ echo "# 'lca apply' — one command for every setting that needs applying"
 # change nothing — verified against real files, not just asserted here.
 APPLY="${REPO}/scripts/apply.sh"
 check "apply.sh is executable" test -x "${APPLY}"
-apply_covers() { grep -qF "$1" "${APPLY}"; }
-check "apply covers the Ollama drop-in"  apply_covers 'apply_ollama'
-check "apply covers the chat app"        apply_covers 'apply_webui'
-check "apply covers the backup timer"    apply_covers 'apply_backup_timer'
+
+# apply_fn_probe STUBS SCRIPT — run SCRIPT with lib.sh and scripts/apply.sh
+# sourced (apply.sh's own guard stops main from running) and STUBS defined
+# between them. The counters start at zero and are printed at the end, because
+# "changed", "blocked" and "could not check" are the three facts every applier
+# is judged on and the summary line is built from them.
+#
+# Named apply_fn_probe, not apply_probe: the guard harness further down this
+# file already owns that name, and a second definition of it would silently
+# replace the first for everything written below.
+#
+# REPO_ROOT points at a sandbox, so the paths these messages name cannot be
+# mistaken for the real checkout by anything that reads them.
+APPLY_FN_SB="${SANDBOX}/apply-fn-probe"
+apply_fn_probe() {
+  mkdir -p "${APPLY_FN_SB}"
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    source "$2" >/dev/null 2>&1
+    REPO_ROOT="$4"; SCRIPT_DIR="$4"
+    info() { printf "INFO %s\n" "$*"; }
+    ok()   { printf "OK %s\n"   "$*"; }
+    warn() { printf "WARN %s\n" "$*"; }
+    die()  { printf "DIE %s\n"  "$*"; exit 1; }
+    step() { :; }
+    DRY_RUN=false; CHANGED=0; BLOCKED=0; UNCHECKED=0
+    eval "$3"
+    eval "$5"
+    printf "COUNTS CHANGED=%s BLOCKED=%s UNCHECKED=%s\n" \
+      "${CHANGED}" "${BLOCKED}" "${UNCHECKED}"
+  ' _ "${REPO}/scripts/lib.sh" "${APPLY}" "$1" "${APPLY_FN_SB}" "$2" 2>&1
+}
+
+# Non-vacuity: the harness has to reach apply.sh's own functions, or every
+# assertion below is about a subshell that died on the source line.
+check "the apply harness reaches apply.sh" \
+  test -n "$(apply_fn_probe ':' 'declare -f apply_guard >/dev/null && printf reached')"
+
+
+
+# Every applier must be REACHED. The grep version asked that main() names
+# apply_agent — which is satisfied by the name appearing anywhere in it, and
+# says nothing about the other four. This drives main() with each applier
+# replaced by a recorder, so a dispatch that quietly loses one fails here.
+apply_runs_every_applier() {
+  local out order
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(apply_fn_probe '
+      for f in apply_ollama apply_webui apply_agent apply_backup_timer apply_guard; do
+        eval "${f}() { printf \"RAN %s\n\" \"${f}\"; }"
+      done' 'main --dry-run')"
+  order="$(grep '^RAN ' <<<"${out}" | sed "s/^RAN //" | tr '\n' ' ')"
+  local f
+  for f in apply_ollama apply_webui apply_agent apply_backup_timer apply_guard; do
+    grep -qw "${f}" <<<"${order}" || {
+      printf '%s is never reached by lca apply, so everything it does is dead code:\n  ran: %s\n%s\n' \
+        "${f}" "${order}" "${out}" >&2
+      return 1; }
+  done
+  # ...and in this order. Ollama before the chat app because the chat app is
+  # configured to talk to it; the guard last because it is the only applier
+  # that can close what the others just opened.
+  [[ "${order% }" == "apply_ollama apply_webui apply_agent apply_backup_timer apply_guard" ]] || {
+    printf 'lca apply runs its appliers in the wrong order — Ollama must be settled before the chat app that talks to it, and the guard must be last:\n  ran: %s\n' \
+      "${order}" >&2
+    return 1; }
+}
+check "every applier is reached, and the guard runs last" \
+  apply_runs_every_applier
+
+# The three scripts an applier shells out to, replaced by recorders that print
+# what they were asked to do. Printing rather than writing a file on purpose:
+# the probe already captures the child's output, so there is no shared state
+# between the gate and the child to get wrong — and an earlier version of this
+# harness lost exactly that round-trip and reported a firewall that was never
+# applied.
+apply_fn_recorders() {
+  mkdir -p "${APPLY_FN_SB}"
+  local s
+  for s in netmode.sh backup.sh install_webui.sh; do
+    { printf '#!/usr/bin/env bash\n'
+      printf 'printf "RAN %s %%s\\n" "$*"\n' "${s}"
+      # shellcheck disable=SC2016  # the literal is the recorder's own text
+      printf 'exit ${FAKE_RC:-0}\n'; } > "${APPLY_FN_SB}/${s}"
+    chmod +x "${APPLY_FN_SB}/${s}"
+  done
+}
+
+# Driven. The awk version read apply.sh for a 'would ' line appearing before
+# whatever each applier changes — which is a statement about the order of two
+# lines, not about what a dry run does. What is at stake is the promise the
+# flag makes: somebody can look at what would happen without it happening.
+dry_run_guards_every_change() {
+  apply_fn_recorders
+  local out
+  # Ollama: drifted drop-in, systemd present, dry run. Nothing may be
+  # rendered and nothing restarted.
+  out="$(apply_fn_probe '
+      DRY_RUN=true
+      have() { true; }
+      systemd_available() { true; }
+      ollama_dropin_matches() { false; }
+      render_ollama_dropin() { printf "RAN render_ollama_dropin\n"; }
+      restart_ollama() { printf "RAN restart_ollama\n"; }
+      needs_root() { true; }' 'apply_ollama')"
+  grep -q '^RAN ' <<<"${out}" && {
+    printf 'a dry run rendered or restarted Ollama:\n%s\n' "${out}" >&2; return 1; }
+  grep -qi 'would' <<<"${out}" || {
+    printf 'a dry run over a drifted drop-in said nothing about it:\n%s\n' "${out}" >&2
+    return 1; }
+  # The chat app: drifted container, dry run. The installer must not run.
+  out="$(apply_fn_probe '
+      DRY_RUN=true
+      SKIP_DOCKER=false
+      ENABLE_WEBUI=true
+      docker_daemon_reachable() { true; }
+      webui_container_exists() { true; }
+      webui_drift() { printf "WEBUI_PORT\n"; }
+      needs_root() { true; }' 'apply_webui')"
+  grep -q '^RAN install_webui.sh' <<<"${out}" && {
+    printf 'a dry run re-created the chat app container:\n%s\n' "${out}" >&2; return 1; }
+  grep -qi 'would' <<<"${out}" || {
+    printf 'a dry run over a drifted container said nothing about it:\n%s\n' "${out}" >&2
+    return 1; }
+  # The backup timer: installed, on the wrong schedule, dry run.
+  out="$(apply_fn_probe '
+      DRY_RUN=true
+      systemd_available() { true; }
+      systemctl() { true; }
+      installed_backup_schedule() { printf "daily\n"; }
+      BACKUP_SCHEDULE="03:30"
+      needs_root() { true; }' 'apply_backup_timer')"
+  grep -q '^RAN backup.sh' <<<"${out}" && {
+    printf 'a dry run re-installed the backup timer:\n%s\n' "${out}" >&2; return 1; }
+  grep -qi 'would' <<<"${out}" || {
+    printf 'a dry run over a drifted timer said nothing about it:\n%s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "a dry run says what every applier would change and changes nothing" \
+  dry_run_guards_every_change
+
+# Driven. The awk version asked that 'is-enabled' appear before
+# '--install-timer' inside the function. What is at stake is 'lca apply'
+# creating a scheduled job on a machine whose owner never asked for one.
+never_creates_a_timer() {
+  apply_fn_recorders
+  local out
+  out="$(apply_fn_probe '
+      systemd_available() { true; }
+      systemctl() { return 1; }   # is-enabled says no timer
+      installed_backup_schedule() { printf "daily\n"; }
+      BACKUP_SCHEDULE="03:30"
+      needs_root() { true; }' 'apply_backup_timer')"
+  grep -q '^RAN backup.sh' <<<"${out}" && {
+    printf 'lca apply installed a backup timer on a machine that had none:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -qi 'nothing to apply\|no scheduled timer' <<<"${out}" || {
+    printf 'a machine with no timer was not told so:\n%s\n' "${out}" >&2; return 1; }
+  grep -q 'COUNTS CHANGED=0' <<<"${out}" || {
+    printf 'a machine with no timer was counted as changed:\n%s\n' "${out}" >&2; return 1; }
+  # ...and one that IS installed and drifted must be moved, or this gate would
+  # pass over an applier that never does anything at all.
+  out="$(apply_fn_probe '
+      systemd_available() { true; }
+      systemctl() { true; }
+      installed_backup_schedule() { printf "daily\n"; }
+      BACKUP_SCHEDULE="03:30"
+      needs_root() { true; }' 'apply_backup_timer')"
+  grep -q '^RAN backup.sh --install-timer' <<<"${out}" || {
+    printf 'an installed timer on the wrong schedule was left alone:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "apply never installs a backup timer that was not there" never_creates_a_timer
+
+# Driven. The awk version read the summary block for a 'UNCHECKED > 0' test
+# ahead of the "already matches" line. What is at stake is the last line of the
+# command: "Everything already matches .env" printed over components it could
+# not look at is this project's defining failure, in the one place everybody
+# reads.
+apply_summary_admits_unchecked() {
+  local out
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(apply_fn_probe '
+      for f in apply_ollama apply_webui apply_agent apply_backup_timer; do
+        eval "${f}() { :; }"
+      done
+      apply_guard() { UNCHECKED=$((UNCHECKED+1)); }' 'main')"
+  grep -q 'already matches .env' <<<"${out}" && {
+    printf 'a component that could not be checked was reported as matching:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  grep -q 'could not be checked' <<<"${out}" || {
+    printf 'a component that could not be checked was passed over in silence:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # ...and when everything really was checked and matched, it must say so —
+  # otherwise the honest branch above could be the only branch.
+  # shellcheck disable=SC2016  # the stub is code for the child shell, not a string to expand here
+  out="$(apply_fn_probe '
+      for f in apply_ollama apply_webui apply_agent apply_backup_timer apply_guard; do
+        eval "${f}() { :; }"
+      done' 'main')"
+  grep -q 'already matches .env' <<<"${out}" || {
+    printf 'a fully checked, fully matching system was not told so:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "'lca apply' never says everything matches over something it could not check" \
+  apply_summary_admits_unchecked
+
+# Driven. The grep version asked that apply_agent be defined and called and
+# that the disabled branch mention agent_container_running. What is at stake is
+# a container that still answers on its port after .env says it is off — this
+# one hands out a session that runs commands on the machine, so "disabled in
+# .env" printed over a live container is the worst line this applier could say.
+apply_reconciles_the_agent() {
+  local out base='
+      docker_daemon_reachable() { true; }
+      SKIP_DOCKER=false
+      AGENT_PORT=3001
+      agent_live_port() { printf "3001"; }'
+  # Disabled, but still running: say so, and count it as unchecked.
+  out="$(apply_fn_probe "${base}"'
+      ENABLE_AGENT=false
+      agent_container_running() { true; }' 'apply_agent')"
+  grep -q 'still RUNNING' <<<"${out}" || {
+    printf 'the agent is disabled in .env and still serving, and lca apply said nothing:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  grep -q 'agent stop' <<<"${out}" || {
+    printf 'a still-running disabled agent was reported without naming the command that stops it:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  grep -q 'UNCHECKED=1' <<<"${out}" || {
+    printf 'a live container over a disabled setting was not counted:\n%s\n' "${out}" >&2
+    return 1; }
+  # Disabled and really gone: ordinary, and not a problem.
+  out="$(apply_fn_probe "${base}"'
+      ENABLE_AGENT=false
+      agent_container_running() { false; }' 'apply_agent')"
+  grep -q 'disabled in .env' <<<"${out}" || {
+    printf 'a disabled agent that is not running was not reported at all:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'COUNTS CHANGED=0 BLOCKED=0 UNCHECKED=0' <<<"${out}" || {
+    printf 'an agent that is off and stopped was counted as a problem:\n%s\n' "${out}" >&2
+    return 1; }
+  # Enabled and running on a port .env no longer names: the port is fixed at
+  # creation, so this is a real mismatch and not something apply can fix.
+  out="$(apply_fn_probe "${base}"'
+      ENABLE_AGENT=true
+      agent_container_running() { true; }
+      agent_live_port() { printf "3999"; }' 'apply_agent')"
+  grep -q '3999' <<<"${out}" || {
+    printf 'the agent runs on a port .env does not name and apply said nothing:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  grep -q 'UNCHECKED=1' <<<"${out}" || {
+    printf 'a port mismatch was not counted:\n%s\n' "${out}" >&2; return 1; }
+  # ...and a daemon that cannot be reached is "could not look", never "fine".
+  out="$(apply_fn_probe "${base}"'
+      ENABLE_AGENT=true
+      docker_daemon_reachable() { false; }
+      agent_container_running() { true; }' 'apply_agent')"
+  grep -q '^OK ' <<<"${out}" && {
+    printf 'an unreachable daemon was reported as a matching agent:\n%s\n' "${out}" >&2
+    return 1; }
+  grep -q 'UNCHECKED=1' <<<"${out}" || {
+    printf 'an unreachable daemon was not counted as unchecked:\n%s\n' "${out}" >&2
+    return 1; }
+  return 0
+}
+check "'lca apply' reports an agent still running after .env disabled it" \
+  apply_reconciles_the_agent
 # No applier may invoke another script bare under 'set -e'. apply_webui has
 # said why since it was written — "a failed re-create aborted 'lca apply'
 # right here: the inbound guard was never reconciled, no summary was printed"
@@ -10071,23 +10305,6 @@ setup_only_dies_on_core_steps() {
 }
 check "setup.sh only aborts on the steps that leave no stack at all" \
   setup_only_dies_on_core_steps
-# The dry run must be incapable of changing anything: every mutating call has
-# to sit behind the 'would' guard that returns early.
-dry_run_guards_every_change() {
-  local fn bad=0
-  for fn in apply_ollama apply_webui apply_backup_timer; do
-    awk -v f="${fn}" '$0 ~ "^"f"\\(\\) \\{" {inf=1}
-         inf && /would /        {guarded=1}
-         inf && /render_ollama_dropin|install_webui\.sh|--install-timer/ \
-             && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
-         inf && /^}/            {inf=0}
-         END {exit bad}' "${APPLY}" || {
-      printf '%s can change something before its dry-run guard\n' "${fn}" >&2; bad=1
-    }
-  done
-  return "${bad}"
-}
-check "every change in apply.sh sits behind the dry-run guard" dry_run_guards_every_change
 # A dry run's plan is the entire answer, so it must survive a redirect. The
 # first version printed it through warn() — i.e. to stderr — so
 # 'lca apply --dry-run > plan.txt' produced a file with a summary count and no
@@ -10138,48 +10355,8 @@ apply_distinguishes_daemon_down() {
 }
 check "apply reports an unreachable Docker daemon, not a missing container" \
   apply_distinguishes_daemon_down
-# ...and the summary must never say "everything matches" about something it
-# could not look at.
-apply_summary_admits_unchecked() {
-  awk '/CHANGED == 0/ {inf=1}
-       inf && /UNCHECKED > 0/ {guarded=1}
-       inf && /already matches .env/ {if (!guarded) bad=1; inf=0}
-       END {exit bad}' "${APPLY}"
-}
-check "apply never claims a clean bill for an unchecked component" \
-  apply_summary_admits_unchecked
 
 echo "# 'lca apply' must move Ollama before rebuilding the chat app"
-# The container bakes in OLLAMA_BASE_URL at creation. docs/TROUBLESHOOTING.md
-# now tells people to fix a moved OLLAMA_HOST with 'lca apply', so Ollama must
-# be listening on the new port before the container is rebuilt to point at it.
-# Reversed, the chat app spends the gap talking to a port nothing answers on —
-# the exact failure this command was written to end. Silent if broken: the end
-# state is still correct, only the window between is wrong.
-apply_moves_ollama_first() {
-  awk '/^main\(\) \{/ {inmain=1}
-       inmain && /^  apply_ollama$/ {o=NR}
-       inmain && /^  apply_webui$/  {w=NR}
-       END {exit !(o > 0 && w > 0 && o < w)}' "${APPLY}"
-}
-check "apply re-points Ollama before it rebuilds the chat app" \
-  apply_moves_ollama_first
-# A missing component is not a matching one.
-distinguishes_absent_from_matching() {
-  grep -qF 'webui_container_exists' "${APPLY}"
-}
-check "apply says 'not created yet' rather than 'already matches'" \
-  distinguishes_absent_from_matching
-# Scheduled backups are opt-in; applying .env must not create a timer nobody
-# asked for.
-never_creates_a_timer() {
-  awk '/^apply_backup_timer\(\) \{/ {inf=1}
-       inf && /is-enabled/ {guarded=1}
-       inf && /--install-timer/ && !/^[[:space:]]*(info|warn|ok|die|#)/ {if (!guarded) bad=1}
-       inf && /^}/ {inf=0}
-       END {exit bad}' "${APPLY}"
-}
-check "apply never installs a backup timer that was not there" never_creates_a_timer
 check "'lca apply' is dispatched by bin/lca" grep -q 'apply)' "${REPO}/bin/lca"
 # check-system.sh must report the drift, for the user who has not rebooted yet.
 check_reports_dropin_drift() {
@@ -13409,21 +13586,8 @@ one_copy_of_the_coverage_rule() {
     return 1
   }
 }
-guard_is_reported_and_applied() {
-  grep -q 'inbound_guard_uncovered' "${REPO}/check-system.sh" || return 1
-  grep -q 'inbound_guard_uncovered' "${REPO}/scripts/apply.sh"  || return 1
-  # and 'lca apply' must actually run the fix, not just describe it
-  grep -q 'netmode.sh" harden' "${REPO}/scripts/apply.sh" || return 1
-  # ...and main() must reach it, or every test below drives dead code.
-  awk '/^main\(\) \{/     { inb=1; next }
-       inb && /^\}/       { exit }
-       inb && /apply_guard/ { found=1 }
-       END { exit !found }' "${REPO}/scripts/apply.sh"
-}
 check "the guard-coverage rule exists in exactly one place" \
   one_copy_of_the_coverage_rule
-check "'lca check' reports guard drift and 'lca apply' fixes it" \
-  guard_is_reported_and_applied
 
 # ...and the applier itself is driven for real, because what it decides is
 # whether a firewall gets loaded. apply.sh guards its own main() behind a
@@ -19017,7 +19181,8 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
       # as that function body — which quietly corrupted every verdict after the
       # first one-liner, this list included. Found by mutating the gate.
       if ($0 ~ /\}[[:space:]]*$/) {
-        if ($0 ~ /\$\{REPO\}\// && $0 ~ /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
+        if (($0 ~ /\$\{REPO\}\// || $0 ~ /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/) \
+          && $0 ~ /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
         inb=0; next
       }
       inb=1; next
@@ -19028,7 +19193,14 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # source grep. A classifier that reads text and draws conclusions from it
     # is the very thing this section exists to stop.
     inb && /^[[:space:]]*#/ { next }
+    # A repo path reached through a VARIABLE counts too. The rule used to be
+    # "${REPO}/ appears in the body", and ${APPLY}, ${TESTS_DIR}, ${CENSUS} and
+    # ${DOC_SURFACES[@]} all hold repo paths that it could not see — seventeen
+    # gates read source through one of them and were invisible to this
+    # classifier for as long as both existed. Three checks grepping apply.sh
+    # for the name of an applier were among them.
     inb && /\$\{REPO\}\// { src=1 }
+    inb && /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/ { src=1 }
     inb && /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
     inb && /^\}/ { if (src && tool) print fn; inb=0 }
   ' "$1" | sort -u
@@ -19204,7 +19376,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 134 )) || {
+  (( n <= 132 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
