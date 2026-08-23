@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now             103   of the 115 the projection was made from
-#   still worth driving     70
+#   A rows now             102   of the 115 the projection was made from
+#   still worth driving     69
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (11):
+#   Of the ~24 highest-cost, driven so far (12):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -80,6 +80,7 @@
 #     logs_ollama_reads_the_background_log  the log itself, on a journal-less box
 #     signup_reported_by_check              open signups warned about
 #     check_system_asks_for_the_port_list    a disabled-but-live chat app's port
+#     webui_installer_applies_the_guard     the guard really re-applied
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -236,7 +237,8 @@ A	watch_follows_the_sandbox_too	two presence-greps in agent-watch.sh
 A	watch_judges_on_time_not_only_on_output	presence-grep plus an absence rule
 A	watch_log_arm_cannot_feed_an_armed_ceiling	counts one line and checks what shares it
 A	watch_reads_the_event_source	three presence-greps in agent-watch.sh
-A	webui_installer_applies_the_guard	presence-grep plus the README claim it protects
+H	webui_guard_install_run	builds a checkout of install_webui.sh minus its 'main "$@"' line and runs it against a recording netmode.sh
+FP	webui_installer_applies_the_guard	runs the real installer with a recording netmode.sh: harden must be called, after the container, and its failure must not kill the install
 B	advice_names_only_documented_commands	the subject is user-facing advice text across scripts and docs
 B	advice_paths_are_absolute	the subject is the text of message/usage strings
 B	aider_privacy_settings_reach_aider	extract-to-drive: reads the config file aider is actually pointed at

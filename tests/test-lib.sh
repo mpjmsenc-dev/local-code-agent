@@ -8703,27 +8703,125 @@ check "nothing re-types a path into the venv" venv_python_is_the_only_source
 echo "# the README's privacy claim about the inbound guard must stay true"
 # README's "How your services are kept private" states the guard is re-applied
 # "whenever WebUI is (re)created". That is a security claim, and it rests on a
-# single line in install_webui.sh. It matters more now than when it was
-# written: 'lca apply' re-creates the container on every settings change, so
-# this is the path that keeps ports 3000 and 11434 off the public internet
-# after routine use, not just at install time.
+# single line at the very end of install_webui.sh. It matters more now than
+# when it was written: 'lca apply' re-creates the container on every settings
+# change, so this is the path that keeps ports 3000 and 11434 off the public
+# internet after routine use, not just at install time.
 #
 # Delete that line and nothing fails, nothing logs, and the only symptom is an
-# exposed port on someone's droplet.
+# exposed port on someone's droplet. The grep this replaces would have caught
+# the deletion — and nothing else: not a harden that runs BEFORE the container
+# exists, not one whose failure kills the install, and not a line sitting in a
+# branch the installer never reaches.
+#
+# So the installer is run. install_webui.sh ends in a bare 'main "$@"', so the
+# copy is the file minus that line; netmode.sh in the sandbox records instead
+# of acting, and shares one log with as_root so the ORDER is visible.
+#
+# A COPY of the tree, and not the webui_install_run harness further up this
+# file, for one reason: that one runs the installer out of the real checkout,
+# where "${REPO_ROOT}/netmode.sh" harden is the real thing. This suite must
+# never apply a firewall rule to the machine it runs on. (It never has: with
+# the container reported not-running, wait_for_webui returns 2 and the
+# installer die()s well before that line — which is also why the harness above
+# cannot answer this question.)
+WEBUI_GUARD_SB="${SANDBOX}/webuiinstall"
+webui_guard_install_run() {   # HARDEN-RC -> the output, with the call log at WEBUI_GUARD_SB/.calls
+  local sb="${WEBUI_GUARD_SB}"
+  if [[ ! -e "${sb}/scripts/install_webui.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/lib.sh"
+    grep -v '^main "\$@"$' "${REPO}/scripts/install_webui.sh" > "${sb}/scripts/install_webui.sh"
+    cp "${REPO}/.env.example" "${sb}/.env.example"
+    cp "${REPO}/.env.example" "${sb}/.env"
+    cp -r "${REPO}/config" "${sb}/"
+  fi
+  # The kill switch and the whole netmode surface, replaced by one recorder
+  # that exits however the case needs.
+  printf '#!/usr/bin/env bash\nprintf "netmode %%s\\n" "$*" >> "%s/.calls"\nexit %s\n' \
+    "${sb}" "$1" > "${sb}/netmode.sh"
+  chmod +x "${sb}/netmode.sh"
+  : > "${sb}/.calls"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    LOG="$2"
+    # ss absent, so the port-squatter check has nothing to find; everything
+    # else present.
+    have() { case "$1" in ss) return 1 ;; *) return 0 ;; esac; }
+    docker_daemon_reachable() { return 0; }
+    net_guard() { :; }
+    webui_wait_or_die() { :; }
+    # Records and answers. State.Running has to say true or the installer dies
+    # on a container it just created; volume inspect says no, which is the
+    # first-install shape.
+    as_root() {
+      printf "as_root %s\n" "$*" >> "${LOG}"
+      case "$*" in
+        *"{{.State.Running}}"*) printf "true\n" ;;
+        *"volume inspect"*)     return 1 ;;
+      esac
+      return 0
+    }
+    main
+    printf "RC=%s\n" "$?"
+  ' _ "${sb}/scripts/install_webui.sh" "${sb}/.calls" 2>&1
+}
+# Just the two lines that matter, because the docker run argv is four kilobytes
+# of system prompt and nobody reading a failure wants it.
+webui_guard_calls() { grep -nE 'docker run|^netmode ' "${WEBUI_GUARD_SB}/.calls" | cut -c1-90; }
 webui_installer_applies_the_guard() {
-  grep -qE 'netmode\.sh" harden' "${REPO}/scripts/install_webui.sh" || {
-    echo "install_webui.sh no longer applies the inbound guard — README claims it does" >&2
+  local out calls run_at harden_at bad=0
+  out="$(webui_guard_install_run 0)"
+  grep -qx 'RC=0' <<<"${out}" || {
+    printf 'the installer did not finish at all, so nothing below measured the guard:\n%s\n' "${out}" >&2
     return 1
+  }
+  calls="$(webui_guard_calls)"
+  run_at="$(grep -n 'docker run' <<<"${calls}" | head -1 | cut -d: -f1)"
+  harden_at="$(grep -n '^[0-9]*:netmode harden' <<<"${calls}" | head -1 | cut -d: -f1)"
+  [[ -n "${run_at}" ]] || {
+    printf 'no container was created, so this run says nothing about the guard:\n%s\n' "${calls}" >&2
+    return 1
+  }
+  [[ -n "${harden_at}" ]] || {
+    printf 'install_webui.sh created the container and never applied the inbound guard — the README says it does, and the only symptom is an exposed port:\n%s\n' \
+      "${calls}" >&2
+    return 1
+  }
+  # After the container exists, not before. A guard applied first covers the
+  # port .env names while the container that then starts may bind another.
+  (( harden_at > run_at )) || {
+    printf 'the guard is applied BEFORE the container is created:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  # ...and a guard that cannot be applied must not kill the install. Warn-only
+  # is deliberate: a box without nftables should still end up with a working
+  # chat app, and be told what is not protecting it.
+  out="$(webui_guard_install_run 1)"
+  grep -qx 'RC=0' <<<"${out}" || {
+    printf 'a machine with no nftables cannot install the chat app at all:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'may be publicly reachable' <<<"${out}" || {
+    printf 'the guard failed to apply and the install said nothing about the exposure:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'netmode.sh harden' <<<"${out}" || {
+    printf 'it reported the exposure without naming the command that closes it:\n%s\n' "${out}" >&2
+    bad=1
   }
   # And the README must still be making the claim this guards; if the sentence
   # goes, the test should be re-examined rather than silently protecting a
   # promise nobody makes any more.
   grep -qi 'whenever WebUI is' "${REPO}/README.md" || {
     echo "README no longer claims the guard is re-applied when WebUI is re-created" >&2
-    return 1
+    bad=1
   }
+  return "${bad}"
 }
-check "install_webui.sh re-applies the inbound guard, as the README promises" \
+check "install_webui.sh really re-applies the inbound guard, as the README promises" \
   webui_installer_applies_the_guard
 
 echo "# 'lca update' must re-run setup even when the checkout is already current"
@@ -21216,8 +21314,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 103 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 50 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 102 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 51 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
