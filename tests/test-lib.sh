@@ -4109,40 +4109,91 @@ agent_base_url_is_not_loopback() {
 }
 check "...at host.docker.internal, not at the container's own loopback" \
   agent_base_url_is_not_loopback
-agent_sh_adds_the_host_gateway() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
-  grep -q 'add-host host.docker.internal:host-gateway' <<<"${body}" || {
-    echo 'agent.sh points the agent at host.docker.internal without the --add-host that makes it resolve' >&2
+# Deliberately unlike the usual values, so a hardcoded 172.17.0.1 or a
+# rewritten-from-memory address fails instead of coinciding.
+AGENT_ARGV_GATEWAY='172.30.77.1'
+AGENT_ARGV_TSIP='100.64.77.7'
+AGENT_ARGV_WEB='http://host.docker.internal:9999'
+AGENT_ARGV_SANDENV='LCA_TEST_SANDBOX_ENV=1'
+
+# agent_docker_argv TAILSCALE — the argument list agent.sh really hands
+# 'docker run', one argument per line, preceded by its messages prefixed MSG.
+# TAILSCALE is 'yes' or 'no' for whether an address exists to publish on.
+#
+# The stub records to a FILE, not to a stream: the invocation ends in
+# '>/dev/null', so anything a stub prints on stdout is discarded before this
+# could see it. That is the same trap the uninstall driver hit, from the same
+# direction.
+#
+# This replaced seven gates that read the invocation as text. A source grep can
+# see that '-p "${bridge_gw}:..."' is written; it cannot see what bridge_gw
+# held, whether the tailscale array reached docker, or whether OH_SANDBOX_KIND
+# came out with a value — and that last one is silent: the env parser reads
+# <KEY>_KIND first and, unable to choose, drops every other OH_SANDBOX_* value
+# with it.
+#
+# SOURCE-GREP: extract-to-drive. agent.sh runs main at the bottom, so the block
+# is pulled out by anchor and evaluated with docker stubbed. What this cannot
+# check is that the anchors still bracket the whole invocation — a truncated
+# extraction fails loudly below rather than asserting over nothing.
+agent_docker_argv() {
+  local block log="${SANDBOX}/agent-docker-argv.log"
+  block="$(awk 'index($0, "local model base_url instructions bridge_gw") { inb = 1 }
+                inb { print }
+                inb && index($0, "|| die \"Could not start the agent container") { exit }' \
+             "${REPO}/agent.sh")"
+  [[ -n "${block}" ]] || {
+    echo "could not find agent.sh's container start — this gate stopped watching" >&2
     return 1; }
+  grep -q 'AGENT_IMAGE' <<<"${block}" || {
+    echo "the extracted block never reaches the image argument — the anchors have moved" >&2
+    return 1; }
+  : > "${log}"
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    load_env >/dev/null 2>&1
+    LOG="$3"; TS="$4"; GW="$5"; TSIP="$6"; WEB="$7"; SANDENV="$8"
+    agent_model_for_run()   { printf "m\n"; }
+    agent_llm_model()       { printf "ollama_chat/m\n"; }
+    agent_llm_base_url()    { printf "http://host.docker.internal:11435/v1\n"; }
+    docker_bridge_gateway() { printf "%s\n" "${GW}"; }
+    tailscale_ip4()         { [[ "${TS}" == yes ]] && printf "%s\n" "${TSIP}"; }
+    lca_user_instructions() { printf "be-nice\n"; }
+    agent_web_url()         { printf "%s\n" "${WEB}"; }
+    agent_sandbox_env()     { printf "%s\n" "${SANDENV}"; }
+    as_root() { "$@"; }
+    docker()  { printf "%s\n" "$@" >> "${LOG}"; }
+    die()  { printf "MSG DIE %s\n"  "$*"; return 1; }
+    warn() { printf "MSG WARN %s\n" "$*"; }
+    ok()   { printf "MSG OK %s\n"   "$*"; }
+    info() { :; }
+    printf "MSG PORT=%s\n" "${AGENT_PORT}"
+    eval "run() { $2 ; }"
+    run
+  ' _ "${REPO}/scripts/lib.sh" "${block}" "${log}" "$1" \
+      "${AGENT_ARGV_GATEWAY}" "${AGENT_ARGV_TSIP}" "${AGENT_ARGV_WEB}" "${AGENT_ARGV_SANDENV}" 2>&1
+  cat "${log}"
 }
-check "...and agent.sh passes the flag that makes that name resolve" \
-  agent_sh_adds_the_host_gateway
+# Non-vacuity for everything below: an argv that lost the image argument is not
+# the real one, and every assertion against it would be an assertion about an
+# extraction that stopped working.
+check "the agent's real docker argv can be built" \
+  test "$(agent_docker_argv yes | grep -c .)" -ge 30
+
 # Published on loopback only. The guard is the real defence, but a container
 # published on 0.0.0.0 is reachable the instant the guard is not loaded — and
-# this box has been in exactly that state twice today, after a restart.
-# agent_run_block — the actual 'docker run' invocation, comments stripped: from
-# the run line to the image argument that ends it.
-#
-# The gates below assert against THIS rather than against the whole file, and a
-# mutant is why. Deleting the line that passes the Tailscale publication to
-# docker left the array still being built three lines above, so a whole-file
-# grep matched the construction and passed on code where the flag never reached
-# docker at all. Built and passed are two claims; only the second one runs.
-#
-# Captured first, then matched: the awk below exits at the image line, and a
-# reader that leaves early SIGPIPEs the sed feeding it — gotcha 3, which this
-# suite has a gate for. It caught this the first time it was written as a pipe.
-agent_run_block() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
-  awk '/docker run -d/ { inb = 1 } inb { print } inb && /AGENT_IMAGE/ { exit }' <<<"${body}"
-}
+# this box has been in exactly that state twice, after a restart.
 agent_publishes_on_loopback() {
-  local body
-  body="$(agent_run_block)"
-  grep -qE '\-p "127\.0\.0\.1:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
-    echo 'agent.sh publishes its port on all interfaces, so it is exposed whenever the guard is not loaded' >&2
+  local port argv
+  argv="$(agent_docker_argv yes)" || return 1
+  port="$(sed -n "s/^MSG PORT=//p" <<<"${argv}")"
+  grep -qxF -- "127.0.0.1:${port}:3000" <<<"${argv}" || {
+    printf 'the agent is not published on loopback:\n%s\n' "${argv}" >&2
+    return 1; }
+  ! grep -qxE -- '0\.0\.0\.0:[0-9]+:3000' <<<"${argv}" || {
+    printf 'the agent is published on every interface — the most dangerous port this project opens:\n%s\n' \
+      "${argv}" >&2
     return 1; }
 }
 check "the agent's port is published on loopback, not on every interface" \
@@ -4152,54 +4203,47 @@ check "the agent's port is published on loopback, not on every interface" \
 # the loopback publish alone every callback the agent makes into itself is
 # refused. Measured from inside a live sandbox: 000 for the MCP URL and 000 for
 # the app's root, on a container that was up and healthy.
+#
+# The gateway the stub hands back is a deliberately odd one. Reading the source
+# could only see that SOME variable was interpolated; this sees whether the
+# address docker was given is the one the daemon was asked for.
 agent_publishes_on_the_bridge_too() {
-  local body file
-  body="$(agent_run_block)"
-  file="$(sed 's/#.*//' "${REPO}/agent.sh")"
-  grep -qE '\-p "\$\{bridge_gw\}:\$\{AGENT_PORT\}:3000"' <<<"${body}" || {
-    echo 'agent.sh publishes only on loopback, which its own sandboxes cannot reach — MCP tool listing will time out in init' >&2
+  local port argv
+  argv="$(agent_docker_argv yes)" || return 1
+  port="$(sed -n "s/^MSG PORT=//p" <<<"${argv}")"
+  grep -qxF -- "${AGENT_ARGV_GATEWAY}:${port}:3000" <<<"${argv}" || {
+    printf 'the agent is not published on the bridge gateway docker reported (%s), so its own sandboxes cannot reach it — MCP tool listing times out in init:\n%s\n' \
+      "${AGENT_ARGV_GATEWAY}" "${argv}" >&2
     return 1; }
-  # The address must be DISCOVERED, not written down: 172.17.0.1 is only the
-  # usual gateway, and a daemon with a custom bip has another.
-  grep -q 'docker_bridge_gateway' <<<"${file}" || {
-    echo 'agent.sh hardcodes a bridge address instead of asking docker for it' >&2
-    return 1; }
-  # And it must not have reached for 0.0.0.0 to solve the same problem.
-  ! grep -qE '\-p "0\.0\.0\.0:' <<<"${body}" || {
-    echo 'agent.sh publishes the agent on every interface' >&2; return 1; }
 }
 check "...and on the docker bridge, which is the only address its sandboxes have" \
   agent_publishes_on_the_bridge_too
 # ...and on the Tailscale address, which is the one the docs actually send the
-# user to and the one nothing was ever published on.
-#
-# A source assertion, deliberately, and this is the case where that is the right
-# check rather than the lazy one: these are arguments handed to 'docker run',
-# there is no way to observe them without starting the real container, and the
-# failure they guard is invisible from this machine — loopback answers, the
-# guard reports the port covered, every check passes, and the phone refuses.
-# The BEHAVIOUR of the reachability rule is driven separately, below.
+# user to and the one nothing was ever published on. Invisible from this
+# machine: loopback answers, the guard reports the port covered, every check
+# passes, and the phone refuses.
 agent_publishes_on_the_tailscale_address() {
-  local body file
-  body="$(agent_run_block)"
-  file="$(sed 's/#.*//' "${REPO}/agent.sh")"
-  grep -qE '\-p "\$\{tsip\}:\$\{AGENT_PORT\}:3000"' <<<"${file}" || {
-    echo "agent.sh never publishes on the Tailscale address, so 'lca agent url' prints a URL that refuses" >&2
+  local port argv
+  argv="$(agent_docker_argv yes)" || return 1
+  port="$(sed -n "s/^MSG PORT=//p" <<<"${argv}")"
+  grep -qxF -- "${AGENT_ARGV_TSIP}:${port}:3000" <<<"${argv}" || {
+    printf "the agent is not published on the Tailscale address, so 'lca agent url' prints a URL that refuses:\n%s\n" \
+      "${argv}" >&2
     return 1; }
-  # ...and it reaches docker. Building the flag and passing it are two claims.
-  grep -q 'tailscale_pub\[@\]' <<<"${body}" || {
-    echo 'agent.sh builds the Tailscale publication and never passes it to docker, so the phone still cannot reach it' >&2
+  # With no address there is nothing to publish on — and that has to be said,
+  # or the user finds out from a phone that will not connect.
+  argv="$(agent_docker_argv no)" || return 1
+  ! grep -qxF -- "${AGENT_ARGV_TSIP}:${port}:3000" <<<"${argv}" || {
+    printf 'the agent was published on a Tailscale address that does not exist:\n%s\n' "${argv}" >&2
     return 1; }
-  # Discovered, not configured, and from the one helper — agent.sh and
-  # check-system.sh each had their own 'tailscale ip -4 | head -1'.
-  grep -q 'tailscale_ip4' <<<"${file}" || {
-    echo 'agent.sh hardcodes or re-derives the Tailscale address instead of asking for it' >&2
+  grep -q '^MSG WARN .*agent restart' <<<"${argv}" || {
+    printf 'the agent started without its phone address and said nothing about it:\n%s\n' \
+      "${argv}" >&2
     return 1; }
-  # Absence must be said out loud. A container started before Tailscale is up
-  # cannot publish there, and the user finds out from a phone that will not
-  # connect unless something tells them to restart.
-  grep -q 'agent restart' <<<"${file}" || {
-    echo 'agent.sh publishes nothing on Tailscale when it is down and says nothing about it' >&2
+  # ...and the rest of the publication must survive its absence.
+  grep -qxF -- "127.0.0.1:${port}:3000" <<<"${argv}" || {
+    printf 'a missing Tailscale address took the loopback publication with it:\n%s\n' \
+      "${argv}" >&2
     return 1; }
 }
 check "...and on the Tailscale address, which is the one the docs send you to" \
@@ -4212,10 +4256,18 @@ check "...and on the Tailscale address, which is the one the docs send you to" \
 # settings correct, conversation open, model never contacted once, nothing
 # reported anywhere. It is one flag between working and silently doing nothing.
 agent_can_resolve_the_host() {
-  local body
-  body="$(agent_run_block)"
-  grep -q -- '--add-host host.docker.internal:host-gateway' <<<"${body}" || {
-    echo 'agent.sh drops --add-host, so the container cannot resolve the relay and every LLM call retries silently forever' >&2
+  local argv; argv="$(agent_docker_argv yes)" || return 1
+  grep -qxF -- '--add-host' <<<"${argv}" || {
+    printf 'agent.sh drops --add-host, so the container cannot resolve the relay and every LLM call retries silently forever:\n%s\n' \
+      "${argv}" >&2
+    return 1; }
+  grep -qxF -- 'host.docker.internal:host-gateway' <<<"${argv}" || {
+    printf 'the --add-host flag is passed without the name that has to resolve:\n%s\n' "${argv}" >&2
+    return 1; }
+  # The base URL the agent is given must be the name that flag makes resolve,
+  # or the flag is correct about the wrong host.
+  grep -qxE -- 'LLM_BASE_URL=http://host\.docker\.internal:[0-9]+/v1' <<<"${argv}" || {
+    printf 'the agent is pointed somewhere other than the host it can resolve:\n%s\n' "${argv}" >&2
     return 1; }
 }
 check "the agent container can resolve the host it must call the model on" \
@@ -4516,19 +4568,27 @@ check "...and a tier that is switched off promises nothing" \
 # on this stack is Open WebUI — and Open WebUI hangs rather than refusing, so
 # the failure is a 30 s MCP timeout in init rather than an error anyone can read.
 agent_sh_corrects_the_callback_address() {
-  local body v
-  body="$(sed 's/#.*//' "${REPO}/agent.sh")"
-  for v in OH_WEB_URL OH_SANDBOX_HOST_PORT OH_SANDBOX_KIND; do
-    grep -q -- "-e ${v}" <<<"${body}" || {
-      printf '%s is not passed to the agent, so its sandboxes call back to the wrong port\n' "${v}" >&2
-      return 1; }
-  done
+  local port argv
+  argv="$(agent_docker_argv yes)" || return 1
+  port="$(sed -n "s/^MSG PORT=//p" <<<"${argv}")"
+  # The port the sandboxes are told to call back on must be the port the
+  # container is really published on, not the 3000 the app assumes.
+  grep -qxF -- "OH_SANDBOX_HOST_PORT=${port}" <<<"${argv}" || {
+    printf 'the sandboxes are not told the port the agent is published on, so they dial 3000 and reach the chat app, which accepts and never speaks MCP:\n%s\n' \
+      "${argv}" >&2
+    return 1; }
+  grep -qxF -- "OH_WEB_URL=${AGENT_ARGV_WEB}" <<<"${argv}" || {
+    printf 'the agent is given a web URL other than the one agent_web_url computes:\n%s\n' \
+      "${argv}" >&2
+    return 1; }
   # OH_SANDBOX_KIND is the one whose absence is SILENT: the env parser reads
   # <KEY>_KIND first and, unable to choose between three kinds, drops every
   # other OH_SANDBOX_* value with it. Measured in the container: host_port
-  # stayed 3000 with OH_SANDBOX_HOST_PORT=3001 set on its own.
-  grep -qE -- '-e OH_SANDBOX_KIND=[A-Za-z]+' <<<"${body}" || {
-    echo 'OH_SANDBOX_KIND is passed without a value, so OH_SANDBOX_HOST_PORT is silently discarded' >&2
+  # stayed 3000 with OH_SANDBOX_HOST_PORT=3001 set on its own. A VALUE, not
+  # just the name — an empty one discards the rest exactly the same way.
+  grep -qxE -- 'OH_SANDBOX_KIND=[A-Za-z]+' <<<"${argv}" || {
+    printf 'OH_SANDBOX_KIND reaches docker without a value, so OH_SANDBOX_HOST_PORT is silently discarded with it:\n%s\n' \
+      "${argv}" >&2
     return 1; }
 }
 check "the agent tells its sandboxes the port it is really published on" \
@@ -4567,10 +4627,12 @@ check "...and a box that wants the catalogue can have it back from .env" \
 # Built and passed are two claims, and this suite has already shipped a bug
 # where only the first was true. Asserted against the run block itself.
 agent_sh_passes_the_sandbox_env() {
-  local body
-  body="$(agent_run_block)"
-  grep -q -- '-e OH_AGENT_SERVER_ENV=' <<<"${body}" || {
-    echo 'OH_AGENT_SERVER_ENV never reaches docker run, so every sandbox re-fetches the skills catalogue' >&2
+  local argv; argv="$(agent_docker_argv yes)" || return 1
+  # The VALUE agent_sandbox_env computed, not merely the name: an empty
+  # assignment reaches docker looking identical and carries nothing.
+  grep -qxF -- "OH_AGENT_SERVER_ENV=${AGENT_ARGV_SANDENV}" <<<"${argv}" || {
+    printf 'the sandbox environment never reaches docker run, so every sandbox re-fetches the skills catalogue:\n%s\n' \
+      "${argv}" >&2
     return 1; }
 }
 check "...and the variable that carries it reaches docker run" \
@@ -18339,7 +18401,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 149 )) || {
+  (( n <= 142 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

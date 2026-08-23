@@ -21,13 +21,12 @@
 # The A rows are the debt and may only go down. Converting one means moving its
 # row to FP, not deleting it.
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
-A	agent_can_resolve_the_host	greps the extracted docker run block
-A	agent_publishes_on_loopback	greps the extracted docker run block
-A	agent_publishes_on_the_bridge_too	greps agent.sh for docker publish flags
-A	agent_publishes_on_the_tailscale_address	greps agent.sh for docker publish flags
-A	agent_sh_adds_the_host_gateway	greps agent.sh for --add-host
-A	agent_sh_corrects_the_callback_address	greps agent.sh for -e flags
-A	agent_sh_passes_the_sandbox_env	greps the extracted docker run block
+FP	agent_can_resolve_the_host	extract-to-drive: reads --add-host and LLM_BASE_URL off the real docker argv
+FP	agent_publishes_on_loopback	extract-to-drive: reads the publications off the real docker argv
+FP	agent_publishes_on_the_bridge_too	extract-to-drive: reads the address off the real docker argv
+FP	agent_publishes_on_the_tailscale_address	extract-to-drive: builds the argv with and without a Tailscale address
+FP	agent_sh_corrects_the_callback_address	extract-to-drive: reads the OH_* values off the real docker argv
+FP	agent_sh_passes_the_sandbox_env	extract-to-drive: reads the value off the real docker argv
 FP	aider_no_auto_commit_is_wired	extract-to-drive: builds the real aider argv and reads the flag off it
 A	aider_pin_is_watched	greps check-system.sh for pin handling
 A	appliers_check_the_scripts_they_call	source lint standing in for "apply survives a failing sub-script"
@@ -299,7 +298,6 @@ FP	uninstall_removes_only_derived	drives remove_agent_models with a recording st
 FP	uninstall_says	drives report_ollama_removal in a subshell
 FP	view_reports_an_empty_payload	runs agent-view.sh on a crafted payload
 FP	wait_is_not_silent	sources lib.sh and drives wait_for_webui
-H	agent_run_block	extracts agent.sh's docker run invocation
 H	backup_retention_case	drives backup.sh's retention decision
 H	baked_keys	extracts the settings install_webui.sh bakes in
 H	drift_case_block	extracts webui.sh's drift case block
@@ -331,3 +329,4 @@ H	aider_argv_with	builds the real aider argv by evaluating run-agent.sh's own bl
 H	settings_verdict	runs check-system.sh's Settings block over a given configuration
 H	drift_verdict	runs check-system.sh's drift-reporting block over a given state
 H	uninstall_home_sweep	runs uninstall.sh's model sweep over a sandbox of fake homes
+H	agent_docker_argv	builds the argv agent.sh really hands docker run, with docker stubbed
