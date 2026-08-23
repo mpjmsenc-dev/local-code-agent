@@ -2097,8 +2097,8 @@ echo "# a backup that missed the chat data must not prune the ones that have it"
 #
 # Driven rather than grepped: the property is "the old files still exist
 # afterwards", and no amount of reading the source proves that.
-backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran>"
-  local b="${SANDBOX}/retention-$1"
+backup_retention_case() {  # ENABLE_WEBUI [DAEMON] -> "<surviving-old-count> <partial|complete>"
+  local b="${SANDBOX}/retention-$1${2:+-$2}"
   # make_stub_dir, not mkdir: backup.sh reaches docker through 'as_root docker
   # volume inspect', and a plain directory of fakes is invisible to sudo, which
   # replaces PATH with sudoers' secure_path. Measured on this box:
@@ -2113,10 +2113,14 @@ backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran
   cp "${REPO}/backup.sh" "${b}/"; cp "${REPO}/scripts/lib.sh" "${b}/scripts/"
   cp "${REPO}/.env.example" "${b}/.env"
   sed -i "s/^BACKUP_KEEP=.*/BACKUP_KEEP=1/; s/^ENABLE_WEBUI=.*/ENABLE_WEBUI=$1/" "${b}/.env"
-  # docker present and its daemon fine; the volume is what is missing.
+  # docker present; the volume is what is missing. DAEMON=down makes the
+  # daemon unreachable instead, which is the third state and the only one where
+  # NOBODY LOOKED — the middle answer webui_data_state exists to give.
+  local info_rc=0
+  [[ "${2:-up}" == "down" ]] && info_rc=1
   # shellcheck disable=SC2016  # $1/$2 belong to the fake docker, not to us
-  printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit 0; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
-    > "${b}/stub/docker"
+  printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit %s; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
+    "${info_rc}" > "${b}/stub/docker"
   chmod +x "${b}/stub/docker"
   local d
   for d in 20260101-000000 20260102-000000; do
@@ -2125,7 +2129,7 @@ backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran
   local out old
   out="$(PATH="$(stub_path "${b}/stub")" bash "${b}/backup.sh" 2>&1 || true)"
   # Kept for the verdict check below, so this runs once rather than twice.
-  printf '%s' "${out}" > "${SANDBOX}/backup-out-$1.txt"
+  printf '%s' "${out}" > "${SANDBOX}/backup-out-$1${2:+-$2}.txt"
   old="$(find "${b}/backups" -name 'local-code-agent-backup-2026010*.tar.gz' | wc -l)"
   # The VERDICT, not the retention sentence. It used to match "skipping
   # retention", which is the same fact stated a second time and moved the
@@ -2176,12 +2180,41 @@ check "...and a complete one still is" \
 # ...and do_backup must actually branch on the answer. A pure helper that
 # nothing consults is decoration, and the five checks above would all still
 # pass while backup.sh went on deciding for itself.
+#
+# Driven. The awk this replaces read do_backup for the string webui_data_state
+# and for a comparison against "present". Both survive the call sitting in a
+# branch nothing reaches, and neither says what the backup DOES with the
+# answer. What is at stake is the middle state: docker installed, daemon not
+# answering, so nothing looked. Get that wrong and BACKUP_KEEP unattended
+# nights delete every backup still holding the accounts and chat history, each
+# run reporting success.
+#
+# The case is built to be the one a hand-written condition gets wrong: the chat
+# app is switched OFF in .env as well, so a do_backup deciding for itself has
+# every excuse to prune.
 backup_asks_the_state_helper() {
-  awk '/^do_backup\(\) \{/ { inb = 1 }
-       inb && /webui_data_state/       { called = 1 }
-       inb && /data_state.*"present"/  { branched = 1 }
-       inb && /^\}/ { exit }
-       END { exit !(called && branched) }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
+  local out bad=0
+  out="$(backup_retention_case false down)"
+  [[ "${out}" == "2 partial" ]] || {
+    printf 'with docker installed, its daemon not answering and the chat app off in .env, the backup reported "%s" — nothing had LOOKED at the volume, and "%s" is what a run that pruned the last complete backups looks like\n' \
+      "${out}" "${out}" >&2
+    bad=1
+  }
+  # ...and it says so, rather than pruning quietly and calling the run good.
+  grep -qF 'WITHOUT the WebUI data' "${SANDBOX}/backup-out-false-down.txt" || {
+    printf 'the archive is missing the chat data and the run did not say so:\n%s\n' \
+      "$(cat "${SANDBOX}/backup-out-false-down.txt")" >&2
+    bad=1
+  }
+  # Non-vacuity, and the opposite failure: with the daemon UP and genuinely no
+  # volume there is nothing to lose, so retention must still run — otherwise
+  # the fix above is "never prune", which fills the disk instead. That is the
+  # "0 complete" case checked above, asserted here as the contrast.
+  [[ "$(backup_retention_case false)" == "0 complete" ]] || {
+    echo 'a machine with no volume at all no longer prunes, so "kept" above proves nothing' >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "backup.sh decides retention through that helper, not its own reading" \
   backup_asks_the_state_helper
@@ -2690,33 +2723,96 @@ check "an unreadable backups directory is reported as unknown, not as empty" \
 # owned by root — so this was the ordinary state of any box that had ever taken
 # a backup, and every OLDER backup is owned the same way. Following that advice
 # gives the same verdict for all of them, during a restore.
+#
+# Driven. The greps this replaces read restore.sh for the ORDER of two calls
+# and for two sentences. Order survives the check being unreachable; a sentence
+# survives being in a branch nothing takes. What is at stake is which of two
+# verdicts a reader gets about a good archive, so both verdicts are produced.
+RESTORE_ARCH_SB="${SANDBOX}/restore-archives"
+restore_archive_sandbox() {
+  local sb="${RESTORE_ARCH_SB}"
+  [[ -e "${sb}/restore.sh" ]] && return 0
+  mkdir -p "${sb}/scripts" "${sb}/config" "${sb}/backups"
+  cp "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+  cp "${REPO}/restore.sh"     "${sb}/"
+  cp "${REPO}/.env.example"   "${sb}/.env.example"
+  cp "${REPO}/.env.example"   "${sb}/.env"
+  cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/"
+  # A REAL archive, so "it cannot be read" is a statement about permissions and
+  # not about the file being rubbish. Verified while it is still readable —
+  # afterwards nobody can open it, which is the whole point.
+  ( cd "${sb}" && printf 'MODEL_NAME=qwen2.5-coder:7b\n' > .in-archive \
+    && tar czf backups/good.tar.gz .in-archive && rm -f .in-archive )
+  tar tzf "${sb}/backups/good.tar.gz" >/dev/null 2>&1 \
+    && : > "${sb}/.good-is-really-good"
+  printf 'this is not a gzip and never was\n' > "${sb}/backups/corrupt.tar.gz"
+  chmod -R a+rX "${sb}"
+  # 0000, not owned-by-somebody-else: a file with no permission bits is
+  # unreadable to its own owner too, so this arm is reachable whether the suite
+  # is root and drops to 65534 or is already an ordinary account.
+  chmod 000 "${sb}/backups/good.tar.gz"
+  chmod 644 "${sb}/backups/corrupt.tar.gz"
+  chmod 711 "${SANDBOX}"
+}
+restore_verdict_on() {   # good|corrupt -> what a real restore said, as not-root
+  restore_archive_sandbox
+  # A sandbox copy, not "${REPO}/restore.sh": if either guard under test were
+  # gone, restore.sh would carry on past it — and the machine it would carry on
+  # onto must not be this one.
+  # shellcheck disable=SC2016  # code for the dropped shell, not a string to expand here
+  as_nobody "${RESTORE_ARCH_SB}/scripts/lib.sh" 'timeout 20 bash "$1" "$2" </dev/null 2>&1' \
+    "${RESTORE_ARCH_SB}/restore.sh" "${RESTORE_ARCH_SB}/backups/$1.tar.gz"
+}
 restore_tells_unreadable_from_corrupt() {
-  local body first second
-  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/restore.sh")"
-  # Asked BEFORE the archive is opened, or the message is about a result that
-  # already means nothing.
-  # Both anchored on the tarball itself. A bare 'tar tzf' also appears inside
-  # the container script restore_webui_volume feeds to docker, far above this,
-  # and matching that one made the gate report the check as coming too late.
-  first="$(grep -n "readable_by_us \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
-  second="$(grep -n "tar tzf \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
-  [[ -n "${first}" && -n "${second}" ]] || {
-    echo 'restore.sh no longer checks the tarball for readability before opening it' >&2
-    return 1; }
-  (( first < second )) || {
-    echo 'restore.sh opens the tarball before asking whether it can read it' >&2
-    return 1; }
-  # ...and the two must not say the same thing.
-  grep -q 'cannot be read by' <<<"${body}" || {
-    echo 'restore.sh does not name a permission problem as one' >&2; return 1; }
-  # The corrupt message sends people to an older backup; the permission one
-  # must not, because every older backup is owned the same way.
-  # A flag, not 'exit 1' inside the rule: awk runs END even after exit, so an
-  # 'END { exit 0 }' there overrides it and the gate passes. Written that way
-  # first, and the mutation said so.
-  awk '/cannot be read by/ && /Try an older backup/ { bad = 1 } END { exit bad }' <<<"${body}" || {
-    echo 'the permission message sends the reader to an older backup, which is owned the same way' >&2
-    return 1; }
+  local out bad=0
+  restore_archive_sandbox
+  # Non-vacuity first: the archive the permission arm uses has to be a real
+  # one, or "it was not called corrupt" is true for the wrong reason.
+  [[ -e "${RESTORE_ARCH_SB}/.good-is-really-good" ]] || {
+    echo 'the fixture archive is not a valid gzip, so this gate cannot tell the two verdicts apart' >&2
+    return 1
+  }
+  out="$(restore_verdict_on good)"
+  grep -q 'cannot be read by' <<<"${out}" || {
+    printf 'a good archive this account cannot open was not reported as a permission problem:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qi 'corrupt or truncated' <<<"${out}" && {
+    printf 'a perfectly good archive was called corrupt because this account could not open it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # The sentence that costs the most. Every older backup is owned the same way,
+  # so following this advice gives the same verdict for all of them and the
+  # reader concludes they have no usable backups at all.
+  grep -qi 'Try an older backup' <<<"${out}" && {
+    printf 'the permission verdict sent the reader to older backups, which are owned the same way:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and it stopped there, rather than going on to touch anything.
+  grep -qi 'Restore complete' <<<"${out}" && {
+    printf 'a restore it could not even read the archive for reported success:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # The complement, and the reason the first arm is not satisfied by deleting
+  # the corrupt message altogether: a file that really is damaged must still be
+  # called damaged, and an older backup really is the right advice for it.
+  out="$(restore_verdict_on corrupt)"
+  grep -qi 'corrupt or truncated' <<<"${out}" || {
+    printf 'a file that is not a gzip at all was not reported as corrupt:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'Try an older backup' <<<"${out}" || {
+    printf 'a genuinely corrupt archive did not send the reader to an older one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'cannot be read by' <<<"${out}" && {
+    printf 'a readable but damaged archive was reported as a permission problem:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "an archive it cannot open is not called corrupt" \
   restore_tells_unreadable_from_corrupt
@@ -21555,8 +21651,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 102 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 51 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 100 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 53 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
