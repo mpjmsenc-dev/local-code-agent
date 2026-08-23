@@ -656,6 +656,40 @@ driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
 
+## A gate that is never run is worse than no gate
+
+`tests/test-lib.sh` is a linear script: a function is a gate only because a
+`check` line names it. Converting `install_is_truncation_safe` from a source
+grep to a driven test replaced the body *and* the `check` line that ran it. The
+suite stayed green, the census still counted the gate, `make gates` passed, and
+the gate was dead — noticed only because a mutation of `install.sh` came back
+killed by three *other* gates and not by that one.
+
+Nothing in 19,000 lines could see it, so now something can. `tests/reachable.awk`
+builds a test file's call graph — roots are `check` invocations and top-level
+calls, edges are names mentioned inside a function body — and
+`no_test_function_is_defined_and_never_run` fails on anything the graph cannot
+reach, across every `tests/*.sh`.
+
+It over-approximates deliberately: a name inside a string counts as a call, so
+it errs towards silence rather than towards accusing live code. Two things it
+found on its first run:
+
+- `command_not_found_handle`, which bash calls itself. Exempt by name, with the
+  reason beside it in `UNREACHED_EXEMPT`.
+- a whole verdict category in `tests/live-verify.sh` — WRONG, documented at the
+  top of that file, counted, printed in the summary and included in the exit
+  condition — whose reporting function no line ever called, so the column could
+  only ever read zero. A column that always reads zero looks like a check being
+  made. It was removed.
+
+Its non-vacuity check is worth reading before you copy it: the probe file is a
+*copy of `test-lib.sh` itself*, so the deliberately-dead function's name has to
+be assembled from pieces. Written as one literal, the name appears in the copy
+as a mention inside a live function — an edge — and the dead function comes
+back reachable. That is the fourth time a scanner here has been fooled by text
+about itself, and the first where the text was the fixture.
+
 ## A tool that parses source must tell code from commentary about code
 
 Three times in one session the tooling was fooled by text *about itself*, and

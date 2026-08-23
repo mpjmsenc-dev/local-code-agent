@@ -230,6 +230,7 @@ B	no_script_calls_an_unreachable_helper	whole-repo static analysis; the source i
 B	no_silent_ollama_start	absence rule for a forbidden invocation
 B	no_status_command_sends_you_to_an_installer	the subject is the text of status messages
 B	no_tee_into_a_root_file	absence rule for a forbidden idiom
+B	no_test_function_is_defined_and_never_run	the subject is the suite's own call graph
 B	no_unbounded_listing_is_piped_into_grep_q	absence rule for a forbidden idiom
 B	no_unsourced_subshell_calls_lib	meta lint over the suite's own source
 B	no_variable_is_piped_into_an_early_exiting_reader	absence rule for a forbidden idiom
@@ -325,6 +326,7 @@ H	step_source_check_says	drives agent-watch.sh's step-source check
 H	tune_builds_on_path	drives tune.sh's PATH construction
 H	tune_dry_run_in	runs lca tune --dry-run
 H	tune_gate_setup	prepares the environment the tune gates need
+H	unreached_functions	lists the functions in a test file that nothing can reach
 H	update_backup_block	extracts update.sh's backup block so it can be run
 H	vol_payload	extracts restore.sh's volume-restore payload
 H	aider_argv_with	builds the real aider argv by evaluating run-agent.sh's own block

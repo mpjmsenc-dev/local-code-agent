@@ -19696,6 +19696,70 @@ group_a_debt_has_not_grown() {
 }
 check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
 
+# A gate that is defined and never run passes, having done nothing — the exact
+# failure this suite exists to catch, turned on the suite itself. It happened
+# here: converting install_is_truncation_safe to a driven test dropped the
+# 'check' line that ran it. The file stayed green, the census still counted it,
+# and the gate was dead until a mutation named a different killer than the one
+# expected. Nothing in 19,000 lines noticed.
+#
+# So every function any test file defines must be reachable from a check
+# invocation, or from top-level code, through the call graph.
+# tests/reachable.awk builds it; its header says what it over-approximates and
+# why it errs towards silence.
+UNREACHED_EXEMPT=( command_not_found_handle )   # bash calls this one itself
+# SOURCE-GREP: reachability inside a file IS a property of that file's text,
+# so there is nothing here to drive. What it cannot see is a name assembled at
+# run time — "${fn}" — which reads as unreachable; that belongs in the
+# exemption list above, with its reason.
+unreached_functions() {   # FILE -> the functions in it nothing can reach
+  awk -f "${TESTS_DIR}/reachable.awk" "$1" "$1" | sort
+}
+# SOURCE-GREP: same subject, same reason.
+no_test_function_is_defined_and_never_run() {
+  local f fn e skip dead=0 nfiles=0 reach_probe="${SANDBOX}/reach-reach_probe.sh"
+  for f in "${TESTS_DIR}"/*.sh; do
+    nfiles=$(( nfiles + 1 ))
+    while read -r fn; do
+      [[ -n "${fn}" ]] || continue
+      skip=false
+      for e in "${UNREACHED_EXEMPT[@]}"; do
+        [[ "${fn}" == "${e}" ]] && skip=true
+      done
+      [[ "${skip}" == "true" ]] && continue
+      printf '%s defines %s and nothing reaches it — a gate that never runs cannot fail\n' \
+        "${f##*/}" "${fn}" >&2
+      dead=1
+    done < <(unreached_functions "${f}")
+  done
+  (( nfiles >= 5 )) || {
+    printf 'only %s test nfiles were read — this stopped watching\n' "${nfiles}" >&2
+    dead=1
+  }
+  # Non-vacuity: the scanner must still be able to SEE an unreachable function.
+  # A scanner that had stopped parsing reports nothing, which reads exactly
+  # like "everything here is reached".
+  # The name is assembled from pieces. The probe file is a COPY of this one, so
+  # a contiguous literal here would appear in it as a mention inside a
+  # reachable function — an edge — and the deliberately dead function would
+  # come back reachable. Fourth time this suite has been fooled by text about
+  # itself, and the first where the text was the fixture.
+  local probe_fn="a_function"'_nothing_calls'
+  cp "${TESTS_DIR}/test-lib.sh" "${reach_probe}"
+  printf '%s() { :; }\n' "${probe_fn}" >> "${reach_probe}"
+  # Captured, not piped: 'reader | grep -q' leaves on the first match and
+  # SIGPIPEs the reader, which under pipefail reads as 141 — the suite has its
+  # own gate against that line, and it caught this one.
+  local unreached; unreached="$(unreached_functions "${reach_probe}")"
+  grep -qxF "${probe_fn}" <<<"${unreached}" || {
+    echo 'the reachability scanner cannot see a function that is plainly unreachable' >&2
+    dead=1
+  }
+  return "${dead}"
+}
+check "no test file defines a gate that nothing ever runs" \
+  no_test_function_is_defined_and_never_run
+
 echo
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
