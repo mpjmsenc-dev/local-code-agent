@@ -72,9 +72,15 @@ SANDBOX="$(mktemp -d)"
 # inside a cleanup function truncated every CI run of this file: the job went
 # red with a bare number, the several hundred checks below that line had not
 # run, and nothing said which of those two things had happened.
+#
+# The chmod is not tidiness either. The dropped-privilege gates leave
+# directories at 444 and 555 on purpose, and rm cannot delete a file inside a
+# directory with no write bit — root can, which is why this showed up only on a
+# runner: four "Permission denied" lines and a sandbox left behind on every run.
 SUITE_FINISHED=false
 trap 'rc=$?
       [[ "${SUITE_FINISHED}" == "true" ]] || printf "\nRESULT: the suite ENDED EARLY with status %s. No verdict was reached, and every check below the last line printed above did NOT run.\n" "${rc}" >&2
+      chmod -R u+rwX "${SANDBOX}" 2>/dev/null || true
       rm -rf "${SANDBOX}"' EXIT
 mkdir -p "${SANDBOX}/scripts"
 cp "${REPO}/scripts/lib.sh" "${SANDBOX}/scripts/"
@@ -267,6 +273,34 @@ stub_path() {
   printf '%s:%s' "${dir}" "${tail}"
 }
 
+# The uid the dropped-privilege probes run as, which is only ever "not root".
+#
+# As root we drop to 65534 with setpriv — no account has to exist, no sudo is
+# involved, and no droplet. When the suite is ALREADY somebody else, which is
+# every GitHub runner, we are that somebody: setpriv could not drop without
+# root anyway, and there is nothing to drop to. Both answers make the arm
+# reachable, which is the only thing that matters here.
+if [[ "${EUID}" -eq 0 ]]; then NOBODY_UID=65534; else NOBODY_UID="${EUID}"; fi
+as_nobody() {   # LIB CODE [ARG...] -> what it printed, as not-root, with LIB sourced
+  # LIB rather than always the real one: REPO_ROOT is computed from lib.sh's
+  # own location, so which copy is sourced decides which directory the code
+  # under test thinks it lives in — and a directory the caller cannot write is
+  # the whole point of one of the gates below.
+  local lib="$1" code="$2"; shift 2
+  # shellcheck disable=SC2016  # the body is code for the probe's shell, not a string to expand here
+  local probe_body='set -uo pipefail
+               lib="$1"; shift
+               code="$1"; shift
+               source "${lib}" >/dev/null 2>&1
+               eval "${code}"'
+  if [[ "${EUID}" -eq 0 ]]; then
+    setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
+      bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
+  else
+    bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
+  fi
+}
+
 echo "# load_env creates .env from .env.example and applies defaults"
 load_env
 check ".env auto-created" test -f "${SANDBOX}/.env"
@@ -387,31 +421,83 @@ check_names_a_bad_port() {
 check "'lca check' names a port that is not a port" check_names_a_bad_port
 
 echo "# 'sudo exists' is not 'I can become root', and one of those is a probe"
-# can_root answers "is the sudo binary installed", which is right for a step
-# allowed to ask for a password and wrong for a probe. The difference produced
-# a false SECURITY alarm: 'lca check' run by a user who is not a sudoer took
-# the can_root branch, ran 'sudo nft list table', got nothing, and reported
-# "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable" on
-# a machine whose guard may be perfectly loaded — then advised a sudo command
-# that user cannot run either. Measured with a freshly created account.
+# Driven. The greps this replaces asked that can_root's body NOT contain
+# 'sudo -n' and that can_root_now's does. Both survive either function being
+# stubbed to return 0, and neither says what the two answer when they
+# disagree — which is the entire reason both exist.
+#
+# The disagreement needs three things at once: an account that is not root, a
+# sudo that is ON the PATH, and a sudo that REFUSES. That is exactly the
+# account which produced the false SECURITY alarm, and it is reachable
+# anywhere with a stub sudo and as_nobody. It is asked as not-root because as
+# root both short-circuit to yes before sudo is consulted at all.
+sudo_that() {   # yes|no -> a stub PATH whose sudo answers that way
+  local dir="${SANDBOX}/sudo-$1"
+  rm -rf "${dir}"; mkdir -p "${dir}"
+  if [[ "$1" == yes ]]; then
+    # Consumes its own options and runs the rest, like make_stub_dir's.
+    cat > "${dir}/sudo" <<'STUB'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u|-g|-p|-C|-r|-t|-T) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+STUB
+  else
+    cat > "${dir}/sudo" <<'STUB'
+#!/bin/sh
+echo "sudo: a password is required" >&2
+exit 1
+STUB
+  fi
+  chmod 755 "${dir}" "${dir}/sudo"
+  stub_path "${dir}"
+}
+root_answer() {   # PATH EXPR -> the exit status EXPR gave as not-root on that PATH
+  # shellcheck disable=SC2016  # $1 and $? belong to the probe's shell, not this one
+  as_nobody "${REPO}/scripts/lib.sh" 'PATH="$1"; '"$2"' >/dev/null 2>&1; printf "%s" $?' "$1"
+}
 can_root_now_is_stricter() {
-  # Both are true for root, which is the only account this suite can speak for.
-  can_root     || { echo "can_root is false as $(id -un)" >&2; return 1; }
-  can_root_now || { echo "can_root_now is false as $(id -un)" >&2; return 1; }
-  # The distinction has to be in the code, not just in the comment: can_root
-  # must not consult sudo -n, and can_root_now must.
-  local lib="${REPO}/scripts/lib.sh" body
-  body="$(sed 's/#.*//' "${lib}")"
-  awk '/^can_root\(\) \{/ { inb = 1 } inb && /sudo -n/ { bad = 1 } inb && /^\}/ { exit }
-       END { exit bad }' <<<"${body}" || {
-    echo "can_root now depends on sudo -n, which makes it useless for actions" >&2
-    return 1
+  local refusing permitting bad=0
+  chmod 711 "${SANDBOX}"
+  refusing="$(sudo_that no)"
+  permitting="$(sudo_that yes)"
+  # The pair that matters: sudo is installed, so it CAN be asked — and it will
+  # say no, so root is not reachable right now. A probe that took the first
+  # answer ran 'sudo nft list table', got nothing, and reported "inbound guard
+  # NOT loaded — ports may be publicly reachable" on a machine whose guard may
+  # be perfectly fine, then advised a sudo command that user cannot run either.
+  [[ "$(root_answer "${refusing}" can_root)" == 0 ]] || {
+    echo 'can_root says no while sudo is installed — an action that is allowed to ask has stopped asking' >&2
+    bad=1
   }
-  awk '/^can_root_now\(\) \{/ { inb = 1 } inb && /sudo -n/ { found = 1 } inb && /^\}/ { exit }
-       END { exit !found }' <<<"${body}" || {
-    echo "can_root_now does not actually test whether sudo works" >&2
-    return 1
+  [[ "$(root_answer "${refusing}" can_root_now)" == 1 ]] || {
+    echo 'can_root_now says root is reachable while sudo refuses — this is the false SECURITY alarm' >&2
+    bad=1
   }
+  # ...and where sudo does let the account through, the strict answer is yes.
+  # Without this, can_root_now returning 1 always would satisfy the line above.
+  [[ "$(root_answer "${permitting}" can_root_now)" == 0 ]] || {
+    echo 'can_root_now says no even where sudo goes through without asking' >&2
+    bad=1
+  }
+  # ...and with no sudo at all, both say no: can_root is "sudo exists", nothing
+  # more, and that is the half a source grep could never separate from the
+  # other one.
+  [[ "$(root_answer /nonexistent can_root)" == 1 ]] || {
+    echo 'can_root says yes with no sudo on the PATH at all' >&2
+    bad=1
+  }
+  [[ "$(root_answer /nonexistent can_root_now)" == 1 ]] || {
+    echo 'can_root_now says yes with no sudo on the PATH at all' >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "can_root_now asks whether root is reachable, not whether sudo exists" \
   can_root_now_is_stricter
@@ -2120,33 +2206,6 @@ check "a 0600 file is readable, and so is an ordinary directory" \
 #
 # setpriv drops to uid 65534 without a user having to exist, without sudo, and
 # without a real machine. The arm is reachable on the box that is already here.
-# The uid the probes below run as, which is only ever "not root".
-#
-# As root we drop to 65534 with setpriv — no account has to exist, no sudo is
-# involved, and no droplet. When the suite is ALREADY somebody else, which is
-# every GitHub runner, we are that somebody: setpriv could not drop without
-# root anyway, and there is nothing to drop to. Both answers make the arm
-# reachable, which is the only thing that matters here.
-if [[ "${EUID}" -eq 0 ]]; then NOBODY_UID=65534; else NOBODY_UID="${EUID}"; fi
-as_nobody() {   # LIB CODE [ARG...] -> what it printed, as not-root, with LIB sourced
-  # LIB rather than always the real one: REPO_ROOT is computed from lib.sh's
-  # own location, so which copy is sourced decides which directory the code
-  # under test thinks it lives in — and a directory the caller cannot write is
-  # the whole point of one of the gates below.
-  local lib="$1" code="$2"; shift 2
-  # shellcheck disable=SC2016  # the body is code for the probe's shell, not a string to expand here
-  local probe_body='set -uo pipefail
-               lib="$1"; shift
-               code="$1"; shift
-               source "${lib}" >/dev/null 2>&1
-               eval "${code}"'
-  if [[ "${EUID}" -eq 0 ]]; then
-    setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
-      bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
-  else
-    bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
-  fi
-}
 readability_still_wants_x_of_a_directory() {
   local d="${SANDBOX}/readx" out bad=0
   rm -rf "${d}"
@@ -2365,6 +2424,7 @@ backup_run_in() {
       cd "$2"
       source "$1" >/dev/null 2>&1
       BACKUP_DIR="$2/backups"
+      AS_ROOT_LOG="$2/.as-root.log"
       MODE="$3"; OWNER="$4"
       have() { case "$1" in
                  docker) return 1 ;;
@@ -2373,7 +2433,16 @@ backup_run_in() {
                esac; }
       ollama() { return 1; }
       docker_daemon_reachable() { return 1; }
-      as_root() { "$@"; }
+      # Records as well as runs. The chown it performs can only take effect on
+      # a suite running as root — nobody else may give a file away — so on any
+      # other machine the outcome is unobservable while the CALL still says
+      # everything: which of invoking_user and id -un the code asked for.
+      # Recorded to a file rather than stdout, because other gates read this
+      # runs output and a new line in it would be a new thing to explain.
+      # No apostrophes in this comment on purpose: it lives INSIDE a
+      # single-quoted bash -c block, where one would end the string. Written
+      # with them first, and the file stopped parsing two hundred lines later.
+      as_root() { printf "%s\n" "$*" >> "${AS_ROOT_LOG}"; "$@"; }
       invoking_user() { printf "%s\n" "${OWNER}"; }
       confirm() { return 0; }
       if [[ "${MODE}" == tarfail ]]; then
@@ -2408,10 +2477,29 @@ check "a backup with no docker and no ollama still writes an archive" \
 # neither says who owns the file at the end. The stub makes invoking_user
 # answer with an account that is not the one running the suite, so the two
 # spellings give different answers and only one of them passes.
+backup_as_root_calls() { cat "${SANDBOX}/backup-$1/.as-root.log" 2>/dev/null; }
 backup_ownership_is_consistent() {
-  local tarball dirowner fileowner
+  local tarball calls dirowner fileowner
   tarball="$(backup_archive_in plain)" || {
     echo 'the plain backup wrote no archive' >&2; return 1; }
+  calls="$(backup_as_root_calls plain)"
+  [[ -n "${calls}" ]] || {
+    echo 'the backup escalated for nothing at all — this gate is reading an empty log' >&2
+    return 1; }
+  # Both must be GIVEN AWAY, and to the account invoking_user names rather than
+  # the one running the command. That is the whole distinction: 'id -un' under
+  # sudo is root, and a backup owned by root is one its owner cannot read.
+  grep -qx "chown ${BACKUP_OWNER} ${SANDBOX}/backup-plain/backups" <<<"${calls}" || {
+    printf 'backups/ was never given to the human who asked for it. What it escalated for:\n%s\n' \
+      "${calls}" >&2
+    return 1; }
+  grep -qx "chown ${BACKUP_OWNER} ${tarball}" <<<"${calls}" || {
+    printf 'the archive was never given to %s, so the directory and the archive disagree. What it escalated for:\n%s\n' \
+      "${BACKUP_OWNER}" "${calls}" >&2
+    return 1; }
+  # ...and where the chown can actually take effect — only root may give a file
+  # away — the outcome is checked too, not just the request.
+  [[ "${EUID}" -eq 0 ]] || return 0
   dirowner="$(stat -c %U "${SANDBOX}/backup-plain/backups")"
   fileowner="$(stat -c %U "${tarball}")"
   [[ "${dirowner}" == "${BACKUP_OWNER}" ]] || {
@@ -5501,7 +5589,13 @@ printf 'OLD CONTENT\n' > "${WRF}/f"
 # The temp path is occupied by a directory, so tee cannot write it — a failure
 # that lands for root as well, unlike an unwritable parent.
 mkdir -p "${WRF}/f.lca-new"
-wrf_write() { printf 'NEW CONTENT\n' | write_root_file "${WRF}/f"; }
+# Through a stub sudo, so this is hermetic. write_root_file goes through
+# as_root, and as_root on any account that is not root reaches for sudo — so
+# these three checks used to pass or fail on whether the machine running the
+# suite happened to be root or a passwordless sudoer, and simply failed on an
+# account that is neither. The file being written is in the sandbox and is the
+# caller's own; only as_root's escalation stood in the way.
+wrf_write() { PATH="$(sudo_that yes)" write_root_file "${WRF}/f" < <(printf 'NEW CONTENT\n'); }
 # Its own wrapper rather than the suite's not_ok, which is not defined until
 # further down this file.
 wrf_write_fails() { ! wrf_write >/dev/null 2>&1; }
@@ -5512,8 +5606,9 @@ rmdir "${WRF}/f.lca-new"
 check "a good write replaces the content" wrf_write
 check "...with what was actually sent" test "$(cat "${WRF}/f")" = "NEW CONTENT"
 check "...at mode 0644 by default" test "$(stat -c %a "${WRF}/f")" = "644"
-check "...honouring an explicit mode" \
-  test "$(printf 'x\n' | write_root_file "${WRF}/g" 0600 && stat -c %a "${WRF}/g")" = "600"
+# Same stub sudo as wrf_write above, for the same reason.
+wrf_mode() { PATH="$(sudo_that yes)" write_root_file "${WRF}/g" 0600 < <(printf 'x\n') && stat -c %a "${WRF}/g"; }
+check "...honouring an explicit mode" test "$(wrf_mode)" = "600"
 wrf_no_leftovers() { ! compgen -G "${WRF}/*.lca-new" >/dev/null; }
 check "...and leaving no temp file behind" wrf_no_leftovers
 # ...and the renderer's own failure must be caught BEFORE the destination is
@@ -19957,8 +20052,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 119 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 34 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 118 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 35 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

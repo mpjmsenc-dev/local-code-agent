@@ -193,4 +193,31 @@ main() {
 # For a file whose stated purpose is to "always end with exactly one of three
 # lines", a trailing "command not found" and a false failure status is the
 # precise opposite.
-main "$@" 2>&1 | tee -a "${LOG_FILE}"; exit $?
+writable_log() {
+  # The log must never be the reason this script fails. On a droplet's first
+  # boot we are root and /var/log is ours. Run by hand as an ordinary user —
+  # which is exactly what 'do-user-data.sh --help' is — the file cannot be
+  # opened, 'tee' says so and exits 1, and under pipefail that became the
+  # script's status. So asking this installer for help printed
+  #
+  #   tee: /var/log/local-code-agent-setup.log: Permission denied
+  #
+  # ...then the whole help text, then exited 1. Measured on a CI runner; as
+  # root, which is how this file had only ever been run here, it cannot happen.
+  #
+  # A function, and chosen on the LAST line rather than above it: anything
+  # above would be top-level code a truncated paste could reach, and the whole
+  # point of the wrapper below is that it cannot reach anything.
+  # Braced, so the 2>/dev/null is in place BEFORE the append is attempted.
+  # Written the flat way first: redirections are applied left to right, the
+  # failing '>>' reports through the still-open stderr, and the raw
+  # "line 211: /var/log/...: Permission denied" printed anyway — under the
+  # tidy sentence meant to replace it. Same shape as the lock in scripts/lib.sh.
+  if { : >> "${LOG_FILE}"; } 2>/dev/null; then
+    printf '%s' "${LOG_FILE}"
+  else
+    printf 'Cannot write %s, so this run will not be logged.\n' "${LOG_FILE}" >&2
+    printf '/dev/null'
+  fi
+}
+main "$@" 2>&1 | tee -a "$(writable_log)"; exit $?

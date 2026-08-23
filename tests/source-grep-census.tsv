@@ -55,7 +55,7 @@ A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
 A	both_commands_announce_a_model_load	greps two scripts for a call
 A	both_reporters_ask_lib	greps for who computes the git identity
 A	both_surfaces_report_an_unknown_family	awk for a call inside main()
-A	can_root_now_is_stricter	calls both, then source-greps for the distinction that matters
+FP	can_root_now_is_stricter	asks both, as not-root, against a stub sudo that refuses and one that does not
 FP	check_names_a_bad_port	extract-to-drive: runs check-system.sh's Settings block over real values
 A	check_reports_dropin_drift	a single grep for one function name
 A	check_reports_the_agent	awk over check-system.sh for a guarded call
@@ -325,8 +325,10 @@ H	recommend_with	drives update-model.sh's recommender
 H	relay_units	renders the relay units from ollama-relay.sh
 H	render_unit_from	renders a boot unit from its installer
 H	rendered_tune_unit	renders the tune boot unit
+H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
 H	seeded_settings_payload	renders agent.sh's real settings payload
 H	step_source_check_says	drives agent-watch.sh's step-source check
+H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
 H	tune_builds_on_path	drives tune.sh's PATH construction
 H	tune_dry_run_in	runs lca tune --dry-run
 H	tune_gate_setup	prepares the environment the tune gates need
