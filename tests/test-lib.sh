@@ -1930,21 +1930,10 @@ readme_supply_chain_matches_the_code() {
 }
 check "the README's supply-chain claims still match the install" \
   readme_supply_chain_matches_the_code
-# ...and neither script may reach 'docker run <image>' without having checked
-# the image is there. Docker pulls a missing one silently: several gigabytes,
-# and in backup.sh's case with the chat app frozen, during a command the user
-# expects to take seconds.
-image_pulls_are_never_implicit() {
-  local f bad=0
-  for f in backup.sh restore.sh; do
-    grep -qF -- 'docker image inspect' "${REPO}/${f}" || {
-      printf '%s runs the image without checking it is cached first\n' "${f}" >&2
-      bad=1
-    }
-  done
-  return "${bad}"
-}
-check "no script pulls gigabytes by accident" image_pulls_are_never_implicit
+# A backup or a restore that meets a missing image must notice it rather than
+# let docker pull several gigabytes by accident. Driven, down beside the
+# harness that can watch a real run: "a missing image is noticed before it is
+# used, never pulled by accident".
 
 echo "# every archive must be owner-only, not just the directory holding it"
 # The umask around tar makes NEW archives 0600. Ones written before that
@@ -2004,13 +1993,9 @@ check "...and still cannot tell even if a stale flag says a volume was there" \
 # disk, which is the opposite failure and just as real.
 check "no docker on the machine -> nothing to lose" \
   data_state_is none    false false false
-# And the decision must not consult .env's chat-app switch again.
-retention_ignores_enable_webui() {
-  awk '/^webui_data_state\(\) \{/ { inb = 1 }
-       inb && /ENABLE_WEBUI/ { bad = 1 }
-       inb && /^\}/ { exit }
-       END { exit bad }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
-}
+# ...and the retention decision must never read ENABLE_WEBUI. Driven, down
+# beside the backup harness: "a chat app switched off in .env still has its
+# data backed up".
 echo "# a backup that missed the chat data must not prune the ones that have it"
 # The note above prune_old_backups says this exists so "an unattended timer run
 # with docker down would not, over BACKUP_KEEP nights, silently delete every
@@ -2104,9 +2089,6 @@ check "an incomplete backup is not reported as a good one" \
   partial_backup_is_not_reported_as_a_good_one
 check "...and a complete one still is" \
   complete_backup_still_reports_success
-
-check "the retention decision never reads ENABLE_WEBUI" \
-  retention_ignores_enable_webui
 # ...and do_backup must actually branch on the answer. A pure helper that
 # nothing consults is decoration, and the five checks above would all still
 # pass while backup.sh went on deciding for itself.
@@ -2730,7 +2712,7 @@ BACKUP_OWNER=nobody
 # function names a ${REPO}/ path and uses a text tool. This one SOURCES that
 # path and calls the real function; the text tool is the cat that replays the
 # cached output. Same position as uninstall_says and tune_dry_run_in.
-backup_run_in() {
+backup_run_in() {   # MODE [SHIM] -> what a real backup into a sandbox printed
   local mode="$1"
   BACKUP_SB="${SANDBOX}/backup-${mode}"
   local outfile="${BACKUP_SB}.out"
@@ -2766,9 +2748,14 @@ backup_run_in() {
         # A file created and then abandoned, which is what a full disk leaves.
         tar() { case "${1:-}" in czf) : > "$2"; return 1 ;; *) command tar "$@" ;; esac; }
       fi
+      # The shim from the caller, last, so it wins over the stubs above. MODE
+      # names the sandbox and the cache file, so two shims need two mode names.
+      # No apostrophes in here: this comment lives INSIDE a single-quoted
+      # bash -c block, where one would end the string. Second time today.
+      eval "$5"
       do_backup
       printf "RC=%s\n" "$?"
-    ' _ "${REPO}/backup.sh" "${BACKUP_SB}" "${mode}" "${BACKUP_OWNER}" > "${outfile}" 2>&1
+    ' _ "${REPO}/backup.sh" "${BACKUP_SB}" "${mode}" "${BACKUP_OWNER}" "${2:-}" > "${outfile}" 2>&1
   fi
   cat "${outfile}"
 }
@@ -9166,31 +9153,173 @@ check "...while agreeing to it restores as before" \
   restore_survives "confirmed" \
   'webui_volume_has_data() { return 0; }; confirm() { return 0; }' \
   'WebUI data restored'
-# The two RECOVERY scripts must never reach for net_guard again. Every other
-# caller is an installer, where dying is right — one that cannot download
-# cannot install, and there is nothing else for it to do. These two have plenty
-# else to do, and backup.sh's abort was the worse of the pair: it threw away
-# the whole tarball, losing .env and the model list over a docker image, and
-# skipped the bookkeeping that keeps older backups from being pruned.
+# Driven. The greps this replaces asked that neither recovery script names
+# net_guard and that both name net_blocked. Both survive the branch never being
+# reached, and backup.sh's failure here was the worse of the pair: net_guard
+# die()s, so an offline box threw away the WHOLE tarball — losing .env and the
+# model list over a docker image it only wanted a tar binary from — and skipped
+# the bookkeeping that keeps older backups from being pruned.
+#
+# So the kill switch is turned ON and the run is watched.
 recovery_scripts_survive_offline() {
-  local bad=0 f
-  for f in restore.sh backup.sh; do
-    local src; src="$(sed 's/#.*//' "${REPO}/${f}")"
-    if grep -qE '(^|[^_[:alnum:]])net_guard' <<<"${src}"; then
-      printf '%s calls net_guard, which die()s — offline would end the run\n' "${f}" >&2
-      bad=1
-    fi
-    # Anti-vacuity: they must still ASK, or "no net_guard" is satisfied by not
-    # checking the kill switch at all and letting a download hang instead.
-    grep -q 'net_blocked' "${REPO}/${f}" || {
-      printf '%s no longer checks the kill switch at all\n' "${f}" >&2
-      bad=1
-    }
-  done
+  local out calls bad=0
+  # Docker is there and the volume exists; the IMAGE is not cached, which is
+  # the one thing an offline box cannot fix.
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  out="$(backup_run_in offline 'have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 0; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 1 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}')"
+  # 1. It finished. This is the gate: an offline backup that dies loses .env
+  # and the model list too.
+  grep -q 'Backup written and verified' <<<"${out}" || {
+    printf 'an offline backup wrote nothing at all — .env and the model list went with the docker image:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 2. ...and said the volume could not be captured, rather than implying it
+  # was.
+  grep -qi 'OFFLINE' <<<"${out}" || {
+    printf 'the offline run said nothing about why the chat data is missing from this archive:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 3. ...and older backups are KEPT, because this one is incomplete. Pruning
+  # on the strength of an archive that is missing the chat data is how the last
+  # complete backup disappears.
+  grep -qi 'KEPT' <<<"${out}" || {
+    printf 'an incomplete offline backup did not say older ones would be kept:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. ...and it never tried to download. Non-vacuity is the other half: with
+  # the switch OFF the same missing image IS pulled, so "did not pull" above is
+  # about the kill switch and not about a backup that never pulls anything.
+  calls="$(backup_as_root_calls offline)"
+  grep -q 'docker pull' <<<"${calls}" && {
+    printf 'the offline backup reached for the network anyway:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  backup_run_in online 'have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 1; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 1 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}' >/dev/null
+  grep -q 'docker pull' <<<"$(backup_as_root_calls online)" || {
+    echo 'a missing image is not pulled even with the network up, so "did not pull when offline" proves nothing' >&2
+    bad=1
+  }
   return "${bad}"
 }
-check "the backup and restore commands survive the kill switch being on" \
+check "an offline backup still writes one, and keeps the older ones" \
   recovery_scripts_survive_offline
+
+# Driven. The greps this replaces asked that both scripts contain the string
+# 'docker image inspect'. That survives the check running AFTER the container it
+# is meant to guard, and it survives the branch never being reached at all.
+# Docker pulls a missing image silently — several gigabytes, and in backup.sh's
+# case with the chat app FROZEN, during a command the reader expects to take
+# seconds.
+#
+# Still both scripts, because both run a container purely to borrow a tar binary
+# from it. Restore is watched through its own harness rather than backup's.
+restore_as_root_calls() {   # -> every escalation a real volume restore made
+  local log="${SANDBOX}/restore-as-root.log"
+  : > "${log}"
+  # Success for everything, so the whole path runs instead of stopping at the
+  # first step. The log path is spliced in by THIS shell; the "$*" beside it is
+  # for the probe's.
+  # shellcheck disable=SC2016  # deliberate: $* belongs to the probe, not here
+  restore_volume_with 'as_root() { printf "%s\n" "$*" >> "'"${log}"'"; return 0; }' >/dev/null
+  cat "${log}"
+}
+looks_before_it_runs() {   # WHO  ESCALATION-LOG
+  local who="$1" calls="$2" inspect_at run_at
+  [[ -n "${calls}" ]] || {
+    printf '%s: no escalation was recorded at all — this gate is reading an empty log\n' "${who}" >&2
+    return 1
+  }
+  inspect_at="$(grep -n 'docker image inspect' <<<"${calls}" | head -1 | cut -d: -f1)"
+  run_at="$(grep -n 'docker run' <<<"${calls}" | head -1 | cut -d: -f1)"
+  # Non-vacuity first: with no container in the log there is no ordering to
+  # judge, and "nothing ran" would otherwise read as "it looked in time".
+  [[ -n "${run_at}" ]] || {
+    printf '%s: no container was ever run, so the ordering below measures nothing:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  }
+  [[ -n "${inspect_at}" ]] || {
+    printf '%s: the image was never checked for before it was used, so a missing one is several silent gigabytes:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  }
+  if (( inspect_at > run_at )); then
+    printf '%s: the image is checked only AFTER it has been used — by then docker has already pulled it:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  fi
+}
+image_pulls_are_never_implicit() {
+  local bad=0
+  # The 'online' run just above already has the shape: image absent, network up.
+  looks_before_it_runs backup.sh "$(backup_as_root_calls online)" || bad=1
+  looks_before_it_runs restore.sh "$(restore_as_root_calls)"      || bad=1
+  return "${bad}"
+}
+check "a missing image is noticed before it is used, never pulled by accident" \
+  image_pulls_are_never_implicit
+
+# Driven. The awk this replaces asked that ENABLE_WEBUI does not appear inside
+# webui_data_state. What is at stake is a chat app that .env says is off and
+# that is still running: its accounts and conversations are on the disk either
+# way, and a backup that skips them because a switch says the feature is off
+# archives a machine that is not the one you have.
+retention_ignores_enable_webui() {
+  local calls bad=0
+  # The switch says off. The volume says otherwise — and a listening socket, or
+  # a volume with data in it, is a fact.
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  backup_run_in webuioff 'ENABLE_WEBUI=false
+have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 1; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 0 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}' >/dev/null
+  calls="$(backup_as_root_calls webuioff)"
+  grep -q 'open-webui-volume.tar.gz' <<<"${calls}" || {
+    printf 'ENABLE_WEBUI=false made the backup skip a volume that still holds every account and conversation:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # ...and the volume really was consulted rather than assumed.
+  grep -q 'volume inspect' <<<"${calls}" || {
+    echo 'the backup never asked docker about the volume at all — this measured nothing' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a chat app switched off in .env still has its data backed up" \
+  retention_ignores_enable_webui
 # ...and net_guard must still be the dying one, for the installers that want it.
 # Driven, because the grep version could not fail. It scanned net_guard's body
 # for the string 'die ' — and the mutation sweep stubs a function by inserting
@@ -17696,39 +17825,78 @@ check "a backup is readable only by its owner, directory and archive alike" \
   backup_is_not_world_readable
 
 echo "# a backup must not leave the chat app frozen for the next one to inherit"
-# backup.sh pauses the WebUI container so the SQLite snapshot is consistent,
-# with an EXIT trap to guarantee the unpause. A signal the trap cannot catch
-# leaves it paused — and a paused container still reports State.Running=true,
-# while 'docker pause' fails on it. The old order asked Running first, so that
-# failure took the "could not pause" branch: no trap, 'paused' left false, no
-# unpause at the end. Every later backup then archived happily and left the
-# chat app frozen and unreachable, with the warning saying it was "archiving
-# live" — the opposite of what was happening.
+# Driven. The awk this replaces asked that State.Paused appears above
+# State.Running in the file. That is the shape which produces the behaviour,
+# and the gate said so honestly — "the behaviour needs a docker daemon and a
+# container that has been killed mid-pause". A stand-in docker supplies both.
 #
-# Structural, because the behaviour needs a docker daemon and a container that
-# has been killed mid-pause. The shape is what produces it: Paused has to be
-# asked before Running, or the already-paused case cannot be seen at all.
+# What is at stake: a paused container still reports Running=true, and
+# 'docker pause' fails on it. Asked in the wrong order, that failure took the
+# "could not pause" branch — no trap, paused left false, no unpause at the end
+# — so every later backup archived happily and left the chat app frozen and
+# unreachable, while the warning said it was "archiving live".
+# shellcheck disable=SC2016  # the shim is code for the probe's shell, not a string to expand here
+BACKUP_DOCKER_SHIM='have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+docker() {
+  case "$*" in
+    *"{{.State.Paused}}"*)  printf "%s\n" "${WAS_PAUSED}" ;;
+    *"{{.State.Running}}"*) printf "true\n" ;;
+    *"volume inspect"*)     return 0 ;;
+    *"image inspect"*)      return 0 ;;
+    *)                      printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}'
 backup_checks_paused_before_running() {
-  # Comments stripped first. The comment above this very check explains the bug
-  # by naming State.Running, and the first version of this scanner counted that
-  # sentence as the code — failing on the fixed file. Same trap as every other
-  # whole-file grep in this suite: the explanation matches the pattern.
-  awk '/^[[:space:]]*#/ { next }
-       /State.Paused/   { if (!paused)  paused  = NR }
-       /State.Running/  { if (!running) running = NR }
-       END { exit !(paused && running && paused < running) }' "${REPO}/backup.sh" || {
-    printf 'backup.sh asks State.Running before State.Paused, so a container left paused reads as running\n' >&2
-    return 1
+  local out bad=0
+  # 1. Already paused — the state a signal the EXIT trap cannot catch leaves.
+  out="$(backup_run_in waspaused "WAS_PAUSED=true
+${BACKUP_DOCKER_SHIM}")"
+  # Read off the ESCALATION LOG, not the output. The unpause runs from the EXIT
+  # trap as 'as_root docker unpause ... >/dev/null 2>&1 || true', so it reaches
+  # no stream at all — a first version asserted on stdout and failed against
+  # code doing exactly the right thing.
+  grep -q 'docker unpause' <<<"$(backup_as_root_calls waspaused)" || {
+    printf 'a container that was already paused was left paused — the chat app stays frozen and unreachable, and every later backup does it again:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
-  # ...and finding it paused must take responsibility for resuming it.
-  awk '/State.Paused/ { inb = 1 }
-       inb && /paused=true/ { found = 1 }
-       inb && /elif/ { exit }
-       END { exit !found }' "${REPO}/backup.sh" || {
-    printf 'backup.sh sees an already-paused container but does not adopt the unpause\n' >&2
-    return 1
+  grep -qi 'already paused' <<<"${out}" || {
+    printf 'the adoption was silent, so nobody learns an earlier backup was killed mid-pause:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
+  grep -qi 'archiving live' <<<"${out}" && {
+    printf 'a paused container was reported as being archived live, which is the opposite of what was happening:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 2. Running and not paused — the ordinary path, which must still pause and
+  # unpause. Without this, "never says archiving live" would be satisfied by a
+  # backup that never touched the container at all.
+  out="$(backup_run_in wasrunning "WAS_PAUSED=false
+${BACKUP_DOCKER_SHIM}")"
+  local calls; calls="$(backup_as_root_calls wasrunning)"
+  grep -q 'docker pause' <<<"${calls}" || {
+    printf 'a running container was archived without being paused, so the SQLite snapshot is not consistent. What it escalated for:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  grep -q 'docker unpause' <<<"${calls}" || {
+    printf 'the chat app was paused for the backup and never resumed. What it escalated for:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # 3. Non-vacuity: the stand-in docker really was asked. Everything above is
+  # about which branch ran, and a run that reached no branch would look calm.
+  grep -q 'container inspect' "${SANDBOX}/backup-waspaused/.as-root.log" 2>/dev/null || {
+    echo 'the backup never inspected the container at all — this measured nothing' >&2
+    bad=1
+  }
+  return "${bad}"
 }
+check "a chat app left paused is adopted and resumed, not archived live" \
+  backup_checks_paused_before_running
 echo "# an interrupted backup must not leave a partial archive behind"
 # A failed archive must not be left where restore.sh would read it as a backup,
 # and a COMPLETE one must survive the same exit path. Driven both ways: the old
@@ -17771,9 +17939,6 @@ partial_cleanup_behaves() {
   rm -f "${f}"
 }
 check "...and it deletes only while the marker is set" partial_cleanup_behaves
-
-check "backup.sh notices a container left paused by an earlier run" \
-  backup_checks_paused_before_running
 
 echo "# the volume restore must know whether it already emptied the volume"
 # restore.sh replaces the WebUI volume by clearing it and unpacking over it.
@@ -20630,8 +20795,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 113 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 40 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 109 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 44 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

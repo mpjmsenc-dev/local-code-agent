@@ -58,6 +58,23 @@
 # Work order is by cost, not by count: roughly 24 of the 82 would, if they
 # silently stopped holding, cost data, the ability to recover, an exposed port,
 # or a false all-clear about the one thing that is broken. Those first.
+#
+# PROGRESS against that projection, kept here rather than as a running count so
+# the end state stays visible. Re-derive it, do not trust it: the labels below
+# are the source of truth.
+#
+#   A rows now             109   of the 115 the projection was made from
+#   still worth driving     76
+#   correctly narrow        33   still labelled A; each needs re-reading and a
+#                                pointer before it may move to B
+#
+#   Of the ~24 highest-cost, driven so far (6):
+#     restore_validates_env_first     an .env that would execute, and did not
+#     restore_rebuilds_derived        a derived model rebuilt, not pulled
+#     backup_checks_paused_before_running   a container already paused
+#     recovery_scripts_survive_offline      the kill switch on, archive kept
+#     image_pulls_are_never_implicit        inspect before run, both scripts
+#     retention_ignores_enable_webui        a switched-off app still backed up
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
 FP	agent_can_resolve_the_host	extract-to-drive: reads --add-host and LLM_BASE_URL off the real docker argv
@@ -82,7 +99,7 @@ A	ask_slices_without_a_pipe	greps for one literal string
 A	autotune_false_still_converges	awk over tune.sh for a branch shape
 FP	backup_and_restore_agree_on_the_component	runs the real restore over a workspace archive, twice, and looks at the disk
 A	backup_asks_the_state_helper	awk over do_backup for a call and a branch
-A	backup_checks_paused_before_running	awk for the order two probes appear in
+FP	backup_checks_paused_before_running	runs a backup against a stand-in docker reporting an already-paused container
 FP	backup_cleans_up_a_partial_archive	drives do_backup with a failing tar and looks at what is left
 FP	backup_is_not_world_readable	drives do_backup and reads the modes off what it wrote
 FP	backup_ownership_is_consistent	drives do_backup with a stubbed invoking_user and reads the owners
@@ -120,7 +137,7 @@ A	guard_message_names_only_guarded_ports	structural awk; the behaviour itself is
 A	harden_installs_the_boot_service	awk over netmode.sh for calls inside do_harden
 A	help_examples_are_dispatched	greps bin/lca for branch order
 A	honours_skip	one grep for a literal condition
-A	image_pulls_are_never_implicit	presence-grep for a command in two scripts
+FP	image_pulls_are_never_implicit	drives a backup and a restore, then reads the escalation log: 'docker image inspect' must precede 'docker run'
 FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both documented ways, and watches for side effects
 A	install_verifies_the_clone	greps for the existence test
 FP	installer_passes_the_banner	reads the banner off the argv docker was really given
@@ -148,7 +165,7 @@ A	ready_banner_asks_about_the_model	awk inside banner_ready for one call
 A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
 A	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call
 A	ready_banner_warns_about_a_stale_chat	awk inside banner_ready for one call
-A	recovery_scripts_survive_offline	absence of net_guard plus a presence-grep for net_blocked
+FP	recovery_scripts_survive_offline	runs a real backup with the kill switch ON: it must still write an archive, say why the volume is missing, KEEP older ones, and never reach the network
 A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
 A	restore_asks_for_the_advice	awk inside main() for one call
 A	restore_distinguishes_the_stages	greps restore.sh for message placement
@@ -157,7 +174,7 @@ FP	restore_rebuilds_derived	restores an archive naming a derived model and check
 FP	restore_reconciles_with_apply	runs the real restore over an archive and watches apply.sh being called
 A	restore_tells_unreadable_from_corrupt	line-number ordering plus message content
 FP	restore_validates_env_first	puts an .env that would execute inside the archive and checks nothing ran
-A	retention_ignores_enable_webui	absence inside one function; a helper could reintroduce it
+FP	retention_ignores_enable_webui	runs a real backup with ENABLE_WEBUI=false and a volume that exists: the volume must still be archived, and docker must have been asked
 A	run_agent_checks_where_it_is_running	presence-greps plus line-number ordering
 A	run_agent_warns_on_an_odd_edit_format	greps run-agent.sh for warn/die forms
 A	same_group_branch_kills_nothing	absence of a signal inside one branch
