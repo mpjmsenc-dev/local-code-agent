@@ -2909,20 +2909,6 @@ check "auto is the default in .env.example, lib.sh and the watcher alike" \
 # file, run it and finish the task.
 check "native tool calling is off by default" \
   test "${AGENT_NATIVE_TOOL_CALLING}" = false
-# Sent as a JSON boolean, not a string. That endpoint declares
-# additionalProperties:true, so a value of the wrong TYPE is accepted with a
-# 200 and dropped — the same silent-drop this repo already hit with the flat
-# legacy settings body.
-seeds_a_real_boolean() {
-  local body
-  body="$(sed -n '/^seed_agent_settings()/,/^}/p' "${REPO}/agent.sh")"
-  grep -q 'argjson native' <<<"${body}" || return 1
-  grep -q 'native_tool_calling:[$]native' <<<"${body}" || return 1
-  # ...and a string would be --arg, which is exactly the mistake being blocked.
-  ! grep -qE '\-\-arg native' <<<"${body}"
-}
-check "the tool-calling mode is sent as a boolean, not a string" \
-  seeds_a_real_boolean
 # ...and read back, because a 200 from that endpoint has already proved nothing
 # once in this project's history.
 check "the stored tool-calling mode is read back and checked" \
@@ -3087,7 +3073,7 @@ check "the first event is summarised by size, not printed" \
 prompt_event_does_not_bury_the_run() {
   local n
   n="$(grep -c . <<<"${VIEW_PROMPT_OUT}")"
-  (( n <= 137 )) || {
+  (( n <= 134 )) || {
     printf 'a 4,000-character system prompt drew %s lines — the real one is 14,387 characters plus 26 tool schemas, and it would bury the run\n' "${n}" >&2
     return 1
   }
@@ -4000,22 +3986,6 @@ max_output_defaults_and_is_guarded() {
 }
 check "the agent's reply cap defaults, and refuses a value the window cannot hold" \
   max_output_defaults_and_is_guarded
-# ...and it must reach the container, as a NUMBER. A quoted "2048" round-trips
-# through the settings API looking correct and reserves nothing.
-seeds_max_output_as_a_number() {
-  local body
-  body="$(sed -n '/agent_settings_diff/,/}}}/p' "${REPO}/agent.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || { echo 'could not find the settings payload in agent.sh' >&2; return 1; }
-  # shellcheck disable=SC2016  # the pattern is source text, not an expansion
-  grep -q 'max_output_tokens:$out' <<<"${body//[[:space:]]/}" || {
-    echo 'the seeded settings do not carry max_output_tokens — the client reserves its own default and the prompt is truncated' >&2
-    return 1; }
-  grep -q -- '--argjson out' "${REPO}/agent.sh" || {
-    echo 'max_output_tokens is passed with --arg, so it is seeded as a string and reserves nothing' >&2
-    return 1; }
-}
-check "...and is seeded into the agent's settings as a number" \
-  seeds_max_output_as_a_number
 # The wait for one reply. 300 seconds is the client's default and this box takes
 # 901, so every step was thrown away and retried while Ollama kept finishing
 # work nobody was listening for — a run that neither progresses nor errors.
@@ -4048,6 +4018,10 @@ check "the agent waits longer for one reply than this hardware takes to give it"
 # statement produces. What it cannot check is that the extraction still finds
 # the right statement, so it fails loudly when the block comes back empty
 # rather than asserting over nothing.
+# seeded_settings_payload [KEY=VALUE ...] — the settings body agent.sh really
+# builds, with any overrides applied AFTER load_env. That order matters:
+# load_env sources .env, and .env overrides the environment, so an env prefix on
+# the subshell would be silently undone.
 seeded_settings_payload() {
   local stmt
   stmt="$(awk '/^  body="\$\(jq -nc/ { inb=1 } inb { print } inb && /\)"$/ { exit }' \
@@ -4056,9 +4030,14 @@ seeded_settings_payload() {
   bash -c 'set -uo pipefail
            source "$1" >/dev/null 2>&1
            load_env >/dev/null 2>&1
+           stmt="$2"; shift 2
+           for kv in "$@"; do
+             [[ "${kv}" =~ ^[A-Z_]+=.*$ ]] || { printf "bad override: %s\n" "${kv}" >&2; exit 1; }
+             eval "${kv%%=*}=\"\${kv#*=}\""
+           done
            model=m; base_url=http://x/v1
-           eval "$2"
-           printf "%s" "${body}"' _ "${REPO}/scripts/lib.sh" "${stmt}"
+           eval "${stmt}"
+           printf "%s" "${body}"' _ "${REPO}/scripts/lib.sh" "${stmt}" "$@"
 }
 seeds_the_timeout() {
   local body tmo out
@@ -4079,6 +4058,46 @@ seeds_the_timeout() {
 }
 check "...and that wait is seeded into the container's settings" \
   seeds_the_timeout
+# Driven, for the same reason: '--argjson out' appearing in the file says
+# nothing about the type that reached the client, and a quoted number reserves
+# nothing while round-tripping as if it had.
+seeds_max_output_as_a_number() {
+  local body got
+  body="$(seeded_settings_payload AGENT_MAX_OUTPUT_TOKENS=1234)" || return 1
+  jq -e '.agent_settings_diff.llm.max_output_tokens | type == "number"' \
+    <<<"${body}" >/dev/null 2>&1 || {
+    printf 'max_output_tokens is seeded as %s, not as a number\n' \
+      "$(jq -r '.agent_settings_diff.llm.max_output_tokens | type' <<<"${body}")" >&2
+    return 1; }
+  got="$(jq -r '.agent_settings_diff.llm.max_output_tokens' <<<"${body}")"
+  [[ "${got}" == "1234" ]] || {
+    printf 'AGENT_MAX_OUTPUT_TOKENS=1234 and the payload carries %s\n' "${got}" >&2
+    return 1; }
+}
+check "max_output_tokens is seeded as a number, tracking the setting" \
+  seeds_max_output_as_a_number
+# Driven through the payload agent.sh really builds. The grep version looked
+# for '--argjson native' and the absence of '--arg native' — both of which
+# survive the value never tracking the setting, and neither of which can see
+# what type came out. A quoted "false" is TRUTHY to the client: the tier's
+# tool-call channel was unusable for its whole life over exactly this.
+seeds_a_real_boolean() {
+  local body v
+  for v in true false; do
+    body="$(seeded_settings_payload "AGENT_NATIVE_TOOL_CALLING=${v}")" || return 1
+    jq -e '.agent_settings_diff.llm.native_tool_calling | type == "boolean"' \
+      <<<"${body}" >/dev/null 2>&1 || {
+      printf 'native_tool_calling is seeded as %s, not as a boolean — a quoted "false" reads as true\n' \
+        "$(jq -r '.agent_settings_diff.llm.native_tool_calling | type' <<<"${body}")" >&2
+      return 1; }
+    [[ "$(jq -r '.agent_settings_diff.llm.native_tool_calling' <<<"${body}")" == "${v}" ]] || {
+      printf 'AGENT_NATIVE_TOOL_CALLING=%s and the payload carries %s\n' \
+        "${v}" "$(jq -r '.agent_settings_diff.llm.native_tool_calling' <<<"${body}")" >&2
+      return 1; }
+  done
+}
+check "native_tool_calling is seeded as a real boolean, tracking the setting" \
+  seeds_a_real_boolean
 # Which sandboxes may be collected while the app is UP — the question nothing
 # asked, so nothing was ever collected until the tier was stopped.
 reclaimable_sandboxes_reads_the_conversation() {
@@ -5664,24 +5683,47 @@ example_env_is_valid() {
     return 1; }
 }
 check ".env.example passes the check load_env applies to it" example_env_is_valid
-# ...and load_env must check BEFORE it sources, or the message never arrives.
+# Driven, not read. The grep version compared the line numbers of
+# 'LCA_ENV_LINE_RE' and 'source' inside load_env — which stays true if the
+# check is there, in order, and inert. What is at stake is that .env is
+# EXECUTED when it is sourced, and a .env is a file people paste into, restore
+# from a backup, or copy off the internet.
 load_env_validates_before_sourcing() {
-  local body check_at source_at
-  body="$(awk '/^load_env\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  check_at="$(grep -n 'LCA_ENV_LINE_RE' <<<"${body}" | head -1 | cut -d: -f1)"
-  source_at="$(grep -n '^ *source ' <<<"${body}" | head -1 | cut -d: -f1)"
-  [[ -n "${check_at}" ]] || {
-    echo 'load_env sources .env without checking it is assignments only' >&2
+  local sb="${SANDBOX}/loadenv" out
+  rm -rf "${sb}"; mkdir -p "${sb}/bad" "${sb}/good"
+  # The unexpanded $( ) is the payload: it must reach the FILE unexpanded, so
+  # that sourcing the file is what would run it.
+  # shellcheck disable=SC2016
+  printf 'MODEL_NAME=ok\nEVIL=$(touch %s/PWNED)\n' "${sb}" > "${sb}/bad/.env"
+  printf 'MODEL_NAME=mine:7b\n' > "${sb}/good/.env"
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    ENV_FILE="$2/.env"
+    load_env
+    printf "LOADED=%s\n" "${MODEL_NAME}"
+  ' _ "${REPO}/scripts/lib.sh" "${sb}/bad" 2>&1)" || true
+  [[ ! -e "${sb}/PWNED" ]] || {
+    printf 'a command substitution in .env RAN — load_env sourced the file before reading it:\n%s\n' \
+      "${out}" >&2
     return 1; }
-  [[ -n "${source_at}" ]] || {
-    echo 'load_env no longer sources .env at all — this gate stopped watching' >&2
-    return 1; }
-  (( check_at < source_at )) || {
-    echo 'load_env checks .env only after sourcing it, which is after the damage' >&2
-    return 1; }
+  # ...and it must say which line, or the reader cannot fix a file that is now
+  # refusing to load.
+  grep -q 'line 2' <<<"${out}" || {
+    printf 'the refusal does not say which line is wrong:\n%s\n' "${out}" >&2; return 1; }
+  # A refusal that also swallows the settings would be its own outage, so the
+  # ordinary case has to still work.
+  out="$(bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    ENV_FILE="$2/.env"
+    load_env >/dev/null 2>&1
+    printf "LOADED=%s\n" "${MODEL_NAME}"
+  ' _ "${REPO}/scripts/lib.sh" "${sb}/good" 2>&1)"
+  grep -qx 'LOADED=mine:7b' <<<"${out}" || {
+    printf 'a perfectly ordinary .env did not load:\n%s\n' "${out}" >&2; return 1; }
 }
-check "...and it checks before sourcing, not after" \
+check "a .env is checked before it is sourced, and an ordinary one still loads" \
   load_env_validates_before_sourcing
 # The two validators must stay different, and this pins the difference so
 # nobody tidies them into one. env_file_is_inert() guards a .env that arrived
@@ -19162,7 +19204,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 137 )) || {
+  (( n <= 134 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

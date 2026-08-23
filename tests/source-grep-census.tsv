@@ -91,7 +91,7 @@ A	installers_answer_help_before_acting	awk that main()'s first statement is the 
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 A	load_env_survives_an_uncreatable_env	greps load_env's body; an unwritable .env would settle it
-A	load_env_validates_before_sourcing	line-number ordering inside load_env
+FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
 A	logs_ollama_reads_the_background_log	greps logs_ollama's body for a tail
 A	logs_ollama_separates_absent_from_unreadable	greps logs_ollama's body for test forms
 A	logs_setup_dates_the_install_log	greps logs_setup's body for date -r
@@ -124,8 +124,8 @@ A	run_agent_checks_where_it_is_running	presence-greps plus line-number ordering
 A	run_agent_warns_on_an_odd_edit_format	greps run-agent.sh for warn/die forms
 A	same_group_branch_kills_nothing	absence of a signal inside one branch
 A	seed_uses_a_diff_and_reads_it_back	awk over agent.sh for a read-back gate
-A	seeds_a_real_boolean	greps the settings payload for jq argument forms
-A	seeds_max_output_as_a_number	greps the settings payload for jq argument forms
+FP	seeds_a_real_boolean	extract-to-drive: builds the real payload and reads the value's type
+FP	seeds_max_output_as_a_number	extract-to-drive: builds the real payload and reads the value's type
 A	selftest_checks_the_live_prompt	awk over selftest.sh for a call after a step
 A	selftest_demands_aider_write_a_file	awk over the aider step for ordering
 A	selftest_uses_the_verdict	presence-grep for the call plus an absence rule
