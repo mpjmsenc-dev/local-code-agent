@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now             100   of the 115 the projection was made from
-#   still worth driving     67
+#   A rows now              98   of the 115 the projection was made from
+#   still worth driving     65
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (14):
+#   Of the ~24 highest-cost, driven so far (16):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -83,6 +83,8 @@
 #     webui_installer_applies_the_guard     the guard really re-applied
 #     backup_asks_the_state_helper          a daemon that did not answer
 #     restore_tells_unreadable_from_corrupt a good archive, unopenable
+#     uninstall_removes_the_agent           the container that hands out a shell
+#     uninstall_feeds_every_step_to_the_verdict  one failing step at a time
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -229,9 +231,10 @@ A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch conditio
 A	uninstall_answers_help_first	awk ordering inside main()
 FP	shipped_defaults_are_what_lib_resolves	loads lib.sh with no .env at all and compares what it resolves against what ships
 FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over a sandbox of fake homes
-A	uninstall_feeds_every_step_to_the_verdict	greps for a call-plus-status form
+FP	uninstall_feeds_every_step_to_the_verdict	runs the whole uninstall five times, failing one step each time, and reads the closing verdict
 A	uninstall_removals_can_reach_root	exhaustive absence of bare rm plus a counted floor
-A	uninstall_removes_the_agent	two presence-greps in uninstall.sh
+FP	uninstall_removes_the_agent	runs the real removal step and reads the escalation log: the agent container removed, before the chat app, and reported as a survivor when it cannot be
+H	uninstall_run	builds a checkout and runs uninstall.sh's main with as_root recording rather than removing, one step failing at a time
 A	unreadable_is_not_reported_as_empty	presence-greps plus message content
 A	update_mentions_restore_on_failure	awk over update.sh for a guarded call
 FP	update_refuses_unattended_after_a_failed_backup	drives update.sh's backup block against a failing backup, both terminal answers

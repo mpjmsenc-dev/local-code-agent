@@ -5881,25 +5881,6 @@ start_seeds_the_settings() {
 }
 check "'lca agent start' seeds the settings a task cannot run without" \
   start_seeds_the_settings
-# An uninstall that leaves the agent behind is this file's own worst failure
-# shape repeated: it once printed "Uninstall complete" while the chat app's
-# container and every account in it were still on the machine. The agent is the
-# more serious version — it holds the docker socket and serves a session that
-# runs commands.
-uninstall_removes_the_agent() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
-  grep -q 'AGENT_CONTAINER' <<<"${body}" || {
-    echo 'uninstall.sh leaves the agent container running and still reports the stack removed' >&2
-    return 1; }
-  # Removed, not merely mentioned — and through as_root, like every other
-  # removal here.
-  grep -qE 'as_root docker rm -f "\$\{AGENT_CONTAINER\}"' <<<"${body}" || {
-    echo 'uninstall.sh names the agent container but never removes it with as_root' >&2
-    return 1; }
-}
-check "uninstall removes the agent container too" \
-  uninstall_removes_the_agent
 # ...and 'lca check' has to report it, or a health check stays silent about a
 # service its owner switched on and which never came up.
 check_reports_the_agent() {
@@ -8441,10 +8422,13 @@ echo "# ...and a chat app it could not even LOOK at is not a chat app it removed
 # Driven through the stubs rather than grepped, the same way report_ollama_removal
 # above is: the fault was a missing DISTINCTION, and no amount of matching the
 # word 'docker' in this file would have seen it.
+REMOVE_WEBUI_LOG="${SANDBOX}/.remove-webui-calls"
+remove_webui_calls() { cat "${REMOVE_WEBUI_LOG}" 2>/dev/null || true; }
 remove_webui_run() {  # CASE [KEEP] -> the output, with "rc=N" as its last line
+  : > "${REMOVE_WEBUI_LOG}"
   bash -c '
     source "$1" >/dev/null 2>&1
-    CASE="$2"; KEEP="$3"
+    CASE="$2"; KEEP="$3"; LOG="$4"
     # Stubs AFTER the source: inside a function "$2" is the FUNCTION argument.
     if [[ "${CASE}" == "nodocker" ]]; then have() { [[ "$1" != "docker" ]]; }
     else have() { return 0; }; fi
@@ -8452,15 +8436,26 @@ remove_webui_run() {  # CASE [KEEP] -> the output, with "rc=N" as its last line
     else docker_daemon_reachable() { return 0; }; fi
     # Both inspects answer "present", so every case below is a machine that
     # really does still have a container and a volume to lose.
+    #
+    # Recording as well as answering: what this step REMOVED cannot be read off
+    # its output, because every removal here is >/dev/null 2>&1. The agent
+    # container is the one that matters most and the one whose absence would be
+    # invisible — a run that never touched it prints nothing about it either.
     as_root() {
+      printf "AS_ROOT %s\n" "$*" >> "${LOG}"
       case "$*" in
+        # Its own case arm, before the general one: rmfails is about the chat
+        # app, and a machine where only the AGENT removal fails is a different
+        # verdict — it is the container that hands out a shell.
+        *"rm -f ${AGENT_CONTAINER}"*)
+          [[ "${CASE}" == "agentfails" || "${CASE}" == "rmfails" ]] && return 1 ;;
         *"rm -f"*)     [[ "${CASE}" == "rmfails"  ]] && return 1 ;;
         *"volume rm"*) [[ "${CASE}" == "volfails" ]] && return 1 ;;
       esac
       return 0
     }
     rc=0; remove_webui "${KEEP}" 2>&1 || rc=$?
-    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${2:-false}"
+    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${2:-false}" "${REMOVE_WEBUI_LOG}"
 }
 uninstall_reports_the_chat_app_it_left() {
   local out bad=0
@@ -8514,6 +8509,71 @@ uninstall_reports_the_chat_app_it_left() {
 }
 check "an uninstall that could not reach docker says the chat app is still here" \
   uninstall_reports_the_chat_app_it_left
+# An uninstall that leaves the agent behind is this file's own worst failure
+# shape repeated: it once printed "Uninstall complete" while the chat app's
+# container and every account in it were still on the machine. The agent is the
+# more serious version — it holds the docker socket and serves a session that
+# runs commands.
+#
+# Driven. The greps this replaces asked that the string AGENT_CONTAINER appears
+# in uninstall.sh and that 'as_root docker rm -f "${AGENT_CONTAINER}"' appears
+# somewhere in it. Both survive the line sitting in a branch no run reaches,
+# and neither says anything about what happens when the removal FAILS — which
+# is the case where the container is still serving and the run must say so.
+uninstall_removes_the_agent() {
+  local out calls bad=0
+  out="$(remove_webui_run live false)"
+  calls="$(remove_webui_calls)"
+  [[ -n "${calls}" ]] || {
+    echo 'the uninstall step escalated for nothing at all — this gate is reading an empty log' >&2
+    return 1
+  }
+  # It was really removed, and through as_root like every other removal here.
+  grep -q "AS_ROOT docker rm -f openhands-app" <<<"${calls}" || {
+    printf 'an ordinary uninstall never removed the agent container — it holds the docker socket and serves a session that can run commands:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # ...before the chat app, which is the order the comment in uninstall.sh
+  # argues for: the dangerous one first.
+  local agent_at webui_at
+  agent_at="$(grep -n 'AS_ROOT docker rm -f openhands-app' <<<"${calls}" | head -1 | cut -d: -f1)"
+  webui_at="$(grep -n 'AS_ROOT docker rm -f open-webui' <<<"${calls}" | head -1 | cut -d: -f1)"
+  if [[ -n "${agent_at}" && -n "${webui_at}" ]] && (( agent_at > webui_at )); then
+    printf 'the chat app is removed before the container that hands out a shell:\n%s\n' "${calls}" >&2
+    bad=1
+  fi
+  grep -qi "container 'openhands-app' removed" <<<"${out}" || {
+    printf 'the agent container was removed and the run did not say so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a removal that FAILS is the case the grep could never see: the
+  # container is still answering on its port, and the caller has to be told so
+  # the closing line cannot say "Uninstall complete" over the top of it.
+  out="$(remove_webui_run agentfails false)"
+  grep -q 'STILL on this machine' <<<"${out}" || {
+    printf 'the agent container survived the uninstall and nothing said so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'execute commands' <<<"${out}" || {
+    printf 'it reported the survivor without saying what it can do:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'rc=1' <<<"${out}" || {
+    printf 'the step reported success while the agent container was still running:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the chat app is still removed in that case, or "the agent failed" is
+  # satisfied by a step that gives up entirely.
+  grep -q "AS_ROOT docker rm -f open-webui" <<<"$(remove_webui_calls)" || {
+    printf 'an agent removal that failed took the chat app removal down with it:\n%s\n' \
+      "$(remove_webui_calls)" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "uninstall removes the agent container too" \
+  uninstall_removes_the_agent
 # ...and the closing line has to agree with it, because that is the line people
 # read. "Uninstall complete" directly above "Kept on purpose: ..." is a full
 # accounting of what survived, and it was signed off on a machine still holding
@@ -8560,20 +8620,90 @@ check "...and it names every step that left something behind, not just one" \
   uninstall_closing_line_carries_every_leftover
 # ...and main has to actually FEED them to it. The banner taking a list is no
 # use if the caller still throws each status away on the line that produced it.
+#
+# Driven. The greps this replaces asked that four call sites match
+# '<step> ... || var=1' and that closing_banner is handed "${left_behind[@]}".
+# A regex over four call sites is a regex, not a verdict: it survives the
+# variable never being read, it survives the arm that reads it being
+# unreachable, and it says nothing about what the reader is finally told.
+#
+# So the whole uninstall is run, once per step, with that step failing. Nothing
+# on this machine is touched: every destructive line in uninstall.sh goes
+# through as_root, and as_root here records rather than runs — which is also
+# the property that makes the run safe to do at all.
+UNINSTALL_SB="${SANDBOX}/uninstall-run"
+uninstall_run() {   # units|webui|workspace|models|none -> the whole run
+  local sb="${UNINSTALL_SB}"
+  if [[ ! -e "${sb}/uninstall.sh" ]]; then
+    mkdir -p "${sb}/scripts" "${sb}/config" "${sb}/home"
+    cp "${REPO}/uninstall.sh"   "${sb}/"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+    cp "${REPO}/.env.example"   "${sb}/.env.example"
+    cp "${REPO}/.env.example"   "${sb}/.env"
+    cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/"
+  fi
+  # HOME into the sandbox, because main computes the homes to clean from it and
+  # then looks for an agent workspace under them. A real one here would take
+  # the workspace arm down a different branch.
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  HOME="${sb}/home" bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    FAIL="$2"
+    # Records nothing and runs nothing. Every removal in uninstall.sh goes
+    # through here, so this one line is what makes running main safe.
+    as_root() { return 0; }
+    # ollama present, so the derived-model arm of the verdict is reachable at
+    # all — it is guarded by "have ollama", because step 4 normally takes the
+    # model store with it. nft absent, so the firewall block is skipped.
+    have() { [[ "$1" == "ollama" ]]; }
+    systemd_available() { return 1; }
+    # The four steps whose status is under test, each failing on demand. Their
+    # own behaviour is covered by their own gates; what is under test here is
+    # whether main carries the answer to the end.
+    remove_boot_units()      { [[ "${FAIL}" != "units" ]]; }
+    remove_webui()           { [[ "${FAIL}" != "webui" ]]; }
+    remove_agent_workspace() { [[ "${FAIL}" != "workspace" ]]; }
+    remove_agent_models()    { [[ "${FAIL}" != "models" ]]; }
+    main --yes 2>&1' _ "${sb}/uninstall.sh" "$1"
+}
 uninstall_feeds_every_step_to_the_verdict() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
-  local call
-  for call in remove_agent_workspace remove_agent_models remove_boot_units remove_webui; do
-    grep -qE "^ *(local [a-z_]+=[0-9] )?${call}[^|]*\|\| *[a-z_]+=1" <<<"${body}" || {
-      printf '%s is called without its status reaching the verdict\n' "${call}" >&2
-      return 1
-    }
-  done
-  grep -qE 'closing_banner "\$\{left_behind\[@\]\}"' <<<"${body}" || {
-    echo 'the closing banner is no longer given the list of what survived' >&2
+  local out bad=0 case want
+  # A clean run still reads as complete, first — every "it did not say
+  # complete" below means nothing if it never says it.
+  out="$(uninstall_run none)"
+  grep -q 'Uninstall complete' <<<"${out}" || {
+    printf 'an uninstall where every step succeeded no longer reads as complete:\n%s\n' "${out}" >&2
     return 1
   }
+  # ...then each step in turn. The sentence is the one the reader acts on, so
+  # it is the sentence that is checked.
+  for case in "units|start again at the next reboot" \
+              "webui|chat app was NOT removed" \
+              "workspace|workspace could not be removed" \
+              "models|still listed by: ollama list"; do
+    want="${case#*|}"
+    out="$(uninstall_run "${case%%|*}")"
+    grep -qF "${want}" <<<"${out}" || {
+      printf 'the %s step failed and the closing verdict never mentioned it:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+    # ...and the line above it must stop saying the run finished cleanly. This
+    # is the whole failure: "Uninstall complete" printed over a machine that
+    # still has the thing on it.
+    grep -q 'Uninstall complete' <<<"${out}" && {
+      printf 'the %s step left something behind and the run still said complete:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+    grep -q 'thing(s) are still on this machine' <<<"${out}" || {
+      printf 'the %s step left something behind and the banner did not count it:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
 }
 check "...and every removal step's status reaches that verdict" \
   uninstall_feeds_every_step_to_the_verdict
@@ -21651,8 +21781,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 100 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 53 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 98 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 55 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
