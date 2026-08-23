@@ -126,6 +126,7 @@ FP	check_reports_webui_drift	extract-to-drive: runs the drift-reporting block ov
 H	check_sandbox	builds the copy of the tree and the stubs a real 'lca check' is run in
 FP	check_system_asks_for_the_port_list	runs a real 'lca check' with the chat app off in .env but still listening, and reads the inbound section
 A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the expectation
+H	ci_fixture_values	reads the .env overrides CI's own workflow and the fresh-install script apply, which this run cannot see
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
 A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
 A	drift_says_something_specific	greps webui.sh for a warn line; reachability unobserved
@@ -215,6 +216,7 @@ A	stop_collects_the_sandboxes	awk inside the stop arm for one call
 A	submit_refuses_an_ambiguous_id	presence-greps in agent-task.sh
 A	sudo_asks_out_loud	awk over extracted regions for escalation order (via probe_region)
 H	sudo_waits_sandbox	builds the copy of the tree, the blocking sudo stub and the .env the stall gate drives commands in
+FP	suggested_switches_are_validated_too	measures the appendix at 'true' and at 'yes', then reads what a real 'lca check' says about each
 A	switches_are_reported	presence-grep plus an absence rule
 A	tailscale_advice_is_conditional	greps two regions for branch arms
 A	tune_checks_the_model_is_downloaded	awk over tune.sh for two branch shapes

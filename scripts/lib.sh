@@ -4482,9 +4482,27 @@ valid_bool() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
 
 # boolean_settings — the .env keys that ARE switches, read out of .env.example
 # rather than listed here, so a new one is covered the day it ships.
+#
+# Commented lines too, and that is the whole of a measured hole. .env.example
+# does not only SHIP switches, it SUGGESTS them: CONVENTIONS_AIDER and
+# CONVENTIONS_AGENT appear under "leaving these alone changes nothing", as
+# lines a reader is invited to uncomment. They were invisible here, so:
+#
+#   AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+#   CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+#
+# ...while lca_user_instructions compares it against the word "true" exactly
+# like every other switch, so 'yes' turned the conventions file off for aider
+# and nothing said so. Measured: 2,527 characters of appendix at 'true', 0 at
+# 'yes'. The only difference between the two settings was which side of a '#'
+# .env.example wrote them on.
+#
+# A suggestion the reader has not taken is not checked — see check-system.sh,
+# which skips any name that is unset. So the shipped machine still counts 12.
 boolean_settings() {
   [[ -r "${ENV_EXAMPLE}" ]] || return 1
-  grep -oE '^[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" | cut -d= -f1 | sort -u
+  grep -oE '^[[:space:]]*#?[[:space:]]*[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" \
+    | sed -E 's/^[[:space:]]*#?[[:space:]]*//' | cut -d= -f1 | sort -u
 }
 
 # valid_port PORT — a number a service can actually listen on.

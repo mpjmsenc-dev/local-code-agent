@@ -77,6 +77,10 @@ BOOLS_OK=0
 BOOLS_BAD=0
 while read -r setting; do
   [[ -n "${setting}" ]] || continue
+  # A switch .env.example only SUGGESTS (commented out) and the reader has not
+  # taken. Nothing to validate, and '${!setting}' on an unset name is an
+  # unbound variable that would end this whole report under 'set -u'.
+  [[ -n "${!setting+set}" ]] || continue
   if valid_bool "${!setting}"; then
     BOOLS_OK=$((BOOLS_OK+1))
     continue

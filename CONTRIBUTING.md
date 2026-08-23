@@ -1070,6 +1070,112 @@ Two lessons, and the second is the general one:
   hanging `lca agent logs`, whose only output *was* the prompt, counts as
   having spoken.
 
+## Configuration blindness
+
+A gate that reads source is dishonest: it claims a runtime behaviour and offers
+text as evidence. This is a different failure, and in one way a worse one. The
+gate is **honest** — it drives its subject — and its coverage is **partial**,
+and *nothing about the gate says which*. A source grep at least looks
+suspicious when you read it.
+
+The instance that named it:
+
+```
+check-system.sh   ENABLE_AGENT=false  rc=1    55 lines   full report
+check-system.sh   ENABLE_AGENT=true   rc=124   7 lines   <-- HUNG
+```
+
+`lca check` is the first entry in `REPORTING_COMMANDS`. It had been run under
+the blocking-sudo stub on **every CI run** since that gate was written, and it
+stalled for ever on any machine with the agent tier switched on. The gate held.
+Its *fixture* was `.env.example`, where the agent tier is off, so the whole
+agent half of `check-system.sh` was unreachable and the bare
+`as_root docker ps` inside `agent_live_sandboxes` was never called.
+
+### The sweep
+
+Measured, not guessed. **34 places in this repo build an `.env` for a product
+script to be run against. 31 of them are `.env.example` verbatim.** The shipped
+defaults are not merely the common case here — they are very nearly the only
+case. The three exceptions are CI's Ollama E2E job (`AUTO_TUNE=false`,
+`ENABLE_WEBUI=false`), `tests/test-fresh-install.sh` (`SKIP_DOCKER=true`,
+`SKIP_TAILSCALE=true`), and one tune fixture (`ENABLE_AGENT=true`).
+
+`tests/config-coverage.tsv` is the census: every switch in `.env.example`,
+whether anything runs a product script at **both** of its values, and — where
+nothing does — what the other side's branches are and what it would cost to
+reach them. Three gates hold it:
+
+1. every switch `.env.example` ships has a row, so a new one cannot be
+   forgotten (the list comes from the product's own `boolean_settings`);
+2. what the file claims is checked against the `.env` files the fixtures
+   really built, so a row saying `BOTH` cannot outlive the fixture that made it
+   true;
+3. a ratchet on the number of switches nothing drives the other side of.
+
+A row is about **whole-command** coverage. A probe that sets a switch and calls
+one function is not the same thing: `ENABLE_AGENT=true` appeared nineteen times
+in the suite, all of them narrow, while the whole-command path stalled for
+ever.
+
+Harnesses that vary their `.env` overwrite it per case, so the file left at the
+end of a run shows only the last one. Those call `record_configuration` as they
+go. An unparameterised harness needs nothing — its one `.env` is still on disk
+to be read, which is the point: **the census measures the fixtures, not the
+code that builds them.**
+
+### Two things the sweep settled
+
+**The developer's own `.env` is not a hidden fixture — today.** `ENV_FILE` is
+computed from `REPO_ROOT` and cannot be overridden, so any gate that runs a
+product script straight out of `${REPO}` reads whatever the developer has on
+disk; CI has none, so `load_env` writes `.env.example` there. That is a real
+asymmetry. Measured by putting six flipped switches into the repo's own `.env`
+and re-running: **1281 checks, all pass, identical verdict.** So no gate depends
+on it now. The only way to pin a configuration is a sandbox copy of the tree,
+which the harnesses that matter already build.
+
+**The switch validator could not see the switches `.env.example` suggests.**
+The same question, asked of the thing that validates switches: which settings
+does *it* not see? `.env.example` does not only ship switches — under "leaving
+these alone changes nothing" it offers `CONVENTIONS_AIDER` and
+`CONVENTIONS_AGENT` as commented lines a reader is invited to uncomment, and
+`boolean_settings` read live lines only:
+
+```
+AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+```
+
+`lca_user_instructions` compares it against the word `true` exactly like every
+other switch — measured, 2,527 characters of appendix at `true`, 0 at `yes`.
+The only difference between the two settings was which side of a `#` they were
+written on. `boolean_settings` now reads commented suggestions too, and
+`check-system.sh` skips any name the reader has not set, so a shipped machine
+still counts 12.
+
+### What it cost to matrix, and what was left
+
+Cheap, and done: three cells of the census, all through `check_report`, which
+already takes the `.env` lines as a parameter. The agent tier's own section
+(four things it must say, and none of them said with the tier off); the relay's;
+and the chat prompt's context budget with the conventions appendix on. That
+last one produced **a warning nothing in this repo had ever produced** — at the
+4096-token window of the 3b rung, the smallest model this project ships, the
+prompt is double its budget and `lca check` says so. Both switches sit at their
+shipped values in every fixture, so that arm had never run.
+
+Not done, and why: `ENABLE_OLLAMA_RELAY=true` through `setup.sh` and
+`netmode.sh` needs real units and a real bridge; `AGENT_NATIVE_TOOL_CALLING`'s
+selftest arm needs a live agent. Those are genuinely expensive, and the census
+says so in the row rather than leaving the next person to find out.
+
+**Don't matrix everything.** Some subjects genuinely have one configuration,
+and a fixture built for a machine nobody has is its own kind of lie. The
+question to ask of a driven gate is not "is it matrixed" but: *what does its
+fixture actually produce, and which branches of its subject can therefore never
+run?*
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:

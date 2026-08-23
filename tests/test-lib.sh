@@ -92,6 +92,36 @@ cp "${REPO}/.env.example" "${SANDBOX}/"
 # three surfaces share one file would pass on an empty string.
 mkdir -p "${SANDBOX}/config"
 cp "${REPO}/config/CONVENTIONS.md" "${SANDBOX}/config/"
+# --- what configuration a fixture puts a product script in --------------------
+#
+# Up here rather than beside the census gates at the bottom of this file: the
+# suite is a linear script, and the first recorder call is four hundred lines
+# below this point. A helper defined after its caller is a command that does
+# not exist, which this file has now learned twice.
+#
+# The switch list comes from the product's own extractor, so a switch added to
+# .env.example is in the census the day it ships and cannot be forgotten. Read
+# once — it costs a subshell and nothing in it changes during a run.
+CONFIG_SWITCHES="$(bash -c 'source "$1" >/dev/null 2>&1; boolean_settings' _ "${REPO}/scripts/lib.sh")"
+config_switches() { printf '%s\n' "${CONFIG_SWITCHES}"; }
+# The LAST assignment, because a fixture that appends an override leaves the
+# .env.example line above it — and the last one is the one load_env ends on.
+env_switch_value() {   # ENV-FILE SETTING -> true|false, or nothing
+  sed -n "s/^[[:space:]]*\(export \)\?$2=\(true\|false\)[[:space:]]*\$/\2/p" "$1" | tail -1
+}
+# Harnesses that VARY their .env overwrite it per case, so the file left at the
+# end of the run shows only the last one. Those record here as they go; an
+# unparameterised harness needs nothing, because its one .env is still on disk.
+CONFIG_LEDGER="${SANDBOX}/.configurations"
+: > "${CONFIG_LEDGER}"
+record_configuration() {   # ENV-FILE -> note what a product script is about to read
+  local f="$1" s
+  [[ -r "${f}" ]] || return 0
+  for s in ${CONFIG_SWITCHES}; do
+    printf '%s=%s\n' "${s}" "$(env_switch_value "${f}" "${s}")"
+  done >> "${CONFIG_LEDGER}"
+}
+
 # ...and the starter questions, for a reason found by a mutant surviving: the
 # drift check treats "this repo has no suggestions file" as "nothing to
 # compare", so without this copy the sandbox's REPO_ROOT had no file, `want`
@@ -588,6 +618,7 @@ sudo_waits_sandbox() {   # [ENABLE_AGENT]
   # The tier switch decides which half of check-system.sh is even reached, so
   # it is a parameter of the sandbox and not a constant in it.
   sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=${1:-false}/" "${WAITS_SB}/.env"
+  record_configuration "${WAITS_SB}/.env"
   # Sleeps rather than reading: a real sudo reads the password from the
   # terminal, and with stdin at /dev/null a read returns EOF at once — which
   # is the one thing that does NOT reproduce the stall. Twelve seconds, so an
@@ -12340,6 +12371,10 @@ check_report() {   # ENV-LINES [WEBUI_STATE] [NFT_COVERS] -> the whole report
   check_sandbox
   cp "${REPO}/.env.example" "${CHECK_SB}/.env"
   printf '%s\n' "$1" >> "${CHECK_SB}/.env"
+  # This harness overwrites its .env per case, so the file left at the end
+  # shows only the last one. Without this line the configuration census would
+  # read every 'lca check' as having run at the shipped defaults.
+  record_configuration "${CHECK_SB}/.env"
   # The status is discarded rather than swallowed with '|| true': the report is
   # the product, and check-system.sh exits non-zero whenever anything FAILed,
   # which is most of these cases. That the report exists at all is asserted
@@ -12404,6 +12439,212 @@ signup_reported_by_check() {
 }
 check "'lca check' reports open signups as a warning, and closed ones as closed" \
   signup_reported_by_check
+
+echo "# ...and the same report, in the configurations nothing ever ran it in"
+# Configuration blindness, worked. Each of these sections is correct code that
+# had never executed: every fixture in this repo that builds an .env for a
+# product script hands it .env.example, where the agent tier and the relay are
+# off and the chat keeps the short prompt. tests/config-coverage.tsv is the
+# census; these are the three cheapest cells of it, and one of them turned out
+# to hold a warning nothing had ever produced.
+check_reports_the_agent_tier() {
+  local out bad=0
+  out="$(check_report 'ENABLE_AGENT=true' running)"
+  # This is the section the stall lived in. It is not enough that it no longer
+  # hangs: it has to say the four things it exists to say.
+  grep -qi 'agent is enabled in .env but its container is not running' <<<"${out}" || {
+    printf 'the agent tier is on and its container is absent, and lca check did not say so:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qi 'loopback is the container' <<<"${out}" || {
+    echo 'nothing warned that an agent with the relay off cannot reach Ollama on 127.0.0.1' >&2
+    bad=1
+  }
+  grep -qi 'agent is on but' <<<"${out}" || {
+    echo 'the derived agent model is missing and the report says nothing about the context it will run at' >&2
+    bad=1
+  }
+  # ...and the exposure half. The agent's UI is the most dangerous port here —
+  # a browser session on it runs anything on the box.
+  grep -q 'Agent 3001' <<<"${out}" || {
+    printf 'the agent is enabled and its port is not in the list the inbound guard must cover:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and with the tier off, none of it appears. Without this the four above
+  # are satisfied by a report that says everything always.
+  out="$(check_report 'ENABLE_AGENT=false' running)"
+  grep -qi 'agent is enabled' <<<"${out}" && {
+    printf 'a machine with the agent tier off is told about an agent:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Agent 3001' <<<"${out}" && {
+    printf 'the guard is asked to cover a port nothing is offering:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca check' reports the agent tier, in the configuration that has one" \
+  check_reports_the_agent_tier
+relay_is_reported_when_it_is_on() {
+  local out bad=0
+  out="$(check_report 'ENABLE_OLLAMA_RELAY=true' running)"
+  grep -qi 'relay is enabled in .env but its boot units are not installed' <<<"${out}" || {
+    printf 'the relay is switched on with nothing listening and the report says nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # It binds the docker bridge, which is not routable from outside — but the
+  # guard's job is to know every port this stack opens, so it is in the list.
+  grep -q 'Ollama relay' <<<"${out}" || {
+    printf 'the relay port is not among the ports the guard is asked to cover:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  out="$(check_report 'ENABLE_OLLAMA_RELAY=false' running)"
+  grep -qi 'relay is enabled' <<<"${out}" && {
+    printf 'a machine with no relay is told its relay is unhealthy:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Ollama relay' <<<"${out}" && {
+    printf 'a port nothing binds is demanded of the guard:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and the relay, in the configuration that has one" \
+  relay_is_reported_when_it_is_on
+# The sharpest cell of the census, and the one that found something. The chat's
+# system prompt is budgeted at 15% of the context window. CONVENTIONS.md adds
+# ~618 tokens to it, and CONVENTIONS_CHAT=true is what puts them there. At the
+# 8192 window of the shipped default the total just fits; at 4096 — the 3b
+# rung, the SMALLEST this project ships — the budget is 614 and the prompt is
+# double it, re-sent on every message for the life of the conversation.
+#
+# Both switches sit at their shipped values in every fixture in this repo, so
+# that warning had never been produced by anything. Measured now: 577 tokens
+# with the appendix off, 1224 with it on, and only the fourth cell warns.
+#
+# Read as a relationship, not as those two numbers: CONVENTIONS.md is a file
+# people are meant to edit, and a gate that hardcodes its token count is a gate
+# that fails on a good change.
+chat_prompt_budget_holds_with_the_appendix_on() {
+  local small_off small_on big_on bad=0
+  big_on="$(check_report 'CONVENTIONS_CHAT=true' running | grep -i 'system prompt' || true)"
+  small_off="$(check_report 'CONVENTIONS_CHAT=false
+OLLAMA_CONTEXT_LENGTH=4096' running | grep -i 'system prompt' || true)"
+  small_on="$(check_report 'CONVENTIONS_CHAT=true
+OLLAMA_CONTEXT_LENGTH=4096' running | grep -i 'system prompt' || true)"
+  [[ -n "${big_on}" && -n "${small_off}" && -n "${small_on}" ]] || {
+    echo 'the report says nothing about the system prompt at all — this gate has lost its subject' >&2
+    return 1
+  }
+  # 1. The appendix is really being added, or every cell below is the same run.
+  local n_on n_off
+  n_on="$(grep -oE '~[0-9]+ tokens' <<<"${big_on}" | tr -dc '0-9')"
+  n_off="$(grep -oE '~[0-9]+ tokens' <<<"${small_off}" | tr -dc '0-9')"
+  [[ -n "${n_on}" && -n "${n_off}" ]] || {
+    printf 'the report no longer says how big the prompt is:\n%s\n%s\n' "${big_on}" "${small_off}" >&2
+    return 1
+  }
+  (( n_on > n_off )) || {
+    printf 'CONVENTIONS_CHAT=true did not make the chat prompt any bigger (%s vs %s) — the appendix is not reaching it:\n%s\n' \
+      "${n_on}" "${n_off}" "${big_on}" >&2
+    bad=1
+  }
+  # 2. The small window with the appendix ON is over budget, and says so. This
+  # is the cell nothing had ever run.
+  grep -qi 'over the' <<<"${small_on}" || {
+    printf 'the smallest rung this project ships carries a prompt over its own budget and is told it fits:\n%s\n' \
+      "${small_on}" >&2
+    bad=1
+  }
+  # ...and names the file responsible, because the fix is a setting and not a
+  # smaller model.
+  grep -q 'CONVENTIONS.md' <<<"${small_on}" || {
+    printf 'the over-budget warning does not name what is in the prompt:\n%s\n' "${small_on}" >&2
+    bad=1
+  }
+  # 3. The other three cells fit, or "over budget" is what it says always.
+  grep -qi 'over the' <<<"${small_off}" && {
+    printf 'the small window is over budget even without the appendix:\n%s\n' "${small_off}" >&2
+    bad=1
+  }
+  grep -qi 'over the' <<<"${big_on}" && {
+    printf 'the shipped window is over budget with the appendix on, which the arithmetic in lib.sh says it is not:\n%s\n' \
+      "${big_on}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the chat prompt's context budget is checked with the conventions appendix on" \
+  chat_prompt_budget_holds_with_the_appendix_on
+# ...and the switches .env.example only SUGGESTS must be checked like the ones
+# it ships. Found by asking the configuration question of the switch list
+# itself: which settings does the thing that validates switches not see?
+#
+# .env.example does not only ship switches. Under "leaving these alone changes
+# nothing" it offers two more as commented lines a reader is invited to
+# uncomment — and boolean_settings read live lines only, so:
+#
+#   AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+#   CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+#
+# ...while lca_user_instructions compares it against the word "true" exactly
+# like every other switch. Measured: 2,527 characters of appendix at 'true',
+# 0 at 'yes'. The only difference between the two settings was which side of a
+# '#' they were written on.
+switch_count_in() { grep -oE '[0-9]+ on/off setting' <<<"$1" | grep -oE '^[0-9]+'; }
+suggested_switches_are_validated_too() {
+  local out base taken bad=0
+  # 1. The behaviour that makes it matter: 'yes' is OFF, silently.
+  local on off
+  on="$(as_nobody "${REPO}/scripts/lib.sh" 'load_env >/dev/null 2>&1
+CONVENTIONS_AIDER=true;  lca_user_instructions aider | wc -c')"
+  off="$(as_nobody "${REPO}/scripts/lib.sh" 'load_env >/dev/null 2>&1
+CONVENTIONS_AIDER=yes;   lca_user_instructions aider | wc -c')"
+  [[ "${on}" =~ ^[0-9]+$ && "${off}" =~ ^[0-9]+$ ]] || {
+    printf 'could not measure the appendix at all (%s / %s) — this gate lost its subject\n' \
+      "${on}" "${off}" >&2
+    return 1
+  }
+  (( on > 0 && off == 0 )) || {
+    printf 'CONVENTIONS_AIDER is no longer compared against the word "true" (true -> %s chars, yes -> %s), so the warning below is about nothing\n' \
+      "${on}" "${off}" >&2
+    return 1
+  }
+  # 2. ...so a value that is not true or false has to be named.
+  out="$(check_report 'CONVENTIONS_AIDER=yes' running)"
+  grep -q "CONVENTIONS_AIDER='yes' is not true or false" <<<"${out}" || {
+    printf 'a switch .env.example suggests can hold a word that silently reads as OFF, and lca check says nothing:\n%s\n' \
+      "$(grep -iE 'on/off|not true or false' <<<"${out}" || echo '(nothing about switches at all)')" >&2
+    bad=1
+  }
+  # 3. A suggestion the reader has NOT taken is not a fault, and does not
+  # change the count on a shipped machine.
+  out="$(check_report '' running)"
+  base="$(switch_count_in "${out}")"
+  grep -qi 'CONVENTIONS_AIDER' <<<"${out}" && {
+    printf 'a shipped machine is told about a setting it does not have:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 4. ...and a suggestion that IS taken, validly, is counted rather than
+  # ignored — otherwise "not true or false" above could be the only thing this
+  # ever notices.
+  taken="$(switch_count_in "$(check_report 'CONVENTIONS_AGENT=false' running)")"
+  [[ -n "${base}" && -n "${taken}" ]] || {
+    echo 'lca check no longer says how many switches it validated' >&2
+    return 1
+  }
+  (( taken == base + 1 )) || {
+    printf 'taking a suggested switch did not add it to the validated set (%s -> %s)\n' \
+      "${base}" "${taken}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a switch .env.example only suggests is validated like one it ships" \
+  suggested_switches_are_validated_too
 
 echo "# every drift message must name the one command that fixes drift"
 # 'lca apply' exists precisely so nobody has to remember which script applies
@@ -21421,6 +21662,114 @@ no_test_function_is_defined_twice() {
 }
 check "...and none defines the same function twice" \
   no_test_function_is_defined_twice
+
+echo "# ...and the configuration those gates were driven IN"
+# A different failure from a gate that reads source, and named separately:
+# CONFIGURATION BLINDNESS. A source-grep is dishonest — it claims a runtime
+# behaviour and offers text. This one is honest and partial: it drives its
+# subject, it drives it in exactly ONE configuration, and nothing about the
+# gate says which. That is arguably the worse of the two, because a source
+# grep at least looks suspicious when you read it.
+#
+# The instance that named it: 'lca check' is first in REPORTING_COMMANDS and
+# had run under the blocking-sudo stub on every CI run since that gate was
+# written. It stalled for ever on any machine with ENABLE_AGENT=true. The gate
+# held. Its FIXTURE was .env.example, where the agent tier is off, so the whole
+# agent half of check-system.sh was unreachable and the bare 'as_root docker ps'
+# inside agent_live_sandboxes was never reached.
+#
+# Measured, not read: 34 places in this repo build an .env for a product script
+# to be run against, and 31 of them are .env.example verbatim. So the shipped
+# defaults are not merely the common case here — they are, very nearly, the
+# only case.
+CONFIG_CENSUS="${REPO}/tests/config-coverage.tsv"
+# Harnesses that VARY their .env overwrite it per case, so the file left at the
+# end shows only the last one. Those record here as they go; an unparameterised
+# harness needs nothing, because its one .env is still on disk to be read.
+# What this RUN drove. Every .env still on disk under the sandbox, plus the
+# ledger above.
+fixture_values() {   # SETTING -> the distinct values a product script was run at
+  local f
+  { while IFS= read -r f; do
+      [[ -n "${f}" ]] || continue
+      env_switch_value "${f}" "$1"
+    done < <(find "${SANDBOX}" -name '.env' -type f 2>/dev/null)
+    sed -n "s/^$1=\(true\|false\)\$/\1/p" "${CONFIG_LEDGER}" 2>/dev/null
+  } | sort -u
+}
+# ...and what CI drives, which this run cannot see because those .env files are
+# built on a runner. Read from the workflow and the fresh-install script, whose
+# text IS the subject: they are recipes, and a recipe that stops overriding a
+# switch is a change to that text.
+ci_fixture_values() {   # SETTING -> the values CI's own fixtures set it to
+  grep -ohE "s/\^$1=[^/]*/$1=(true|false)/|^[[:space:]]*$1=(true|false)\$" \
+    "${REPO}/.github/workflows/ci.yml" "${REPO}"/tests/test-fresh-install.sh 2>/dev/null \
+    | grep -oE '(true|false)/?$' | tr -d '/' | sort -u
+}
+config_driven_values() {   # SETTING -> every value some fixture, here or in CI, ran it at
+  { fixture_values "$1"; ci_fixture_values "$1"; } | sort -u | paste -sd, -
+}
+# 1. Nothing may go unclassified. A switch added to .env.example without a row
+# here is a configuration nobody decided about.
+every_switch_is_in_the_config_census() {
+  local s bad=0 seen=0
+  [[ -r "${CONFIG_CENSUS}" ]] || { echo 'the configuration census is missing' >&2; return 1; }
+  for s in $(config_switches); do
+    seen=$(( seen + 1 ))
+    grep -qE "^(BOTH|SHIPPED-ONLY)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" || {
+      printf '%s is a switch in .env.example with no row in tests/config-coverage.tsv — decide whether anything drives its other value\n' \
+        "${s}" >&2
+      bad=1
+    }
+  done
+  (( seen >= 12 )) || {
+    printf 'only %s switches were read out of .env.example — the extractor has stopped matching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every switch in .env.example is classified in the configuration census" \
+  every_switch_is_in_the_config_census
+# 2. ...and the census's claim is checked against what the fixtures really
+# produced, so a row saying BOTH cannot survive the fixture that made it true
+# being deleted. This is the half that keeps the file honest.
+config_census_matches_the_fixtures() {
+  local s label driven bad=0
+  for s in $(config_switches); do
+    label="$(grep -E "^(BOTH|SHIPPED-ONLY)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" | cut -f1 | head -1)"
+    [[ -n "${label}" ]] || continue          # gate 1 reports the missing row
+    driven="$(config_driven_values "${s}")"
+    case "${label}" in
+      BOTH)
+        [[ "${driven}" == "false,true" ]] || {
+          printf '%s is recorded as driven at BOTH values, but the fixtures of this suite and of CI only ever ran it at: %s\n' \
+            "${s}" "${driven:-nothing at all}" >&2
+          bad=1
+        } ;;
+      SHIPPED-ONLY)
+        [[ "${driven}" != "false,true" ]] || {
+          printf '%s is now driven at both values — move its row to BOTH and say what drives it\n' "${s}" >&2
+          bad=1
+        } ;;
+    esac
+  done
+  return "${bad}"
+}
+check "...and what it claims agrees with the .env files the fixtures built" \
+  config_census_matches_the_fixtures
+# 3. The ratchet, the same shape as the source-grep debt: the number of
+# switches whose other side nothing runs may only go down.
+config_blindness_has_not_grown() {
+  local n
+  n="$(grep -cE '^SHIPPED-ONLY'$'\t' "${CONFIG_CENSUS}")"
+  (( n <= 6 )) || {
+    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and two have since been driven, and the only honest direction is down\n' \
+      "${n}" >&2
+    return 1
+  }
+}
+check "...and the number of undriven configurations never gets bigger" \
+  config_blindness_has_not_grown
 
 echo
 SUITE_FINISHED=true
