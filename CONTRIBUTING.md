@@ -821,6 +821,36 @@ behave completely differently, and setpriv gives you an unprivileged uid, not a
 password prompt. A prompt does not fail, it **waits** — so the failure mode is
 a command that never returns, and that still needs a box with a sudoers entry.
 
+The privilege probes it replaced are worth reading as a cautionary tale, not
+just as dead code. They made a throwaway account with `useradd`, ran through
+`runuser`, and skipped — *loudly*, said the comment — where they could not:
+
+> Skipped loudly rather than silently when the account cannot be made — a
+> conditional gate that vanishes on CI is a gate that reads as coverage while
+> protecting nothing.
+
+They never skipped loudly anywhere. The cleanup ran `userdel` on a user it had
+just declined to create; `userdel` exits **6** for "no such user"; and under
+`errexit` a failing command ends the *function*, so the `return 0` written at
+the bottom to make it safe was never reached. The suite died at that line. No
+SKIPPED message, no verdict, no FAIL — a bare exit 6 — and the several hundred
+checks below it had not run. Every CI run of `tests/test-lib.sh` had been
+ending there, on every machine that is not root, which is every runner.
+
+Two things came out of it:
+
+- `tests/test-lib.sh` now sets `SUITE_FINISHED=true` before its verdict, and
+  its `EXIT` trap prints **"the suite ENDED EARLY"** otherwise. A check that
+  fails prints FAIL and the run continues; anything else stops the process
+  where it stands, and the difference between those two has to be legible from
+  the outside.
+- The probes themselves no longer need an account, so nothing is skipped:
+  `as_nobody` drops to 65534 when the suite is root, and runs directly when it
+  is not — because then it already *is* the account the questions are about.
+  Which answer `can_root_now` must give depends on whether sudo lets that
+  account through without asking, so that is measured first and both
+  directions are asserted. Six checks, on every machine, where CI had zero.
+
 `systemd_available` is half-settled and honestly so: a host with no `systemctl`
 cannot have systemd, and the suite asserts that anywhere. Which of the two
 answers a given machine gives is that machine's business, not a gate's.

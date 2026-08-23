@@ -25,7 +25,13 @@ jobs:
     name: Unit tests + tune dry-run
     runs-on: ubuntu-latest
     steps:
+      # Full history: the update.sh step below clones this checkout, pushes it
+      # to a scratch bare repo and fetches back. actions/checkout is shallow by
+      # default, a clone of a shallow repo is shallow too, and git refuses to
+      # push one — "shallow update not allowed".
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Library + tune-ladder unit tests
         run: bash tests/test-lib.sh
       - name: tune.sh --dry-run exits 0 and changes nothing
@@ -550,7 +556,12 @@ jobs:
     name: E2E — real Ollama install + real generation
     runs-on: ubuntu-latest
     steps:
+      # Full history, for the same reason as the test job: the
+      # apply-and-verify step clones this checkout and pushes it to a scratch
+      # bare repo, and git refuses to push a shallow one.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Pin the smallest model this project actually ships (3b)
         # This pinned 0.5b, "because runners are small". It kept the job fast
         # and it proved nothing about the one thing the product does: 0.5b

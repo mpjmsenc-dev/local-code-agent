@@ -65,7 +65,17 @@ check() {
 
 # Work in a throwaway copy so the real .env is never touched.
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "${SANDBOX}"' EXIT
+# The trap says so when the suite ended EARLY. A check that fails prints FAIL
+# and the run carries on to a verdict; anything else — errexit on an unguarded
+# command, a die() reached from a helper — ends the process wherever it
+# happened, with no verdict and no FAIL line. That is how a 'userdel' exiting 6
+# inside a cleanup function truncated every CI run of this file: the job went
+# red with a bare number, the several hundred checks below that line had not
+# run, and nothing said which of those two things had happened.
+SUITE_FINISHED=false
+trap 'rc=$?
+      [[ "${SUITE_FINISHED}" == "true" ]] || printf "\nRESULT: the suite ENDED EARLY with status %s. No verdict was reached, and every check below the last line printed above did NOT run.\n" "${rc}" >&2
+      rm -rf "${SANDBOX}"' EXIT
 mkdir -p "${SANDBOX}/scripts"
 cp "${REPO}/scripts/lib.sh" "${SANDBOX}/scripts/"
 cp "${REPO}/.env.example" "${SANDBOX}/"
@@ -2110,20 +2120,32 @@ check "a 0600 file is readable, and so is an ordinary directory" \
 #
 # setpriv drops to uid 65534 without a user having to exist, without sudo, and
 # without a real machine. The arm is reachable on the box that is already here.
-NOBODY_UID=65534
-as_nobody() {   # LIB CODE [ARG...] -> what it printed, as nobody, with LIB sourced
+# The uid the probes below run as, which is only ever "not root".
+#
+# As root we drop to 65534 with setpriv — no account has to exist, no sudo is
+# involved, and no droplet. When the suite is ALREADY somebody else, which is
+# every GitHub runner, we are that somebody: setpriv could not drop without
+# root anyway, and there is nothing to drop to. Both answers make the arm
+# reachable, which is the only thing that matters here.
+if [[ "${EUID}" -eq 0 ]]; then NOBODY_UID=65534; else NOBODY_UID="${EUID}"; fi
+as_nobody() {   # LIB CODE [ARG...] -> what it printed, as not-root, with LIB sourced
   # LIB rather than always the real one: REPO_ROOT is computed from lib.sh's
   # own location, so which copy is sourced decides which directory the code
   # under test thinks it lives in — and a directory the caller cannot write is
   # the whole point of one of the gates below.
   local lib="$1" code="$2"; shift 2
-  # shellcheck disable=SC2016  # the body is code for the dropped shell, not a string to expand here
-  setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
-    bash -c 'set -uo pipefail
-             lib="$1"; shift
-             code="$1"; shift
-             source "${lib}" >/dev/null 2>&1
-             eval "${code}"' _ "${lib}" "${code}" "$@" 2>&1
+  # shellcheck disable=SC2016  # the body is code for the probe's shell, not a string to expand here
+  local probe_body='set -uo pipefail
+               lib="$1"; shift
+               code="$1"; shift
+               source "${lib}" >/dev/null 2>&1
+               eval "${code}"'
+  if [[ "${EUID}" -eq 0 ]]; then
+    setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
+      bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
+  else
+    bash -c "${probe_body}" _ "${lib}" "${code}" "$@" 2>&1
+  fi
 }
 readability_still_wants_x_of_a_directory() {
   local d="${SANDBOX}/readx" out bad=0
@@ -6072,7 +6094,11 @@ printf "MODEL %s\n" "${MODEL_NAME:-unset}"
 [[ -e "${ENV_FILE}" ]] && printf "ENV-CREATED\n" || printf "NO-ENV\n"
 printf "STILL-RUNNING\n"'
   chmod 711 "${SANDBOX}"
-  env_root_for_nobody "${ro}" 755   # root-owned, world-readable, not writable
+  # 555, not 755: when the suite is already running as somebody who is not
+  # root, the probe OWNS this directory, and 755 would hand the owner write.
+  # The mode has to deny the caller whichever of the two accounts it turns out
+  # to be.
+  env_root_for_nobody "${ro}" 555
   out="$(as_nobody "${ro}/scripts/lib.sh" "${env_probe}")"
   grep -qx "uid ${NOBODY_UID}" <<<"${out}" || {
     printf 'the env_probe did not drop to uid %s, so it was root and could write anywhere:\n%s\n' \
@@ -6103,6 +6129,15 @@ printf "STILL-RUNNING\n"'
   grep -qx 'NO-ENV' <<<"${out}" || {
     printf 'a .env appeared in a directory the caller cannot write — this measured nothing:\n%s\n' \
       "${out}" >&2
+    bad=1
+  }
+  # ...and the raw tool failure is NOT still printed underneath the
+  # explanation. "cp: cannot create regular file ... Permission denied" is the
+  # exact line this fix exists to replace, and dropping the 2>/dev/null puts it
+  # back with the warning left in place — which every source grep here, and the
+  # first driven version of this gate, read as fixed.
+  grep -q 'cp:' <<<"${out}" && {
+    printf 'the raw cp failure is printed under the explanation:\n%s\n' "${out}" >&2
     bad=1
   }
   # Non-vacuity: the same env_probe where the caller CAN write must create the
@@ -18824,64 +18859,66 @@ check "...and still says nothing when there is nothing" \
   dry_run_still_says_nothing_when_nothing
 
 echo "# the privilege probes, driven from a real non-root account"
-# These five were on the "needs a real machine" list in CONTRIBUTING.md for a
-# reason that turned out to be half true: the suite runs as root, and root
-# reads and writes everything, so the arm that matters is unreachable. What was
-# NOT true is that it needs a droplet. A throwaway account settles four of them
-# here, and the fifth needs only a PATH without sudo on it.
+# These were on the "needs a real machine" list in CONTRIBUTING.md for a reason
+# that turned out to be half true: the suite runs as root, root reads and
+# writes everything, and the arm that matters is unreachable. What was NOT true
+# is that it needs a droplet.
 #
-# Skipped loudly rather than silently when the account cannot be made — a
-# conditional gate that vanishes on CI is a gate that reads as coverage while
-# protecting nothing, which is the thing this suite spent a week removing.
-PROBE_USER=lca_probe_$$
-PROBE_DIR=/tmp/lca-privprobe-$$
-privilege_probe_ready() {
-  [[ "${EUID}" -eq 0 ]] || return 1
-  have useradd && have runuser && have userdel || return 1
-  useradd -M -s /bin/sh "${PROBE_USER}" >/dev/null 2>&1 || return 1
-  rm -rf "${PROBE_DIR}"; mkdir -p "${PROBE_DIR}"
-  cp "${REPO}/scripts/lib.sh" "${PROBE_DIR}/" || return 1
-  printf 'x\n' > "${PROBE_DIR}/rootonly.env"
-  chmod 600 "${PROBE_DIR}/rootonly.env"     # root-owned, root-only
-  chmod 755 "${PROBE_DIR}" "${PROBE_DIR}/lib.sh"
+# The first version made a throwaway account with useradd and ran the probes
+# through runuser, and skipped — loudly, it thought — where it could not. It
+# never skipped loudly anywhere. Its cleanup ran 'userdel' on a user it had
+# just declined to create, userdel exits 6 for "no such user", and under
+# errexit that ENDED THE SUITE at that line: no SKIPPED message, no verdict,
+# and the several hundred checks below it never ran. Every CI run of this file
+# had been stopping there.
+#
+# So there is no throwaway account any more, and nothing to skip. as_nobody
+# drops to 65534 when we are root and runs directly when we are not — and when
+# we are not, we already are the account these questions are about.
+priv_rc() {   # EXPR -> the exit status EXPR gave as not-root
+  as_nobody "${PRIV_LIB}" "$1"' >/dev/null 2>&1; printf "%s" $?'
 }
-privilege_probe_cleanup() {
-  [[ -n "${PROBE_USER:-}" ]] && userdel "${PROBE_USER}" >/dev/null 2>&1
-  rm -rf "${PROBE_DIR}"
-  return 0
-}
-as_probe_user() {   # EXPR -> its output, run as the throwaway account
-  # shellcheck disable=SC2016  # the body is a script for the child shell
-  runuser -u "${PROBE_USER}" -- bash -c '
-    source "$1" >/dev/null 2>&1
-    shift
-    eval "$@"' _ "${PROBE_DIR}/lib.sh" "$@" 2>&1
-}
-if privilege_probe_ready; then
-  probe_rc() { as_probe_user "$1 \"${PROBE_DIR}/rootonly.env\" >/dev/null 2>&1; printf '%s' \$?"; }
-  check "a root-owned 0600 file is not writable by an ordinary user" \
-    test "$(probe_rc writable_by_us)" = 1
-  check "...nor readable by one" \
-    test "$(probe_rc readable_by_us)" = 1
-  check "...and that account is not root" \
-    test "$(as_probe_user 'am_root; printf %s $?')" = 1
-  # The distinction this project made deliberately: 'can root be reached
-  # RIGHT NOW, without asking' is not 'is sudo installed'.
-  check "an account with no cached credential cannot become root now" \
-    test "$(as_probe_user 'can_root_now; printf %s $?')" = 1
-  # ...while can_root is the interactive answer and means "sudo exists, so it
-  # can be asked". It is 0 for a user sudo will go on to refuse, and that is
-  # the documented meaning rather than a bug: you cannot know whether a
-  # password will be accepted without asking for it, and an acting script that
-  # asks fails with sudo's own message rather than silently.
-  check "...but the interactive answer is yes while sudo is on the PATH" \
-    test "$(as_probe_user 'can_root; printf %s $?')" = 0
-  check "...and no when it is not" \
-    test "$(as_probe_user 'PATH=/nonexistent; can_root; printf %s $?')" = 1
-  privilege_probe_cleanup
+PRIV_SB="${SANDBOX}/priv"
+PRIV_LIB="${PRIV_SB}/lib.sh"
+rm -rf "${PRIV_SB}"; mkdir -p "${PRIV_SB}"
+cp "${REPO}/scripts/lib.sh" "${PRIV_LIB}"
+# Denied to the probe whichever account it turns out to be: 000 has nothing for
+# the owner either, and root is the only uid that walks past that.
+printf 'x\n' > "${PRIV_SB}/denied.env"
+chmod 000 "${PRIV_SB}/denied.env"
+chmod 755 "${PRIV_SB}" "${PRIV_LIB}"
+chmod 711 "${SANDBOX}"
+check "the privilege probes really are running as somebody who is not root" \
+  test "$(priv_rc 'am_root')" = 1
+check "a file the caller cannot open is not writable by it" \
+  test "$(priv_rc "writable_by_us \"${PRIV_SB}/denied.env\"")" = 1
+check "...nor readable by it" \
+  test "$(priv_rc "readable_by_us \"${PRIV_SB}/denied.env\"")" = 1
+# can_root is the INTERACTIVE answer: "sudo exists, so it can be asked". It is
+# 0 for a user sudo will go on to refuse, and that is the documented meaning
+# rather than a bug — you cannot know whether a password will be accepted
+# without asking for it, and an acting script that asks fails with sudo's own
+# message rather than silently.
+if have sudo; then
+  check "the interactive answer is yes while sudo is on the PATH" \
+    test "$(priv_rc 'can_root')" = 0
+fi
+check "...and no when it is not" \
+  test "$(priv_rc 'PATH=/nonexistent; can_root')" = 1
+# ...and can_root_now is the strict one, which must agree with what sudo will
+# actually do without asking. Which of the two answers is the right one depends
+# on the account the suite is running as, so it is measured rather than
+# assumed: as root we drop to 65534, which no sudoers file lets through; on a
+# runner we are the runner, which is usually a passwordless sudoer. Both
+# directions are a real assertion about can_root_now reflecting reality, and
+# neither is a skip.
+PRIV_SUDO_NOW="$(as_nobody "${PRIV_LIB}" 'sudo -n true >/dev/null 2>&1 && printf yes || printf no')"
+if [[ "${PRIV_SUDO_NOW}" == "no" ]]; then
+  check "an account sudo will not let through cannot become root now" \
+    test "$(priv_rc 'can_root_now')" = 1
 else
-  privilege_probe_cleanup
-  echo "  SKIPPED - the privilege probes need root and useradd to make a throwaway account; they were NOT checked on this run"
+  check "an account sudo lets through without asking can become root now" \
+    test "$(priv_rc 'can_root_now')" = 0
 fi
 
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
@@ -20029,6 +20066,7 @@ check "...and none defines the same function twice" \
   no_test_function_is_defined_twice
 
 echo
+SUITE_FINISHED=true
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
   exit 1
