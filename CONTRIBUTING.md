@@ -797,6 +797,30 @@ Nothing in a source grep of that function looks wrong.
 | `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
 | the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
 
+`setpriv` narrowed the second row rather than removing it. Running as somebody
+who is not root needs no real account, no sudo and no droplet:
+
+```bash
+setpriv --reuid=65534 --regid=65534 --clear-groups bash -c '...'
+```
+
+So every *permission* arm in `scripts/lib.sh` — the family root can never
+reach, because root reads and writes everything — is drivable here now.
+`readability_still_wants_x_of_a_directory` was the first to move: it used to
+assert that `readable_by_us` still contains `-x `, with a comment saying the
+directory half was "the code, because no account here can exercise it". It now
+calls the function as uid 65534 over a directory with r and no x, one with x
+and no r, an ordinary one, and a 0600 file the caller owns. Two more things it
+has to check first, and they are the ones worth copying: that the probe really
+dropped (a run as root looks exactly like a run that passed), and that the two
+directories it expects a **yes** for still get one, or "unreadable" would be
+the answer to everything.
+
+What the row still means is the other half. `sudo -n` and an interactive sudo
+behave completely differently, and setpriv gives you an unprivileged uid, not a
+password prompt. A prompt does not fail, it **waits** — so the failure mode is
+a command that never returns, and that still needs a box with a sudoers entry.
+
 `systemd_available` is half-settled and honestly so: a host with no `systemctl`
 cannot have systemd, and the suite asserts that anywhere. Which of the two
 answers a given machine gives is that machine's business, not a gate's.

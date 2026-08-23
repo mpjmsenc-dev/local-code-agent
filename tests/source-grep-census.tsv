@@ -104,7 +104,7 @@ FP	port_is_checked_before_the_container_is_destroyed	runs the real installer aga
 A	probes_use_the_stricter_test	presence/absence inside extracted regions (via probe_region)
 A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
 A	prompt_check_is_not_claimed_when_skipped	presence-grep for a guard call in each claimant
-A	readability_still_wants_x_of_a_directory	greps readable_by_us for test flags; calling it would settle it
+FP	readability_still_wants_x_of_a_directory	calls readable_by_us as uid 65534 over four real directories and files
 A	ready_banner_asks_about_the_model	awk inside banner_ready for one call
 A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
 A	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call

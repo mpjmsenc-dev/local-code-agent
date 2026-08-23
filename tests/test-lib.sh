@@ -2102,19 +2102,78 @@ readability_is_about_the_right_bits() {
 }
 check "a 0600 file is readable, and so is an ordinary directory" \
   readability_is_about_the_right_bits
-# ...and the directory half, which no account here can exercise, asserted on
-# the code: it must still special-case a directory and still want x of one.
-readability_still_wants_x_of_a_directory() {
-  local body
-  body="$(sed -n '/^readable_by_us() {$/,/^}$/p' "${REPO}/scripts/lib.sh")"
-  [[ -n "${body}" ]] || { echo 'readable_by_us is gone' >&2; return 1; }
-  grep -q -- '-d ' <<<"${body}" || {
-    echo 'readable_by_us no longer treats a directory differently from a file' >&2; return 1; }
-  grep -q -- '-x ' <<<"${body}" || {
-    echo 'readable_by_us no longer wants the execute bit on a directory, so a glob over one comes back silently empty' >&2
-    return 1; }
+# Driven. The gate this replaces said, in its own comment, that the directory
+# half is "the code, because no account here can exercise it" — and that was
+# true of every permission arm in lib.sh, which is a whole family of code no
+# gate in this suite could reach. Root reads and writes everything, so
+# "can we read this?" can only ever be answered yes.
+#
+# setpriv drops to uid 65534 without a user having to exist, without sudo, and
+# without a real machine. The arm is reachable on the box that is already here.
+NOBODY_UID=65534
+as_nobody() {   # CODE [ARG...] -> what it printed, as nobody, with lib.sh sourced
+  local code="$1"; shift
+  # shellcheck disable=SC2016  # the body is code for the dropped shell, not a string to expand here
+  setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups \
+    bash -c 'set -uo pipefail
+             lib="$1"; shift
+             code="$1"; shift
+             source "${lib}" >/dev/null 2>&1
+             eval "${code}"' _ "${REPO}/scripts/lib.sh" "${code}" "$@" 2>&1
 }
-check "...and a directory is still required to be traversable" \
+readability_still_wants_x_of_a_directory() {
+  local d="${SANDBOX}/readx" out bad=0
+  rm -rf "${d}"
+  mkdir -p "${d}/listable" "${d}/traversable" "${d}/normal"
+  : > "${d}/listable/f"
+  : > "${d}/private"
+  chown "${NOBODY_UID}" "${d}/private"
+  chmod 600 "${d}/private"        # what backup.sh writes, owned by the reader
+  chmod 444 "${d}/listable"       # r without x: the names list, nothing stats
+  chmod 111 "${d}/traversable"    # x without r: stats fine, no names to stat
+  chmod 755 "${d}" "${d}/normal"
+  # mktemp gives 0700 to root. Nobody has to be able to walk INTO the sandbox
+  # before any of the modes above mean anything.
+  chmod 711 "${SANDBOX}"
+  # shellcheck disable=SC2016  # likewise: this runs as nobody, not here
+  out="$(as_nobody 'printf "uid %s\n" "$(id -u)"
+    for p in listable traversable normal private; do
+      if readable_by_us "$1/${p}"; then printf "%s YES\n" "${p}"
+      else                             printf "%s no\n"  "${p}"; fi
+    done' "${d}")"
+  # First: it really is somebody else. Every assertion below is worthless if
+  # this ran as root, and running as root is precisely how it would look.
+  grep -qx "uid ${NOBODY_UID}" <<<"${out}" || {
+    printf 'the probe did not drop to uid %s, so nothing here was measured:\n%s\n' \
+      "${NOBODY_UID}" "${out}" >&2
+    return 1
+  }
+  # A directory you can list but not traverse: a glob over it comes back
+  # silently EMPTY rather than failing, which reads as "there is nothing here".
+  grep -qx 'listable no' <<<"${out}" || {
+    printf 'a directory with r and no x reads as readable — a glob over it returns nothing, and nothing is indistinguishable from empty:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qx 'traversable no' <<<"${out}" || {
+    printf 'a directory with x and no r reads as readable, and there are no names in it to read:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and the two that must still say yes, or "not readable" would be the
+  # answer to everything and the two above would pass for the wrong reason.
+  grep -qx 'normal YES' <<<"${out}" || {
+    printf 'an ordinary 0755 directory reads as unreadable:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'private YES' <<<"${out}" || {
+    printf 'a 0600 file its own owner can read reads as unreadable — that is every backup archive this project makes:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and a directory is still required to be traversable, asked as somebody who is not root" \
   readability_still_wants_x_of_a_directory
 # ...and the two readers must ask before they conclude. Ordering, not mere
 # presence: a readability check AFTER the search is a check about a result that
@@ -19816,8 +19875,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 121 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 32 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 120 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 33 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
