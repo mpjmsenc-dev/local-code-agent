@@ -12581,13 +12581,18 @@ echo "# the three small helpers 'make coverage' had never seen run"
 # chat probe point, webui_responds() is what 'webui.sh start' waits on before
 # declaring success, and require_cmd() is what turns a missing dependency into
 # a sentence instead of a raw error later on.
-url_for() { ( WEBUI_PORT="$1"; webui_url ); }
-check "webui_url uses the configured port" test "$(url_for 8080)" = "http://127.0.0.1:8080"
+# webui_url_for, not url_for: that name is already a helper eleven thousand
+# lines up, over OLLAMA_HOST rather than WEBUI_PORT. A second definition in a
+# linear script silently replaces the first, so every caller below this line
+# would have been asking the wrong question — and nothing but the accident of
+# where the callers sit kept that from being a wrong answer.
+webui_url_for() { ( WEBUI_PORT="$1"; webui_url ); }
+check "webui_url uses the configured port" test "$(webui_url_for 8080)" = "http://127.0.0.1:8080"
 check "...and defaults to 3000 when unset" test "$( ( unset WEBUI_PORT; webui_url ) )" = "http://127.0.0.1:3000"
 # A plain function, not 'bash -c': a fresh shell has never sourced lib.sh, so
-# url_for would be undefined there. Written the other way first and it failed
-# exactly like that — the stub-scope trap this file keeps re-learning.
-url_is_loopback() { [[ "$(url_for 3000)" == http://127.0.0.1:* ]]; }
+# webui_url_for would be undefined there. Written the other way first and it
+# failed exactly like that — the stub-scope trap this file keeps re-learning.
+url_is_loopback() { [[ "$(webui_url_for 3000)" == http://127.0.0.1:* ]]; }
 check "...and always asks loopback, never the tailscale address" url_is_loopback
 webui_responds_probes_health() {
   # The stub writes to a FILE. webui_responds sends curl's stdout AND stderr to
@@ -19875,6 +19880,49 @@ no_test_function_is_defined_and_never_run() {
 }
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
+
+# ...and the other half of the same trap. A second definition of a function in
+# a linear script silently replaces the first: every call above it gets one
+# implementation and every call below gets another, with nothing said. url_for
+# was defined twice, eleven thousand lines apart — once over OLLAMA_HOST, once
+# over WEBUI_PORT — and the only thing keeping that from being a wrong answer
+# was that no caller happened to sit on the wrong side of the second one.
+# ShellCheck sees it as SC2317 "appears to be unreachable", which is how the
+# collision was found, and only because the shadowed copy had nothing else
+# reaching it either.
+# SOURCE-GREP: which name a file defines twice is a property of that file's
+# text. What it cannot see is a redefinition built at run time — eval, or a
+# name assembled from pieces.
+duplicate_definitions() {   # FILE -> names it defines more than once
+  awk -f "${TESTS_DIR}/duplicate-defs.awk" "$1"
+}
+# SOURCE-GREP: same subject, same reason.
+no_test_function_is_defined_twice() {
+  local f hits bad=0 dup_probe="${SANDBOX}/dup-probe.sh"
+  for f in "${TESTS_DIR}"/*.sh; do
+    hits="$(duplicate_definitions "${f}")"
+    [[ -z "${hits}" ]] || {
+      printf '%s defines the same function twice, so which one runs depends on where the caller sits:\n%s\n' \
+        "${f##*/}" "${hits}" >&2
+      bad=1
+    }
+  done
+  # Non-vacuity, the same way as the gate above: the scanner has to be able to
+  # SEE a duplicate. The name is assembled, because the probe file is a copy of
+  # this one and a contiguous literal here would be a third definition of it in
+  # the copy — which passes for the wrong reason.
+  local dup_fn="a_function"'_defined_twice'
+  cp "${TESTS_DIR}/test-lib.sh" "${dup_probe}"
+  printf '%s() { :; }\n%s() { :; }\n' "${dup_fn}" "${dup_fn}" >> "${dup_probe}"
+  hits="$(duplicate_definitions "${dup_probe}")"
+  grep -qF "${dup_fn}" <<<"${hits}" || {
+    echo 'the duplicate scanner cannot see a function defined twice at the end of the file' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and none defines the same function twice" \
+  no_test_function_is_defined_twice
 
 echo
 if (( FAILED > 0 )); then

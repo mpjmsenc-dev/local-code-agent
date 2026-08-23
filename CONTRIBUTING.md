@@ -693,6 +693,22 @@ as a mention inside a live function — an edge — and the dead function comes
 back reachable. That is the fourth time a scanner here has been fooled by text
 about itself, and the first where the text was the fixture.
 
+The other half of the same trap is a function defined **twice**. A test suite
+here is a linear script, so the second definition silently replaces the first:
+every call above it gets one implementation and every call below gets another,
+with nothing said. `url_for` was defined twice eleven thousand lines apart —
+once over `OLLAMA_HOST`, once over `WEBUI_PORT` — and the only thing keeping
+that from being a wrong answer was that no caller happened to sit on the wrong
+side of the second one. `tests/duplicate-defs.awk` and
+`no_test_function_is_defined_twice` now refuse it.
+
+Both scanners have to skip the same two kinds of data, because this suite is
+full of both and each contains real function definitions on purpose: quoted
+heredocs (the fixtures, which exist to be scanned) and single-quoted strings
+spanning several lines (the shims handed to `restore_sandbox`, which are code
+for *another* shell). A naive grep reports ten duplicates here; nine of them
+are fixtures, and the tenth is the real one.
+
 ## A tool that parses source must tell code from commentary about code
 
 Three times in one session the tooling was fooled by text *about itself*, and

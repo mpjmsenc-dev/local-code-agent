@@ -231,6 +231,7 @@ B	no_silent_ollama_start	absence rule for a forbidden invocation
 B	no_status_command_sends_you_to_an_installer	the subject is the text of status messages
 B	no_tee_into_a_root_file	absence rule for a forbidden idiom
 B	no_test_function_is_defined_and_never_run	the subject is the suite's own call graph
+B	no_test_function_is_defined_twice	the subject is which names a file defines twice
 B	no_unbounded_listing_is_piped_into_grep_q	absence rule for a forbidden idiom
 B	no_unsourced_subshell_calls_lib	meta lint over the suite's own source
 B	no_variable_is_piped_into_an_early_exiting_reader	absence rule for a forbidden idiom
@@ -302,6 +303,7 @@ H	backup_retention_case	drives backup.sh's retention decision
 H	baked_keys	extracts the settings install_webui.sh bakes in
 H	drift_case_block	extracts webui.sh's drift case block
 H	drift_keys	extracts the keys webui_drift can report
+H	duplicate_definitions	lists the names a test file defines more than once
 H	entry_points	lists the repo's entry points
 H	example_keys	extracts the keys .env.example ships
 H	example_value	extracts one value from .env.example
