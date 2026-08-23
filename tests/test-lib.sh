@@ -15761,11 +15761,77 @@ apply_survives_a_failed_rebuild() {
     echo 'apply.sh runs install_webui.sh unguarded, so a failed rebuild aborts the apply' >&2
     return 1; }
 }
+# Driven. The grep this replaced could only see that update.sh still said
+# '-t 0' somewhere; the claim is a runtime one — that a failed backup stops an
+# update nobody is watching. So update.sh's backup block is lifted out and run
+# against a stand-in backup.sh that fails on demand, with fd 0 answered both
+# ways.
+update_backup_block() {
+  awk 'index($0, "if [[ \"${do_backup}\" == \"true\" ]]; then") { inb = 1 }
+       inb { print }
+       inb && /^  fi$/ { exit }' "${REPO}/update.sh"
+}
+update_backup_run() {   # ASSUME_YES  BACKUP_RC  tty|notty  -> what the block did
+  local yes="$1" rc="$2" tty="$3" sb
+  sb="${SANDBOX}/update-backup"
+  rm -rf "${sb}"; mkdir -p "${sb}"
+  printf '#!/usr/bin/env bash\nexit %s\n' "${rc}" > "${sb}/backup.sh"
+  chmod +x "${sb}/backup.sh"
+  {
+    printf 'SCRIPT_DIR=%q\n' "${sb}"
+    printf 'do_backup=true assume_yes=%s\n' "${yes}"
+    cat <<'SHIM'
+step() { printf 'STEP %s\n' "$*"; }
+info() { printf 'INFO %s\n' "$*"; }
+ok()   { printf 'OK %s\n'   "$*"; }
+warn() { printf 'WARN %s\n' "$*"; }
+die()  { printf 'DIE %s\n'  "$*"; exit 1; }
+# Auto-answers YES, exactly as the real confirm() does off a terminal. A shim
+# that said no would hide the defect this gate exists for.
+confirm() { printf 'ASKED %s\n' "$*"; return 0; }
+SHIM
+    update_backup_block
+    printf 'printf "REACHED-THE-UPDATE\\n"\n'
+  } > "${sb}/driver.sh"
+  # /dev/ptmx opens a pty master, which isatty() answers yes to — a real
+  # terminal on fd 0 without needing one to exist. confirm() is stubbed, so
+  # nothing ever reads from it.
+  if [[ "${tty}" == "tty" ]]; then
+    bash "${sb}/driver.sh" < /dev/ptmx 2>&1 || true
+  else
+    bash "${sb}/driver.sh" < /dev/null 2>&1 || true
+  fi
+}
 update_refuses_unattended_after_a_failed_backup() {
-  # confirm() auto-answers YES off a terminal, so a cron'd update without --yes
-  # sailed past a FAILED backup — the case the --yes branch refuses outright.
-  grep -q 'assume_yes}" != "true" && -t 0' "${REPO}/update.sh" || {
-    echo 'update.sh still asks confirm() after a failed backup when nobody can answer' >&2
+  local out
+  # 1. The defect: no terminal, no --yes, backup failed. confirm() would have
+  # auto-answered YES and the update would have gone ahead with no restore point.
+  out="$(update_backup_run false 1 notty)"
+  grep -q '^DIE Backup failed' <<<"${out}" || {
+    printf 'a failed backup did not stop an unattended update:\n%s\n' "${out}" >&2
+    return 1; }
+  ! grep -q 'REACHED-THE-UPDATE' <<<"${out}" || {
+    printf 'the update ran anyway after a failed backup:\n%s\n' "${out}" >&2
+    return 1; }
+  # 2. ...and --yes is not a way past it either, which was already true.
+  out="$(update_backup_run true 1 notty)"
+  grep -q '^DIE Backup failed' <<<"${out}" || {
+    printf '--yes walked past a failed backup:\n%s\n' "${out}" >&2
+    return 1; }
+  # 3. At a real terminal the question is still ASKED rather than refused
+  # outright — otherwise "refuse when unattended" could be satisfied by
+  # refusing always, which is a different program.
+  out="$(update_backup_run false 1 tty)"
+  grep -q '^ASKED ' <<<"${out}" || {
+    printf 'nobody was asked even at a terminal, so the refusal is unconditional:\n%s\n' \
+      "${out}" >&2
+    return 1; }
+  # 4. Non-vacuity: a backup that works lets the update through. Without this,
+  # a block that died on every path would satisfy 1 and 2.
+  out="$(update_backup_run false 0 notty)"
+  grep -q 'REACHED-THE-UPDATE' <<<"${out}" || {
+    printf 'a successful backup did not let the update proceed — this gate is testing nothing:\n%s\n' \
+      "${out}" >&2
     return 1; }
 }
 # Driven: the archive is listed rather than the source read. '>' creates
@@ -19548,8 +19614,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 126 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and four have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 125 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 28 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

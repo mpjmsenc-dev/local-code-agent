@@ -162,7 +162,7 @@ A	uninstall_removals_can_reach_root	exhaustive absence of bare rm plus a counted
 A	uninstall_removes_the_agent	two presence-greps in uninstall.sh
 A	unreadable_is_not_reported_as_empty	presence-greps plus message content
 A	update_mentions_restore_on_failure	awk over update.sh for a guarded call
-A	update_refuses_unattended_after_a_failed_backup	one grep for a condition
+FP	update_refuses_unattended_after_a_failed_backup	drives update.sh's backup block against a failing backup, both terminal answers
 A	uses_announced_start	one grep for a call
 A	venv_without_pip_is_rebuilt	two presence-greps
 A	warm_is_detached	awk over warm_model for a background form
@@ -323,6 +323,7 @@ H	step_source_check_says	drives agent-watch.sh's step-source check
 H	tune_builds_on_path	drives tune.sh's PATH construction
 H	tune_dry_run_in	runs lca tune --dry-run
 H	tune_gate_setup	prepares the environment the tune gates need
+H	update_backup_block	extracts update.sh's backup block so it can be run
 H	vol_payload	extracts restore.sh's volume-restore payload
 H	aider_argv_with	builds the real aider argv by evaluating run-agent.sh's own block
 H	settings_verdict	runs check-system.sh's Settings block over a given configuration
