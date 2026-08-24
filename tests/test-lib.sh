@@ -121,6 +121,17 @@ record_configuration() {   # ENV-FILE -> note what a product script is about to 
     printf '%s=%s\n' "${s}" "$(env_switch_value "${f}" "${s}")"
   done >> "${CONFIG_LEDGER}"
 }
+# ...and the same note where the value does not come from an .env at all.
+#
+# Some harnesses hand the product script its settings another way. backup_run_in
+# sources backup.sh out of ${REPO}, so lib.sh computes REPO_ROOT there and
+# load_env reads the REPO's .env — which is why that harness overrides what it
+# needs in a shim rather than in a file. The run is still a run at that value,
+# and the census measures what product scripts were run with, so the shim says
+# so here rather than leaving the census to read a file that was never used.
+record_configuration_value() {   # SETTING VALUE
+  printf '%s=%s\n' "$1" "$2" >> "${CONFIG_LEDGER}"
+}
 
 # ...and the starter questions, for a reason found by a mutant surviving: the
 # drift check treats "this repo has no suggestions file" as "nothing to
@@ -2955,6 +2966,90 @@ backup_archive_in() {
 backup_wrote_an_archive() { backup_archive_in plain >/dev/null; }
 check "a backup with no docker and no ollama still writes an archive" \
   backup_wrote_an_archive
+# ...and what a backup CONTAINS when the agent's workspace is switched on.
+#
+# BACKUP_AGENT_WORKSPACE is one of the switches tests/config-coverage.tsv
+# recorded as SHIPPED-ONLY: agent_backup_decision has unit tests at both
+# values, but no backup had ever been RUN with it on, so what ends up inside
+# the archive at that setting was unmeasured. The decision helper answering
+# "include" is not the same as a workspace being in the tarball, and this file
+# has taken that distinction out of five other places.
+AGENT_WS_FIXTURE="${SANDBOX}/agentws"
+agent_ws_shim() {   # ENABLED [MAX_MB] -> a shim putting a real workspace in view
+  record_configuration_value BACKUP_AGENT_WORKSPACE "$1"
+  printf 'BACKUP_AGENT_WORKSPACE=%s\nBACKUP_AGENT_MAX_MB=%s\nagent_workspace_dir() { printf "%%s" "%s"; }\n' \
+    "$1" "${2:-2048}" "${AGENT_WS_FIXTURE}"
+}
+agent_ws_fixture() {
+  [[ -e "${AGENT_WS_FIXTURE}/notes.txt" ]] && return 0
+  mkdir -p "${AGENT_WS_FIXTURE}"
+  # Two megabytes of real content, because du -sm on a nearly-empty tree
+  # answers 0 and this gate would then be about a workspace with nothing in it.
+  head -c 2200000 /dev/zero | tr '\0' 'w' > "${AGENT_WS_FIXTURE}/notes.txt"
+}
+backup_includes_the_agent_workspace() {
+  local out tarball bad=0
+  agent_ws_fixture
+  # ON, and under the ceiling: it goes in, and the archive really carries it.
+  out="$(backup_run_in wson "$(agent_ws_shim true 2048)")"
+  grep -q 'Agent workspace captured' <<<"${out}" || {
+    printf 'BACKUP_AGENT_WORKSPACE=true and the workspace was not captured:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  tarball="$(backup_archive_in wson)" || {
+    echo 'the run with the workspace switched on wrote no archive at all' >&2
+    return 1
+  }
+  # Captured, never 'tar tzf | grep -q': grep leaves on its first match, tar
+  # takes SIGPIPE, and 141 under pipefail reads as "not found" precisely when
+  # it WAS found. This file gates against that and caught this line.
+  local listing
+  listing="$(tar tzf "${tarball}" 2>/dev/null || true)"
+  grep -q 'agent-workspace.tar.gz' <<<"${listing}" || {
+    printf 'the run said it captured the workspace and the archive does not contain it:\n%s\n' \
+      "${listing}" >&2
+    bad=1
+  }
+  # OFF — the shipped default, and the one every other backup gate runs at.
+  # The workspace must be left out, and the reader told it exists so the
+  # setting is a choice rather than a surprise.
+  out="$(backup_run_in wsoff "$(agent_ws_shim false 2048)")"
+  grep -q 'Agent workspace not included' <<<"${out}" || {
+    printf 'a backup with the workspace switched off said nothing about the workspace it skipped:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  tarball="$(backup_archive_in wsoff)" || {
+    echo 'the run with the workspace switched off wrote no archive at all' >&2
+    return 1
+  }
+  listing="$(tar tzf "${tarball}" 2>/dev/null || true)"
+  grep -q 'agent-workspace.tar.gz' <<<"${listing}" && {
+    printf 'BACKUP_AGENT_WORKSPACE=false and the workspace is in the archive anyway:\n%s\n' \
+      "${listing}" >&2
+    bad=1
+  }
+  # ON, over the ceiling: left out, said so with both numbers, and the rest of
+  # the backup unaffected — a workspace that is too big must not cost the
+  # reader their .env and model list.
+  out="$(backup_run_in wsbig "$(agent_ws_shim true 1)")"
+  grep -q 'Agent workspace NOT included' <<<"${out}" || {
+    printf 'a workspace over the ceiling was not reported as excluded:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Everything else in this backup is unaffected' <<<"${out}" || {
+    printf 'it excluded the workspace without saying the rest of the backup is fine:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -q 'Backup written and verified' <<<"${out}" || {
+    printf 'a workspace over the ceiling cost the whole backup:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a backup includes the agent's workspace only when .env asks for it" \
+  backup_includes_the_agent_workspace
 # ...and the archive must end up owned by the same person as the directory.
 # Driven, not read: the old gate counted 'chown "$(invoking_user)"' lines and
 # looked for 'chown "$(id -un)"'. Both survive the chown never running, and
@@ -22873,8 +22968,8 @@ check "...and what it claims agrees with the .env files the fixtures built" \
 config_blindness_has_not_grown() {
   local n
   n="$(grep -cE '^SHIPPED-ONLY'$'\t' "${CONFIG_CENSUS}")"
-  (( n <= 6 )) || {
-    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and two have since been driven, and the only honest direction is down\n' \
+  (( n <= 5 )) || {
+    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and three have since been driven, and the only honest direction is down\n' \
       "${n}" >&2
     return 1
   }

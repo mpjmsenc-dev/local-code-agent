@@ -43,6 +43,8 @@
 #                           4096 cell is the one that produced a warning
 #                           nothing in this repo had ever produced
 #   OLLAMA_KEEP_ALIVE       shipped 30m; the -1 the agent tier wants is unrun
+#                           (tune's dry-run drives both, but no whole command
+#                            has been run at -1)
 #   AGENT_STEP_SOURCE       five comparisons in the watch/selftest path
 #   MODEL_NAME              CI's ollama job pins 3b; everything else is 7b
 #   AGENT_PORT              one comparison
@@ -54,7 +56,7 @@ SHIPPED-ONLY	AGENT_NATIVE_TOOL_CALLING	false	true puts native tool-calling into 
 SHIPPED-ONLY	AIDER_CONVENTIONS	true	false turns the conventions appendix off for all three surfaces at once, chat included, whatever CONVENTIONS_CHAT says. Cost: low — the aider argv builder and check_report both reach it
 SHIPPED-ONLY	AIDER_NO_AUTO_COMMIT	false	true adds --no-auto-commit to the aider argv, so the agent stops committing its own work. Driven at both values by the argv probe; no whole-command run of run-agent.sh exists at EITHER value. Cost: low
 BOTH	AUTO_TUNE	true	false pins the model and skips the recommendation drift check. CI's ollama E2E job runs the whole stack at false; every other fixture is true
-SHIPPED-ONLY	BACKUP_AGENT_WORKSPACE	false	true puts the agent's workspace into the archive, subject to BACKUP_AGENT_MAX_MB. Nothing has ever run a backup that includes it, so what a backup CONTAINS at that setting is unmeasured. Cost: low — backup_run_in takes a shim and a mode
+BOTH	BACKUP_AGENT_WORKSPACE	false	true puts the agent's workspace into the archive, subject to BACKUP_AGENT_MAX_MB. Driven: a real backup at each value, and the archive's own listing read back — plus the over-the-ceiling case, which must leave the rest of the backup intact
 SHIPPED-ONLY	CONVENTIONS_AGENT	unset	the same, for the agent surface — the one where CONVENTIONS.md is most expensive and most load-bearing at once. Cost: low
 SHIPPED-ONLY	CONVENTIONS_AIDER	unset	suggested in a comment, not shipped: unset means it inherits AIDER_CONVENTIONS, which is what every fixture leaves it at. Any explicit value is unreached — including the 'yes' that reads as OFF, which lca check could not see until boolean_settings learned to read commented suggestions. Cost: low
 BOTH	CONVENTIONS_CHAT	false	true adds ~618 tokens of CONVENTIONS.md to the chat's system prompt, measured 577 -> 1224 tokens, against a 15% budget that is 614 at the 4096 window of the smallest rung this project ships. lca check's context-fit line has only ever run at the small one. Cost: trivial — one check_report line. DRIVEN as of this commit
