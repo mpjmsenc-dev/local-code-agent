@@ -9410,6 +9410,63 @@ ci_compares_the_whole_prompt() {
 check "CI compares the container's prompt with this repo's, byte for byte" \
   ci_compares_the_whole_prompt
 
+# --- running the acceptance test itself ---------------------------------
+#
+# scripts/selftest.sh is straight-line — no main, no BASH_SOURCE guard — so
+# there is no seam to stub through after it sources lib.sh.
+#
+# The stub bodies below are INDENTED inside their strings on purpose. This
+# file's own source-grep classifier reads a line matching 'name() {' at column
+# zero as a function definition, and it does not skip multi-line single-quoted
+# strings — so an un-indented stub here is read as a gate in this suite that
+# greps source and cannot justify itself. It reported webui_drift; there is no
+# such gate. The stubs are
+# APPENDED to the sandbox's copy of lib.sh instead: a definition at the end of
+# that file wins over the one above it, and selftest.sh sources it whole. Same
+# trick sudo_waits_sandbox uses for systemd_available.
+#
+# Steps 1 to 3 talk to Ollama and to aider, so they fail here. That is fine and
+# deliberate: what is under test is step 4, and a self-test whose first three
+# checks failed must still run and still report the fourth.
+SELFTEST_SB="${SANDBOX}/selftest-run"
+selftest_run() {   # LIB-SHIM -> everything the acceptance test printed
+  local sb="${SELFTEST_SB}"
+  if [[ ! -e "${sb}/scripts/selftest.sh" ]]; then
+    mkdir -p "${sb}" "${sb}/bin" "${sb}/home"
+    ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${sb}" )
+    cp "${REPO}/.env.example" "${sb}/.env"
+    local c
+    for c in ollama docker nft tailscale systemctl sudo; do
+      printf '#!/bin/sh\nexit 1\n' > "${sb}/bin/${c}"
+    done
+    printf '#!/bin/sh\nexit 7\n' > "${sb}/bin/curl"
+    cp "${sb}/scripts/lib.sh" "${sb}/scripts/lib.sh.orig"
+    chmod -R a+rX "${sb}"
+    chmod +x "${sb}/bin/"*
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # The two that would otherwise sit in their own announced waits, and the
+  # chat app answering, so step 4 reaches the prompt comparison at all.
+  { printf '\nwait_for_ollama() { return 1; }\nensure_ollama_up() { return 1; }\n'
+    printf 'webui_responds() { return 0; }\nwebui_url() { printf "http://127.0.0.1:3000"; }\n'
+    printf '%s\n' "$1"; } >> "${sb}/scripts/lib.sh"
+  local out rc=0
+  out="$( cd "${sb}" \
+          && PATH="$(stub_path "${sb}/bin")" HOME="${sb}/home" \
+             timeout 120 bash "${sb}/scripts/selftest.sh" 2>&1 )" || rc=$?
+  printf '%s\n' "${out}"
+  return 0
+}
+# Non-vacuity for everything below: the run has to reach its own summary.
+selftest_harness_works() {
+  local out; out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { return 0; }')"
+  grep -q 'Self-test summary' <<<"${out}" || {
+    printf 'the acceptance test did not run to a summary in the sandbox:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+check "the acceptance test can be run against stand-ins" selftest_harness_works
 echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
 # The self-test's 4th check was "does the HTTP port answer". The only real bug
 # report ever filed against this project was a box where Ollama, the model,
@@ -9417,20 +9474,63 @@ echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
 # so this test would have printed "SELF-TEST PASSED — your stack works
 # end-to-end" to the person filing it. That is the worst thing a test can do:
 # vouch for the exact thing that is broken.
+#
+# Driven. The awk this replaces asked that the string DEFAULT_MODEL_PARAMS or
+# webui_drift appears somewhere after the "4/4" banner, and that the phrase
+# "skipped, not passed" appears anywhere in the file. Neither says which line a
+# given machine LANDS on, which is the entire question: the bug was a box where
+# the comparison could not run and the test printed a pass.
+#
+# Three machines, one run each.
 selftest_checks_the_live_prompt() {
-  awk '/step "4\/4 Open WebUI"/ { seen = 1 }
-       seen && /DEFAULT_MODEL_PARAMS|webui_drift/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/selftest.sh" || {
-    echo "selftest.sh never checks which assistant prompt the chat app is running" >&2
-    return 1
+  local out bad=0
+  # 1. The prompt is compared at all, and a match is reported as one.
+  out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { return 0; }')"
+  grep -q "carries this repo's assistant prompt" <<<"${out}" || {
+    printf "the acceptance test says nothing about which assistant prompt the chat app is running:\n%s\n" \
+      "${out}" >&2
+    bad=1
   }
-  # ...and an unreadable value must not be reported as a pass. "Cannot look"
-  # and "fine" are different answers, and this file already learned that the
-  # hard way for docker probes.
-  grep -q 'skipped, not passed' "${REPO}/scripts/selftest.sh" || {
-    echo "selftest.sh does not distinguish 'could not check' from 'passed'" >&2
-    return 1
+  # 2. A STALE prompt is a failure, not a note. This is the check the only real
+  # bug report ever filed against this project would have needed: every
+  # infrastructural check passed and the assistant was wrong.
+  out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { printf "SYSTEM_PROMPT\n"; }')"
+  grep -q 'OLDER assistant prompt' <<<"${out}" || {
+    printf 'a chat app running a stale assistant prompt was not reported:\n%s\n' "${out}" >&2
+    bad=1
   }
+  grep -qE '\[FAIL\].*assistant prompt' <<<"${out}" || {
+    printf 'a stale assistant prompt was reported at less than failure severity:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf 'the same run both failed and passed the prompt check:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 3. ...and a comparison that could not be made is SKIPPED, not passed.
+  # "Cannot look" and "fine" are different answers, and this file learned that
+  # the hard way for docker probes.
+  out="$(selftest_run 'webui_prompt_comparable() { return 1; }
+  webui_drift() { return 0; }')"
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf 'a prompt comparison that could not run was not reported as skipped:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf 'a box that could not compare the prompt was told the chat app carries this repo one:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and the skip is COUNTED, because the summary line branches on it: a run
+  # with a skip must not read as "works end-to-end".
+  grep -qE 'SKIPPED=[1-9]' <<<"${out}" || {
+    printf 'the skipped prompt check was not counted, so the summary cannot know about it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 # The "wrote no file" advice must not name causes nothing looked at.
 # "Check LCA_EDIT_FORMAT in .env and the context window" was a guess: observed
@@ -9764,6 +9864,84 @@ check "an offline restore says nothing was touched" \
   'net_blocked() { return 0; }
    as_root() { case "$*" in *"image inspect"*) return 1 ;; esac; return 0; }' \
   'any existing data is intact'
+# ...and restore.sh must actually tell those apart rather than share a branch.
+#
+# Driven. The greps this replaces asked that two sentences appear in the file
+# and that one of them is not inside the '5)' arm. A sentence survives being in
+# an arm nothing reaches, and an awk over a case statement says nothing about
+# which arm a given failure LANDS in. What is at stake is the one question a
+# reader has during a failed restore — is my data still there? — and the two
+# answers are opposite.
+#
+# So each status is produced and the verdict read back. The container's own
+# exit codes are already driven above (3 before the clear, 5 after it); this is
+# what restore.sh does with them.
+restore_verdict_for() {   # STATUS -> what restore.sh said about that outcome
+  restore_volume_with "as_root() { case \"\$*\" in *'docker run'*) return $1 ;; esac; return 0; }"
+}
+restore_distinguishes_the_stages() {
+  local out bad=0 code
+  # 3: the archive would not read, so nothing was touched. This is the
+  # reassuring answer and it must never be given for a wiped volume.
+  out="$(restore_verdict_for 3)"
+  grep -q 'was NOT wiped' <<<"${out}" || {
+    printf 'a failure BEFORE the volume was touched did not say the data survived:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 5: the volume was emptied and the unpack did not finish. The opposite
+  # answer, and the whole reason the two codes exist.
+  out="$(restore_verdict_for 5)"
+  grep -q 'FAILED PART-WAY' <<<"${out}" || {
+    printf 'a restore that emptied the volume and then failed was not reported as such:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qE 'NOT wiped|is intact|still there and unchanged' <<<"${out}" && {
+    printf 'a volume that WAS emptied was reported as untouched — this is the sentence the two codes exist to keep apart:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and it is the one outcome here that is an error rather than a warning:
+  # every other arm leaves the reader with their data, this one does not.
+  grep -q '\[FAIL\]' <<<"${out}" || {
+    printf 'losing the accounts and chat history is reported at the same severity as not touching them:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4, 6 and 7 all fail before anything is replaced, so all three must say so —
+  # otherwise "NOT wiped" at 3 is one lucky sentence rather than a rule.
+  for code in 4 6 7; do
+    out="$(restore_verdict_for "${code}")"
+    grep -qE 'is intact|still there and unchanged' <<<"${out}" || {
+      printf 'status %s fails before anything is replaced and the reader is not told their data survived:\n%s\n' \
+        "${code}" "${out}" >&2
+      bad=1
+    }
+    grep -q 'FAILED PART-WAY' <<<"${out}" && {
+      printf 'status %s was reported as a half-finished restore:\n%s\n' "${code}" "${out}" >&2
+      bad=1
+    }
+  done
+  # A status nobody has a sentence for must say it cannot tell, rather than
+  # picking one of the two answers. This is the arm that keeps the gate honest
+  # about codes added later.
+  out="$(restore_verdict_for 42)"
+  grep -q 'cannot say whether' <<<"${out}" || {
+    printf 'an unrecognised status was given one of the two definite answers:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and every one of them carried on to the model restore, because a
+  # recovery command must finish everything it still can.
+  for code in 3 4 5 6 7 42; do
+    grep -q 'RC=0' <<<"$(restore_verdict_for "${code}")" || {
+      printf 'status %s ended the restore instead of continuing with the models\n' "${code}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
+  restore_distinguishes_the_stages
 
 # ...and the SUCCESSFUL path has to say what it costs, which it never did.
 # 'rm -rf /to/*' replaces everything in the live volume with the backup's, and
@@ -12665,11 +12843,18 @@ STUB
   for c in ollama tailscale systemctl curl; do
     printf '#!/bin/sh\nexit 1\n' > "${CHECK_SB}/bin/${c}"
   done
+  # A pristine copy, so a per-case shim can be appended to lib.sh and then
+  # taken off again. Appending is how a stub reaches a straight-line product
+  # script: check-system.sh sources lib.sh and there is no seam after that.
+  cp "${CHECK_SB}/scripts/lib.sh" "${CHECK_SB}/scripts/lib.sh.orig"
   chmod -R a+rX "${CHECK_SB}"
   chmod +x "${CHECK_SB}/bin/"*
 }
-check_report() {   # ENV-LINES [WEBUI_STATE] [NFT_COVERS] -> the whole report
+check_report() {   # ENV-LINES [WEBUI_STATE] [NFT_COVERS] [LIB-SHIM] -> the whole report
   check_sandbox
+  # Restored every time, so one case's shim cannot leak into the next.
+  cp "${CHECK_SB}/scripts/lib.sh.orig" "${CHECK_SB}/scripts/lib.sh"
+  [[ -z "${4:-}" ]] || printf '\n%s\n' "$4" >> "${CHECK_SB}/scripts/lib.sh"
   cp "${REPO}/.env.example" "${CHECK_SB}/.env"
   printf '%s\n' "$1" >> "${CHECK_SB}/.env"
   # This harness overwrites its .env per case, so the file left at the end
@@ -17749,45 +17934,67 @@ prompt_check_is_not_claimed_when_skipped() {
   # webui_drift skips both prompt comparisons without jq, or when either side
   # is unreadable; the pass line named "system prompt" regardless.
   #
-  # Every reporter that makes the CLAIM, not just check-system.sh. selftest.sh
-  # had the same bug and was not covered by this: it rolled its own probe,
-  # reading the LIVE value alone, so on a box without jq the drift list could
-  # not contain SYSTEM_PROMPT and it printed "the chat app carries this repo's
-  # assistant prompt" — while install_webui.sh, on that same box, warns that the
-  # chat was started WITHOUT our prompt.
-  #
-  # Keyed on the success line, because that is the thing being made honest. A
-  # file that only reports drift when it finds it needs no guard: webui.sh
-  # warns per drifted key and never gives the prompt a clean bill of health, so
-  # its silence on a jq-less box is silence, not a false claim.
-  #
-  # Comments stripped before looking for the guard. Caught in mutation: the
-  # first version of this passed while selftest.sh was reverted to its own
-  # live-value probe, because the comment explaining the fix says the helper's
-  # name. Fourth time in this file.
-  local f code claimants=0
+  # Driven. The greps this replaces asked that each file claiming the prompt
+  # also contains the string webui_prompt_comparable and the phrase "skipped,
+  # not passed". Both survive the guard sitting in a branch nothing reaches —
+  # and this gate has already been fooled once by its own explanation, when the
+  # comment describing the fix satisfied the grep while selftest.sh was
+  # reverted to a hand-rolled probe. So both reporters are now RUN, on a
+  # machine where the comparison cannot be made and on one where it can.
+  local out bad=0
+  # 'lca check'. webui_drift is stubbed empty in both arms so the run reaches
+  # the success line at all — the drift branch above it says nothing about the
+  # prompt either way.
+  out="$(check_report '' running '' 'webui_drift() { return 0; }
+  webui_prompt_comparable() { return 1; }')"
+  grep -q 'system prompt' <<<"$(grep -E '^\[ ?ok ?\].*matches \.env' <<<"${out}" || true)" && {
+    printf "'lca check' could not compare the assistant prompt and passed it anyway:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf "'lca check' said nothing about the comparison it could not make:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  # ...and where it CAN compare, it says so, or "does not claim the prompt" is
+  # satisfied by a line that never mentions it.
+  out="$(check_report '' running '' 'webui_drift() { return 0; }
+  webui_prompt_comparable() { return 0; }')"
+  grep -qE '^\[ ?ok ?\].*matches \.env.*system prompt' <<<"${out}" || {
+    printf "'lca check' can compare the assistant prompt and does not say it did:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  # 'lca test' — the same claim, from the command whose whole output is a
+  # verdict on whether the stack works.
+  out="$(selftest_run 'webui_prompt_comparable() { return 1; }
+  webui_drift() { return 0; }')"
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf "'lca test' could not compare the assistant prompt and passed it anyway:\n%s\n" \
+      "$(grep -i prompt <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf "'lca test' said nothing about the comparison it could not make:\n%s\n" \
+      "$(grep -i prompt <<<"${out}")" >&2
+    bad=1
+  }
+  # A THIRD claimant would be undriven, and this gate would not know. The
+  # enumeration is text — which files make the claim — and it exists to fail
+  # loudly when the answer changes rather than to stand in for the two runs
+  # above.
+  local f claimants=()
   for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
     [[ "${f}" == "${REPO}/scripts/lib.sh" ]] && continue
-    grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" || continue
-    claimants=$(( claimants + 1 ))
-    code="$(sed 's/#.*//' "${f}")"
-    grep -q 'webui_prompt_comparable' <<<"${code}" || {
-      printf '%s claims the prompt matched without checking it could compare it\n' \
-        "${f##*/}" >&2
-      return 1; }
-    grep -q 'skipped, not passed' "${f}" || {
-      printf '%s does not say the prompt check was skipped rather than passed\n' \
-        "${f##*/}" >&2
-      return 1; }
+    grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" && claimants+=("${f##*/}")
   done
-  # A file list that matched nothing passes silently. The claim this guards is
-  # made by check-system.sh and selftest.sh; if neither still makes it,
-  # somebody reworded the success line and this stopped watching.
-  (( claimants >= 2 )) || {
-    printf 'only %s file(s) still claim the prompt matched — this stopped watching them\n' \
-      "${claimants}" >&2
-    return 1
+  [[ "${claimants[*]}" == "check-system.sh selftest.sh" ]] || {
+    printf 'the files claiming the assistant prompt matched are now: %s — the two arms above drive check-system.sh and selftest.sh, so any other one is a claim nothing checks\n' \
+      "${claimants[*]:-none at all}" >&2
+    bad=1
   }
+  return "${bad}"
 }
 prompt_comparable_needs_both_sides() {
   local out
@@ -19079,18 +19286,6 @@ unpack_failure_is_distinguishable() {
 }
 check "an unpack that fails after clearing exits 5, not 3" \
   unpack_failure_is_distinguishable
-# ...and restore.sh must actually tell those apart rather than share a branch.
-restore_distinguishes_the_stages() {
-  grep -q 'existing WebUI data was NOT wiped' "${REPO}/restore.sh" || return 1
-  grep -q 'FAILED PART-WAY' "${REPO}/restore.sh" || return 1
-  # the "not wiped" sentence must not live in the same arm as the wiped case
-  ! awk '/^ *5\)/ { inarm = 1; next }
-         inarm && /^ *;;/ { inarm = 0 }
-         inarm && /NOT wiped/ { found = 1 }
-         END { exit !found }' "${REPO}/restore.sh"
-}
-check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
-  restore_distinguishes_the_stages
 
 # ...and an option it does not take must be refused as one, not read as a
 # filename. It fell through as one, and — after the step banner, so it looked
@@ -21856,8 +22051,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 98 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 55 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 95 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 58 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

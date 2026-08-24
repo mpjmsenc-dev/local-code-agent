@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              98   of the 115 the projection was made from
-#   still worth driving     65
+#   A rows now              95   of the 115 the projection was made from
+#   still worth driving     62
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (16):
+#   Of the ~24 highest-cost, driven so far (19):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -85,6 +85,9 @@
 #     restore_tells_unreadable_from_corrupt a good archive, unopenable
 #     uninstall_removes_the_agent           the container that hands out a shell
 #     uninstall_feeds_every_step_to_the_verdict  one failing step at a time
+#     restore_distinguishes_the_stages      wiped vs not wiped, six statuses
+#     selftest_checks_the_live_prompt       fresh, stale, and not comparable
+#     prompt_check_is_not_claimed_when_skipped   both reporters, both ways
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -173,7 +176,7 @@ A	pin_is_sized_before_the_pull	line-number ordering inside main()
 FP	port_is_checked_before_the_container_is_destroyed	runs the real installer against a stand-in docker and reads what it was asked to do
 FP	probes_use_the_stricter_test	runs each reporting command under a sudo that waits, and bounds it
 A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
-A	prompt_check_is_not_claimed_when_skipped	presence-grep for a guard call in each claimant
+FP	prompt_check_is_not_claimed_when_skipped	runs 'lca check' and 'lca test' on a machine that cannot compare the prompt, and on one that can; greps only the file list of claimants
 FP	readability_still_wants_x_of_a_directory	calls readable_by_us as uid 65534 over four real directories and files
 A	ready_banner_asks_about_the_model	awk inside banner_ready for one call
 A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
@@ -184,12 +187,13 @@ H	remove_agent_sandboxes_run	runs uninstall.sh's sandbox removal against a stand
 A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
 H	restore_archive_sandbox	builds the checkout, the good-but-unopenable archive and the corrupt one a real restore is run against
 A	restore_asks_for_the_advice	awk inside main() for one call
-A	restore_distinguishes_the_stages	greps restore.sh for message placement
+FP	restore_distinguishes_the_stages	produces each volume-restore status in turn and reads the verdict: which of them say the data survived, which says it did not, and which admits it cannot tell
 FP	restore_main_calls_the_volume_restore	runs the real restore over an archive with and without the volume
 FP	restore_rebuilds_derived	restores an archive naming a derived model and checks it was rebuilt, not pulled
 FP	restore_reconciles_with_apply	runs the real restore over an archive and watches apply.sh being called
 FP	restore_tells_unreadable_from_corrupt	runs a real restore against a good archive it cannot open and a file that is not a gzip, and reads the two verdicts
 FP	restore_validates_env_first	puts an .env that would execute inside the archive and checks nothing ran
+H	restore_verdict_for	drives restore.sh's volume restore to a given exit status and returns what it told the reader
 FP	retention_ignores_enable_webui	runs a real backup with ENABLE_WEBUI=false and a volume that exists: the volume must still be archived, and docker must have been asked
 A	run_agent_checks_where_it_is_running	presence-greps plus line-number ordering
 A	run_agent_warns_on_an_odd_edit_format	greps run-agent.sh for warn/die forms
@@ -197,8 +201,9 @@ A	same_group_branch_kills_nothing	absence of a signal inside one branch
 A	seed_uses_a_diff_and_reads_it_back	awk over agent.sh for a read-back gate
 FP	seeds_a_real_boolean	extract-to-drive: builds the real payload and reads the value's type
 FP	seeds_max_output_as_a_number	extract-to-drive: builds the real payload and reads the value's type
-A	selftest_checks_the_live_prompt	awk over selftest.sh for a call after a step
+FP	selftest_checks_the_live_prompt	runs the real acceptance test three times — prompt fresh, stale, and not comparable — and reads which verdict each machine gets
 A	selftest_demands_aider_write_a_file	awk over the aider step for ordering
+H	selftest_run	builds a checkout with stand-in binaries and runs the real acceptance test, stubs appended to its copy of lib.sh
 A	selftest_uses_the_verdict	presence-grep for the call plus an absence rule
 A	service_store_is_checked_first	positional ordering inside a candidate list
 A	setup_calls_the_webui_installer	one grep for an invocation
