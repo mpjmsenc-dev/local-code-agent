@@ -45,15 +45,25 @@
 # claim is a runtime behaviour and whose evidence is that the source still
 # says so.
 #
-# Three of the 115 carry a written argument for why they cannot be driven, and
-# on re-reading all three are beatable with harnesses built since they were
-# written: service_store_is_checked_first (make both candidate directories
-# exist), tune_checks_the_model_is_downloaded (stub model_present), and
-# warm_is_detached (a curl that accepts and never answers is a stub that
-# sleeps). uninstall_answers_help_first says running uninstall.sh "would delete
-# the tester's own stack" — it is already run, safely, in a copy of the tree
-# with recorders, by installers_answer_help_before_acting. An excuse written
-# once is worth re-reading against the tools that exist now.
+# Three of the 115 carried a written argument for why they could not be driven.
+# All three are now DRIVEN, and none needed anything the excuse claimed:
+#
+#   service_store_is_checked_first       "cannot be asserted on a box that has
+#                                         only one of them" -> two mkdirs, and
+#                                         OLLAMA_SYSTEM_MODELS_DIR is a seam
+#   tune_checks_the_model_is_downloaded  "needs a real Ollama, a real pull and
+#                                         a real interruption" -> none of them:
+#                                         model_present answers, and the state
+#                                         an interruption leaves can be written
+#   warm_is_detached                     "no behavioural test catches it
+#                                         without a host that accepts and never
+#                                         answers" -> that host is a curl that
+#                                         sleeps. 0s detached, 8s without the &
+#
+# uninstall_answers_help_first says running uninstall.sh "would delete the
+# tester's own stack" — it is already run, safely, in a copy of the tree with
+# recorders, by installers_answer_help_before_acting. An excuse written once is
+# worth re-reading against the tools that exist now; three for three so far.
 #
 # Work order is by cost, not by count: roughly 24 of the 82 would, if they
 # silently stopped holding, cost data, the ability to recover, an exposed port,
@@ -63,8 +73,8 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              90   of the 115 the projection was made from
-#   still worth driving     57
+#   A rows now              87   of the 115 the projection was made from
+#   still worth driving     54
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
@@ -220,7 +230,7 @@ FP	selftest_checks_the_live_prompt	runs the real acceptance test three times —
 A	selftest_demands_aider_write_a_file	awk over the aider step for ordering
 H	selftest_run	builds a checkout with stand-in binaries and runs the real acceptance test, stubs appended to its copy of lib.sh
 A	selftest_uses_the_verdict	presence-grep for the call plus an absence rule
-A	service_store_is_checked_first	positional ordering inside a candidate list
+FP	service_store_is_checked_first	builds a machine with BOTH model stores and asks ollama_models_dir which one it picks
 A	setup_calls_the_webui_installer	one grep for an invocation
 A	setup_chain_is_in_dependency_order	step numbering and line ordering
 A	setup_ensures_the_model_after_the_pull	line-number ordering in main()
@@ -245,9 +255,10 @@ H	sudo_waits_sandbox	builds the copy of the tree, the blocking sudo stub and the
 FP	suggested_switches_are_validated_too	measures the appendix at 'true' and at 'yes', then reads what a real 'lca check' says about each
 A	switches_are_reported	presence-grep plus an absence rule
 A	tailscale_advice_is_conditional	greps two regions for branch arms
-A	tune_checks_the_model_is_downloaded	awk over tune.sh for two branch shapes
+FP	tune_checks_the_model_is_downloaded	runs a real tune with .env matching the ladder and the model absent, and reads whether it called the machine tuned
 A	tune_consults_the_disk_before_pulling	awk ordering across three regions of tune.sh
 A	tune_reconciles_after_a_model_change	awk over tune.sh for a call inside a branch
+H	tune_run_with_model	runs a real 'lca tune' in a scratch checkout with model_present answering either way and a recording ollama
 A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch condition and messages
 A	uninstall_answers_help_first	awk ordering inside main()
 FP	shipped_defaults_are_what_lib_resolves	loads lib.sh with no .env at all and compares what it resolves against what ships
@@ -261,7 +272,8 @@ A	update_mentions_restore_on_failure	awk over update.sh for a guarded call
 FP	update_refuses_unattended_after_a_failed_backup	drives update.sh's backup block against a failing backup, both terminal answers
 A	uses_announced_start	one grep for a call
 A	venv_without_pip_is_rebuilt	two presence-greps
-A	warm_is_detached	awk over warm_model for a background form
+FP	warm_is_detached	runs warm_model against a curl that accepts and never answers, and times the return
+H	warm_returns_in	times one warm_model against a stand-in server that accepts and never answers
 A	watch_follows_the_sandbox_too	two presence-greps in agent-watch.sh
 B	watch_judges_on_time_not_only_on_output	ALREADY DRIVEN by tests/test-agent-watch.sh, which runs the real watcher against a real silent container; kept as the belt for the skip that file takes without a docker daemon
 A	watch_log_arm_cannot_feed_an_armed_ceiling	counts one line and checks what shares it

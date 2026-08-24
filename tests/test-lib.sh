@@ -11183,18 +11183,62 @@ warm_returns_promptly() {
   (( SECONDS - t0 < 5 ))
 }
 check "warm_model returns promptly" warm_returns_promptly
-# Structural: the request must stay backgrounded. Losing the '&' is the one
-# edit that would silently reintroduce a multi-minute stall at boot, and no
-# behavioural test catches it without a host that accepts and never answers.
-# '[[:space:]]' not '\s' — awk has no \s, and the first version of this check
-# silently failed against correct code. Caught by mutation-testing it.
-warm_is_detached() {
-  awk '/^warm_model\(\)/ {f=1}
-       f && /curl .*api\/generate/ {c=1}
-       f && c && /&[[:space:]]*\)/ {ok=1}
-       f && /^}/ {exit !ok}' "${REPO}/scripts/lib.sh"
+# The request must stay backgrounded. Losing the '&' is the one edit that would
+# silently reintroduce a multi-minute stall at boot.
+#
+# This gate carried a written excuse — "no behavioural test catches it without
+# a host that accepts and never answers" — and the excuse was wrong. A host
+# that accepts and never answers is a curl that sleeps. The two arms above use
+# an unreachable port, which is refused instantly and so returns promptly with
+# or without the '&'; that is what made this look undrivable.
+#
+#   detached      returned in 0s, and the request was really made
+#   '&' deleted   returned in 8s
+WARM_SB="${SANDBOX}/warmdetach"
+warm_returns_in() {   # -> "SECONDS CALLS" for one warm_model against a sleeping curl
+  local sb="${WARM_SB}"
+  [[ -d "${sb}/stub" ]] || {
+    make_stub_dir "${sb}/stub"
+    # Accepts, records, and never answers. Eight seconds, so a blocked caller
+    # is unmistakable and an orphan cannot outlive the suite.
+    # shellcheck disable=SC2016  # the stub's own variable, read when it runs
+    { printf '#!/bin/sh\n'; printf 'printf "CURL\\n" >> "${WARM_LOG}"\n'; printf 'sleep 8\n'; } \
+      > "${sb}/stub/curl"
+    chmod +x "${sb}/stub/curl"
+  }
+  : > "${sb}/log"
+  local t0="${SECONDS}"
+  PATH="$(stub_path "${sb}/stub")" WARM_LOG="${sb}/log" \
+    bash -c 'source "$1" >/dev/null 2>&1; MODEL_NAME="not-a-real-model:1b"; warm_model >/dev/null 2>&1' \
+    _ "${REPO}/scripts/lib.sh"
+  local took=$(( SECONDS - t0 ))
+  # The call is made by a backgrounded child, so it may not have been scheduled
+  # yet when the parent returns — which is the whole point. One second is
+  # plenty and costs nothing next to the eight the failure would take.
+  sleep 1
+  printf '%s %s\n' "${took}" "$(grep -c . "${sb}/log")"
 }
-check "warm_model backgrounds the request" warm_is_detached
+warm_is_detached() {
+  local answer took calls
+  answer="$(warm_returns_in)"
+  took="${answer%% *}"; calls="${answer##* }"
+  # Non-vacuity first: warm_model returns 0 without doing anything when curl or
+  # jq is missing, and then "it returned promptly" is true of nothing at all.
+  (( calls >= 1 )) || {
+    echo 'warm_model made no request at all, so "it did not block" is about nothing' >&2
+    return 1
+  }
+  (( took < 3 )) || {
+    printf 'warm_model waited %ss for a server that accepts and never answers — at the end of the boot oneshot that is the whole unit sitting there\n' \
+      "${took}" >&2
+    return 1
+  }
+}
+if command -v jq >/dev/null 2>&1; then
+  check "warm_model backgrounds the request" warm_is_detached
+else
+  echo "skip - no jq, so warm_model returns before it would reach curl"
+fi
 
 echo "# a deliberately skipped component must not be reported as a problem"
 # Adding a skip flag without teaching the health check about it produces an
@@ -11940,36 +11984,49 @@ ollama_models_dir_answers_correctly() {
 }
 check "ollama_models_dir prefers OLLAMA_MODELS, then the real store" \
   ollama_models_dir_answers_correctly
-# The ORDER of the two candidates matters and cannot be asserted on a box that
-# has only one of them: Ollama runs as its own service account, so on a machine
-# with both stores the service one is the filesystem that fills up.
+# The ORDER of the two candidates matters, and this gate carried a written
+# excuse for reading source instead of driving it: "cannot be asserted on a box
+# that has only one of them". That was true of the box, not of the function.
+# ollama_models_dir takes OLLAMA_SYSTEM_MODELS_DIR as a seam and HOME decides
+# the other, so a machine with BOTH stores is two mkdirs — no root, no service
+# account, nothing that a CI runner lacks.
 #
-# No pipe anywhere in here, deliberately. Written first as
-# 'sed lib.sh | awk ... exit', which passed on this machine and FAILED in CI:
-# awk stops reading at the line it wants, sed keeps writing into a closed pipe,
-# takes SIGPIPE, and under 'set -o pipefail' the pipeline reports failure. It
-# is a race against the 64 KiB pipe buffer, so it depends on how much of the
-# file is left — lib.sh is the biggest file here and the match is halfway up,
-# which is why this one lost and the identical checks against motd.sh do not.
-# The same trap lib.sh's own current_run_log() carries a comment about.
+# What is at stake: Ollama runs as its own service account, so on a machine
+# with both stores the service one is the filesystem that fills up, and the
+# disk check that reads this answers about the wrong one.
 service_store_is_checked_first() {
-  local body l line="" svc_at home_at
-  # A range match reads the whole file; nothing exits early.
-  body="$(sed -n '/^ollama_models_dir() {/,/^}/p' "${REPO}/scripts/lib.sh")"
-  while IFS= read -r l; do
-    [[ "${l}" == *"for d in"* ]] && { line="${l}"; break; }
-  done <<<"${body}"
-  [[ -n "${line}" ]] || {
-    echo 'ollama_models_dir no longer loops over candidate stores' >&2; return 1; }
-  [[ "${line}" == */usr/share/ollama* && "${line}" == *HOME* ]] || {
-    echo 'the candidate list no longer names both the service store and the user one' >&2
-    return 1; }
-  # Prefix lengths, so the comparison is positional without invoking anything.
-  svc_at="${line%%/usr/share/ollama*}"
-  home_at="${line%%HOME*}"
-  (( ${#svc_at} < ${#home_at} )) || {
-    echo "the user's store is checked before the service account's" >&2
-    return 1; }
+  local sb="${SANDBOX}/mstore" got bad=0
+  rm -rf "${sb}"; mkdir -p "${sb}/svc/.ollama/models" "${sb}/home/.ollama/models"
+  # Both present: the service account's wins.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  OLLAMA_MODELS=""; HOME="$2/home"
+                  OLLAMA_SYSTEM_MODELS_DIR="$2/svc/.ollama/models"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/svc/.ollama/models" ]] || {
+    printf "on a machine with both stores the user's was chosen: %s\n" "${got}" >&2
+    bad=1
+  }
+  # Only the user's exists: it is the answer, or "the service one wins" is
+  # satisfied by a function that always returns the service path.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  OLLAMA_MODELS=""; HOME="$2/home"
+                  OLLAMA_SYSTEM_MODELS_DIR="$2/nowhere/.ollama/models"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/home/.ollama/models" ]] || {
+    printf 'with only the user store present the answer was: %s\n' "${got}" >&2
+    bad=1
+  }
+  # ...and an explicit OLLAMA_MODELS outranks both, which is the documented
+  # override and the reason the loop is not the first thing this function does.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  HOME="$2/home"; OLLAMA_SYSTEM_MODELS_DIR="$2/svc/.ollama/models"
+                  OLLAMA_MODELS="$2/explicit"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/explicit" ]] || {
+    printf 'an explicit OLLAMA_MODELS was ignored in favour of: %s\n' "${got}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and looks at the service account's store before the user's" \
   service_store_is_checked_first
@@ -18741,24 +18798,97 @@ echo "# 'already tuned' has to mean the model is on disk, not named in .env"
 # could not work, and the machine was left with .env naming a model that is not
 # there, which is what 'lca ask' and 'lca speed' then die on.
 #
-# Structural: reproducing it needs a real Ollama, a real pull and a real
-# interruption. The shape is the fix — both decisions have to consult the disk.
+# This gate carried a written excuse — "reproducing it needs a real Ollama, a
+# real pull and a real interruption" — and it needs none of them. What decides
+# the branch is model_present, which lives in lib.sh; the sandbox's copy of
+# lib.sh can answer either way, and a stand-in ollama records the pull that
+# follows. The interruption is not needed at all: its only product is a .env
+# that names a model which is not on disk, and that state can simply be
+# written.
+TUNE_REAL_SB="${SANDBOX}/tunereal"
+tune_run_with_model() {   # present|missing -> what a real 'lca tune' printed
+  local sb="${TUNE_REAL_SB}" want=0
+  [[ "$1" == "missing" ]] && want=1
+  if [[ ! -e "${sb}/scripts/tune.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/tune.sh" "${sb}/scripts/"
+    cp "${REPO}/scripts/lib.sh"  "${sb}/scripts/lib.sh.orig"
+    cp "${REPO}/.env.example"    "${sb}/.env.example"
+    make_stub_dir "${sb}/stub"
+    # Records what it was asked to do and agrees to all of it. A real pull is
+    # the one thing this must not do.
+    # shellcheck disable=SC2016  # the stub's own variables, read when it runs
+    { printf '#!/bin/sh\n'; printf 'printf "OLLAMA %%s\\\\n" "$*" >> "${TUNE_LOG}"\n'; printf 'exit 0\n'; } \
+      > "${sb}/stub/ollama"
+    printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/systemctl"
+    chmod +x "${sb}/stub/ollama" "${sb}/stub/systemctl"
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # Appended, because tune.sh sources lib.sh and there is no seam after that.
+  # Everything here except model_present is about keeping a real run from
+  # touching this machine: as_root records instead of acting, and the two waits
+  # answer at once.
+  # shellcheck disable=SC2016  # the stubs' own variables, read when THEY run
+  { printf '\nmodel_present() { return %s; }\n' "${want}"
+    printf 'as_root() { printf "AS_ROOT %%s\\n" "$*" >> "${TUNE_LOG}"; return 0; }\n'
+    printf 'systemd_available() { return 1; }\nwait_for_ollama() { return 0; }\n'
+    printf 'restart_ollama() { return 0; }\nensure_agent_model() { return 0; }\n'
+  } >> "${sb}/scripts/lib.sh"
+  # The ladder decides from THIS machine's RAM, so .env is seeded with whatever
+  # it chooses here rather than with a guess that holds on one box. A --dry-run
+  # to ask; the real run to assert on.
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=false\nOLLAMA_KEEP_ALIVE=30m\n' > "${sb}/.env"
+  local first m c
+  first="$( cd "${sb}" && timeout 60 bash scripts/tune.sh --dry-run 2>&1 )"
+  m="$(sed -n 's/.*Ladder decision: model=\([^ ]*\).*/\1/p' <<<"${first}" | head -1)"
+  c="$(sed -n 's/.*context=\([0-9]*\).*/\1/p' <<<"${first}" | head -1)"
+  [[ -n "${m}" && -n "${c}" ]] || {
+    printf 'could not read the ladder decision: %s\n' "${first}" >&2
+    return 1
+  }
+  # .env now says exactly what the ladder wants. Nothing about it is wrong
+  # EXCEPT, in the 'missing' case, that the model is not on the disk — which is
+  # precisely the state the two early exits leave behind.
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=false\nMODEL_NAME=%s\nOLLAMA_CONTEXT_LENGTH=%s\nOLLAMA_KEEP_ALIVE=-1\n' \
+    "${m}" "${c}" > "${sb}/.env"
+  : > "${sb}/log"
+  ( cd "${sb}" && PATH="$(stub_path "${sb}/stub")" TUNE_LOG="${sb}/log" \
+      timeout 90 bash scripts/tune.sh 2>&1 ) || true
+}
+tune_calls() { cat "${TUNE_REAL_SB}/log" 2>/dev/null || true; }
 tune_checks_the_model_is_downloaded() {
-  # 1. the fast path
-  awk '/^[[:space:]]*#/ { next }
-       /TUNE_MODEL.*==.*MODEL_NAME.*TUNE_CTX.*==.*OLLAMA_CONTEXT_LENGTH/ { fast = NR }
-       fast && NR >= fast && NR <= fast + 2 && /model_present/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/tune.sh" || {
-    echo 'tune.sh takes the "already tuned" fast path without checking the model is downloaded' >&2
-    return 1
+  local out bad=0
+  # The regression: .env matches the ladder exactly, and the model is not
+  # there. A fast path that compares .env against the ladder and nothing else
+  # calls this machine tuned.
+  out="$(tune_run_with_model missing)" || return 1
+  grep -q 'Already tuned for this machine' <<<"${out}" && {
+    printf 'a machine whose model is not downloaded was told it is already tuned:\n%s\n' "${out}" >&2
+    bad=1
   }
-  # 2. the pull decision
-  awk '/^[[:space:]]*#/ { next }
-       /TUNE_MODEL.*!=.*MODEL_NAME.*\|\|.*model_present/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/tune.sh" || {
-    echo 'tune.sh only fetches when the model NAME changed, so a missing model is never pulled' >&2
-    return 1
+  grep -q 'is not downloaded' <<<"${out}" || {
+    printf 'the missing model was not named as missing:\n%s\n' "${out}" >&2
+    bad=1
   }
+  # ...and it actually fetched it, which is the half the fast path skipped.
+  grep -q 'OLLAMA pull' <<<"$(tune_calls)" || {
+    printf 'tune said the model was missing and never pulled it:\n%s\n' "$(tune_calls)" >&2
+    bad=1
+  }
+  # The complement, and the reason the above is not satisfied by a tune that
+  # pulls on every run: with the model on disk and .env already right, it must
+  # say so and fetch nothing. A 9 GB download on every boot is the opposite
+  # failure.
+  out="$(tune_run_with_model present)" || return 1
+  grep -q 'Already tuned for this machine' <<<"${out}" || {
+    printf 'a fully tuned machine is no longer reported as one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'OLLAMA pull' <<<"$(tune_calls)" && {
+    printf 'a machine that needed nothing pulled a model anyway:\n%s\n' "$(tune_calls)" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
@@ -22286,8 +22416,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 90 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 62 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 87 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 65 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
