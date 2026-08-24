@@ -5884,6 +5884,30 @@ check "the settings seeder proves the write landed instead of trusting a 200" \
 # on a network call writes no log at all. A loop that judges once per log line
 # never judges such a run. Both of these were found by watching a real
 # container, not by reading the loop.
+#
+# NOT converted, and that is the finding. Read as one of the highest-cost gates
+# still reading source, this turned out not to be debt: the behaviour is
+# already DRIVEN, in another file. tests/test-agent-watch.sh starts a real
+# container running 'sleep 600' — a process that says nothing at all — points
+# the real scripts/agent-watch.sh at it with AGENT_TIMEOUT_MINUTES=1, and
+# asserts both halves of what this reads for:
+#
+#   the wall clock fires on a container that never says a word
+#   ...and the container was really stopped, not just reported
+#
+# The negated-read half is covered by the same assertion: a loop that read $?
+# after '! read' would break on the first tick and announce "the agent stopped
+# on its own", so 'wall-clock limit' would not appear. CI runs that file in the
+# system-artefacts job, against a real docker daemon.
+#
+# What is kept here is a cheap structural belt, and it earns its place for one
+# reason: that file SKIPS itself where there is no reachable daemon, and these
+# two shapes are the ones whose absence is silent. A belt that costs a
+# millisecond next to a five-minute test that can skip is worth the line.
+#
+# SOURCE-GREP: driven by tests/test-agent-watch.sh, which needs a docker daemon
+# and skips without one. This is the belt for that skip, and its subject is
+# deliberately the shape of the loop rather than its behaviour.
 watch_judges_on_time_not_only_on_output() {
   local body
   body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
@@ -22262,7 +22286,7 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 91 )) || {
+  (( n <= 90 )) || {
     printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 62 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }

@@ -63,12 +63,19 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              91   of the 115 the projection was made from
-#   still worth driving     58
+#   A rows now              90   of the 115 the projection was made from
+#   still worth driving     57
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (23):
+#   The ~24 highest-cost tranche is DONE: 23 driven, and one that turned out
+#   not to be debt at all — watch_judges_on_time_not_only_on_output is already
+#   driven by tests/test-agent-watch.sh against a real silent container, so its
+#   row is B with a pointer and the gate stays as the belt for the skip that
+#   file takes without a docker daemon. Reading a row is not the same as
+#   converting it, and one in twenty-four was worth more as a re-read.
+#
+#   The twenty-three driven:
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -256,7 +263,7 @@ A	uses_announced_start	one grep for a call
 A	venv_without_pip_is_rebuilt	two presence-greps
 A	warm_is_detached	awk over warm_model for a background form
 A	watch_follows_the_sandbox_too	two presence-greps in agent-watch.sh
-A	watch_judges_on_time_not_only_on_output	presence-grep plus an absence rule
+B	watch_judges_on_time_not_only_on_output	ALREADY DRIVEN by tests/test-agent-watch.sh, which runs the real watcher against a real silent container; kept as the belt for the skip that file takes without a docker daemon
 A	watch_log_arm_cannot_feed_an_armed_ceiling	counts one line and checks what shares it
 A	watch_reads_the_event_source	three presence-greps in agent-watch.sh
 H	webui_guard_install_run	builds a checkout of install_webui.sh minus its 'main "$@"' line and runs it against a recording netmode.sh
