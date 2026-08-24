@@ -3414,22 +3414,77 @@ check "...and Ollama is given longer to load than the probe waits" \
 # The startup lines are gone, the file opens with an error from the process
 # that died, and a text log has NUL bytes in it — and that file is what
 # 'lca logs ollama' prints.
+#
+# Driven, because the subject is a RACE and no reading of the source settles
+# one. The greps this replaces asked that the body contains 'flock' and that a
+# wait_for_ollama appears between the flock and the nohup. Both survive a lock
+# taken on the wrong file, a lock never released, and a re-check that reads a
+# stale answer. Three commands are started at once against a stand-in server
+# that takes two seconds to come up, and the spawns are counted.
+BG_RACE_SB="${SANDBOX}/bgrace"
+bg_race_spawns() {   # RACERS -> how many servers actually started
+  local sb="${BG_RACE_SB}"
+  if [[ ! -e "${sb}/lib.sh" ]]; then
+    # make_stub_dir, not mkdir: a directory of fakes with no sudo beside it is
+    # invisible to as_root, which replaces PATH with sudoers' secure_path — the
+    # trap the retention harness records, and which this file gates against.
+    make_stub_dir "${sb}/stub"
+    cp "${REPO}/scripts/lib.sh" "${sb}/lib.sh"
+    # A server that records itself, takes two seconds to answer, and then stays
+    # up. The delay is the window: without the lock both racers are inside it.
+    # shellcheck disable=SC2016  # the stub's own variables, read when it runs
+    { printf '#!/bin/sh\n'
+      printf 'if [ "${1:-}" = "serve" ]; then\n'
+      printf '  printf "SPAWN %%s\\\\n" "$$" >> "${LCA_SPAWN_LOG}"\n'
+      printf '  sleep 2\n  : > "${LCA_UP_MARKER}"\n  sleep 5\nfi\nexit 0\n'; } > "${sb}/stub/ollama"
+    chmod +x "${sb}/stub/ollama"
+    # Appended, because lib.sh is sourced whole and there is no seam after it.
+    # wait_for_ollama polls like the real one, so the winner holds the lock
+    # until its server answers rather than releasing it immediately.
+    # shellcheck disable=SC2016  # the stubs' own variables, read when THEY run
+    { printf '\nhave() { command -v "$1" >/dev/null 2>&1; }\n'
+      printf 'ollama_extra_env() { :; }\nwarn() { :; }\n'
+      printf 'wait_for_ollama() { local i; for i in $(seq 1 "${1:-2}"); do'
+      printf ' [[ -e "${LCA_UP_MARKER}" ]] && return 0; sleep 1; done; return 1; }\n'
+    } >> "${sb}/lib.sh"
+  fi
+  : > "${sb}/spawns"; rm -f "${sb}/up" "${sb}/log.lock" "${sb}/log"
+  local i
+  for (( i = 0; i < $1; i++ )); do
+    # shellcheck disable=SC2016  # code for the racer's shell, not a string to expand here
+    ( PATH="$(stub_path "${sb}/stub")" LCA_SPAWN_LOG="${sb}/spawns" LCA_UP_MARKER="${sb}/up" \
+      timeout 60 bash -c 'set -uo pipefail
+        source "$1" >/dev/null 2>&1
+        OLLAMA_BG_LOG="$2/log"
+        start_ollama_bg >/dev/null 2>&1' _ "${sb}/lib.sh" "${sb}" ) &
+  done
+  wait
+  grep -c . "${sb}/spawns" || true
+}
 start_bg_serialises_against_itself() {
-  local body
-  body="$(sed -n '/^start_ollama_bg() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || { echo 'could not find start_ollama_bg' >&2; return 1; }
-  grep -q 'flock' <<<"${body}" || {
-    echo 'start_ollama_bg does not serialise, so two lca commands can both start a server and truncate each other'"'"'s log' >&2
-    return 1; }
-  # The lock is worthless without a re-check inside it: the winner has usually
-  # finished starting by the time the loser is admitted, and starting a second
-  # server then is the very thing being prevented.
-  awk '/flock -w/                { locked = 1 }
-       locked && /wait_for_ollama/ { rechecked = 1 }
-       /nohup/                   { if (!spawned) { spawned = 1; ok = rechecked } }
-       END { exit (spawned && ok) ? 0 : 1 }' <<<"${body}" || {
-    echo 'start_ollama_bg takes the lock but never re-checks inside it, so the loser still starts a second server' >&2
-    return 1; }
+  local n bad=0
+  # Non-vacuity first: on a box where nothing is running, ONE command has to
+  # start a server. A function that never spawns would pass every count below.
+  n="$(bg_race_spawns 1)"
+  [[ "${n}" == "1" ]] || {
+    printf 'a single command on a box with no server started %s of them\n' "${n}" >&2
+    return 1
+  }
+  # ...and three at once must still produce exactly one. flock removed, this
+  # is 3.
+  n="$(bg_race_spawns 3)"
+  [[ "${n}" == "1" ]] || {
+    printf 'three commands raced to start Ollama and %s servers were spawned — the losers cannot bind, but they truncate the log first, which is the file lca logs ollama prints\n' \
+      "${n}" >&2
+    bad=1
+  }
+  # ...and the log the survivor wrote is intact: one writer, no NUL bytes. That
+  # is the damage the race does, stated as the thing the reader would see.
+  if [[ -e "${BG_RACE_SB}/log" ]] && LC_ALL=C grep -qU $'\0' "${BG_RACE_SB}/log"; then
+    echo "the background log has NUL bytes in it — two processes wrote to it at once" >&2
+    bad=1
+  fi
+  return "${bad}"
 }
 check "...and only one command at a time starts the server" \
   start_bg_serialises_against_itself
@@ -22207,8 +22262,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 92 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 61 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 91 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 62 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
@@ -22269,6 +22324,61 @@ no_test_function_is_defined_and_never_run() {
   }
   return "${dead}"
 }
+echo "# no tracked path may be hostile to a glob"
+# Found the hard way, by leaving one behind. A stray file in the repo root
+# whose name began with '-' turned every harness that globs "${REPO}"/* into
+#
+#   cp: invalid option -- '1'
+#
+# and nineteen gates failed at once with messages about the product — "the
+# reader was not told", "setup.sh does not reach its end" — when what had
+# happened was that cp read a filename as a flag and copied nothing. A whole
+# cycle went into reading those messages as if they were about the code.
+#
+# It is not only a test problem: uninstall.sh, backup.sh and the installers all
+# glob and 'rm -rf' inside this tree, and a leading dash is read as an option by
+# every one of those tools. A newline is worse — it breaks the 'while read'
+# loops this file and the product both use to walk lists of files.
+#
+# SOURCE-GREP: the subject IS the set of names in the tree. There is no
+# behaviour to drive; the property is what git is tracking.
+no_tracked_path_is_hostile_to_a_glob() {
+  local bad=0 names
+  names="$( cd "${REPO}" && git ls-files )"
+  [[ -n "${names}" ]] || {
+    echo 'git listed no tracked files at all — this gate stopped watching' >&2
+    return 1
+  }
+  # A component that starts with '-'. Anchored per path segment, because
+  # 'docs/-x.md' is read as a flag by anything that globs that directory.
+  local dashed
+  dashed="$(grep -E '(^|/)-' <<<"${names}" || true)"
+  [[ -z "${dashed}" ]] || {
+    printf 'these tracked paths have a component starting with "-", which cp, rm and every other tool reads as an option:\n%s\n' \
+      "${dashed}" >&2
+    bad=1
+  }
+  # ...and whitespace, which splits under an unquoted expansion.
+  local spaced
+  spaced="$(grep -E '[[:space:]]' <<<"${names}" || true)"
+  [[ -z "${spaced}" ]] || {
+    printf 'these tracked paths contain whitespace, which splits wherever the tree is walked:\n%s\n' \
+      "${spaced}" >&2
+    bad=1
+  }
+  # Non-vacuity: the scanner has to be able to SEE a bad name, or an empty
+  # answer above means nothing. Asked of the matcher, not of the tree — there
+  # is deliberately no such file to find, and the made-up name must not look
+  # like a document either: the gate that checks every doc a script names is a
+  # file will go looking for it.
+  grep -qE '(^|/)-' <<<"somewhere/-hostile" || {
+    echo 'the leading-dash matcher no longer matches a leading dash' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no tracked path starts with a dash or contains whitespace" \
+  no_tracked_path_is_hostile_to_a_glob
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 

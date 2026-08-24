@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              92   of the 115 the projection was made from
-#   still worth driving     59
+#   A rows now              91   of the 115 the projection was made from
+#   still worth driving     58
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (22):
+#   Of the ~24 highest-cost, driven so far (23):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -91,6 +91,7 @@
 #     ask_bounds_the_whole_context          three windows, 48,000 characters
 #     ask_reports_a_cut_short_answer        a request that died mid-stream
 #     ask_announces_a_cold_load             resident and not, and on stderr
+#     start_bg_serialises_against_itself    three racers, one server
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -127,6 +128,7 @@ FP	backup_serialises_itself	runs backup.sh against a lock another process really
 FP	backup_stages_no_empty_model_list	drives do_backup with a failing ollama and lists the archive
 A	banner_network_probes_bound_themselves	greps motd.sh probe lines for --max-time
 A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
+H	bg_race_spawns	runs N concurrent start_ollama_bg calls in a sandbox and returns how many actually spawned a server
 A	both_commands_announce_a_model_load	greps two scripts for a call
 A	both_reporters_ask_lib	greps for who computes the git identity
 A	both_surfaces_report_an_unknown_family	awk for a call inside main()
@@ -176,6 +178,7 @@ FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, 
 A	motd_bounds_the_docker_read	awk inside chat_stale_row for a timeout
 A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
+B	no_tracked_path_is_hostile_to_a_glob	the subject IS the set of names git tracks; a leading dash or whitespace breaks every glob and read loop in the tree
 A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
 A	pin_is_sized_before_the_pull	line-number ordering inside main()
 FP	port_is_checked_before_the_container_is_destroyed	runs the real installer against a stand-in docker and reads what it was asked to do
@@ -226,7 +229,7 @@ A	speed_classifies_the_placement	awk proximity in speed.sh
 A	speed_measures_reading_separately	presence-greps for which counters are used
 A	start_and_restart_draw_the_note	counts calls inside webui.sh's dispatch
 A	start_bg_reads_the_file_rather_than_copying_it	presence-grep for the shared reader plus a narrow absence
-A	start_bg_serialises_against_itself	awk over the function for lock ordering
+FP	start_bg_serialises_against_itself	starts three commands at once against a stand-in server that takes two seconds to come up, and counts how many servers were spawned
 A	start_seeds_the_settings	two presence-greps in agent.sh
 A	stop_collects_the_sandboxes	awk inside the stop arm for one call
 A	submit_refuses_an_ambiguous_id	presence-greps in agent-task.sh
