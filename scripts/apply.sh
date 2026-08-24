@@ -204,6 +204,55 @@ apply_webui() {
   CHANGED=$((CHANGED+1))
 }
 
+# apply_relay — the Ollama relay, which nothing in this file reconciled.
+#
+# Found by asking what 'lca apply' does NOT apply. Its summary is a statement
+# about what in .env is in effect, and the word "relay" did not appear in this
+# file at all: with ENABLE_OLLAMA_RELAY=true and the units absent, apply
+# printed "Applied 1 change(s). Verify with: lca check" about a machine where
+# the switch was doing nothing. 'lca check' warns about exactly that, so the
+# two commands disagreed — and this file already refuses to let them disagree
+# about the ports, for the same reason.
+#
+# Re-installed when the address has DRIFTED, because that is the guard's shape:
+# a boot unit that bakes in an address the machine no longer has. NOT installed
+# from nothing, for the reason apply_backup_timer gives about the timer — an
+# install nobody asked for, on a command they ran to reconcile, is a surprise.
+# Enabled-but-absent is reported and counted instead, which is what leaves the
+# summary honest.
+apply_relay() {
+  if [[ "${ENABLE_OLLAMA_RELAY}" != "true" ]]; then
+    info "Relay:    disabled in .env — nothing to apply."
+    return 0
+  fi
+  local addr drift
+  if ! addr="$(ollama_relay_address 2>/dev/null)"; then
+    warn "Relay:    OLLAMA_RELAY_PORT='${OLLAMA_RELAY_PORT}' is not a port number, so the relay has no address to listen on and the agent cannot reach the model. Fix it in ${ENV_FILE}."
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  if ! ollama_relay_unit_address >/dev/null 2>&1; then
+    warn "Relay:    enabled in .env but its boot units are not installed, so nothing is listening on ${addr} and the agent cannot reach Ollama. Install them with: sudo ${REPO_ROOT}/bin/lca relay install"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  if ! drift="$(ollama_relay_drift 2>/dev/null)"; then
+    ok "Relay:    already listening on ${addr}."
+    return 0
+  fi
+  would "re-install the relay's boot units, which listen on ${drift} rather than the ${addr} this machine now has." && return 0
+  needs_root "Re-installing the relay" || return 0
+  info "Relay:    re-installing the boot units (they listen on ${drift}, this machine now has ${addr})..."
+  # Not bare under 'set -e', for the reason apply_webui states above.
+  if ! "${SCRIPT_DIR}/ollama-relay.sh" install; then
+    warn "Relay:    could not be re-installed, so the agent still cannot reach Ollama on ${addr} — see the error above. Retry with: sudo ${REPO_ROOT}/bin/lca relay install"
+    UNCHECKED=$((UNCHECKED+1))
+    return 0
+  fi
+  ok "Relay:    applied."
+  CHANGED=$((CHANGED+1))
+}
+
 apply_backup_timer() {
   if ! systemd_available; then
     info "Backups:  no systemd — no timer to apply to."
@@ -376,6 +425,9 @@ main() {
   apply_ollama
   apply_webui
   apply_agent
+  # Before the guard, which asks guarded_ports what to cover — and the relay's
+  # address is on that list.
+  apply_relay
   apply_backup_timer
   apply_guard
 

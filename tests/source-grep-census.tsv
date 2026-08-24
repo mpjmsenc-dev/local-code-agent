@@ -120,11 +120,12 @@ FP	agent_sh_corrects_the_callback_address	extract-to-drive: reads the OH_* value
 FP	agent_sh_passes_the_sandbox_env	extract-to-drive: reads the value off the real docker argv
 FP	aider_no_auto_commit_is_wired	extract-to-drive: builds the real aider argv and reads the flag off it
 A	aider_pin_is_watched	greps check-system.sh for pin handling
-A	appliers_check_the_scripts_they_call	source lint standing in for "apply survives a failing sub-script"
+FP	appliers_check_the_scripts_they_call	fails each sub-script apply.sh calls in turn: every run must reach its summary, count the failure, and still reconcile the guard
 A	apply_asks_before_rendering	awk over apply.sh for the order two calls appear in
 A	apply_does_not_read_ollama_ps	greps for the absence of a command in two function bodies
 FP	apply_reconciles_the_agent	drives apply_agent over five states of the container and .env
-A	apply_survives_a_failed_rebuild	awk for a guarded invocation line; the behaviour is drivable
+H	apply_run_failing	runs the whole of scripts/apply.sh with one of its three sub-scripts failing on demand
+FP	apply_survives_a_failed_rebuild	runs a whole 'lca apply' against a chat-app installer that fails, and reads what it said and whether it finished
 A	apt_failure_checks_sudo_first	greps the apt branch for message order
 FP	ask_announces_a_cold_load	runs 'lca ask' with the model resident and with it not, and checks which run gets the notice and on which stream
 FP	ask_bounds_the_whole_context	runs 'lca ask' at three context windows with 48,000 characters of context and measures the prompt that reached the model

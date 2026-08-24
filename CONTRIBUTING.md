@@ -1081,8 +1081,18 @@ take whatever you are looking at and ask it backwards.
 | does `lca logs` tell an unreadable log from a missing one? | which of this project's own logs does it not offer at all? | the agent tier — and four stalls behind it |
 | does the switch validator catch a mistyped switch? | which switches does the validator not see? | the two `.env.example` suggests in a comment |
 | does `uninstall` remove what it says it removes? | what does it leave behind that it never mentions? | every `oh-agent-server-*` sandbox, left running |
+| does `lca apply` survive a sub-script that fails? | what does it not apply that it claims to? | the Ollama relay — the word did not appear in `apply.sh` at all |
 
-That last one is the sharpest of the four. `uninstall.sh` removed the agent's
+The fifth is the same shape as the fourth. `lca apply` printed
+`[ ok ] Applied 1 change(s). Verify with: lca check` on a machine with
+`ENABLE_OLLAMA_RELAY=true` and the relay's units absent — a clean bill about a
+switch the reader set that was doing nothing. `lca check` warns about exactly
+that state, so the two commands disagreed, and this project already refuses to
+let them disagree about the ports. `apply_relay` reports the missing units and
+counts them, and re-installs when the bridge address has drifted — the guard's
+shape, not the timer's.
+
+The fourth is the sharpest. `uninstall.sh` removed the agent's
 app container and left every sandbox it had spawned **running**, under a
 closing line that said "Uninstall complete". A sandbox belongs to a
 conversation inside the app container, so once that container is gone nothing

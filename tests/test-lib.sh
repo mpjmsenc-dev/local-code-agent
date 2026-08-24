@@ -12519,21 +12519,232 @@ check "'lca apply' reports an agent still running after .env disabled it" \
 # right here: the inbound guard was never reconciled, no summary was printed"
 # — and the other two did exactly that, including the last one, where
 # everything else has already succeeded by the time it runs.
+#
+# Driven. The grep this replaces looked for bare invocation lines and for one
+# guarded form still existing. It cannot see an applier that checks the status
+# and then returns anyway, it cannot see the summary going missing, and it says
+# nothing about the thing the comment is actually about: whether the GUARD is
+# still reconciled after an earlier step failed. So each sub-script is made to
+# fail in turn and the whole of 'lca apply' is run.
+APPLY_SB="${SANDBOX}/applyrun"
+apply_run_failing() {   # FAILING-SUBSCRIPT [EXTRA-LIB] [EXTRA-ENV] -> the whole run
+  local sb="${APPLY_SB}" f
+  if [[ ! -e "${sb}/scripts/apply.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/apply.sh" "${sb}/scripts/"
+    cp "${REPO}/scripts/lib.sh"   "${sb}/scripts/lib.sh.orig"
+    cp "${REPO}/.env.example"     "${sb}/.env.example"
+    cp "${REPO}/.env.example"     "${sb}/.env"
+    make_stub_dir "${sb}/stub"
+    # The timer has to read as installed, or apply_backup_timer returns before
+    # it ever reaches backup.sh — "not installed" is a choice, not drift.
+    printf '#!/bin/sh\ncase "$*" in *is-enabled*) exit 0 ;; esac\nexit 0\n' > "${sb}/stub/systemctl"
+    chmod +x "${sb}/stub/systemctl"
+    # The three sub-scripts, recording themselves and failing on demand. Their
+    # own behaviour has its own gates; what is under test is what apply does
+    # with the answer.
+    for f in scripts/install_webui.sh backup.sh netmode.sh scripts/ollama-relay.sh; do
+      mkdir -p "${sb}/$(dirname "${f}")"
+      # shellcheck disable=SC2016  # the stand-in's own variables, read when IT runs
+      { printf '#!/usr/bin/env bash\n'
+        printf 'printf "RAN %s %%s\\n" "$*" >> "${APPLY_LOG}"\n' "${f##*/}"
+        printf '[ "${APPLY_FAIL:-}" = "%s" ] && exit 1\nexit 0\n' "${f##*/}"; } > "${sb}/${f}"
+      chmod +x "${sb}/${f}"
+    done
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # Appended, because apply.sh sources lib.sh and there is no seam after it.
+  # Every one of these exists to put the machine in the state where all three
+  # appliers have something to do — a run where nothing needs applying would
+  # call none of the sub-scripts and prove nothing.
+  cat >> "${sb}/scripts/lib.sh" <<'STUBS'
+have() { return 0; }
+am_root() { return 0; }
+as_root() { "$@"; }
+can_root_now() { return 0; }
+systemd_available() { return 0; }
+docker_daemon_reachable() { return 0; }
+webui_container_running() { return 0; }
+webui_container_exists() { return 0; }
+webui_drift() { printf 'MODEL_NAME\n'; }
+agent_container_running() { return 1; }
+agent_container_exists() { return 1; }
+agent_live_port() { return 1; }
+render_ollama_dropin() { return 0; }
+restart_ollama() { return 0; }
+ollama_dropin_drift() { printf 'context\n'; }
+installed_backup_schedule() { printf '*-*-* 05:00:00\n'; }
+guarded_ports() { printf 'WebUI 3000\n'; }
+inbound_guard_uncovered() { printf 'WebUI 3000\n'; }
+ollama_relay_unit_address() { printf '172.17.0.1:11435\n'; }
+ollama_relay_drift() { printf '172.18.0.1:11435\n'; }
+STUBS
+  # The caller's own lines last, so they win over the block above.
+  [[ -z "${2:-}" ]] || printf '%s\n' "$2" >> "${sb}/scripts/lib.sh"
+  # The relay switched ON, because with it off apply_relay returns before it
+  # reaches its sub-script and one of the four below would never be driven.
+  # That is configuration blindness in miniature — see tests/config-coverage.tsv.
+  cp "${REPO}/.env.example" "${sb}/.env"
+  printf 'ENABLE_OLLAMA_RELAY=true\n' >> "${sb}/.env"
+  # ...and the caller's own settings after it. This has to be .env and not the
+  # lib shim: apply.sh sources lib.sh and THEN calls load_env, so a value set
+  # in the shim is overwritten by the file a moment later.
+  [[ -z "${3:-}" ]] || printf '%s\n' "$3" >> "${sb}/.env"
+  record_configuration "${sb}/.env"
+  : > "${sb}/log"
+  ( cd "${sb}" && PATH="$(stub_path "${sb}/stub")" APPLY_LOG="${sb}/log" APPLY_FAIL="$1" \
+      timeout 90 bash scripts/apply.sh 2>&1 ) || true
+}
+apply_ran() { cat "${APPLY_SB}/log" 2>/dev/null || true; }
+apply_reached_its_summary() { grep -qE 'change\(s\)|Everything in .env' <<<"$1"; }
 appliers_check_the_scripts_they_call() {
-  local hits
-  hits="$(grep -nE '^[[:space:]]*"\$\{(REPO_ROOT|SCRIPT_DIR)\}/[^"]*"' "${REPO}/scripts/apply.sh" || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'apply.sh runs these without checking their status:\n%s\n' "${hits}" >&2
-    return 1
+  local out bad=0 who
+  # Nothing failing: all four are reached, so the arms below are about a run
+  # that really calls them, and nothing is reported as unapplied.
+  out="$(apply_run_failing '')"
+  for who in install_webui.sh backup.sh netmode.sh ollama-relay.sh; do
+    grep -q "RAN ${who}" <<<"$(apply_ran)" || {
+      printf 'a clean apply never reached %s, so failing it proves nothing:\n%s\n' \
+        "${who}" "$(apply_ran)" >&2
+      return 1
+    }
+  done
+  grep -q 'could not be' <<<"${out}" && {
+    printf 'a run where every step succeeded still reported something unapplied:\n%s\n' "${out}" >&2
+    bad=1
   }
-  # ...and the guarded form must still be there, or a rename could empty this.
-  grep -qE 'if ! "\$\{(REPO_ROOT|SCRIPT_DIR)\}/' "${REPO}/scripts/apply.sh" || {
-    echo "apply.sh no longer calls any sub-script — this gate stopped watching" >&2
-    return 1
-  }
+  # ...then each one in turn.
+  for who in install_webui.sh backup.sh netmode.sh ollama-relay.sh; do
+    out="$(apply_run_failing "${who}")"
+    apply_reached_its_summary "${out}" || {
+      printf '%s failed and lca apply never printed a summary — its whole contract is the summary:\n%s\n' \
+        "${who}" "${out}" >&2
+      bad=1
+      continue
+    }
+    grep -q 'could not be' <<<"${out}" || {
+      printf '%s failed and the run said nothing about it:\n%s\n' "${who}" "${out}" >&2
+      bad=1
+    }
+    grep -qE '[0-9]+ component\(s\) could not be checked' <<<"${out}" || {
+      printf '%s failed and the summary did not count it:\n%s\n' "${who}" "${out}" >&2
+      bad=1
+    }
+    # ...and the GUARD still ran. This is what the comment in apply_webui is
+    # about and what the grep could never see: an abort at the chat app leaves
+    # the ports as they were, on the command whose job is to close them.
+    grep -q 'RAN netmode.sh' <<<"$(apply_ran)" || {
+      printf '%s failed and the inbound guard was never reconciled:\n%s\n' "${who}" "$(apply_ran)" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
 }
 check "no applier runs a sub-script without checking it worked" \
   appliers_check_the_scripts_they_call
+# ...and the chat-app rebuild in particular, which is the one that shipped the
+# bug and the one every 'lca apply' on a settings change reaches.
+apply_survives_a_failed_rebuild() {
+  local out bad=0
+  out="$(apply_run_failing install_webui.sh)"
+  grep -q 'could not be re-created' <<<"${out}" || {
+    printf 'a failed container re-create was not reported as one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # It says what is therefore NOT in effect, because the reader edited .env and
+  # is entitled to know the edit did not land.
+  grep -q 'still not in effect' <<<"${out}" || {
+    printf 'the failed rebuild did not say which setting is still not applied:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'Continuing with the rest' <<<"${out}" || {
+    printf 'it reported the failure without saying it carried on:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  apply_reached_its_summary "${out}" || {
+    printf 'a failed rebuild took the whole apply with it:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca apply' survives a chat app that will not rebuild" \
+  apply_survives_a_failed_rebuild
+# ...and the relay, which nothing here reconciled until now.
+#
+# Found by asking what 'lca apply' does NOT apply. Its summary is a statement
+# about what in .env is in effect, and the word "relay" did not appear in
+# scripts/apply.sh at all. Measured, with ENABLE_OLLAMA_RELAY=true and the
+# units absent:
+#
+#   [ ok ] Applied 1 change(s). Verify with: lca check
+#
+# ...about a machine where the switch the reader set was doing nothing. 'lca
+# check' warns about exactly that state, so the two commands disagreed — and
+# this file already refuses to let them disagree about the ports.
+apply_reconciles_the_relay() {
+  local out bad=0
+  # Off: silent about a thing that is not there, and nothing counted.
+  out="$(apply_run_failing '' 'ollama_relay_unit_address() { return 1; }
+  ollama_relay_drift() { return 1; }' 'ENABLE_OLLAMA_RELAY=false')"
+  grep -qi 'Relay:    disabled' <<<"${out}" || {
+    printf 'a machine with the relay off was not told the relay needed nothing:\n%s\n' \
+      "$(grep -i relay <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'could not be checked' <<<"${out}" && {
+    printf 'a switched-off relay was counted as something that could not be applied:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # On, and the units are not installed. THE regression: the summary must stop
+  # being a clean bill.
+  out="$(apply_run_failing '' 'ollama_relay_unit_address() { return 1; }
+  ollama_relay_drift() { return 1; }')"
+  grep -q 'boot units are not installed' <<<"${out}" || {
+    printf 'the relay is enabled in .env, nothing is listening, and apply said nothing:\n%s\n' \
+      "$(grep -i relay <<<"${out}" || echo '(the word relay never appeared)')" >&2
+    bad=1
+  }
+  grep -qE '[0-9]+ component\(s\) could not be checked' <<<"${out}" || {
+    printf "apply reported a clean bill about a machine where .env's relay is not in effect:\n%s\n" \
+      "${out}" >&2
+    bad=1
+  }
+  grep -q 'lca relay install' <<<"${out}" || {
+    printf 'it reported the missing relay without naming the command that installs it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # On, installed, and the bridge has MOVED. Same shape as the guard: a boot
+  # unit that bakes in an address the machine no longer has. This one apply
+  # fixes rather than reports.
+  out="$(apply_run_failing '')"
+  grep -q 'RAN ollama-relay.sh install' <<<"$(apply_ran)" || {
+    printf 'the relay unit listens where nothing dials and apply did not re-install it:\n%s\n' \
+      "$(apply_ran)" >&2
+    bad=1
+  }
+  grep -qi 'Relay:    applied' <<<"${out}" || {
+    printf 'the relay was re-installed and the run did not say so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # On, installed, and in place: nothing to do, and it must not re-install on
+  # every apply. Without this arm the assertion above is satisfied by a version
+  # that always re-installs.
+  out="$(apply_run_failing '' 'ollama_relay_drift() { return 1; }')"
+  grep -q 'RAN ollama-relay.sh' <<<"$(apply_ran)" && {
+    printf 'a relay that is already right was re-installed anyway:\n%s\n' "$(apply_ran)" >&2
+    bad=1
+  }
+  grep -qi 'already listening on' <<<"${out}" || {
+    printf 'a relay that is already right was not reported as such:\n%s\n' \
+      "$(grep -i relay <<<"${out}")" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca apply' reconciles the relay it never used to mention" \
+  apply_reconciles_the_relay
 
 echo "# setup.sh may only die on the two steps that leave nothing able to run"
 # Same rule, one script over. setup.sh already knows the distinction — it
@@ -18357,21 +18568,6 @@ prompt_comparable_needs_both_sides() {
                   webui_prompt_comparable && echo yes || echo no' _ "${REPO}/scripts/lib.sh")"
   [[ "${out}" == no ]] || { echo "webui_prompt_comparable said yes with the container unreadable" >&2; return 1; }
 }
-apply_survives_a_failed_rebuild() {
-  # A bare install_webui.sh under errexit aborted 'lca apply' before the guard
-  # was reconciled and before any summary was printed.
-  awk '/^apply_webui\(\) \{/ { inb = 1 }
-       inb && /^\}/ { exit }
-       inb && /^[[:space:]]*#/ { next }
-       # Anchored to a bare INVOCATION line. Matching "install_webui.sh\"$"
-       # anywhere also matched the info() a few lines up that merely names the
-       # script — the message about the thing, counted as the thing.
-       inb && /^[[:space:]]*"\$\{SCRIPT_DIR\}\/install_webui\.sh"$/ { bare = 1 }
-       inb && /if ! "\$\{SCRIPT_DIR\}\/install_webui\.sh"/ { guarded = 1 }
-       END { exit !(guarded && !bare) }' "${REPO}/scripts/apply.sh" || {
-    echo 'apply.sh runs install_webui.sh unguarded, so a failed rebuild aborts the apply' >&2
-    return 1; }
-}
 # Driven. The grep this replaced could only see that update.sh still said
 # '-t 0' somewhere; the claim is a runtime one — that a failed backup stops an
 # update nobody is watching. So update.sh's backup block is lifted out and run
@@ -18470,7 +18666,6 @@ check "check-system restores set +e after sourcing tune.sh" errexit_survives_sou
 check "the prompt check is reported as skipped, not passed"  prompt_check_is_not_claimed_when_skipped
 check "webui_prompt_comparable needs jq AND a readable container" \
   prompt_comparable_needs_both_sides
-check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_failed_rebuild
 # ...and so must the FIRST applier, which takes all three of the others down
 # with it. apply_ollama ran render_ollama_dropin and restart_ollama bare, and
 # it could not have been fixed the way apply_webui was: both of those die(),
@@ -22416,8 +22611,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 87 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 65 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 85 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 67 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
