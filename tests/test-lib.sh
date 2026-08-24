@@ -7696,20 +7696,159 @@ ollama_bg_log_path_is_named_once() {
 check "...and that path is spelled out in exactly one place" \
   ollama_bg_log_path_is_named_once
 
+# 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
+# body with a zero exit status. Measured against a model that is not installed:
+#
+#   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
+#   {"error":"model 'no-such-model:1b' not found"}      (curl rc=0)
+#
+# piped through jq '.response // empty' that yields nothing, the pipeline
+# exits 0, and the only check afterwards was on the pipeline's status. So the
+# command printed nothing, warned about nothing and exited 0, throwing away the
+# one sentence that named the problem. Seen live as well: a cold 'lca ask -c'
+# printed "continuing from your last question", no answer, status 0.
+#
+# Driven end to end against ask.sh with curl stubbed, because the shape that
+# matters is the whole pipeline — capture, extraction and the check after it.
+# One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
+# it are the generated script's, not this one's — and the body it answers with
+# comes through the environment rather than being interpolated in.
+#
+# 'ollama' is stubbed as well as curl, and that is not belt-and-braces: ask.sh
+# checks model_present (which runs 'ollama show') before it generates anything,
+# and CI's unit job has neither the binary nor the model. Without this the
+# three gates below passed here and failed there with
+#
+#   [FAIL] Model 'qwen2.5-coder:7b' is not downloaded.
+#
+# which is ask.sh being right and the test being environment-dependent — the
+# exact class this file carries systemic guards for, introduced by me.
+write_ask_stubs() {  # DIR
+  make_stub_dir "$1"
+  cat > "$1/curl" <<'STUB'
+#!/bin/sh
+# With LCA_CAPTURE set, keep the request body: some gates need to see the
+# prompt that would have reached the model, not just the reply.
+if [ -n "${LCA_CAPTURE:-}" ]; then
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "-d" ] && printf '%s' "$a" > "${LCA_CAPTURE}"
+    prev="$a"
+  done
+fi
+for a in "$@"; do
+  case "$a" in
+    # LCA_FAKE_GENERATE_RC is how a request that DIED mid-answer is produced:
+    # curl printing part of a stream and then exiting non-zero is exactly the
+    # 10-minute cap, a restart, or the model being killed for memory.
+    */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit "${LCA_FAKE_GENERATE_RC:-0}" ;;
+  esac
+done
+printf '%s' '{"version":"0.32.5"}'
+STUB
+  cat > "$1/ollama" <<'STUB'
+#!/bin/sh
+# Only what ask.sh asks: 'ollama show MODEL' decides model_present, and
+# 'ollama ps' decides whether the model is already resident — which is what
+# model_load_notice branches on. Empty output is "not loaded", which is what
+# this stub said before LCA_FAKE_PS existed and still says by default.
+case "${1:-}" in
+  show) exit 0 ;;
+  ps)   printf '%s' "${LCA_FAKE_PS:-}"; exit 0 ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$1/curl" "$1/ollama"
+}
+
+# --- running 'lca ask' against a stand-in model server -----------------------
+#
+# ask.sh reads OLLAMA_CONTEXT_LENGTH and LCA_ASK_TOKENS out of .env, and .env
+# wins over the environment — load_env sources the file after the shell has
+# been set up. So a case that needs a different window needs a different .env,
+# which needs a checkout of its own. That is the whole reason this harness
+# copies the tree instead of running "${REPO}/scripts/ask.sh" like the argument
+# gates further down: those vary flags, these vary the machine.
+ASK_ROOT_SB="${SANDBOX}/askroot"
+ask_root_sandbox() {
+  [[ -e "${ASK_ROOT_SB}/scripts/ask.sh" ]] && return 0
+  mkdir -p "${ASK_ROOT_SB}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${ASK_ROOT_SB}" )
+  write_ask_stubs "${ASK_ROOT_SB}/stub"
+  # Three files of known size, so a case can push the TOTAL over the budget
+  # without any single source exceeding its own cap — which is exactly the hole
+  # this gate exists for: every source was capped and the sum was not.
+  mkdir -p "${ASK_ROOT_SB}/ctx"
+  local i
+  for i in 1 2 3; do
+    head -c 12000 /dev/zero | tr '\0' 'x' > "${ASK_ROOT_SB}/ctx/f${i}.txt"
+  done
+  chmod -R a+rX "${ASK_ROOT_SB}"
+}
+ASK_BODY="";  ASK_ERR="";  ASK_RC=0
+ask_run_in() {   # CTX  [PS]  [GENERATE-RC]  ARGS... -> sets ASK_BODY/ASK_ERR/ASK_RC
+  ask_root_sandbox
+  local ctx="$1" ps="$2" grc="$3"; shift 3
+  cp "${REPO}/.env.example" "${ASK_ROOT_SB}/.env"
+  sed -i "s/^OLLAMA_CONTEXT_LENGTH=.*/OLLAMA_CONTEXT_LENGTH=${ctx}/" "${ASK_ROOT_SB}/.env"
+  record_configuration "${ASK_ROOT_SB}/.env"
+  local cap="${ASK_ROOT_SB}/body.json" err="${ASK_ROOT_SB}/err.txt"
+  : > "${cap}"; : > "${err}"
+  ASK_RC=0
+  # Piped input as well as the files, because the trim is documented to keep it
+  # last — it is the thing the reader just produced.
+  head -c 12000 /dev/zero | tr '\0' 'p' \
+    | ( cd "${ASK_ROOT_SB}" \
+        && PATH="$(stub_path "${ASK_ROOT_SB}/stub")" LCA_CAPTURE="${cap}" \
+           LCA_FAKE_PS="${ps}" LCA_FAKE_GENERATE_RC="${grc}" \
+           LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+           timeout 90 bash scripts/ask.sh "$@" "hi" >/dev/null 2>"${err}" ) || ASK_RC=$?
+  ASK_BODY="$(jq -r '.prompt // empty' <"${cap}" 2>/dev/null || true)"
+  ASK_ERR="$(cat "${err}")"
+}
+ask_ctx_files() { printf -- '-f\n%s/ctx/f1.txt\n-f\n%s/ctx/f2.txt\n-f\n%s/ctx/f3.txt\n' \
+  "${ASK_ROOT_SB}" "${ASK_ROOT_SB}" "${ASK_ROOT_SB}"; }
 # 'lca ask' streams the answer through a pipeline. Bare under 'set -o pipefail'
 # that pipeline was the last statement of main, so a curl that died mid-answer
 # — the 600s cap, or Ollama being OOM-killed by the model it just loaded — took
 # the whole command down silently: half an answer, no error, and a non-zero
 # status nothing explained. speed.sh has always said so on the same failure.
+#
+# Driven. The greps this replaces asked that the pipeline's status is captured
+# into a variable and that the variable is compared to zero somewhere. Both
+# survive the comparison sitting in a branch nothing reaches, and neither is
+# about the thing at stake: what the reader sees when the answer stops
+# half-way. So the request is made to die mid-stream.
 ask_reports_a_cut_short_answer() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
-  # The pipeline's status has to be captured...
-  grep -qE 'tee "[$]\{answer_tmp\}" \|\| [a-z_]+=[$]\?' <<<"${body}" || {
-    echo 'ask.sh runs the answer pipeline bare — a truncated answer exits silently' >&2
-    return 1; }
-  # ...and acted on, not just stored.
-  grep -qE '\(\( *stream_rc *!= *0 *\)\)' <<<"${body}"
+  local bad=0
+  ask_run_in 8192 "" 1
+  grep -qi 'answer above is incomplete' <<<"${ASK_ERR}" || {
+    printf 'the request to Ollama ended early and the reader was not told:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and it names the causes it can actually have, because "incomplete" alone
+  # sends people looking at their question.
+  grep -qi 'killed for memory' <<<"${ASK_ERR}" || {
+    printf 'the truncation notice does not say what ends a request early:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and the command fails, so a script piping this cannot read a half answer
+  # as a whole one.
+  (( ASK_RC != 0 )) || {
+    echo 'a request that died mid-answer exited 0' >&2
+    bad=1
+  }
+  # The complement: a request that completes says none of it and exits 0.
+  ask_run_in 8192 "" 0
+  grep -qi 'answer above is incomplete' <<<"${ASK_ERR}" && {
+    printf 'a complete answer was reported as cut short:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  (( ASK_RC == 0 )) || {
+    printf 'an ordinary question no longer succeeds (rc=%s):\n%s\n' "${ASK_RC}" "${ASK_ERR}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_answer
 # ...and it must say something BEFORE the answer starts, when the model has to
@@ -7727,37 +7866,51 @@ check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_
 # words, so each arm below now checks it where it lives. All three are kept:
 # relocating a guard is not an excuse to drop one, and the mutation that beat
 # the first version of this check is still the mutation to beat.
+#
+# Driven. The greps this replaces read model_load_notice for the name of a
+# helper, for a redirect (after joining continuations, because the first
+# version was beaten by deleting the '>&2'), and for the order of two lines in
+# ask.sh. Every one of them is about the shape of the source. What matters is
+# whether a reader waiting on a cold box sees anything — and whether a reader
+# on a warm one is spared a line that would be noise on every question.
 ask_announces_a_cold_load() {
-  local body notice
-  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
-  notice="$(sed -n '/^model_load_notice() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  [[ -n "${notice}" ]] || { echo 'could not find model_load_notice in lib.sh' >&2; return 1; }
-  # Asked, so the message appears only when it is true — on a resident model
-  # the first token is immediate and this would be noise on every question.
-  grep -q 'ollama_processor' <<<"${notice}" || {
-    echo 'the cold-load notice never checks whether the model is already resident, so it cannot know if the wait is coming' >&2
-    return 1; }
-  # stderr, or it lands in the answer. README documents
-  # 'lca logs | lca ask "why did this fail?"', and answers get redirected.
-  #
-  # Continuations joined first: the redirect sits on the line AFTER the printf,
-  # so a line-scoped grep sees the two separately and matches with the '>&2'
-  # deleted — which is exactly the mutation that walked through the first
-  # version of this check.
-  local joined
-  joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' <<<"${notice}")"
-  grep -qE "printf 'Loading %s.*>&2" <<<"${joined}" || {
-    echo 'the cold-load notice is not printed to stderr, so it would contaminate the answer' >&2
-    return 1; }
-  # And it must come before the request, not after it.
-  # END decides, and only END: a rule-level 'exit N' in awk still RUNS the END
-  # block, so an 'END { exit 1 }' underneath silently overwrites the status.
-  # Second time in this session — see CONTRIBUTING trap #8.
-  awk '/model_load_notice/      { seen = 1 }
-       /curl .*api\/generate/   { if (!done) { done = 1; in_order = seen } }
-       END { exit (done && in_order) ? 0 : 1 }' <<<"${body}" || {
-    echo 'the cold-load notice comes after the request it is meant to explain' >&2
-    return 1; }
+  local bad=0
+  # Nothing resident: 'ollama ps' says so, and the wait is real.
+  ask_run_in 8192 "" 0
+  grep -q 'Loading' <<<"${ASK_ERR}" || {
+    printf 'a cold model was loaded with nothing on screen to explain the silence:\n%s\n' \
+      "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and it says the wait is expected, not a hang. That is the whole job of
+  # the sentence.
+  grep -qi 'not stuck' <<<"${ASK_ERR}" || {
+    printf 'the notice does not say the wait is expected:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...on stderr, and only there. README documents
+  # 'lca logs | lca ask "why did this fail?"', so the answer gets redirected —
+  # a notice on stdout lands inside it. ASK_BODY is what reached the model and
+  # stdout is discarded by the harness, so the proof is that the notice is in
+  # ASK_ERR and the answer is not.
+  grep -q 'Loading' <<<"${ASK_BODY}" && {
+    echo 'the cold-load notice was fed to the model as part of the prompt' >&2
+    bad=1
+  }
+  # Resident: 'ollama ps' shows the model at 100% CPU, so the first token is
+  # immediate and the notice would be noise on every single question.
+  ask_run_in 8192 "NAME  ID  SIZE  PROCESSOR  UNTIL
+qwen2.5-coder:7b  abc123  5 GB  100% CPU  4 minutes from now" 0
+  grep -q 'Loading' <<<"${ASK_ERR}" && {
+    printf 'a model already in memory was announced as loading:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and the run still worked, or "no notice" is what a failed run looks like.
+  (( ASK_RC == 0 )) || {
+    printf 'the warm-model run failed (rc=%s):\n%s\n' "${ASK_RC}" "${ASK_ERR}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' explains the silence before a cold model answers" \
   ask_announces_a_cold_load
@@ -8963,30 +9116,90 @@ echo "# 'lca ask' must bound its TOTAL context, not just each piece of it"
 # own instructions and answering like a stock model — on
 # 'lca logs | lca ask "why did this fail?"', which README.md and
 # TROUBLESHOOTING.md both recommend as the way to diagnose a broken box.
+#
+# Driven. The greps this replaces asked that a variable called budget_chars
+# exists, that its assignment mentions ctx_tokens and ${#system}, that a
+# particular parameter expansion appears, and that a warn sits inside the if.
+# Five greps, all of them about the shape of one arithmetic line, and none of
+# them about the number that reaches the model.
+#
+# Three windows and two input sizes. The files are 12,000 characters each and
+# the piped input is another 12,000, so no single source exceeds its own cap
+# and the TOTAL is what goes over — which is precisely the hole: every source
+# was capped and the sum was not.
 ask_bounds_the_whole_context() {
-  local src="${REPO}/scripts/ask.sh"
-  # The budget must derive from the model's window and account for the system
-  # prompt, not be a constant someone guessed.
-  grep -q 'budget_chars=' "${src}" || {
-    echo "ask.sh computes no total context budget" >&2; return 1
+  local bad=0 kept_8k kept_4k
+  local -a files
+  mapfile -t files < <(ask_ctx_files)
+  # 1. Over budget: it trims, and it says so.
+  ask_run_in 8192 "" 0 "${files[@]}"
+  grep -q 'Context (' <<<"${ASK_ERR}" || {
+    printf '48,000 characters of context went to a 8192-token window with nothing said:\n%s\n' \
+      "${ASK_ERR}" >&2
+    return 1
   }
-  grep -qE 'budget_chars=.*ctx_tokens' "${src}" || {
-    echo "ask.sh's context budget ignores the model's context length" >&2; return 1
+  kept_8k="$(grep -oE 'most recent [0-9]+' <<<"${ASK_ERR}" | grep -oE '[0-9]+' | head -1)"
+  [[ -n "${kept_8k}" ]] || {
+    printf 'the trim notice no longer says how much it kept:\n%s\n' "${ASK_ERR}" >&2
+    return 1
   }
-  grep -qE 'budget_chars=.*\$\{#system\}' "${src}" || {
-    echo "ask.sh's context budget ignores the size of the system prompt" >&2; return 1
+  # ...and the prompt that actually reached the model is that size, not the
+  # 48,000 it was handed. This is the assertion the five greps could not make.
+  (( ${#ASK_BODY} <= kept_8k + 200 )) || {
+    printf 'the notice says %s characters were kept and %s reached the model\n' \
+      "${kept_8k}" "${#ASK_BODY}" >&2
+    bad=1
   }
-  # It must actually trim...
-  grep -qE 'context="\$\{context: -budget_chars\}"' "${src}" || {
-    echo "ask.sh never trims the context to its budget" >&2; return 1
+  (( ${#ASK_BODY} >= kept_8k )) || {
+    printf 'the prompt is smaller than the budget the notice announced (%s < %s)\n' \
+      "${#ASK_BODY}" "${kept_8k}" >&2
+    bad=1
   }
-  # ...and never silently: losing context changes the answer.
-  awk '/if \(\( \$\{#context\} > budget_chars \)\); then/ { inb = 1 }
-       inb && /warn / { found = 1 }
-       inb && /^  fi$/ { exit }
-       END { exit !found }' "${src}" || {
-    echo "ask.sh trims the context without telling anyone" >&2; return 1
+  # ...and it names the window and the way out, because the fix is a setting.
+  grep -q '8192-token window' <<<"${ASK_ERR}" || {
+    printf 'the trim notice does not name the window it is trimming to:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
   }
+  grep -q 'OLLAMA_CONTEXT_LENGTH' <<<"${ASK_ERR}" || {
+    printf 'the trim notice does not say what to raise:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # 2. A SMALLER window must keep less. This is the claim "the budget derives
+  # from the model context length", and the only way to make it is to change
+  # the model context length. 4096 is the window of the 3b rung, the smallest
+  # this project ships — the machine the hole was measured on.
+  ask_run_in 4096 "" 0 "${files[@]}"
+  kept_4k="$(grep -oE 'most recent [0-9]+' <<<"${ASK_ERR}" | grep -oE '[0-9]+' | head -1)"
+  [[ -n "${kept_4k}" ]] || {
+    printf 'the same context did not trim at half the window:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  if [[ -n "${kept_4k}" ]] && (( kept_4k >= kept_8k )); then
+    printf 'halving the window did not shrink the budget (%s at 4096, %s at 8192) — it is a constant, not a budget\n' \
+      "${kept_4k}" "${kept_8k}" >&2
+    bad=1
+  fi
+  # 3. A window big enough for all of it must not trim, and must say nothing.
+  # Without this arm every assertion above is satisfied by a version that
+  # always trims and always warns.
+  ask_run_in 32768 "" 0 "${files[@]}"
+  grep -q 'Context (' <<<"${ASK_ERR}" && {
+    printf 'a context that fits was trimmed anyway:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  (( ${#ASK_BODY} > kept_8k )) || {
+    printf 'a 32768-token window received no more context than an 8192-token one (%s)\n' \
+      "${#ASK_BODY}" >&2
+    bad=1
+  }
+  # 4. ...and piped input survives the trim, because it is appended last and
+  # the tail is what is kept. It is the thing the reader just produced.
+  ask_run_in 8192 "" 0 "${files[@]}"
+  [[ "${ASK_BODY}" == *pppppppppp* ]] || {
+    echo 'the trim dropped the piped input, which is documented to survive it' >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' bounds its total context and says when it trims" \
   ask_bounds_the_whole_context
@@ -19328,63 +19541,6 @@ check "...and still reports a backup that really is missing" \
   restore_still_reports_a_missing_file
 
 echo "# an answer that never arrived is not an answer"
-# 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
-# body with a zero exit status. Measured against a model that is not installed:
-#
-#   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
-#   {"error":"model 'no-such-model:1b' not found"}      (curl rc=0)
-#
-# piped through jq '.response // empty' that yields nothing, the pipeline
-# exits 0, and the only check afterwards was on the pipeline's status. So the
-# command printed nothing, warned about nothing and exited 0, throwing away the
-# one sentence that named the problem. Seen live as well: a cold 'lca ask -c'
-# printed "continuing from your last question", no answer, status 0.
-#
-# Driven end to end against ask.sh with curl stubbed, because the shape that
-# matters is the whole pipeline — capture, extraction and the check after it.
-# One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
-# it are the generated script's, not this one's — and the body it answers with
-# comes through the environment rather than being interpolated in.
-#
-# 'ollama' is stubbed as well as curl, and that is not belt-and-braces: ask.sh
-# checks model_present (which runs 'ollama show') before it generates anything,
-# and CI's unit job has neither the binary nor the model. Without this the
-# three gates below passed here and failed there with
-#
-#   [FAIL] Model 'qwen2.5-coder:7b' is not downloaded.
-#
-# which is ask.sh being right and the test being environment-dependent — the
-# exact class this file carries systemic guards for, introduced by me.
-write_ask_stubs() {  # DIR
-  make_stub_dir "$1"
-  cat > "$1/curl" <<'STUB'
-#!/bin/sh
-# With LCA_CAPTURE set, keep the request body: some gates need to see the
-# prompt that would have reached the model, not just the reply.
-if [ -n "${LCA_CAPTURE:-}" ]; then
-  prev=""
-  for a in "$@"; do
-    [ "$prev" = "-d" ] && printf '%s' "$a" > "${LCA_CAPTURE}"
-    prev="$a"
-  done
-fi
-for a in "$@"; do
-  case "$a" in
-    */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit 0 ;;
-  esac
-done
-printf '%s' '{"version":"0.32.5"}'
-STUB
-  cat > "$1/ollama" <<'STUB'
-#!/bin/sh
-# Only what ask.sh asks: 'ollama show MODEL' decides model_present.
-case "${1:-}" in
-  show) exit 0 ;;
-  *)    exit 0 ;;
-esac
-STUB
-  chmod +x "$1/curl" "$1/ollama"
-}
 ask_with_stubbed_curl() {  # generate-body -> "rc=N" then stderr
   local sb="${SANDBOX}/askstub" rc=0 out
   rm -rf "${sb}"; write_ask_stubs "${sb}"
@@ -22051,8 +22207,8 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 95 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 58 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 92 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 61 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }

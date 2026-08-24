@@ -63,12 +63,12 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              95   of the 115 the projection was made from
-#   still worth driving     62
+#   A rows now              92   of the 115 the projection was made from
+#   still worth driving     59
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
-#   Of the ~24 highest-cost, driven so far (19):
+#   Of the ~24 highest-cost, driven so far (22):
 #     restore_validates_env_first     an .env that would execute, and did not
 #     restore_rebuilds_derived        a derived model rebuilt, not pulled
 #     backup_checks_paused_before_running   a container already paused
@@ -88,6 +88,9 @@
 #     restore_distinguishes_the_stages      wiped vs not wiped, six statuses
 #     selftest_checks_the_live_prompt       fresh, stale, and not comparable
 #     prompt_check_is_not_claimed_when_skipped   both reporters, both ways
+#     ask_bounds_the_whole_context          three windows, 48,000 characters
+#     ask_reports_a_cut_short_answer        a request that died mid-stream
+#     ask_announces_a_cold_load             resident and not, and on stderr
 #   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
 # ---------------------------------------------------------------------------
 A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
@@ -105,10 +108,12 @@ A	apply_does_not_read_ollama_ps	greps for the absence of a command in two functi
 FP	apply_reconciles_the_agent	drives apply_agent over five states of the container and .env
 A	apply_survives_a_failed_rebuild	awk for a guarded invocation line; the behaviour is drivable
 A	apt_failure_checks_sudo_first	greps the apt branch for message order
-A	ask_announces_a_cold_load	greps ask.sh and lib.sh for notice placement
-A	ask_bounds_the_whole_context	greps ask.sh for budget arithmetic
+FP	ask_announces_a_cold_load	runs 'lca ask' with the model resident and with it not, and checks which run gets the notice and on which stream
+FP	ask_bounds_the_whole_context	runs 'lca ask' at three context windows with 48,000 characters of context and measures the prompt that reached the model
 A	ask_keeps_its_answer_stream_clean	source lint for stream routing
-A	ask_reports_a_cut_short_answer	greps ask.sh for status capture
+FP	ask_reports_a_cut_short_answer	makes the request die mid-stream and reads what the reader was told, and the exit status
+H	ask_root_sandbox	builds the checkout, stand-in model server and context files a real 'lca ask' is run against
+H	ask_run_in	runs 'lca ask' in that checkout at a given context window, with the model resident or not, and captures the prompt, stderr and status
 A	ask_slices_without_a_pipe	greps for one literal string
 A	autotune_false_still_converges	awk over tune.sh for a branch shape
 FP	backup_and_restore_agree_on_the_component	runs the real restore over a workspace archive, twice, and looks at the disk
