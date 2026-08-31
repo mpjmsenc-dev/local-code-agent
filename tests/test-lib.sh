@@ -65,6 +65,27 @@ check() {
 
 # Work in a throwaway copy so the real .env is never touched.
 SANDBOX="$(mktemp -d)"
+# ...and the copy is not enough, because not everything this suite drives
+# writes inside the checkout. MOTD_FILE is an absolute path under /etc that no
+# LCA_DIR can move, installed with 'ln', which no stub intercepted -- so a
+# harness that runs setup.sh for real relinks the LIVE machine's login banner
+# into its own sandbox, and that sandbox is deleted when the run ends.
+#
+# It is not hypothetical and it was not once. Two different harnesses did it,
+# and the evidence of both was found on this box, hours apart:
+#
+#   99-local-code-agent -> /tmp/tmp.PDSSCvpjBI/dud/target/scripts/motd.sh
+#   99-local-code-agent -> /tmp/tmp.mVdpbCFQbv/setupsb/scripts/motd.sh
+#
+# Every SSH login in between printed "run-parts: failed to stat component" and
+# no banner at all. Each harness was then given LCA_MOTD_FILE -- and that is
+# exactly the fix that will be forgotten by the third one, because it already
+# was by the second. So the property is asserted centrally instead: whatever
+# the live link was when this suite started, it must still be that at the end.
+REAL_MOTD_LINK="/etc/update-motd.d/99-local-code-agent"
+# readlink, not 'test -e': a link whose target is gone is still a state worth
+# comparing, and a dangling one is precisely what the escape leaves behind.
+REAL_MOTD_BEFORE="$(readlink "${REAL_MOTD_LINK}" 2>/dev/null || printf '(absent)')"
 # The trap says so when the suite ended EARLY. A check that fails prints FAIL
 # and the run carries on to a verdict; anything else — errexit on an unguarded
 # command, a die() reached from a helper — ends the process wherever it
@@ -4437,6 +4458,7 @@ setup_run() {   # -> everything setup.sh printed
   ( cd "${SETUP_SB}" && env -i \
       "PATH=$(stub_path "${SETUP_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
       "HOME=${SETUP_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
+      "LCA_MOTD_FILE=${SETUP_SB}/99-local-code-agent" \
       timeout 60 bash "${SETUP_SB}/setup.sh" </dev/null 2>&1 ) || true
 }
 every_installer_call_in_setup_is_guarded() {
@@ -21137,6 +21159,21 @@ no_test_function_is_defined_twice() {
 }
 check "...and none defines the same function twice" \
   no_test_function_is_defined_twice
+
+# The tripwire recorded at the top, read here: nothing this suite ran may have
+# repointed the live machine's login banner. Last, so it covers every harness
+# above it including ones written after this line.
+suite_did_not_touch_the_live_banner() {
+  local now
+  now="$(readlink "${REAL_MOTD_LINK}" 2>/dev/null || printf '(absent)')"
+  [[ "${now}" == "${REAL_MOTD_BEFORE}" ]] || {
+    printf 'this suite repointed the LIVE login banner while it ran:\n  before: %s\n  after:  %s\nA harness drove something that installs the banner without setting LCA_MOTD_FILE. Every SSH login gets that link, and the sandbox it now names is deleted when this run ends.\n' \
+      "${REAL_MOTD_BEFORE}" "${now}" >&2
+    return 1
+  }
+}
+check "...and the suite left the live login banner alone" \
+  suite_did_not_touch_the_live_banner
 
 echo
 SUITE_FINISHED=true
