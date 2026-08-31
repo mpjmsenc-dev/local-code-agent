@@ -98,7 +98,7 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Eight shell traps that turn a gate into decoration
+## Nine shell traps that turn a gate into decoration
 
 All eight were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
@@ -255,6 +255,63 @@ a real ordering as wrong. Let `END` decide alone:
 /uses/   { if (!done) { done = 1; in_order = seen } }
 END      { exit (done && in_order) ? 0 : 1 }
 ```
+
+**9. A scanner that works out for itself which lines are code.** Sibling of 5,
+and it reached four tools at once. `tests/duplicate-defs.awk` tracked
+multi-line single-quoted strings by counting apostrophes, skipping comment
+lines first because "an apostrophe in prose is not a quote". That guard was
+written against the right idea and applied to the wrong scope: it covered `#`
+comments and not the far commoner case, an apostrophe inside a double-quoted
+string. So this line —
+
+```bash
+check "...and the suite left the live machine's login banner alone"
+```
+
+— left the scanner believing it was inside a string for the rest of the file.
+It then reported no duplicate functions, because it could no longer see a
+function *definition*. The line was the last in the file, so nothing real
+followed it and nothing real was missed; the only thing that failed was the
+gate's own non-vacuity probe, which appends a known duplicate and demands the
+scanner find it. **That probe is the entire reason this was not silent.**
+
+The other three scanners over these files did not track quoting at all, so a
+definition at column 0 inside a multi-line single-quoted shim — code for
+*another* shell, appended to a sandbox's `lib.sh` — was read as this file's
+own. `reachable.awk` reported it as a function nothing calls, which is a false
+accusation in the one scanner whose header promises it cannot make one;
+`source_grep_gates` called it a gate that reads repo source; `justified_gates`
+accepted a `SOURCE-GREP:` marker written inside a shim as excusing one.
+
+Four tools, four separate answers to one question, three of them wrong. The
+fix is not a better answer in each: it is **one** answer, in
+`tests/shell-lex.awk`, which every scanner is now loaded with —
+
+```bash
+awk -f tests/shell-lex.awk -f tests/duplicate-defs.awk FILE
+```
+
+— and **one** fixture they are all driven over, carrying every shape that got
+through: an apostrophe in a description, in a comment and in a heredoc; a
+function defined twice inside data; a long wait inside data; a marker inside
+data. Each scanner must give *both* answers over it — find the real thing, and
+stay silent about the same thing written as data. A scanner tested only on
+tidy input is a scanner that will be fooled by text about itself again.
+
+The rule that generalises past quoting: **a scanner that has stopped seeing
+code must say so.** Blindness and cleanliness produce identical output — an
+empty, confident answer — and that is what made this survive. `shell-lex.awk`
+exits non-zero when it reaches the end of a file still inside a quote or a
+heredoc, and a gate drives it over every file any scanner here reads.
+
+That end-of-input rule is also the one part of this a mutation sweep cannot
+kill on its own: while the lexer is correct, deleting the rule changes no
+verdict anywhere, and the gate passes either way. It has to be shown *refusing*
+something — the gate writes a file that ends inside a quoted string and
+requires the lexer to reject it. The other three mutations (stop treating `"`
+as a quote, stop treating heredocs as data, lex comments as code) each flip a
+scanner's answer over the fixture and are killed by it; without the
+non-vacuity half, removing the safety net was the one change nothing noticed.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.

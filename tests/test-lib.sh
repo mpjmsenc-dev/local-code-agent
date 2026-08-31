@@ -10619,7 +10619,7 @@ check "run-agent.sh announces a slow Ollama start" uses_announced_start run-agen
 # inconvenient.
 no_unannounced_long_wait() {
   local hits
-  hits="$(awk -f "${TESTS_DIR}/long-wait.awk" "$@")"
+  hits="$(awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/long-wait.awk" "$@")"
   [[ -z "${hits}" ]] || {
     printf 'these wait a long time for an Ollama nobody started, in silence:\n%s\n' "${hits}" >&2
     return 1
@@ -20840,16 +20840,17 @@ echo "# ...and the rule that stops the list growing back"
 # no behaviour to drive; the property is syntactic. What it cannot check is
 # whether a gate that DOES drive drives the right thing.
 source_grep_gates() {   # FILE -> functions that read repo source with a text tool
-  awk '
-    # A quoted heredoc is DATA, not this file\x27s code. Without this the
-    # fixture below — which deliberately contains functions that read source —
-    # was scanned as if those were real gates. Third time this scanner has been
-    # fooled by text about itself; see CONTRIBUTING.md.
-    !inhd && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/) {
-      hd=substr($0, RSTART+3, RLENGTH-4); inhd=1; next
-    }
-    inhd && $0 == hd { inhd=0; next }
-    inhd { next }
+  awk -f "${TESTS_DIR}/shell-lex.awk" -e '
+    # DATA is not this file\x27s code. The fixture below deliberately contains
+    # functions that read source, and without this was scanned as if those were
+    # real gates. Which lines are code is now decided in ONE place for every
+    # scanner here — tests/shell-lex.awk — because four of them had answered it
+    # separately and three had it wrong. The heredoc-opening line is skipped
+    # rather than scanned, as it always was: it is code, but it is the line
+    # that names the fixture, and reading it would classify a gate by the path
+    # of the file it writes.
+    LEX_OPENS_HEREDOC { next }
+    !LEX_CODE { next }
     /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn); src=0; tool=0
       # A one-line definition opens and closes on the same line. Without this
@@ -20888,16 +20889,17 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
 # function's real marker changed nothing. Found by mutating it, which is the
 # only reason it is not still true.
 justified_gates() {   # FILE -> functions carrying a SOURCE-GREP: justification
-  awk '
-    # A quoted heredoc is DATA, not this file\x27s code. Without this the
-    # fixture below — which deliberately contains functions that read source —
-    # was scanned as if those were real gates. Third time this scanner has been
-    # fooled by text about itself; see CONTRIBUTING.md.
-    !inhd && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/) {
-      hd=substr($0, RSTART+3, RLENGTH-4); inhd=1; next
-    }
-    inhd && $0 == hd { inhd=0; next }
-    inhd { next }
+  awk -f "${TESTS_DIR}/shell-lex.awk" -e '
+    # DATA is not this file\x27s code. The fixture below deliberately contains
+    # functions that read source, and without this was scanned as if those were
+    # real gates. Which lines are code is now decided in ONE place for every
+    # scanner here — tests/shell-lex.awk — because four of them had answered it
+    # separately and three had it wrong. The heredoc-opening line is skipped
+    # rather than scanned, as it always was: it is code, but it is the line
+    # that names the fixture, and reading it would classify a gate by the path
+    # of the file it writes.
+    LEX_OPENS_HEREDOC { next }
+    !LEX_CODE { next }
     /^[[:space:]]*# SOURCE-GREP: ./ && !inb { just=1; next }
     /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn)
@@ -21075,19 +21077,29 @@ check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
 # run time — "${fn}" — which reads as unreachable; reachable.awk's own exempt
 # list is where such a case belongs, with its reason.
 unreached_functions() {   # FILE -> the functions in it nothing can reach
-  awk -f "${TESTS_DIR}/reachable.awk" "$1" "$1" | sort
+  awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/reachable.awk" "$1" "$1" | sort
 }
 # SOURCE-GREP: same subject, same reason.
 no_test_function_is_defined_and_never_run() {
   local f fn dead=0 nfiles=0 reach_probe="${SANDBOX}/reach-probe.sh"
   for f in "${TESTS_DIR}"/*.sh; do
     nfiles=$(( nfiles + 1 ))
+    # Captured rather than read from a process substitution: that form
+    # discards the scanner's exit status, so a file it could not read at all
+    # would look exactly like a file with nothing wrong in it.
+    local found
+    found="$(unreached_functions "${f}")" || {
+      printf '%s could not be read by the reachability scanner at all — see above\n' \
+        "${f##*/}" >&2
+      dead=1
+      continue
+    }
     while read -r fn; do
       [[ -n "${fn}" ]] || continue
       printf '%s defines %s and nothing reaches it — a gate that never runs cannot fail\n' \
         "${f##*/}" "${fn}" >&2
       dead=1
-    done < <(unreached_functions "${f}")
+    done <<<"${found}"
   done
   (( nfiles >= 5 )) || {
     printf 'only %s test files were read — this stopped watching\n' "${nfiles}" >&2
@@ -21130,13 +21142,21 @@ check "no test file defines a gate that nothing ever runs" \
 # text. What it cannot see is a redefinition built at run time — eval, or a
 # name assembled from pieces.
 duplicate_definitions() {   # FILE -> names it defines more than once
-  awk -f "${TESTS_DIR}/duplicate-defs.awk" "$1"
+  awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/duplicate-defs.awk" "$1"
 }
 # SOURCE-GREP: same subject, same reason.
 no_test_function_is_defined_twice() {
   local f hits bad=0 dup_probe="${SANDBOX}/dup-probe.sh"
   for f in "${TESTS_DIR}"/*.sh; do
-    hits="$(duplicate_definitions "${f}")"
+    # A scanner that could not READ the file is not a scanner that found
+    # nothing, and under errexit an unguarded assignment here would end the
+    # whole run rather than fail this one check.
+    hits="$(duplicate_definitions "${f}")" || {
+      printf '%s could not be read by the duplicate scanner at all — see above; anything it reported is worthless\n' \
+        "${f##*/}" >&2
+      bad=1
+      continue
+    }
     [[ -z "${hits}" ]] || {
       printf '%s defines the same function twice, so which one runs depends on where the caller sits:\n%s\n' \
         "${f##*/}" "${hits}" >&2
@@ -21160,6 +21180,173 @@ no_test_function_is_defined_twice() {
 check "...and none defines the same function twice" \
   no_test_function_is_defined_twice
 
+# ---------------------------------------------------------------------------
+# The scanners that read this suite, driven over text written to fool them.
+#
+# Four tools parse these files, and each had worked out for itself which lines
+# are code and which are data. Three of them had it wrong, and the fourth was
+# wrong in a way that hid the other three: the duplicate scanner tracked
+# single-quoted strings by counting apostrophes, and the apostrophe in
+#
+#   check "...and the suite left the live machine's login banner alone"
+#
+# is not a quote to the shell — it sits inside double quotes. The counter
+# disagreed, read the rest of the file as string data, and reported no
+# duplicates because it could no longer see a definition at all. That line is
+# the last in the file, so nothing real followed it; the only thing that failed
+# was the gate's own non-vacuity probe, which appends a known duplicate and
+# demands the scanner find it. Without that probe this was silent.
+#
+# The other three did not track quoting at all, so a definition at column 0
+# inside a multi-line single-quoted shim — code for ANOTHER shell, appended to
+# a sandbox's lib.sh — reached all of them: reachable.awk called it a function
+# nothing calls (a false accusation, which its header promises it cannot make),
+# source_grep_gates called it a gate that reads repo source, and justified_gates
+# accepted a SOURCE-GREP: marker written inside a shim as excusing one.
+#
+# So the question is answered in ONE place now — tests/shell-lex.awk — and
+# every scanner is driven over ONE fixture, below, which carries each shape
+# that got through. Each scanner must give BOTH answers over it: find the real
+# thing, and stay silent about the same thing written in data.
+QUOTE_FIXTURE="${SANDBOX}/quoting-fixture.sh"
+cat > "${QUOTE_FIXTURE}" <<'QFIX'
+# Fixture: text designed to fool a scanner that reads this suite. Nothing here
+# is ever run. don't let this apostrophe, in a comment, flip a lexer.
+
+# A real gate that reads repo source. The classifier must SEE this one.
+quoting_fixture_real_gate() {
+  grep -q 'something' "${REPO}/scripts/lib.sh"
+}
+# The apostrophe below is inside double quotes, so it is text to the shell. It
+# is the exact line that blinded the duplicate scanner to the rest of its file.
+check "...and the suite left the live machine's login banner alone" quoting_fixture_real_gate
+
+# A quoted heredoc is data. Nothing between these markers is this file's code.
+cat > "${dir}/stub" <<'HD'
+# SOURCE-GREP: a marker written inside data justifies nothing.
+quoting_fixture_in_a_heredoc() { grep -q x "${REPO}/scripts/lib.sh"; echo "it's data"; }
+quoting_fixture_in_a_heredoc() { echo "and defined twice, in data"; }
+wait_for_ollama 60
+HD
+
+# A multi-line single-quoted shim: code for ANOTHER shell, at column 0.
+run_with_shim smoke 'have() { return 1; }
+# SOURCE-GREP: nor does one written inside a shim.
+quoting_fixture_in_a_shim() {
+  grep -q x "${REPO}/scripts/lib.sh"
+}
+quoting_fixture_in_a_shim() {
+  echo "and defined twice, in data"
+}
+wait_for_ollama 60'
+
+# An apostrophe inside a double-quoted string is not a quote to the shell.
+printf "the harness's own message\n"
+
+# Nothing calls this one, and reachable.awk must still be able to say so.
+quoting_fixture_never_called() { :; }
+
+# A real duplicate, last, so finding it proves the scanner read this far.
+quoting_fixture_defined_twice() { :; }
+quoting_fixture_defined_twice() { :; }
+QFIX
+
+# The lexer's own contract: a file that ends inside a quote or a heredoc was
+# not read, and every verdict past that point was computed over data. It says
+# so and exits non-zero rather than returning a confident empty answer, which
+# is what the original bug did for as long as it existed.
+# SOURCE-GREP: the subject is whether the suite's own text can be read to its
+# end by the lexer every scanner here depends on. There is no behaviour to
+# drive; what this cannot see is a file that nothing scans.
+every_scanned_file_lexes_to_its_end() {
+  local f bad=0 n=0 lex_probe="${SANDBOX}/unlexable.sh"
+  for f in "${TESTS_DIR}"/*.sh "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
+    n=$(( n + 1 ))
+    awk -f "${TESTS_DIR}/shell-lex.awk" -e 'END { }' "${f}" || bad=1
+  done
+  (( n >= 20 )) || {
+    printf 'only %s files were lexed — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  # Non-vacuity, and it is the whole point of the check: while the lexer is
+  # correct this gate passes whatever it does, so deleting the end-of-input
+  # rule changes no verdict anywhere and a mutation sweep cannot kill it. It
+  # has to be shown REFUSING something. A file that ends inside a quoted
+  # string is exactly what blindness looks like from outside — the scanner
+  # stops seeing code and returns an empty, confident answer.
+  printf 'f() { :; }\nnot_closed="\n' > "${lex_probe}"
+  if awk -f "${TESTS_DIR}/shell-lex.awk" -e 'END { }' "${lex_probe}" 2>/dev/null; then
+    echo 'the lexer accepted a file that ends inside a quoted string, so it cannot tell being blind from finding nothing' >&2
+    bad=1
+  fi
+  return "${bad}"
+}
+check "every file a scanner reads can be lexed to its end" \
+  every_scanned_file_lexes_to_its_end
+
+dup_scanner_reads_past_an_apostrophe_in_a_description() {
+  local hits; hits="$(duplicate_definitions "${QUOTE_FIXTURE}")" || return 1
+  grep -q 'quoting_fixture_defined_twice' <<<"${hits}"
+}
+check "the duplicate scanner reads past an apostrophe in a description" \
+  dup_scanner_reads_past_an_apostrophe_in_a_description
+
+dup_scanner_ignores_a_duplicate_in_data() {
+  local hits; hits="$(duplicate_definitions "${QUOTE_FIXTURE}")" || return 1
+  ! grep -qE 'quoting_fixture_in_a_(heredoc|shim)' <<<"${hits}"
+}
+check "...and does not count one defined twice inside a heredoc or a shim" \
+  dup_scanner_ignores_a_duplicate_in_data
+
+reach_scanner_still_names_a_dead_function() {
+  local out; out="$(unreached_functions "${QUOTE_FIXTURE}")" || return 1
+  grep -qx 'quoting_fixture_never_called' <<<"${out}"
+}
+check "the reachability scanner still names a function nothing calls" \
+  reach_scanner_still_names_a_dead_function
+
+reach_scanner_accuses_nothing_written_in_data() {
+  local out; out="$(unreached_functions "${QUOTE_FIXTURE}")" || return 1
+  ! grep -qE 'quoting_fixture_in_a_(heredoc|shim)' <<<"${out}"
+}
+check "...and accuses nothing that is only defined in data" \
+  reach_scanner_accuses_nothing_written_in_data
+
+classifier_still_sees_a_real_source_grep() {
+  local out; out="$(source_grep_gates "${QUOTE_FIXTURE}")" || return 1
+  grep -qx 'quoting_fixture_real_gate' <<<"${out}"
+}
+check "the source-grep classifier still sees a gate that reads source" \
+  classifier_still_sees_a_real_source_grep
+
+classifier_ignores_a_gate_written_in_data() {
+  local out; out="$(source_grep_gates "${QUOTE_FIXTURE}")" || return 1
+  ! grep -qE 'quoting_fixture_in_a_(heredoc|shim)' <<<"${out}"
+}
+check "...but not one written inside a heredoc or a shim" \
+  classifier_ignores_a_gate_written_in_data
+
+justifier_ignores_a_marker_written_in_data() {
+  local out; out="$(justified_gates "${QUOTE_FIXTURE}")" || return 1
+  [[ -z "${out}" ]]
+}
+check "a SOURCE-GREP: marker written inside data justifies nothing" \
+  justifier_ignores_a_marker_written_in_data
+
+long_wait_rule_ignores_a_wait_in_data() {
+  no_unannounced_long_wait "${QUOTE_FIXTURE}" 2>/dev/null
+}
+check "the long-wait rule ignores a bare wait written in data" \
+  long_wait_rule_ignores_a_wait_in_data
+
+long_wait_rule_still_fires_on_real_code() {
+  local probe="${SANDBOX}/long-wait-probe.sh"
+  printf 'do_something\nwait_for_ollama 60\n' > "${probe}"
+  ! no_unannounced_long_wait "${probe}" 2>/dev/null
+}
+check "...and still fires on the same line written as code" \
+  long_wait_rule_still_fires_on_real_code
+
 # The tripwire recorded at the top, read here: nothing this suite ran may have
 # repointed the live machine's login banner. Last, so it covers every harness
 # above it including ones written after this line.
@@ -21172,7 +21359,7 @@ suite_did_not_touch_the_live_banner() {
     return 1
   }
 }
-check "...and the suite left the live login banner alone" \
+check "...and the suite left the live machine's login banner alone" \
   suite_did_not_touch_the_live_banner
 
 echo

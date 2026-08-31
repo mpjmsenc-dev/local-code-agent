@@ -317,6 +317,7 @@ H	example_value	extracts one value from .env.example
 H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
 H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
 H	installed_units	lists the boot units this repo installs
+H	justified_gates	lists the gates in a test file carrying a SOURCE-GREP: justification
 H	lca_subcommands	extracts the subcommands bin/lca dispatches
 H	lib_default_keys	extracts the keys load_env defaults
 H	model_block_says	drives update-model.sh's model block
@@ -333,6 +334,7 @@ H	rendered_tune_unit	renders the tune boot unit
 H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
 H	seeded_settings_payload	renders agent.sh's real settings payload
 H	setup_installers	lists the installers setup.sh actually runs
+H	source_grep_gates	lists the gates in a test file that read repo source with a text tool
 H	step_source_check_says	drives agent-watch.sh's step-source check
 H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
 H	tune_builds_on_path	drives tune.sh's PATH construction
