@@ -18659,6 +18659,222 @@ every_job_count_claim_is_the_real_one() {
 check "...and every place that counts those jobs counts them right" \
   every_job_count_claim_is_the_real_one
 
+echo "# the rail itself: a push that fails the gates has to be actually refused"
+# Found by asking what in this project has never been looked at, and landing on
+# the thing that watches everything else. .githooks/pre-push is documented as
+# "the safety rail for the AI-assisted loop": an agent edits code, this runs
+# ShellCheck, bash -n and both suites, and a push that fails them never leaves
+# the machine. Nothing had ever run it. The gate above reads its PROSE — that
+# it does not over-promise — and stops there.
+#
+# Two things had to be true for it to be broken with nobody noticing, and one
+# of them was: git never invokes it, because 'make hooks' is opt-in and no
+# clone that skipped it says so. This clone had skipped it. core.hooksPath was
+# unset and .git/hooks/pre-push did not exist, so every push made from here
+# went out with the rail unarmed — and the only reason that cost nothing is
+# that the suite was run by hand each time. A safety mechanism whose absence is
+# silent is indistinguishable from one that is present and broken.
+#
+# So: a real sandbox repository, the documented 'make hooks' run for real
+# inside it, a real bare remote, and real 'git push'es either side of a gate
+# that fails. The stub 'make' is deliberate — what is under test here is the
+# RAIL, not the gates it runs: does git invoke this hook, does it ask make for
+# 'gates', and does a non-zero answer stop the commit reaching the remote.
+HOOK_SB="${SANDBOX}/hookrepo"
+HOOK_REMOTE="${SANDBOX}/hookremote.git"
+hook_sandbox() {
+  [[ -e "${HOOK_SB}/.git" ]] && return 0
+  mkdir -p "${HOOK_SB}/.githooks"
+  cp "${REPO}/Makefile" "${HOOK_SB}/Makefile"
+  cp "${REPO}/.githooks/pre-push" "${HOOK_SB}/.githooks/pre-push"
+  make_stub_dir "${HOOK_SB}/stub"
+  # shellcheck disable=SC2016  # the stub's own variables, read when IT runs
+  { printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >> "${LCA_HOOK_MAKE_LOG}"\n'
+    printf 'exit "${LCA_HOOK_MAKE_RC:-0}"\n'
+  } > "${HOOK_SB}/stub/make"
+  chmod +x "${HOOK_SB}/stub/make"
+  git init -q "${HOOK_SB}"
+  git -C "${HOOK_SB}" symbolic-ref HEAD refs/heads/main
+  git -C "${HOOK_SB}" config user.email 'gates@example.invalid'
+  git -C "${HOOK_SB}" config user.name  'gate probe'
+  git -C "${HOOK_SB}" add -A
+  git -C "${HOOK_SB}" commit -qm 'the tree this rail is installed into'
+  git init -q --bare "${HOOK_REMOTE}"
+  git -C "${HOOK_SB}" remote add origin "${HOOK_REMOTE}"
+  # The baseline push goes round the hook on purpose: the hook is not installed
+  # yet, and this establishes a remote head for the gates to compare against.
+  git -C "${HOOK_SB}" push -q --no-verify origin main
+  # The documented install, executed. Nothing in this repo had ever run this
+  # recipe — 'make hooks' was a line in a document.
+  ( cd "${HOOK_SB}" && make hooks >/dev/null 2>&1 )
+}
+hook_remote_head() { git -C "${HOOK_REMOTE}" rev-parse main 2>/dev/null || printf none; }
+# rail_notice DIR — the line to say about DIR's pre-push rail, or nothing.
+#
+# 'make gates' says this too, but an agent working in a fresh clone runs this
+# suite directly and never types 'make'. The verdict at the bottom of this file
+# is the most-read line in the project, so the notice goes there: not a
+# failure, and it disappears the moment the hook is installed.
+rail_notice() {   # DIR -> nothing if the rail is armed there
+  local dir="$1" hp
+  hp="$(git -C "${dir}" config --get core.hooksPath 2>/dev/null || true)"
+  [[ "${hp}" == ".githooks" ]] && return 0
+  printf 'note - no pre-push hook in this clone, so nothing runs this suite for you. Install it: make hooks\n'
+}
+HOOK_OUT=""; HOOK_RC=0
+hook_push_attempt() {   # MAKE-RC -> HOOK_RC, HOOK_OUT, and a remote that moved or did not
+  hook_sandbox
+  local rc="$1"
+  : > "${HOOK_SB}/make.log"
+  date +%s%N > "${HOOK_SB}/tick"
+  git -C "${HOOK_SB}" add -A
+  git -C "${HOOK_SB}" commit -qm 'a change somebody is trying to push'
+  HOOK_RC=0
+  HOOK_OUT="$( cd "${HOOK_SB}" \
+    && PATH="$(stub_path "${HOOK_SB}/stub")" \
+       LCA_HOOK_MAKE_LOG="${HOOK_SB}/make.log" LCA_HOOK_MAKE_RC="${rc}" \
+       timeout 120 git push origin main 2>&1 )" || HOOK_RC=$?
+}
+the_documented_install_arms_the_hook() {
+  hook_sandbox
+  local hp
+  hp="$(git -C "${HOOK_SB}" config --get core.hooksPath 2>/dev/null || true)"
+  [[ "${hp}" == ".githooks" ]] || {
+    printf "'make hooks' left core.hooksPath as %s, so git runs nothing\\n" "${hp:-unset}" >&2
+    return 1; }
+  [[ -x "${HOOK_SB}/.githooks/pre-push" ]] || {
+    echo "'make hooks' left the hook non-executable, which git skips in silence" >&2
+    return 1; }
+}
+check "'make hooks' really arms the pre-push gate" \
+  the_documented_install_arms_the_hook
+failing_gates_refuse_a_real_push() {
+  local before after bad=0
+  before="$(hook_remote_head)"
+  hook_push_attempt 1
+  after="$(hook_remote_head)"
+  (( HOOK_RC != 0 )) || {
+    printf 'a push whose gates failed succeeded:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  [[ "${before}" == "${after}" ]] || {
+    echo 'the gates failed and the commit reached the remote anyway' >&2
+    bad=1; }
+  grep -q 'push aborted' <<<"${HOOK_OUT}" || {
+    printf 'the refusal does not say the push was aborted:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  # ...and it asked make for the gates, rather than for something that happens
+  # to exit non-zero. 'make gates' is the whole claim.
+  grep -qx 'gates' "${HOOK_SB}/make.log" || {
+    printf 'the hook ran make with %s, not with gates\\n' \
+      "$(tr '\\n' ' ' < "${HOOK_SB}/make.log")" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and a failing gate stops a real push reaching a real remote" \
+  failing_gates_refuse_a_real_push
+passing_gates_let_the_push_through() {
+  local before after bad=0
+  before="$(hook_remote_head)"
+  hook_push_attempt 0
+  after="$(hook_remote_head)"
+  (( HOOK_RC == 0 )) || {
+    printf 'a push whose gates passed was refused (rc=%s):\\n%s\\n' "${HOOK_RC}" "${HOOK_OUT}" >&2
+    bad=1; }
+  [[ "${before}" != "${after}" ]] || {
+    echo 'the gates passed and the commit never reached the remote' >&2
+    bad=1; }
+  grep -q 'gates passed' <<<"${HOOK_OUT}" || {
+    printf 'a successful run does not say so:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and a passing one lets it through, so the rail is not simply a wall" \
+  passing_gates_let_the_push_through
+# The other half of the finding: a clone that never ran 'make hooks' has no
+# way to know. 'make hooks-status' is that way, and it has to be right in both
+# directions — a status line that always says the same thing is decoration.
+hooks_status_says_whether_the_rail_is_armed() {
+  hook_sandbox
+  local armed unarmed bad=0
+  armed="$( cd "${HOOK_SB}" && make --no-print-directory hooks-status 2>&1 )"
+  grep -q 'hook armed' <<<"${armed}" || {
+    printf 'an armed clone is not reported as armed:\\n%s\\n' "${armed}" >&2
+    bad=1; }
+  git -C "${HOOK_SB}" config --unset core.hooksPath
+  unarmed="$( cd "${HOOK_SB}" && make --no-print-directory hooks-status 2>&1 )"
+  git -C "${HOOK_SB}" config core.hooksPath .githooks
+  grep -q 'NOT installed' <<<"${unarmed}" || {
+    printf 'a clone with no hook is not told so:\\n%s\\n' "${unarmed}" >&2
+    bad=1; }
+  grep -q 'make hooks' <<<"${unarmed}" || {
+    printf 'the notice does not say how to install it:\\n%s\\n' "${unarmed}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and 'make hooks-status' tells the truth about both kinds of clone" \
+  hooks_status_says_whether_the_rail_is_armed
+# ...and the same fact, said where this suite's own reader will see it.
+the_verdict_names_an_unarmed_rail() {
+  hook_sandbox
+  local armed unarmed bad=0
+  armed="$(rail_notice "${HOOK_SB}")"
+  [[ -z "${armed}" ]] || {
+    printf 'an armed clone is nagged anyway: %s\n' "${armed}" >&2
+    bad=1; }
+  git -C "${HOOK_SB}" config --unset core.hooksPath
+  unarmed="$(rail_notice "${HOOK_SB}")"
+  git -C "${HOOK_SB}" config core.hooksPath .githooks
+  grep -q 'make hooks' <<<"${unarmed}" || {
+    printf 'a clone with no rail is told nothing by the verdict: %s\n' "${unarmed:-<silence>}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and this suite's own verdict says so too, where an agent will read it" \
+  the_verdict_names_an_unarmed_rail
+# ...and every script under tests/ has to have a way in.
+#
+# The other half of the same question, asked of the parts of this project
+# nobody had reason to look at: which files can nothing reach? One answer, and
+# it was the sharpest one available. tests/live-verify.sh — the other half of
+# the unit suite, same subjects with no stubs at all, against a real docker and
+# a real agent — had no Makefile target, no CI job, no bin/lca subcommand and
+# no caller. The only record that it could be run at all was one sentence in
+# docs/PROMPT-WINDOW.md.
+#
+# An instrument with no way in is reached for exactly once: in a hurry, on the
+# machine it was written for, by somebody who has to rediscover that it exists.
+# Whether it still works is discovered then, which is the worst possible moment.
+# It is now 'make live-verify', beside 'make coverage' and 'make smoke', and
+# this refuses the next one.
+#
+# SOURCE-GREP: the subject IS whether a file's name appears in the files that
+# could invoke it. There is no behaviour to drive.
+every_test_script_has_a_way_in() {
+  # 'no_way_in' rather than 'missing': that name is an ARRAY elsewhere in this
+  # file, and ShellCheck types a name across the whole file. CONTRIBUTING has a
+  # section on it; this is the fourth time.
+  local f b callers n=0 no_way_in=""
+  for f in "${REPO}"/tests/*.sh; do
+    b="$(basename "${f}")"
+    n=$(( n + 1 ))
+    callers="$(grep -rlF "tests/${b}" \
+                 "${REPO}/Makefile" "${REPO}/.github/workflows/ci.yml" \
+                 "${REPO}/bin/lca" "${REPO}/.githooks/pre-push" \
+                 "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null || true)"
+    [[ -n "${callers}" ]] || no_way_in+="  ${b}"$'\n'
+  done
+  (( n >= 5 )) || {
+    printf 'only %s scripts found under tests/ — this gate stopped watching\n' "${n}" >&2
+    return 1; }
+  [[ -z "${no_way_in}" ]] || {
+    printf 'these test scripts have no way in — no make target, no CI job, no caller:\n%sGive it one, or it gets found the day it is needed.\n' \
+      "${no_way_in}" >&2
+    return 1; }
+}
+check "...and every script under tests/ has a way in" \
+  every_test_script_has_a_way_in
+
 echo "# five failure paths that reported the wrong thing, or nothing"
 # Each of these was verified by running the mechanism, not by reading it.
 errexit_survives_sourcing_tune() {
@@ -23197,6 +23413,10 @@ check "...and the number of undriven configurations never gets bigger" \
 
 echo
 SUITE_FINISHED=true
+# CI has no hook to install and no push to make from here, so it is told
+# nothing. Everywhere else, a clone that skipped 'make hooks' is running this
+# because somebody remembered to, and that is worth saying out loud.
+[[ -n "${CI:-}" ]] || rail_notice "${REPO}"
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
   exit 1

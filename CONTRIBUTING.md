@@ -722,6 +722,74 @@ spanning several lines (the shims handed to `restore_sandbox`, which are code
 for *another* shell). A naive grep reports ten duplicates here; nine of them
 are fixtures, and the tenth is the real one.
 
+### ...and the rail that was never run at all
+
+The same rule, turned on the thing that runs everything else. `.githooks/pre-push`
+is this project's stated safety rail for the AI-assisted loop: an agent edits,
+the hook runs ShellCheck, `bash -n` and both suites, and a push that fails them
+never leaves the machine. **Nothing had ever run it.** The only gate on it,
+`hook_does_not_promise_more_than_it_runs`, reads its *prose* — that it does not
+over-promise a green CI — and stops there.
+
+Asking what would have to be true for it to be broken with nobody noticing gave
+two answers, and the second one was already true:
+
+1. the hook runs and swallows `make`'s status, so a red push goes out reported
+   as gated;
+2. **git never invokes it at all**, because `make hooks` is opt-in and a clone
+   that skipped it says nothing, ever.
+
+This clone had skipped it. `core.hooksPath` was unset and `.git/hooks/pre-push`
+did not exist, so every push made from here went out with the rail unarmed. The
+only reason that cost nothing is that the suite was run by hand each time — the
+rail was a habit, not a mechanism, and a habit is exactly what a rail is for
+replacing. *A safety mechanism whose absence is silent is indistinguishable
+from one that is present and broken.*
+
+Both answers are now driven, against a real sandbox repository with a real bare
+remote:
+
+| | driven by |
+|---|---|
+| `make hooks` actually sets `core.hooksPath` and leaves the hook executable | the recipe run for real — nothing had executed it before |
+| a failing gate stops a real `git push` reaching a real remote | a stub `make` that exits 1; the remote head must not move, and the hook must have asked for `gates` and not for something else that happens to exit non-zero |
+| a passing gate lets the same push through | the same stub at 0 — without this, a hook that refused everything would pass the row above |
+| a clone with no hook is told so, and a clone with one is not nagged | `make hooks-status`, both ways |
+| ...and this suite's own verdict says it too | `rail_notice`, both ways |
+
+The stub `make` is the point, not a shortcut: what is under test is the **rail**,
+not the gates it runs. Does git invoke this hook, does it ask for `make gates`,
+and does a non-zero answer stop the commit reaching the remote.
+
+`make gates` and the suite's own verdict now both say when the rail is not
+armed, because those are the two things somebody actually runs in a fresh
+clone — `make gates` if they read CONTRIBUTING, the suite directly if they are
+an agent who did not. It is a note, not a failure, and it disappears the moment
+the hook is installed. CI is told nothing: it has no hook to install and no
+push to make.
+
+One more thing worth recording, because it nearly buried all of the above. The
+first mutation run reported all three mutants passing — a perfect "these gates
+are decoration" result. The mutations had not applied: the probe hardcoded
+`REPO` and never read the mutated copies. This document already warns about
+exactly that ("a mutation that does not apply looks exactly like a test that
+cannot fail"), and it still took a second look. Print proof the mutation landed.
+
+The same sweep asked the other half of the question — *which files can nothing
+reach?* — and got one answer. `tests/live-verify.sh` had no `make` target, no CI
+job, no `bin/lca` subcommand and no caller anywhere: 487 lines that are the
+other half of the unit suite, same subjects with no stubs at all, against a real
+docker and a real agent. The only record that it could be run was one sentence
+in `docs/PROMPT-WINDOW.md`. It is now `make live-verify`, beside `make coverage`
+and `make smoke`, and `every_test_script_has_a_way_in` refuses the next one.
+
+Run here, on a box with no docker, it exits 2 with *"The docker daemon is not
+reachable as root; nothing here can be driven"* — refusing wholesale rather than
+printing forty skips that would look like coverage. The instrument was fine. The
+only thing wrong with it was that nobody could get to it, which is a defect you
+find on the day you need it and not before.
+
+
 ## A tool that parses source must tell code from commentary about code
 
 Three times in one session the tooling was fooled by text *about itself*, and

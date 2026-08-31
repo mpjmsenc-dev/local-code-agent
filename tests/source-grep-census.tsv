@@ -176,6 +176,7 @@ FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it 
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
 B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
+B	every_test_script_has_a_way_in	the subject IS whether a file name appears in the files that could invoke it — an exhaustive absence rule over the repo
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
 A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
 A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
