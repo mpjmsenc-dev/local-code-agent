@@ -11417,9 +11417,9 @@ drift_arms() {
 # derived list would make every assertion below pass over nothing at all, which
 # is exactly the failure this gate exists to stop.
 check "the drift keys are read from webui_drift itself" \
-  test "$(drift_keys | grep -c .)" -ge 8
+  test "$(drift_keys | grep -c .)" -ge 9
 check "...and the sentences are read from webui.sh" \
-  test "$(drift_arms | grep -c .)" -ge 8
+  test "$(drift_arms | grep -c .)" -ge 9
 every_drift_key_is_reported() {
   local key bad=0
   while read -r key; do
@@ -11716,6 +11716,11 @@ if have jq; then
     local want="$1" stub_live="$2" readable="${3:-yes}" out
     out="$(
       webui_container_env_list() { [[ "${readable}" == "yes" ]] || return 1; printf 'PORT=3000\n'; }
+      # The image read is a seam of its own — not an environment variable —
+      # so it needs its own stub here, or these gates would ask the REAL
+      # daemon and pass or fail on whatever this machine happens to be running.
+    # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
+      webui_container_image() { [[ "${readable}" == "yes" ]] || return 1; printf '%s' "${WEBUI_IMAGE}"; }
       webui_container_env() {
         [[ "${readable}" == "yes" ]] || return 1
         [[ "$1" == "DEFAULT_MODEL_PARAMS" ]] || return 1
@@ -11778,9 +11783,18 @@ if have jq; then
         [[ -n "${v}" ]] || return 1
         printf '%s' "${v}"
       }
+      webui_container_image() {
+        [[ "${readable}" == "yes" ]] || return 1
+        [[ -n "${STUB_IMAGE}" ]] || return 1
+        printf '%s' "${STUB_IMAGE}"
+      }
       webui_drift || true
     ) | tr '\n' ' '
   }
+  # What the container was built from, for the harness above. Defaults to
+  # agreement so every gate that is not about the image is unaffected by it.
+  # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
+  STUB_IMAGE="${WEBUI_IMAGE}"
   # Everything the installer bakes in, at today's values.
   # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
   FULL_FIXTURE=(
@@ -11816,6 +11830,34 @@ if have jq; then
     grep -q SYSTEM_PROMPT <<<"$(drift_without DEFAULT_MODEL_PARAMS)"
   check "...and a missing model name is still caught, as it always was" \
     grep -q MODEL_NAME <<<"$(drift_without DEFAULT_MODELS)"
+
+  # The image the container was created from — the one setting in .env that
+  # nothing compared, because it is the one that is not an environment
+  # variable and so needed a read of its own. Left unfixed until a machine
+  # with a real daemon could settle WHICH field to read: '.Config.Image'
+  # returns the tag as passed (measured: ghcr.io/open-webui/open-webui:main),
+  # so a plain string comparison is stable and a stock install compares equal.
+  # Had it returned a digest, this comparison would report drift on every run
+  # for every install and 'lca apply' would re-create the chat container each
+  # time — which is why it was worth measuring rather than guessing.
+  image_drift() {   # LIVE_IMAGE -> the drifted keys for a container built from it
+    local out
+    STUB_IMAGE="$1"
+    out="$(drift_list yes "${FULL_FIXTURE[@]}")"
+  # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
+    STUB_IMAGE="${WEBUI_IMAGE}"
+    printf '%s' "${out}"
+  }
+  # The half that matters most, because guessing wrong here re-creates the
+  # chat container on every single 'lca apply': a stock install must be quiet.
+  # shellcheck disable=SC2031  # read after unrelated subshells above; these are the outer values, which is what this needs
+  check "a container built from the image .env asks for is not called drifted" \
+    test -z "$(image_drift "${WEBUI_IMAGE}" | tr -d ' ')"
+  check "a container built from a different image IS reported as drift" \
+    grep -q WEBUI_IMAGE <<<"$(image_drift ghcr.io/open-webui/open-webui:v0.3.0)"
+  # Absent is not agreement, the same rule the rest of this function follows.
+  check "...and an image that cannot be read is not silently agreed with" \
+    grep -q WEBUI_IMAGE <<<"$(image_drift "")"
 else
   echo "skip - jq not installed, cannot exercise the system prompt comparison"
 fi

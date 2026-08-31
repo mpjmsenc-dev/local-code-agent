@@ -2724,6 +2724,47 @@ webui_container_env() {
   printf '%s' "${out}"
 }
 
+# webui_container_image — the image the chat app container was CREATED from,
+# spelled the way 'docker run' was handed it.
+#
+# Which field to read decided the whole implementation, and a stub cannot
+# answer it, so it was measured on a real daemon with the chat app up:
+#
+#   docker container inspect -f '{{.Config.Image}}' open-webui
+#     -> the WEBUI_IMAGE tag below, character for character, as it was passed
+#   docker container inspect -f '{{.Image}}'        open-webui
+#     -> sha256:6a773e5c...                        the resolved id
+#
+# (The tag is not written out again here on purpose: it is defined once in this
+# file and a gate holds it to that, so a second copy in a comment would be a
+# second definition to go stale.)
+#
+# .Config.Image echoes back what the command line said, and install_webui.sh
+# hands it "${WEBUI_IMAGE}" — a tag — so a plain string comparison is stable
+# and a stock install compares EQUAL. That matters more than it sounds: the
+# alternative, comparing the container's resolved id against the id the
+# configured tag resolves to, needs the image present locally to resolve, so
+# an offline box would report a pin problem it does not have, and any install
+# whose tag had moved would have 'lca apply' re-create the chat container on
+# every single run.
+#
+# What this does NOT catch, and must not be read as catching: .Config.Image is
+# fixed when the container is created, so a ':main' that has advanced upstream
+# still reads equal. The question answered here is "is the container running
+# the image .env asks for", not "is that image the newest one".
+webui_container_image() {
+  local out runner=()
+  have docker || return 1
+  # Bounded and root-fallback for the same reasons as webui_container_env_list
+  # above: every caller is a reporter, and the login banner is one of them.
+  if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
+  out="$("${runner[@]}" docker container inspect -f '{{.Config.Image}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { root_for_probe && as_root "${runner[@]}" docker container inspect -f '{{.Config.Image}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || true)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
 # docker_daemon_reachable — true when docker commands can actually run here.
 #
 # Needed because "no container" and "cannot ask" are different answers that
@@ -4629,6 +4670,19 @@ webui_drift() {
   # nothing at all.
   live="$(webui_container_env WEBUI_NAME || true)"
   [[ "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  # The image the container was created from. Not an environment variable, so
+  # it takes a read of its own — and being the only setting read differently
+  # is exactly why nothing compared it: WEBUI_IMAGE is honoured by lib.sh and
+  # four scripts, its own comment invites pinning the tag, and this function
+  # had no key for it. Measured against a stubbed docker before it was fixed:
+  # container on v0.3.0, .env asking for v9.9.9, drift reported []. 'lca apply'
+  # answered "already matches .env" and the chat app ran the old image for
+  # ever.
+  #
+  # Absent is not agreement, same as everything above: a container whose image
+  # cannot be read is not a container that agrees.
+  live="$(webui_container_image || true)"
+  [[ "${live}" == "${WEBUI_IMAGE}" ]] || drifted+=("WEBUI_IMAGE")
   # The assistant's own instructions, and the starter questions beside them.
   # Neither is an .env key — they live in lib.sh and config/ — which is exactly
   # why they were missed: the gate below scanned install_webui.sh for lines
