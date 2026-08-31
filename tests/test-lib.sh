@@ -18572,6 +18572,93 @@ hook_does_not_promise_more_than_it_runs() {
 check "the pre-push hook does not promise a green CI it cannot deliver" \
   hook_does_not_promise_more_than_it_runs
 
+# ...and EVERY place that counts those jobs has to count them right.
+#
+# The gate above was written for exactly this drift and still missed two of
+# them, because it looked for one phrasing per file:
+#
+#   Makefile        "(2 of CI's 6 jobs)"        the number was never read
+#   CONTRIBUTING.md "all six jobs, not just"    a fourth site nobody listed
+#
+# CI has had seven jobs since `webui` was added. Both said six, in a document
+# whose own comment reads "a gate that watches one file while the same claim
+# lives in three is a gate with a blind spot" — the blind spot was the
+# phrasing, not the file. So this one does not look for a sentence. It reads
+# every number that sits immediately in front of the word "jobs", and every
+# number after "of CI's", in the files that talk about CI, and requires all of
+# them to be the count in the workflow. A new sentence in a new shape is
+# covered the day it is written.
+#
+# Scoped to the CI-facing files on purpose: docs/AGENT.md says "two different
+# jobs" about the supervisor, which is not this number and never will be.
+#
+# SOURCE-GREP: the subject IS prose about the workflow, checked against the
+# workflow. There is no behaviour to drive.
+CI_CLAIM_FILES=( CONTRIBUTING.md README.md Makefile .githooks/pre-push )
+CI_NUMBER_WORDS='one|two|three|four|five|six|seven|eight|nine|ten'
+count_word() {   # a number, written either way -> the number
+  case "${1,,}" in
+    one) echo 1 ;; two) echo 2 ;; three) echo 3 ;; four) echo 4 ;;
+    five) echo 5 ;; six) echo 6 ;; seven) echo 7 ;; eight) echo 8 ;;
+    nine) echo 9 ;; ten) echo 10 ;; *) echo "$1" ;;
+  esac
+}
+every_job_count_claim_is_the_real_one() {
+  local total f blob n a b bad=0 seen=0
+  total="$(grep -cE '^    name: ' "${REPO}/.github/workflows/ci.yml" || true)"
+  (( total > 0 )) || { echo 'could not count the CI jobs' >&2; return 1; }
+  for f in "${CI_CLAIM_FILES[@]}"; do
+    [[ -r "${REPO}/${f}" ]] || {
+      printf 'a file this gate watches is gone: %s\n' "${f}" >&2; return 1; }
+    # One blob, not lines: "That is two / of CI's seven" is one claim wrapped
+    # over two lines, and a line-at-a-time reader sees "two" and "seven" as
+    # separate numbers belonging to nothing.
+    #
+    # Fenced blocks and backticked spans come out first, because this document
+    # teaches its own rules by QUOTING the wrong version — the table below the
+    # section that added this gate contains the literal strings "2 of CI's 6
+    # jobs" and "all six jobs", which are the drift, not a claim of it. That is
+    # a deliberate blind spot: a real claim written inside backticks would
+    # escape. The floor on how many claims this gate must find is what stops
+    # that from emptying it out silently.
+    # shellcheck disable=SC2016  # backticks are markdown here, not a command
+    blob="$(awk '/^```/ { fence = !fence; next } !fence' "${REPO}/${f}" \
+            | sed 's/`[^`]*`//g' | tr '\n' ' ' | tr -s ' ')"
+    while read -r n; do
+      [[ -n "${n}" ]] || continue
+      seen=$(( seen + 1 ))
+      [[ "$(count_word "${n}")" == "${total}" ]] || {
+        printf '%s says CI has %s jobs; the workflow defines %s\n' \
+          "${f}" "${n}" "${total}" >&2
+        bad=1; }
+    done < <( { grep -oiE "(${CI_NUMBER_WORDS}|[0-9]+) jobs" <<<"${blob}" | awk '{print $1}'
+                grep -oiE "of CI's (${CI_NUMBER_WORDS}|[0-9]+)" <<<"${blob}" | awk '{print $3}'
+              } || true )
+    # ...and where a sentence splits the set — "runs two of them, the other
+    # five need a fresh machine" — the halves have to add up to it. That
+    # sentence is the promise the hook is allowed to make; if it drifts, the
+    # reader is told a smaller gap than the one they have.
+    while read -r a b; do
+      [[ -n "${a}" && -n "${b}" ]] || continue
+      seen=$(( seen + 1 ))
+      a="$(count_word "${a}")"; b="$(count_word "${b}")"
+      (( a + b == total )) || {
+        printf '%s splits %s CI jobs into %s local and %s not, which is %s\n' \
+          "${f}" "${total}" "${a}" "${b}" "$(( a + b ))" >&2
+        bad=1; }
+    done < <(grep -oiE "(${CI_NUMBER_WORDS}|[0-9]+) of (them|CI's (${CI_NUMBER_WORDS}|[0-9]+)).{0,40}the other (${CI_NUMBER_WORDS}|[0-9]+)" \
+               <<<"${blob}" | awk '{print $1, $NF}' || true)
+  done
+  # A sweep that finds nothing passes, having done nothing.
+  (( seen >= 6 )) || {
+    printf 'only %s job-count claims found across %s files — this gate stopped watching\n' \
+      "${seen}" "${#CI_CLAIM_FILES[@]}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "...and every place that counts those jobs counts them right" \
+  every_job_count_claim_is_the_real_one
+
 echo "# five failure paths that reported the wrong thing, or nothing"
 # Each of these was verified by running the mechanism, not by reading it.
 errexit_survives_sourcing_tune() {
@@ -22712,6 +22799,137 @@ group_a_debt_has_not_grown() {
   }
 }
 check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
+# ...and the census header must count its own rows.
+#
+# Found by re-reading my own bookkeeping after a status check. The header said
+# "A rows now 87 / still worth driving 54" while the file held 85 A rows: a
+# commit lowered the ratchet, which IS driven, and left the prose beside it,
+# which was not. That is exactly the failure this whole file exists to remove —
+# a statement about the work that nothing checks — committed in the ledger that
+# records the removing of it.
+#
+# SOURCE-GREP: the subject IS two numbers written in this file's own header,
+# checked against the rows underneath them. There is no behaviour to drive.
+census_header_counts_its_own_rows() {
+  local head_a head_driving narrow actual bad=0
+  head_a="$(sed -n 's/^#   A rows now  *\([0-9]\+\) .*/\1/p' "${CENSUS}" | head -1)"
+  head_driving="$(sed -n 's/^#   still worth driving  *\([0-9]\+\).*/\1/p' "${CENSUS}" | head -1)"
+  narrow="$(sed -n 's/^#   correctly narrow  *\([0-9]\+\).*/\1/p' "${CENSUS}" | head -1)"
+  actual="$(grep -c '^A' "${CENSUS}")"
+  [[ -n "${head_a}" && -n "${head_driving}" && -n "${narrow}" ]] || {
+    echo 'the census header no longer states its own progress numbers — this gate stopped watching' >&2
+    return 1
+  }
+  (( head_a == actual )) || {
+    printf 'the census header says %s A rows and the file holds %s — the prose beside the ratchet was not updated with it\n' \
+      "${head_a}" "${actual}" >&2
+    bad=1
+  }
+  (( head_driving + narrow == head_a )) || {
+    printf 'the header splits %s A rows into %s worth driving and %s correctly narrow, which is %s\n' \
+      "${head_a}" "${head_driving}" "${narrow}" "$(( head_driving + narrow ))" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the census header's numbers are the ones under it" \
+  census_header_counts_its_own_rows
+# ...and the same for what the COMMIT MESSAGE says about them.
+#
+# The other half of the same audit. Every message in this branch's history that
+# moves census rows states the transition — "Census: A 102 -> 100, FP 79 -> 81".
+# Checked against the diffs afterwards, twenty-two of twenty-four were right and
+# one commit's two were not: it claimed A 112 -> 109 where the parent held 113,
+# because it carried a fourth conversion from a previous session's working tree
+# that the message did not count. Nobody would ever have noticed; the number in
+# the file was right and only the story about it was wrong.
+#
+# HEAD's message only, deliberately. A gate over all of history cannot be
+# satisfied without rewriting it, and a gate nobody can satisfy gets deleted.
+# This one fails before a wrong claim is pushed — the pre-push hook runs this
+# suite — and an amend fixes it.
+#
+# SOURCE-GREP: the subject IS the text of a commit message, compared with the
+# diff it describes. There is no behaviour to drive.
+census_counts_in() {   # REV FILE LABEL -> how many rows of that label it had
+  git -C "${REPO}" show "$1:$2" 2>/dev/null | grep -c "^$3	" || true
+}
+# The judging half, separated from HEAD on purpose: a gate whose only input is
+# the commit that happens to be checked out cannot be shown to fail, and this
+# suite's whole argument is that a gate nobody has seen fail is decoration.
+census_claims_in_message() {   # REV MESSAGE -> 1 if the message miscounts REV's diff
+  local rev="$1" msg="$2" label from to before after bad=0 blob
+  # A message that QUOTES a wrong claim is describing one, not making one —
+  # the commit that added this gate quotes the miscount it found, and was
+  # rejected by its own gate for saying so. Double quotes are how a message
+  # quotes; this repo's convention writes a real transition bare, on a
+  # "Census:" line. Blobbed first because the quotation wraps over a line
+  # break, and a line-at-a-time reader sees only an unbalanced quote. It is the
+  # same deliberate escape hatch the job-count sweep has for backticks, with
+  # the same mitigation: the controls below still require an unquoted claim to
+  # be caught.
+  blob="$(tr '\n' ' ' <<<"${msg}" | sed 's/"[^"]*"//g')"
+  while read -r label from to; do
+    [[ -n "${label}" ]] || continue
+    before="$(census_counts_in "${rev}^" tests/source-grep-census.tsv "${label}")"
+    after="$(census_counts_in "${rev}"   tests/source-grep-census.tsv "${label}")"
+    [[ "${before}" == "${from}" && "${after}" == "${to}" ]] || {
+      printf 'this commit says "%s %s -> %s" and its diff moved %s from %s to %s\n' \
+        "${label}" "${from}" "${to}" "${label}" "${before}" "${after}" >&2
+      bad=1
+    }
+  done < <(grep -oE '\b(A|B|FP|H) [0-9]+ -> [0-9]+' <<<"${blob}" | sed 's/ -> / /')
+  while read -r from to; do
+    [[ -n "${from}" ]] || continue
+    before="$(census_counts_in "${rev}^" tests/config-coverage.tsv SHIPPED-ONLY)"
+    after="$(census_counts_in "${rev}"   tests/config-coverage.tsv SHIPPED-ONLY)"
+    [[ "${before}" == "${from}" && "${after}" == "${to}" ]] || {
+      printf 'this commit says "SHIPPED-ONLY %s -> %s" and its diff moved it from %s to %s\n' \
+        "${from}" "${to}" "${before}" "${after}" >&2
+      bad=1
+    }
+  done < <(grep -oE 'SHIPPED-ONLY [0-9]+ -> [0-9]+' <<<"${blob}" | sed 's/SHIPPED-ONLY //; s/ -> / /')
+  # A message with no such claim is fine, and most are. Nothing is asserted
+  # about messages that say nothing about the census.
+  return "${bad}"
+}
+commit_message_claims_match_its_diff() {
+  local msg
+  msg="$(git -C "${REPO}" log -1 --format=%B 2>/dev/null || true)"
+  [[ -n "${msg}" ]] || { echo 'could not read HEAD as a commit' >&2; return 1; }
+  census_claims_in_message HEAD "${msg}"
+}
+# ...and the same judge, shown failing. Both controls run against the real HEAD
+# diff, so they cost nothing and cannot go stale with the history.
+commit_message_gate_can_fail() {
+  local a
+  a="$(census_counts_in HEAD tests/source-grep-census.tsv A)"
+  census_claims_in_message HEAD "Census: A $(( a + 40 )) -> $(( a + 41 ))" 2>/dev/null && {
+    echo 'a message claiming a census transition that never happened was accepted' >&2
+    return 1; }
+  census_claims_in_message HEAD "SHIPPED-ONLY 99 -> 98" 2>/dev/null && {
+    echo 'a message miscounting the configuration census was accepted' >&2
+    return 1; }
+  census_claims_in_message HEAD "a message that says nothing about any census" || {
+    echo 'a message making no census claim was rejected anyway' >&2
+    return 1; }
+  # ...and the same wrong claim QUOTED rather than made. A message about a
+  # miscount has to be able to say what the miscount was, including across the
+  # line break it will inevitably wrap over.
+  census_claims_in_message HEAD "an earlier commit claimed \"A $(( a + 40 )) -> $(( a + 41 )),
+and it was wrong\", which is what this paragraph is about" || {
+    echo 'a message QUOTING a wrong claim was rejected as though it had made it' >&2
+    return 1; }
+  return 0
+}
+if git -C "${REPO}" rev-parse --verify -q HEAD^ >/dev/null 2>&1; then
+  check "...and this commit's message counts the rows its own diff moved" \
+    commit_message_claims_match_its_diff
+  check "...and a message that miscounts them is caught" \
+    commit_message_gate_can_fail
+else
+  echo "skip - no parent commit here, so a message cannot be compared with its diff"
+fi
 
 # A gate that is defined and never run passes, having done nothing — the exact
 # failure this suite exists to catch, turned on the suite itself. It happened

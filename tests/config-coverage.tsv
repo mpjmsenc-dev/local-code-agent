@@ -39,9 +39,11 @@
 # other settings are compared rather than interpolated — they select a branch
 # exactly like a switch does — and they are the next tranche:
 #
-#   OLLAMA_CONTEXT_LENGTH   DRIVEN at 8192 and at 4096 as of this commit; the
-#                           4096 cell is the one that produced a warning
-#                           nothing in this repo had ever produced
+#   OLLAMA_CONTEXT_LENGTH   DRIVEN at 4096, 8192 and 32768. The 4096 cell
+#                           produced a warning nothing in this repo had ever
+#                           produced; the three together are what proves
+#                           'lca ask' computes a budget rather than holding a
+#                           constant
 #   OLLAMA_KEEP_ALIVE       shipped 30m; the -1 the agent tier wants is unrun
 #                           (tune's dry-run drives both, but no whole command
 #                            has been run at -1)

@@ -73,8 +73,8 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              87   of the 115 the projection was made from
-#   still worth driving     54
+#   A rows now              85   of the 115 the projection was made from
+#   still worth driving     52
 #   correctly narrow        33   still labelled A; each needs re-reading and a
 #                                pointer before it may move to B
 #
@@ -151,6 +151,9 @@ A	both_commands_announce_a_model_load	greps two scripts for a call
 A	both_reporters_ask_lib	greps for who computes the git identity
 A	both_surfaces_report_an_unknown_family	awk for a call inside main()
 FP	can_root_now_is_stricter	asks both, as not-root, against a stub sudo that refuses and one that does not
+H	census_claims_in_message	judges one message against one revision, so the judge can be shown failing
+H	census_counts_in	how many rows of one label a given revision of the census held
+B	census_header_counts_its_own_rows	the subject IS two numbers in this file's own header, checked against the rows under them
 FP	check_names_a_bad_port	extract-to-drive: runs check-system.sh's Settings block over real values
 A	check_reports_dropin_drift	a single grep for one function name
 A	check_reports_the_agent	awk over check-system.sh for a guarded call
@@ -159,6 +162,7 @@ H	check_sandbox	builds the copy of the tree and the stubs a real 'lca check' is 
 FP	check_system_asks_for_the_port_list	runs a real 'lca check' with the chat app off in .env but still listening, and reads the inbound section
 A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the expectation
 H	ci_fixture_values	reads the .env overrides CI's own workflow and the fresh-install script apply, which this run cannot see
+H	count_word	a number written as a word -> the number
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
 A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
 A	drift_says_something_specific	greps webui.sh for a warn line; reachability unobserved
@@ -171,6 +175,7 @@ FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an arg
 FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
+B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
 A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
 A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
 A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
@@ -290,6 +295,8 @@ B	every_honoured_setting_is_accounted_for	the subject is which names lib.sh reso
 B	group_a_debt_has_not_grown	the subject is a recorded-debt table
 B	chmod_lists_agree	seven text artefacts must name the same paths
 B	ci_runs_the_acceptance_test_on_a_shipped_model	derives two lists (CI model, tune rungs) and compares
+B	commit_message_claims_match_its_diff	the subject IS the text of HEAD's commit message, compared with the census rows its own diff moved
+B	commit_message_gate_can_fail	the positive control for the row above: two invented claims must be rejected and a message with no claim accepted
 B	conventions_carry_the_measured_gotchas	the subject is a markdown document
 B	conventions_keep_their_keyed_phrases	the subject is a markdown document
 B	conventions_note_lists_the_same_phrases	the subject is a markdown document

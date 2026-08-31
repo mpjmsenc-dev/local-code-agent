@@ -98,7 +98,7 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Eight shell traps that turn a gate into decoration
+## Nine shell traps that turn a gate into decoration
 
 All eight were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
@@ -255,6 +255,19 @@ a real ordering as wrong. Let `END` decide alone:
 /uses/   { if (!done) { done = 1; in_order = seen } }
 END      { exit (done && in_order) ? 0 : 1 }
 ```
+
+**9. Editing a script while `bash` is running it.** `bash` reads a script
+incrementally, by byte offset, as it goes. Rewrite the file under it and every
+offset past the edit shifts, so the interpreter resumes mid-token, tries to run
+the remainder of the file as one command, and reports **`File name too long`**
+— at a line number in a part of the suite that has nothing to do with the edit.
+A full run of `tests/test-lib.sh` ended early inside a gate about the tune
+ladder for exactly this, quoting mangled source back at me. Nothing was wrong
+with the file: `bash -n` and ShellCheck both passed on it a second later. Let
+the run finish, or edit a copy. It is the same mistake as pushing in the
+background while still editing — the pre-push hook runs this suite, on the file
+your editor is halfway through writing. Two things holding one file, and only
+one of them knows it.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
@@ -1207,11 +1220,83 @@ question to ask of a driven gate is not "is it matrixed" but: *what does its
 fixture actually produce, and which branches of its subject can therefore never
 run?*
 
+## The bookkeeping is a claim too, and nothing was driving it
+
+Everything above is about a statement of a behaviour that nothing checks. The
+ledgers that record *this* work are statements as well, and for a while nothing
+checked those either. Three had drifted, all the same way: a number was lowered
+where it is gated and left standing in the prose beside it.
+
+| where | said | actually | why nobody noticed |
+|---|---|---|---|
+| the census header | `87` A rows, `54` worth driving | 85 and 52 | `group_a_debt_has_not_grown` reads the rows; the header is prose sitting on top of them |
+| `Makefile`'s `gates:` help | `2 of CI's 6 jobs` | 7 | the gate that watches that line greps it for the words *everything* and *all of* — never for the number |
+| `CONTRIBUTING.md`, "Reviewing a PR" | `all six jobs` | 7 | a fourth site for a claim the gate knew lived in three |
+
+The third is the instructive one. `hook_does_not_promise_more_than_it_runs` was
+written for exactly this drift, and its own comment reads *"a gate that watches
+one file while the same claim lives in three is a gate with a blind spot"*. It
+watched all three files. It still missed two claims, because it looked for **one
+phrasing per file** — `CI has N jobs` in the hook, `CI (N jobs)` in the document
+— and a claim written any other way was invisible to it. The blind spot was
+never the file. It was the sentence the author of the gate happened to have in
+front of them, which is the same failure as a fixture that produces one
+configuration: honest, partial, and silent about which.
+
+`every_job_count_claim_is_the_real_one` replaces the guess with a sweep. Every
+number immediately in front of the word *jobs*, and every number after *of
+CI's*, in the CI-facing files, has to be the count of jobs in the workflow; and
+where a sentence splits the set — "runs two of them, the other five need a fresh
+machine" — the halves have to add up to it. It reads each file as one blob
+rather than line by line, because "That is two / of CI's seven" is one claim
+wrapped over two lines and a line-at-a-time reader sees two unrelated numbers.
+Adding an eighth CI job now fails with a line per stale site, naming each
+file: eight of them, across three files, on the run that proved it.
+
+Two deliberate limits, stated because a limit nobody writes down is a blind
+spot: fenced blocks and backticked spans are stripped first, since this document
+teaches its own rules by quoting the wrong version — the table above contains
+the literal strings the gate is there to prevent — so a real claim written
+inside backticks would escape; and the file list is the CI-facing four, because
+`docs/AGENT.md` says "two different jobs" about the supervisor and always will.
+A floor on how many claims the sweep must find is what stops either limit from
+quietly emptying it.
+
+### ...and the same question, asked of the commit messages
+
+Twenty-four messages on this branch state a census transition —
+`Census: A 102 -> 100, FP 79 -> 81`. Compared against the diffs they describe,
+**twenty-two were right, and one commit's two were both wrong**: it claimed
+`A 112 -> 109, FP 68 -> 71` where its parent held A=113 and FP=67, because it
+carried a fourth conversion from an earlier working tree that the message never
+counted. The rows in the file were right the whole time. Only the story about
+them was wrong, and nothing anywhere could have told you.
+
+`commit_message_claims_match_its_diff` reads HEAD's message and checks every
+such claim against what HEAD's diff did to the two `.tsv` files. HEAD's message
+only, deliberately: a gate over all of history cannot be satisfied without
+rewriting history, and a gate nobody can satisfy gets deleted. The pre-push
+hook runs this suite, so a wrong claim fails before it is pushed, and `git
+commit --amend` fixes it.
+
+The judge takes the revision and the message as arguments instead of reading
+`HEAD` itself, so `commit_message_gate_can_fail` can hand it two invented claims
+and require both to be rejected, and a message with no claim at all and require
+it to pass. **A gate nobody has watched fail is decoration** — this document's
+oldest rule, and it applies to the gates about the bookkeeping exactly as much
+as to the gates about the product.
+
+A third audit ran and produced nothing: every message that names a file, checked
+against `git show --stat` for that commit. Almost every hit was a false
+positive, because a message legitimately names the subject under test and not
+only the paths it touched. No gate came out of it. Recorded because it was
+asked, and because "we looked and there was nothing" is a result.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
 
-1. **The green ticks** — all six jobs, not just `lint`. `e2e`/`webui` are where
+1. **The green ticks** — all seven jobs, not just `lint`. `e2e`/`webui` are where
    real breakage shows up.
 2. **Idempotency and the no-systemd / offline paths** — the fragile parts of a
    provisioning stack are the second run and the degraded environment, not the
