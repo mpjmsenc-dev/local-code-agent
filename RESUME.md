@@ -28,6 +28,7 @@ one that would tell you an unattended run is unprotected when it is not.
 | **`git push` fails: this machine has no credentials for GitHub** | **Overtaken.** `~/.git-credentials` exists and the push works. The branch was 21 commits ahead of `origin/agent-live-verify` — all of docs/PROMPT-WINDOW.md, the skills cut, the `/props` tokenizer discovery and the `AGENT_MAX_OUTPUT_TOKENS` correction — and is now pushed. A mobile session searching origin found none of it and correctly refused to act; the work was committed locally the whole time, never lost. |
 | The first prompt is **~15k tokens**, and it is upstream and out of reach | **Both halves wrong.** The real figure was ~18k — ollama logged 17,820 on the day ~15k was estimated, and 18,353 later. And 4,232 tokens of it were a GitHub skills catalogue this project could cut and did. The prompt now fits its window for the first time, with zero truncations since. docs/PROMPT-WINDOW.md. |
 | It tracks `origin/claude/local-code-agent-build-dd13qw` (PR #28) | It tracks **`origin/agent-live-verify`**. |
+| **The machine was left in a clean, off state** — `ENABLE_AGENT=false`, agent containers and images removed, `~/.openhands` removed | **True of the night it describes, and no longer true of this box** — which matters, because "Cleanup: what state this machine is in" below is where somebody looks to find out. The tier was turned back on for the step-ceiling work and left on: `ENABLE_AGENT=true`, `openhands-app` up on 3001, `~/.openhands` back at 9.5M, both `agent-server` images present (1.26.0 and 1.27.0). The temporary `socat` relay is gone because the shipped one replaced it: `local-code-agent-ollama-relay.socket`, active, with `ENABLE_OLLAMA_RELAY=true`. |
 
 `ENABLE_AGENT` still defaults to `false`, and the reason changed: not "too slow
 to be useful" — that was a projection and the measurement refuted it — but ~7 GB
@@ -440,6 +441,11 @@ Changed something:
 ---
 
 ## Cleanup: what state this machine is in
+
+> **Out of date — see the table at the top of this file.** This records the
+> state this machine was restored to on the night below. It is not the state
+> it is in now: the agent tier was turned back on for the step-ceiling work
+> and left running. Check `.env` and `docker ps` rather than this table.
 
 **I chose to restore a clean, off state.** `ENABLE_AGENT=false`.
 
