@@ -1068,9 +1068,18 @@ deadline: the call does not run slowly, it never returns.
 
 Bounding those three moved the hang rather than removing it — `lca check` then
 reached its inbound-guard step and stopped there instead. Counting properly:
-**`scripts/lib.sh` has nine read-only docker probes and exactly one of them was
-bounded.** Container inspects, `docker ps`, `docker network inspect`, the volume
-inspect: all unbounded, all reachable from a report.
+**`scripts/lib.sh` has eleven read-only docker probes and exactly one of them
+was bounded.** Container inspects, `docker ps`, `docker network inspect`, the
+volume inspect: all unbounded, all reachable from a report.
+
+*That number was nine when this section was first written, and the commit that
+fixed the code said nine as well* — an undercount of my own diff, in a commit
+whose subject is claims matching diffs. The correction is the smaller half. The
+useful half is that nothing was counting, so a twelfth probe added without a
+bound would have been exactly as invisible as the ten were:
+`every_docker_question_is_bounded` counts them now, across `lib.sh`, `webui.sh`
+and `check-system.sh`, and refuses any docker *question* — `info`, `ps`,
+`inspect`, `port` — that carries no bound. Actions stay exempt by name.
 
 The sharpest part is that the argument was already written down. The one bounded
 probe, `webui_container_env_list`, sits six lines above `docker_daemon_reachable`
@@ -1162,6 +1171,48 @@ contentedly measuring the backup. Mutating the branch away is what found it.
 The assertion is one line now: the roll-back sentence and the script name
 together, on the same line, which is the only place they mean what the gate
 claims.
+
+### Every switch, and the two cost notes that were wrong
+
+`tests/config-coverage.tsv` began with eight switches nothing drove the other
+side of. It now has none. The last four went together because they are one
+decision seen from four sides: `AIDER_CONVENTIONS` is the master switch,
+`CONVENTIONS_AIDER` and `CONVENTIONS_AGENT` are the per-surface overrides, and
+`AIDER_NO_AUTO_COMMIT` is the flag the third of them ends up beside in aider's
+argv.
+
+Two of the four carried "Cost: low", and both notes were wrong in the same way.
+
+- **`AIDER_CONVENTIONS` said `check_report` reaches it.** At the shipped
+  defaults it does not: `CONVENTIONS_CHAT` is false, so the chat prompt carries
+  no appendix and turning the master switch off changes nothing a report can
+  see. Measured — identical output, ~577 tokens either way. The other side is
+  only reachable with the chat surface switched on too: 1224 tokens against 577.
+- **`AIDER_NO_AUTO_COMMIT` said the argv probe drives both values.** It does.
+  The probe extracts one block out of `run-agent.sh` and evaluates it, and what
+  it cannot see is any of the forty lines above that block deciding never to
+  reach it — a missing aider, an undownloaded model, a metadata file that cannot
+  be written, a question asked of a terminal that is not there. **`lca` is this
+  project's headline command and nothing had ever run it.** It has a
+  whole-command harness now, and the flag is read off the argv a stub aider
+  really received.
+
+*A cost written down without being paid is a guess wearing a number.* Both of
+these had been read as settled facts for weeks.
+
+The third and fourth are the settings `.env.example` only *suggests*, in a
+comment. `CONVENTIONS_AIDER=yes` now runs through a whole `lca check` and is
+reported — that is the value which reads as OFF, because every switch here is
+compared against the word `true`, and the only difference between the two
+settings was which side of a `#` they were written on. And setting
+`CONVENTIONS_AGENT` at all takes the switch count from 12 to 13, either way
+round: what changes the count is being *set*, not what it is set to, which is
+the observable difference between a suggestion and a decision.
+
+What is left is the value-settings tranche — `OLLAMA_KEEP_ALIVE`,
+`AGENT_STEP_SOURCE`, `MODEL_NAME`, `AGENT_PORT`, `AGENT_TIMEOUT_MINUTES` — which
+are compared rather than interpolated and select a branch exactly like a switch
+does. That is where the next configuration blindness will be.
 
 ## Run it broken, not working
 

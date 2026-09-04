@@ -311,6 +311,7 @@ A	install_verifies_the_clone	greps for the existence test
 FP	installer_passes_the_banner	reads the banner off the argv docker was really given
 FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
 FP	installers_answer_help_before_acting	runs each installer with --help and -h in a stubbed world and checks nothing was installed
+FP	lca_reaches_aider_at_all	runs the whole of run-agent.sh through entry_run and reads the model off the argv a stub aider really got
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
@@ -414,6 +415,7 @@ B	aider_privacy_settings_reach_aider	extract-to-drive: reads the config file aid
 B	banner_states_are_documented	derived banner states must each be explained in the docs
 B	census_order_covers_every_a_row	the subject IS the order published in this file's own header, checked against the rows underneath it
 B	census_names_real_gates	the subject is a checked-in table and the suite's own definitions
+B	every_docker_question_is_bounded	an exhaustive absence rule: no docker question in lib.sh, webui.sh or check-system.sh may be asked without a bound
 B	every_honoured_setting_is_accounted_for	the subject is which names lib.sh resolves against which .env.example ships
 B	group_a_debt_has_not_grown	the subject is a recorded-debt table
 B	chmod_lists_agree	seven text artefacts must name the same paths

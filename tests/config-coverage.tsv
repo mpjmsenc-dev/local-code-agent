@@ -52,15 +52,32 @@
 #   AGENT_PORT              one comparison
 #   AGENT_TIMEOUT_MINUTES   one comparison
 #
+# WHERE THIS STANDS. Every switch in .env.example is now DRIVEN at both values
+# by a whole product command. Eight were SHIPPED-ONLY when this file was
+# written; the last four went together, because they are one decision seen from
+# four sides — a master switch, two per-surface overrides, and the aider argv
+# the third of them ends up in.
+#
+# Two of those four had 'Cost: low' beside them and the note was wrong in the
+# same way twice. AIDER_CONVENTIONS said check_report reaches it: at the shipped
+# defaults it does not, because CONVENTIONS_CHAT is false and the master switch
+# then changes nothing a report can see. AIDER_NO_AUTO_COMMIT said the argv
+# probe drives both values: it does, and the probe evaluates one extracted block
+# while forty lines above it decide whether that block is ever reached. A cost
+# written down without being paid is a guess wearing a number.
+#
+# What is left is the value-settings tranche listed above, which is where the
+# next configuration blindness will be.
+#
 # Format: LABEL <TAB> setting <TAB> shipped <TAB> what the other side is, and what reaches it.
 # ---------------------------------------------------------------------------
 BOTH	AGENT_NATIVE_TOOL_CALLING	false	DRIVEN at both values, twice over: the settings payload agent.sh really builds (seeds_a_real_boolean), and the whole of scripts/agent-selftest.sh run end to end against stand-in curl, docker and ollama. The 'needs a live agent' cost in this row was wrong — every link in that script reaches its world through those three commands. true with a model that returns no native tool calls must stop at 5/6 and name the setting; true with one that does must reach the end
-SHIPPED-ONLY	AIDER_CONVENTIONS	true	false turns the conventions appendix off for all three surfaces at once, chat included, whatever CONVENTIONS_CHAT says. Cost: low — the aider argv builder and check_report both reach it
-SHIPPED-ONLY	AIDER_NO_AUTO_COMMIT	false	true adds --no-auto-commit to the aider argv, so the agent stops committing its own work. Driven at both values by the argv probe; no whole-command run of run-agent.sh exists at EITHER value. Cost: low
+BOTH	AIDER_CONVENTIONS	true	DRIVEN at both values through a whole 'lca check'. The old note said check_report reaches it and that was wrong at the shipped defaults: CONVENTIONS_CHAT is false, so the chat prompt carries no appendix and the master switch changes nothing a report can see — identical output, ~577 tokens either way. With the chat surface on it is 1224 tokens against 577
+BOTH	AIDER_NO_AUTO_COMMIT	false	DRIVEN at both values by a whole run of run-agent.sh — the headline 'lca' command, which had no whole-command harness at all until this row needed one. The flag is read off the argv a stub aider really received, and the warning about losing the undo path off the run's own output
 BOTH	AUTO_TUNE	true	false pins the model and skips the recommendation drift check. CI's ollama E2E job runs the whole stack at false; every other fixture is true
 BOTH	BACKUP_AGENT_WORKSPACE	false	true puts the agent's workspace into the archive, subject to BACKUP_AGENT_MAX_MB. Driven: a real backup at each value, and the archive's own listing read back — plus the over-the-ceiling case, which must leave the rest of the backup intact
-SHIPPED-ONLY	CONVENTIONS_AGENT	unset	the same, for the agent surface — the one where CONVENTIONS.md is most expensive and most load-bearing at once. Cost: low
-SHIPPED-ONLY	CONVENTIONS_AIDER	unset	suggested in a comment, not shipped: unset means it inherits AIDER_CONVENTIONS, which is what every fixture leaves it at. Any explicit value is unreached — including the 'yes' that reads as OFF, which lca check could not see until boolean_settings learned to read commented suggestions. Cost: low
+BOTH	CONVENTIONS_AGENT	unset	DRIVEN at both values through a whole 'lca check'. Setting it takes the switch count from 12 to 13 either way, which is the observable difference between a suggestion in a comment and a decision: check-system skips a name the reader has not set
+BOTH	CONVENTIONS_AIDER	unset	DRIVEN at true and at false through a whole 'lca check', and at 'yes' as well — the value that reads as OFF because every switch here is compared against the word 'true'. The warning names the setting and says which way it is read
 BOTH	CONVENTIONS_CHAT	false	true adds ~618 tokens of CONVENTIONS.md to the chat's system prompt, measured 577 -> 1224 tokens, against a 15% budget that is 614 at the 4096 window of the smallest rung this project ships. lca check's context-fit line has only ever run at the small one. Cost: trivial — one check_report line. DRIVEN as of this commit
 BOTH	ENABLE_AGENT	false	true reaches the whole agent half of check-system.sh, apply.sh, motd.sh and the guard's Agent port. Driven by WAITS_CONFIGS and by check_report — it is the switch this census exists because of
 BOTH	ENABLE_OLLAMA_RELAY	false	true adds the relay's boot units, its address to guarded_ports, a section to lca check, a step to setup.sh and a requirement to agent-setup.sh. Cost: trivial for lca check, high for setup and netmode. lca check DRIVEN as of this commit

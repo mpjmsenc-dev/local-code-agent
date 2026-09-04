@@ -848,6 +848,51 @@ reports_survive_a_world_that_never_answers() {
 check "every report comes back from a world that accepts and never answers" \
   reports_survive_a_world_that_never_answers
 
+echo "# ...and every docker QUESTION in this project has to carry a bound"
+# The belt under the run above, and the answer to a number I got wrong.
+#
+# The commit that bounded these said "scripts/lib.sh has nine read-only docker
+# probes and exactly one was bounded". Counted properly there are ELEVEN, and
+# exactly one was bounded — a claim about my own diff, in a commit whose subject
+# is claims matching diffs. Correcting the sentence is the smaller half; the
+# useful half is that nothing was counting, so the next probe added without a
+# bound would be as invisible as the ten were.
+#
+# A question, not an action: 'docker run', 'pull', 'rm', 'stop' and 'logs' are
+# things the reader asked for and may take minutes. info, ps, inspect and port
+# are questions, and a question that cannot time out is how a report never
+# returns.
+#
+# SOURCE-GREP: the subject is an exhaustive absence rule over the source — no
+# unbounded docker QUESTION anywhere in these three files. The behaviour it
+# protects is driven by reports_survive_a_world_that_never_answers above; this
+# is what stops the twelfth probe being written without one.
+DOCKER_QUESTION_FILES=( scripts/lib.sh webui.sh check-system.sh )
+every_docker_question_is_bounded() {
+  local f line unbounded="" n=0
+  for f in "${DOCKER_QUESTION_FILES[@]}"; do
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      n=$(( n + 1 ))
+      grep -qE 'timeout|LCA_DOCKER_RUNNER|DOCKER_PROBE|runner\[@\]' <<<"${line}" \
+        || unbounded+="  ${f}:${line}"$'\n'
+    done < <(sed 's/#.*//' "${REPO}/${f}" \
+             | grep -nE '(^|[^_[:alnum:]])docker +(info|ps|inspect|container inspect|container port|network inspect|volume inspect)' \
+             || true)
+  done
+  # Eleven in lib.sh alone when this was written, plus the hand-written copies.
+  (( n >= 10 )) || {
+    printf 'only %s docker questions found across %s files — this gate stopped watching\n' \
+      "${n}" "${#DOCKER_QUESTION_FILES[@]}" >&2
+    return 1; }
+  [[ -z "${unbounded}" ]] || {
+    printf 'these docker questions carry no bound, so a daemon that accepts and never answers stops the command that asks them:\n%sUse LCA_DOCKER_RUNNER (lib.sh) or the file its own probe array.\n' \
+      "${unbounded}" >&2
+    return 1; }
+}
+check "...and no docker question anywhere is asked without a bound" \
+  every_docker_question_is_bounded
+
 # ...and the shape underneath both of the above, stated once.
 #
 # select_docker, run_reader and ensure_ollama_up each decided, inside the
@@ -14111,6 +14156,112 @@ OLLAMA_CONTEXT_LENGTH=4096' running | grep -i 'system prompt' || true)"
 }
 check "the chat prompt's context budget is checked with the conventions appendix on" \
   chat_prompt_budget_holds_with_the_appendix_on
+
+echo "# the three conventions switches, run through a whole command at both values"
+# Three rows of tests/config-coverage.tsv at once, all SHIPPED-ONLY, all with
+# 'Cost: low' beside them and none of them paid. What makes them one block is
+# that they are one decision seen from three sides: AIDER_CONVENTIONS is the
+# master switch, CONVENTIONS_AIDER and CONVENTIONS_AGENT are the per-surface
+# overrides, and 'lca check' is the only command that reports on all of them.
+#
+# The census note for AIDER_CONVENTIONS said check_report "reaches it". It does
+# not, at the shipped defaults: CONVENTIONS_CHAT is false, so the chat prompt
+# carries no appendix and turning the master switch off changes nothing a
+# report can see. Measured — identical output, ~577 tokens either way. The
+# other side is only reachable with the chat surface switched on as well, which
+# is precisely the kind of thing a row saying "cost: low" hides.
+prompt_tokens_in() {   # REPORT -> the token count 'lca check' printed
+  sed -n 's/.*system prompt fits its share of the context (~\([0-9]*\) tokens).*/\1/p' \
+    <<<"$1" | head -1
+}
+conventions_master_switch_reaches_a_real_run() {
+  local on off n_on n_off bad=0
+  on="$(check_report "CONVENTIONS_CHAT=true")"
+  off="$(check_report "CONVENTIONS_CHAT=true
+AIDER_CONVENTIONS=false")"
+  n_on="$(prompt_tokens_in "${on}")"
+  n_off="$(prompt_tokens_in "${off}")"
+  [[ "${n_on}" =~ ^[0-9]+$ && "${n_off}" =~ ^[0-9]+$ ]] || {
+    printf 'lca check no longer reports the prompt size, so this measures nothing (on=%s off=%s)\n' \
+      "${n_on:-none}" "${n_off:-none}" >&2
+    return 1; }
+  # The appendix is the difference, and it is hundreds of tokens rather than a
+  # rounding change: measured at 1224 with it and 577 without.
+  (( n_on - n_off > 200 )) || {
+    printf 'AIDER_CONVENTIONS=false did not take the appendix out of the prompt: %s tokens on, %s off\n' \
+      "${n_on}" "${n_off}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "AIDER_CONVENTIONS=false really empties the appendix, through a whole 'lca check'" \
+  conventions_master_switch_reaches_a_real_run
+# ...and the per-surface override, at a value that is neither true nor false.
+#
+# This is the setting .env.example only SUGGESTS, in a comment. boolean_settings
+# could not see it until it learned to read commented lines, and the value that
+# matters is 'yes' — which reads as OFF because every switch here is compared
+# against the word 'true'. The difference between the two settings was which
+# side of a '#' they were written on.
+a_switch_written_as_yes_is_reported() {
+  local out bad=0
+  out="$(check_report "CONVENTIONS_AIDER=yes")"
+  grep -qE "CONVENTIONS_AIDER='yes' is not true or false" <<<"${out}" || {
+    printf "lca check accepts CONVENTIONS_AIDER=yes without saying it reads as OFF:\n%s\n" \
+      "$(grep -iE 'setting|conventions' <<<"${out}")" >&2
+    bad=1; }
+  grep -qi 'reads as OFF' <<<"${out}" || {
+    echo 'the warning does not say which way a non-boolean is read' >&2
+    bad=1; }
+  # ...and a real boolean is simply counted, either way round, so the warning
+  # above is about the VALUE and not about the name. Both values also because a
+  # row cannot claim BOTH on a fixture that only ever ran one of them — this
+  # file's own configuration census refuses that.
+  local v
+  for v in true false; do
+    out="$(check_report "CONVENTIONS_AIDER=${v}")"
+    grep -qE 'on/off setting\(s\) hold true or false' <<<"${out}" || {
+      printf 'CONVENTIONS_AIDER=%s is not accepted as a switch:\n%s\n' \
+        "${v}" "$(grep -iE 'setting' <<<"${out}")" >&2
+      bad=1; }
+    grep -q "CONVENTIONS_AIDER='${v}' is not true or false" <<<"${out}" && {
+      printf 'a real boolean was reported as not being one: CONVENTIONS_AIDER=%s\n' "${v}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "...and a conventions switch written as 'yes' is reported, not silently OFF" \
+  a_switch_written_as_yes_is_reported
+# ...and the agent surface's override, which .env.example also only suggests.
+# Setting it takes the count from 12 to 13: check-system skips a name the
+# reader has not set, so the count IS the observable difference between a
+# suggestion and a decision.
+setting_the_agent_override_is_counted() {
+  local n1 n2 v bad=0 count_re
+  # Inline rather than a helper: a two-line function called only from inside
+  # another one that 'check' invokes by name reads as unreachable to
+  # ShellCheck, and SC2317 on a live function is a warning nobody can act on.
+  count_re='s/.*\[ ok \] \([0-9]*\) on\/off setting(s) hold true or false.*/\1/p'
+  n1="$(sed -n "${count_re}" <<<"$(check_report "")" | head -1)"
+  [[ "${n1}" =~ ^[0-9]+$ ]] || {
+    printf 'lca check no longer counts its switches at all (%s)\n' "${n1:-none}" >&2
+    return 1; }
+  # Both values, because the census will not accept a BOTH row from a fixture
+  # that only ran one of them — and because the count is the same either way,
+  # which is the point: what changes it is being SET, not what it is set to.
+  for v in true false; do
+    n2="$(sed -n "${count_re}" <<<"$(check_report "CONVENTIONS_AGENT=${v}")" | head -1)"
+    [[ "${n2}" =~ ^[0-9]+$ ]] || {
+      printf 'the switch count vanished with CONVENTIONS_AGENT=%s\n' "${v}" >&2
+      bad=1; continue; }
+    (( n2 == n1 + 1 )) || {
+      printf 'CONVENTIONS_AGENT=%s did not join the count: %s shipped, %s with it set\n' \
+        "${v}" "${n1}" "${n2}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "...and setting CONVENTIONS_AGENT brings it into the count it was not in" \
+  setting_the_agent_override_is_counted
 # ...and the switches .env.example only SUGGESTS must be checked like the ones
 # it ships. Found by asking the configuration question of the switch list
 # itself: which settings does the thing that validates switches not see?
@@ -17863,6 +18014,75 @@ installers_answer_help_before_acting() {
 }
 check "install.sh, setup.sh, uninstall.sh and the first-boot script explain themselves before they install anything" \
   installers_answer_help_before_acting
+
+echo "# 'lca' itself, run end to end — the headline command had no whole-command run"
+# AIDER_NO_AUTO_COMMIT was the last switch tests/config-coverage.tsv had as
+# SHIPPED-ONLY, and its note said why in one sentence: "Driven at both values by
+# the argv probe; no whole-command run of run-agent.sh exists at EITHER value."
+#
+# That is configuration blindness one level up. The argv probe pulls one block
+# out of run-agent.sh and evaluates it; what it cannot see is any of the forty
+# lines above that block deciding never to reach it — a missing aider, a model
+# that is not downloaded, a metadata file that cannot be written, a question
+# asked of a terminal that is not there. 'lca' is this project's headline
+# command and nothing had ever run it.
+#
+# The harness for it already existed: entry_harness has recorded a stub aider
+# at .venv/bin/aider since the day it was written, for the forwarder gates, and
+# nothing had asked it what the argv contained.
+entry_env() {   # ENV-LINES -> the .env the next entry_run will read
+  cp "${REPO}/.env.example" "${ENTRY_SB}/repo/.env"
+  printf '%s\n' "$1" >> "${ENTRY_SB}/repo/.env"
+  record_configuration "${ENTRY_SB}/repo/.env"
+}
+lca_reaches_aider_at_all() {
+  local out model bad=0
+  entry_harness
+  model="$(sed -n 's/^MODEL_NAME=//p' "${REPO}/.env.example" | head -1)"
+  entry_env ""
+  out="$(entry_run run-agent.sh)"
+  grep -qx 'EXIT 0' <<<"${out}" || {
+    printf "'lca' did not reach aider:\n%s\n" "${out}" >&2
+    bad=1; }
+  grep -q '^DID aider ' <<<"${out}" || {
+    printf "'lca' exited without ever running aider:\n%s\n" "${out}" >&2
+    return 1; }
+  # The model aider is actually pointed at, prefix and all: litellm needs the
+  # ollama_chat/ form and a bare name reaches a different provider entirely.
+  grep -qF "ollama_chat/${model}" <<<"${out}" || {
+    printf 'aider was not started against ollama_chat/%s:\n%s\n' "${model}" \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "'lca' starts aider against the local model, end to end" \
+  lca_reaches_aider_at_all
+auto_commit_switch_reaches_the_real_argv() {
+  local out bad=0
+  entry_env "AIDER_NO_AUTO_COMMIT=true"
+  out="$(entry_run run-agent.sh)"
+  grep -qE '^DID aider .*--no-auto-commits' <<<"${out}" || {
+    printf 'AIDER_NO_AUTO_COMMIT=true and aider was started with auto-commit on:\n%s\n' \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  # ...and the reader is told, because this removes the entire undo path for a
+  # small model's unrequested edits.
+  grep -qi 'will NOT be committed' <<<"${out}" || {
+    printf 'auto-commit was switched off and nothing said so:\n%s\n' "${out}" >&2
+    bad=1; }
+  entry_env "AIDER_NO_AUTO_COMMIT=false"
+  out="$(entry_run run-agent.sh)"
+  grep -qE '^DID aider .*--no-auto-commits' <<<"${out}" && {
+    printf 'AIDER_NO_AUTO_COMMIT=false and the flag was passed anyway:\n%s\n' \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  grep -qi 'will NOT be committed' <<<"${out}" && {
+    printf 'the shipped configuration warns about something it is not doing:\n%s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and AIDER_NO_AUTO_COMMIT reaches the argv aider really gets, both ways" \
+  auto_commit_switch_reaches_the_real_argv
 # ...and the flag has to REACH main(), which is a separate fault from handling
 # it. do-user-data.sh's last line was 'main 2>&1 | tee ...' — arguments dropped
 # on the floor — so a --help case inside main would have been dead code.
@@ -23827,8 +24047,8 @@ check "...and what it claims agrees with the .env files the fixtures built" \
 config_blindness_has_not_grown() {
   local n
   n="$(grep -cE '^SHIPPED-ONLY'$'\t' "${CONFIG_CENSUS}")"
-  (( n <= 4 )) || {
-    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and four have since been driven, and the only honest direction is down\n' \
+  (( n <= 0 )) || {
+    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and all eight have since been driven, and the only honest direction is down\n' \
       "${n}" >&2
     return 1
   }
