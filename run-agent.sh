@@ -9,6 +9,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. It starts Ollama and
+# hands the terminal to aider, and the reader typed 'lca' to work: a
+# password prompt is fair, and refusing where it used to work is the worse
+# trade. Without this the shared probes take the strict default and the
+# coding agent reports a stopped model it could have started.
+LCA_MAY_PROMPT=true
 load_env
 
 main() {
@@ -16,6 +22,25 @@ main() {
   aider="$(aider_bin)"
   [[ -x "${aider}" ]] || die "aider is not installed at ${aider}. Run: ${REPO_ROOT}/scripts/install_python.sh"
   require_cmd curl jq
+
+  # Checked BEFORE the model is loaded, which costs 20 seconds on this box even
+  # warm: somebody who is in the wrong directory should be told while they are
+  # still looking at the screen, not after the wait.
+  #
+  # Auto-commit is the whole safety net for a small model's unrequested edits —
+  # see the note above AIDER_NO_AUTO_COMMIT below — and it needs a git repo.
+  # commit_safety_state() explains where aider does and does not make one.
+  case "$(commit_safety_state)" in
+    home)
+      warn "This is your home directory, and aider does not create a git repo here — so nothing will be committed, 'git diff HEAD~1' will have nothing to show you, and an edit you never asked for cannot be reverted."
+      info "Better: mkdir -p ~/my-project && cd ~/my-project && lca"
+      confirm "Start aider here anyway, with no undo?" \
+        || die "Nothing started. cd into a project directory and run 'lca' again."
+      ;;
+    norepo)
+      info "No git repo here yet — aider will offer to make one. Say yes: that is what turns each edit into a commit you can read with 'git diff HEAD~1' and undo with 'git revert'."
+      ;;
+  esac
 
   # Ollama must be up before aider starts. ensure_ollama_up_announced both
   # STARTS it — the systemd service where there is one and root to do it, a
@@ -39,10 +64,8 @@ main() {
     if confirm "Pull '${MODEL_NAME}' now?"; then
       net_guard "Downloading ${MODEL_NAME}"
       pull_model "${MODEL_NAME}" || die "Could not pull '${MODEL_NAME}'."
-    elif [[ "$(netmode_state)" == "offline" ]]; then
-      die "Cannot start aider without the model, and netmode is OFFLINE. Run: sudo ${REPO_ROOT}/netmode.sh online — then: ollama pull ${MODEL_NAME}"
     else
-      die "Cannot start aider without the model. Pull it with: ollama pull ${MODEL_NAME}"
+      die "Cannot start aider without the model. $(pull_advice "${MODEL_NAME}")"
     fi
   fi
 
@@ -58,9 +81,20 @@ main() {
   # fallback) can never make the metadata and the printed window disagree.
   window=$(( input_tokens + output_tokens ))
   meta_dir="${HOME}/.cache/local-code-agent"
-  mkdir -p "${meta_dir}"
   meta_file="${meta_dir}/aider.model.metadata.json"
-  cat > "${meta_file}" <<EOF
+  # Not bare under 'set -e'. This directory is shared with 'lca ask' and 'lca
+  # speed', and it ends up root-owned the moment any of the three is run once
+  # under sudo — after which THIS command, the headline one, died on a raw
+  # "Permission denied" before aider ever started.
+  #
+  # It still stops, unlike the other two: the metadata is not decoration.
+  # Without it aider trusts litellm's generic 32k figure while Ollama runs at
+  # OLLAMA_CONTEXT_LENGTH and truncates anything longer, silently. So this dies
+  # deliberately, saying what happened and what to look at.
+  local meta_ok=true
+  mkdir -p "${meta_dir}" 2>/dev/null || meta_ok=false
+  if [[ "${meta_ok}" == "true" ]]; then
+    ( cat > "${meta_file}" <<EOF
 {
   "ollama_chat/${MODEL_NAME}": {
     "max_input_tokens": ${input_tokens},
@@ -69,6 +103,9 @@ main() {
   }
 }
 EOF
+    ) 2>/dev/null || meta_ok=false
+  fi
+  [[ "${meta_ok}" == "true" ]] || die "Could not write ${meta_file}, and aider must not start without it: it would trust a generic 32k context while Ollama runs at ${window} and truncates anything longer, with no error. Usually this directory is root-owned from a run under sudo — check with: ls -ld ${meta_dir}"
 
   # Edit format and repo-map size make a large difference to output quality on
   # small local models — see aider_edit_format()/aider_map_tokens(). AUTO picks
@@ -77,6 +114,14 @@ EOF
   edit_format="${LCA_EDIT_FORMAT:-auto}"
   if [[ "${edit_format}" == "auto" ]]; then
     edit_format="$(aider_edit_format "${MODEL_NAME}")"
+  # Warned about, not refused. aider accepts a dozen edit formats and someone
+  # may well want one this project does not document — but a typo here is
+  # answered by forty lines of aider's usage text ending in "invalid choice:
+  # 'whole-file'", with nothing pointing at .env. Measured, on the one command
+  # the whole stack is for.
+  elif [[ "${edit_format}" != "whole" && "${edit_format}" != "diff" \
+       && "${edit_format}" != "udiff" ]]; then
+    warn "LCA_EDIT_FORMAT='${edit_format}' in ${ENV_FILE} is not one of auto, whole, diff or udiff. Passing it to aider anyway — if it rejects the value, that is why."
   fi
   map_tokens="$(aider_map_tokens "${OLLAMA_CONTEXT_LENGTH:-8192}")"
 
@@ -91,14 +136,37 @@ EOF
   # local model makes tighter, in-style edits. Costs a little context, so it is
   # skippable via AIDER_CONVENTIONS=false for the smallest (4096) windows.
   local conventions="${REPO_ROOT}/config/CONVENTIONS.md"
-  if [[ "${AIDER_CONVENTIONS:-true}" == "true" && -f "${conventions}" ]]; then
+  if [[ "${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" == "true" && -f "${conventions}" ]]; then
     aider_args+=( --read "${conventions}" )
-    info "Priming with coding conventions (config/CONVENTIONS.md; AIDER_CONVENTIONS=false to skip)"
+    info "Priming with coding conventions (config/CONVENTIONS.md; CONVENTIONS_AIDER=false to skip)"
+  fi
+
+  # Auto-commit is ON by default and that is deliberate: it is the safety net
+  # for a small model's unrequested edits. Every change lands as its own commit,
+  # so 'git diff HEAD~1' shows exactly what was touched and 'git revert <sha>'
+  # undoes one cleanly. Measured on qwen2.5-coder:7b: asked for two specific
+  # changes, it made both correctly AND deleted an unrelated function it was
+  # never asked about — recoverable only because the commit existed.
+  #
+  # The opt-out is for people who would rather inspect a dirty tree before
+  # anything is recorded. It costs the per-change audit trail: several edits
+  # pile up unstaged together, and undoing one of them becomes a manual job.
+  if [[ "${AIDER_NO_AUTO_COMMIT:-false}" == "true" ]]; then
+    aider_args+=( --no-auto-commits )
+    warn "AIDER_NO_AUTO_COMMIT=true — edits will NOT be committed. Review with 'git diff' before you lose track of which change was which."
   fi
 
   info "Starting aider with ollama_chat/${MODEL_NAME} in $(pwd)"
   info "Context budget: ${input_tokens} prompt + ${output_tokens} reply = ${window}-token window"
   info "Edit format: ${edit_format} · repo map: ${map_tokens} tokens (LCA_EDIT_FORMAT=auto picks per model)"
+  # Last, so it sits directly above aider's own first output — where the wait
+  # actually happens. Everything above this checks the server is up and the
+  # model is downloaded; neither says whether it is IN RAM, and a model that is
+  # not resident makes the first edit sit silent for minutes inside aider,
+  # which prints nothing while it waits. Measured on this box, cold: 268s for
+  # the first edit of a new project. 'lca ask' has said this for a while and
+  # this command, the one people sit in front of, said nothing.
+  model_load_notice "${MODEL_NAME}"
   # aider talks to Ollama through litellm, which needs OLLAMA_API_BASE and
   # the ollama_chat/ model prefix.
   export OLLAMA_API_BASE

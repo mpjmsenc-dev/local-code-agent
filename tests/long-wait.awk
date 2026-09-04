@@ -28,6 +28,13 @@ FNR == 1 { delete hist }
     if (hist[i] ~ /^[[:space:]]*#/) continue
     if (hist[i] ~ /systemctl (re)?start ollama/) allowed = 1
     if (hist[i] ~ /nohup ollama serve/)          allowed = 1
+    # ...and the same start spelled across lines. start_ollama_bg builds its
+    # environment from config/ollama.env, so the command is now
+    # "nohup env \ ... \ ollama serve >LOG 2>&1 &" and the single-line
+    # pattern above no longer reaches it. Anchored on the trailing '&': that is
+    # what makes it a START rather than a sentence about one, so a warn() that
+    # merely tells the reader to run 'ollama serve' still counts as silence.
+    if (hist[i] ~ /ollama serve.*&[[:space:]]*$/)  allowed = 1
     if (hist[i] ~ /ensure_ollama_up/)            allowed = 1
   }
   if (!allowed) printf "%s:%d:%s\n", FILENAME, FNR, $0

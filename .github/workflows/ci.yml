@@ -15,17 +15,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
         run: |
-          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*; do
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*; do
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)
-        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*
 
   test:
     name: Unit tests + tune dry-run
     runs-on: ubuntu-latest
     steps:
+      # Full history: the update.sh step below clones this checkout, pushes it
+      # to a scratch bare repo and fetches back. actions/checkout is shallow by
+      # default, a clone of a shallow repo is shallow too, and git refuses to
+      # push one — "shallow update not allowed".
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Library + tune-ladder unit tests
         run: bash tests/test-lib.sh
       - name: tune.sh --dry-run exits 0 and changes nothing
@@ -88,7 +94,25 @@ jobs:
           out="$(cd /tmp/upd-work && ./update.sh --check 2>&1)"
           grep -q 'local modifications' <<<"${out}" \
             || { echo "FAIL: local edits were not reported"; printf '%s\n' "${out}"; exit 1; }
-          echo "update.sh --check: detection, no-op guarantee and dirty-tree warning all behave"
+
+          # A branch that exists only locally fails the SAME fetch a dead
+          # network does, and used to get the same message: "Could not reach
+          # the remote. Check connectivity, and whether the kill switch is on."
+          # Both are wrong here — net_guard has already ruled the kill switch
+          # out — and they send the reader to diagnose a network that is fine.
+          # Real git against a real bare origin, which is what this fixture is
+          # for; the unit suite covers the same three states through a stub.
+          git -C /tmp/upd-work checkout -q -b only-on-this-machine
+          out="$(cd /tmp/upd-work && ./update.sh --check 2>&1 || true)"
+          printf '%s\n' "${out}"
+          if ! grep -q 'does not exist on the remote' <<<"${out}"; then
+            echo "FAIL: a branch missing from the remote was not diagnosed as one"; exit 1
+          fi
+          if grep -q 'kill switch' <<<"${out}"; then
+            echo "FAIL: a local-only branch is still blamed on connectivity"; exit 1
+          fi
+          git -C /tmp/upd-work checkout -q "${BR}"
+          echo "update.sh --check: detection, no-op guarantee, dirty-tree warning and fetch diagnosis all behave"
 
   system:
     name: System artifacts (nft ruleset + systemd units)
@@ -112,48 +136,175 @@ jobs:
           sleep 1
           curl -fsS --max-time 5 http://127.0.0.1:3000/ >/dev/null && echo "loopback:3000 reachable through the guard (correct)"
           kill %1 2>/dev/null || true
-      - name: The guard must actually DROP a non-loopback connection
+      - name: The guard drops an untrusted path and still admits the stack's own
         # Everything above proves the guard EXISTS and does not block loopback.
         # None of it proves it drops anything: a ruleset with the wrong hook,
         # the wrong priority, or an accept ahead of the drop would still pass.
-        # Docker's bridge gives a genuine non-lo, non-tailscale0 path to the
-        # host, so a container connecting to the host's bridge IP exercises the
-        # same input hook a public client would.
+        #
+        # This used to send the probe over the DEFAULT docker bridge, on the
+        # reasoning that a container is a genuine non-lo, non-tailscale0 path.
+        # That reasoning expired: the guard now accepts iifname docker0 on
+        # purpose, because without it the guard dropped the stack's own
+        # containers — measured, 626 packets, the agent's sandbox unable to
+        # reach Ollama. So the old probe tested a path the design deliberately
+        # allows, and reported the deliberate part as "GUARD INEFFECTIVE".
+        #
+        # A USER-DEFINED network is the honest path. Its bridge is br-<id>,
+        # which is in none of the accept rules, so it reaches the drop the way
+        # a public interface would. And the exception is now pinned too: the
+        # default bridge must still get through, since a guard that drops it
+        # breaks the agent tier while looking stricter.
         run: |
           set -euo pipefail
+          sudo docker network create lca-untrusted >/dev/null
+          UNTRUSTED="$(sudo docker network inspect lca-untrusted -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}')"
           GW="$(sudo docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}')"
-          [ -n "${GW}" ] || { echo "could not determine the docker bridge gateway"; exit 1; }
-          echo "host bridge IP: ${GW}"
+          [ -n "${GW}" ] && [ -n "${UNTRUSTED}" ] \
+            || { echo "could not determine both bridge gateways"; exit 1; }
+          echo "trusted bridge: ${GW}   untrusted bridge: ${UNTRUSTED}"
           # 3000 is guarded; 3999 is not — the control proves we are testing the
           # guard rather than merely failing to reach the host at all.
           python3 -m http.server 3000 --bind 0.0.0.0 >/dev/null 2>&1 &
           python3 -m http.server 3999 --bind 0.0.0.0 >/dev/null 2>&1 &
           sleep 2
-          if sudo docker run --rm --network bridge alpine:3.20 \
-               wget -q -T 3 -O /dev/null "http://${GW}:3999/"; then
-            echo "control: unguarded port 3999 IS reachable from the bridge (correct)"
+          if sudo docker run --rm --network lca-untrusted alpine:3.20 \
+               wget -q -T 3 -O /dev/null "http://${UNTRUSTED}:3999/"; then
+            echo "control: unguarded port 3999 IS reachable from the untrusted bridge (correct)"
           else
-            echo "control failed: the host is unreachable from the bridge, so this test proves nothing"; exit 1
+            echo "control failed: the host is unreachable from that network, so this test proves nothing"; exit 1
           fi
+          # The exception, asserted rather than assumed: the stack's own
+          # containers reach the guarded ports over the default bridge.
           if sudo docker run --rm --network bridge alpine:3.20 \
                wget -q -T 3 -O /dev/null "http://${GW}:3000/"; then
-            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from a non-loopback path"; exit 1
+            echo "the stack's own bridge still reaches a guarded port (correct — this is what the docker0 accept is for)"
           else
-            echo "guarded port 3000 is DROPPED from the bridge (correct)"
+            echo "GUARD TOO STRICT: the default docker bridge is being dropped, which is what broke the agent tier before"
+            sudo nft list ruleset || true
+            exit 1
+          fi
+          if sudo docker run --rm --network lca-untrusted alpine:3.20 \
+               wget -q -T 3 -O /dev/null "http://${UNTRUSTED}:3000/"; then
+            echo "GUARD INEFFECTIVE: guarded port 3000 was reachable from an untrusted bridge"
+            # ...and what the kernel actually had loaded when it happened. This
+            # step reported the verdict and nothing else, which is enough to
+            # know the guard is wrong and not enough to know how: a missing
+            # rule, the wrong hook, the wrong priority and an accept ahead of
+            # the drop all look identical from here. The ruleset is the evidence
+            # and it costs one command.
+            echo "--- nft ruleset as loaded ---"
+            sudo nft list ruleset || echo "(nft list ruleset failed)"
+            echo "--- what is listening ---"
+            ss -ltn || true
+            exit 1
+          else
+            echo "guarded port 3000 is DROPPED from an untrusted bridge (correct)"
           fi
           kill %1 %2 2>/dev/null || true
+          sudo docker network rm lca-untrusted >/dev/null 2>&1 || true
       - name: Install boot services and verify the units
+        shell: bash
         run: |
+          set -euo pipefail
           sudo scripts/tune.sh --install-service
           sudo ./netmode.sh --install-service
           sudo ./backup.sh --install-timer
-          systemd-analyze verify \
+          # Any output fails, not just a non-zero exit: a typo in a directive
+          # NAME ('FreeBnid=true') exits 0 with only "Unknown key name ...
+          # ignoring", so an exit-status check waves through the silent loss of
+          # a setting. Verified clean on all four before this rule was applied,
+          # by rendering them the way tests/test-lib.sh does.
+          out="$(systemd-analyze verify \
             /etc/systemd/system/local-code-agent-tune.service \
             /etc/systemd/system/local-code-agent-netmode.service \
             /etc/systemd/system/local-code-agent-backup.service \
-            /etc/systemd/system/local-code-agent-backup.timer
+            /etc/systemd/system/local-code-agent-backup.timer 2>&1)"
+          if [ -n "$out" ]; then
+            echo "FAIL: systemd had something to say about the boot units:"; echo "$out"; exit 1
+          fi
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: The supervisor stops a real container (all three limits)
+        # 'lca agent watch' is what stops a runaway run while nobody is looking.
+        # Its decisions were unit-tested and its loop had never been run to the
+        # point of stopping anything. This drives the real script against real
+        # containers over a real 'docker logs -f' stream. About five minutes,
+        # most of it the two one-minute wall clocks it cannot make shorter.
+        run: bash tests/test-agent-watch.sh
+
+      - name: The relay's units, as systemd reads them
+        # Rendered and checked rather than installed, which is the same shape as
+        # the nft ruleset check above: the artefact is the thing under test and
+        # applying it needs a machine state CI should not depend on.
+        #
+        # ANY OUTPUT FAILS, not just a non-zero exit, and that is the point.
+        # Measured on these units: 'ListenStream=not-an-address' exits 1, but a
+        # typo in a directive NAME — 'FreeBnid=true' — exits 0 with only
+        # "Unknown key name ... ignoring". FreeBind is what lets this socket bind
+        # before docker has created the bridge, so an exit-status check would
+        # wave through the loss of the one line that makes the relay survive a
+        # reboot.
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d)"
+          src="$(sed -n '/^render_socket_unit()/,/^}/p;/^render_service_unit()/,/^}/p' scripts/ollama-relay.sh)"
+          ( REPO_ROOT="$PWD"; eval "$src"
+            render_socket_unit "172.17.0.1:11435" > "$d/local-code-agent-ollama-relay.socket"
+            render_service_unit "127.0.0.1:11434" /usr/lib/systemd/systemd-socket-proxyd \
+              > "$d/local-code-agent-ollama-relay.service" )
+          out="$(systemd-analyze verify "$d/local-code-agent-ollama-relay.socket" \
+                                        "$d/local-code-agent-ollama-relay.service" 2>&1)"
+          if [ -n "$out" ]; then
+            echo "FAIL: systemd had something to say about the relay units:"; echo "$out"; exit 1
+          fi
+          echo "systemd parsed both relay units without a word."
+      - name: A boot unit pointing at a moved checkout must be reported
+        # 'systemctl is-enabled' is an answer about a symlink. It keeps saying
+        # "enabled" after the checkout the unit runs from is moved, renamed or
+        # deleted, and the health check used to stop there — so a netmode unit
+        # that could not start still printed a green "will be re-applied on
+        # boot", and the WebUI/Ollama ports would go public at the next reboot.
+        #
+        # This is also the only place the ExecStart parse meets real systemd:
+        # the unit tests can only feed it a recorded rendering, and the raw
+        # line is echoed here so a future format change is visible in the log.
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNIT=local-code-agent-netmode.service
+          raw="$(systemctl show -p ExecStart --value "${UNIT}")"
+          echo "systemd renders ExecStart as: ${raw}"
+          parsed="$(bash -c 'source scripts/lib.sh; show_execstart_program' <<<"${raw}")"
+          [[ "${parsed}" == "${PWD}/netmode.sh" ]] \
+            || { echo "FAIL: parsed '${parsed}', expected ${PWD}/netmode.sh"; exit 1; }
+
+          moved_reported() {
+            grep -q 'can no longer execute' <<<"$(./check-system.sh --quick 2>&1 || true)"
+          }
+
+          # A healthy box must stay quiet — a false alarm here would be worse
+          # than the blind spot it replaces.
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: a healthy boot unit was reported as broken"; exit 1
+          fi
+
+          # Now point the unit where the checkout is not.
+          sudo sed -i 's|^ExecStart=.*|ExecStart="/gone/local-code-agent/netmode.sh" apply-saved|' \
+            "/etc/systemd/system/${UNIT}"
+          sudo systemctl daemon-reload
+          moved_reported || {
+            ./check-system.sh --quick 2>&1 | tail -30
+            echo "FAIL: a boot unit whose program is missing was not reported"; exit 1; }
+
+          # ...and the fix the warning names must actually repair it.
+          sudo ./netmode.sh harden
+          if moved_reported; then
+            ./check-system.sh --quick 2>&1 | grep 'can no longer execute' || true
+            echo "FAIL: 'netmode.sh harden' did not repair the boot unit"; exit 1
+          fi
+          echo "boot unit: staleness reported, and 'netmode.sh harden' repairs it"
       - name: A backup schedule changed in .env must be reported until applied
         # The timer keeps the schedule it was installed with. Editing
         # BACKUP_SCHEDULE and forgetting '--install-timer' leaves backups on
@@ -203,6 +354,28 @@ jobs:
           for key in OLLAMA_HOST OLLAMA_CONTEXT_LENGTH OLLAMA_KEEP_ALIVE OLLAMA_MAX_LOADED_MODELS; do
             grep "^Environment=${key}=" /etc/systemd/system/ollama.service.d/local-code-agent.conf
           done
+
+  fresh-install:
+    # THE claim nobody had ever tested: a clean machine walked through setup.sh
+    # end to end. Every install this project has had was incremental, including
+    # the one in the E2E lane below — that one installs Ollama and aider itself
+    # first, so it proves setup.sh is safe to RE-run, not that it works from
+    # nothing.
+    #
+    # Two bugs reached a real droplet through that gap, and this job asserts both
+    # by name: ENABLE_AGENT=true leaving no derived model (the bootstrap loop),
+    # and tune.sh skipping the build on an already-tuned box (main() has four
+    # exits and the call sat past all of them). Neither is a unit-testable shape;
+    # both are what a first user meets in the first five minutes.
+    #
+    # It runs the real thing in a disposable ubuntu:24.04 and pulls a real 3b, so
+    # it is slow. That is the price of the one claim the README opens with.
+    name: Fresh install — a clean machine through setup.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: A clean machine, one setup.sh, and the questions a first user asks
+        run: bash tests/test-fresh-install.sh
 
   minimal-base:
     # Guards the dependency contract on a TRULY minimal image. The normal
@@ -270,6 +443,46 @@ jobs:
           grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-bad.log \
             || { echo "FAIL: the log gives no verdict after a failed clone"; cat /tmp/dud-bad.log; exit 1; }
 
+          # A clone that SUCCEEDS and brings back the wrong tree is a third
+          # outcome, and it used to produce none of the three verdict lines:
+          # setup.sh simply was not there, so the log ended with "setup
+          # reported problems — its verdict line is above" pointing at a line
+          # that did not exist. install.sh has checked for this since it was
+          # caught cloning a stale 'main' holding only a README; the file whose
+          # header says "EDIT ME if you forked the repository" did not.
+          rm -rf /tmp/lca-notours /tmp/lca-notours.git /tmp/lca-dud-notours
+          mkdir -p /tmp/lca-notours
+          git -C /tmp/lca-notours init -q .
+          echo '# some other project' > /tmp/lca-notours/README.md
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            add -A
+          git -C /tmp/lca-notours -c user.email=ci@example.invalid -c user.name=CI \
+            commit --quiet -m 'not local-code-agent'
+          git -C /tmp/lca-notours branch -f ci-notours HEAD
+          git clone --quiet --bare /tmp/lca-notours /tmp/lca-notours.git
+          git -C /tmp/lca-notours.git symbolic-ref HEAD refs/heads/ci-notours
+          set +e
+          LCA_REPO_URL=/tmp/lca-notours.git LCA_DIR=/tmp/lca-dud-notours \
+            LCA_LOG=/tmp/dud-notours.log LCA_RUN_SETUP=false \
+            bash deploy/do-user-data.sh >/dev/null 2>&1
+          rc=$?
+          set -e
+          test "${rc}" -ne 0 \
+            || { echo "FAIL: a clone with no setup.sh reported success"; cat /tmp/dud-notours.log; exit 1; }
+          grep -q 'FIRST-BOOT INSTALL FAILED' /tmp/dud-notours.log \
+            || { echo "FAIL: no verdict for a clone that is not this project"; cat /tmp/dud-notours.log; exit 1; }
+          # ...and it must have stopped before installing a login banner out of
+          # a tree that is not this project. Asserted on the LOG, not on
+          # /etc/update-motd.d: the successful runs earlier in this same step
+          # install a banner of their own, so the file's existence proves
+          # nothing about this run.
+          if grep -q 'Installing the login banner' /tmp/dud-notours.log; then
+            echo "FAIL: a banner was installed from a foreign checkout"
+            cat /tmp/dud-notours.log
+            exit 1
+          fi
+          echo "do-user-data.sh: success, re-run, failed clone, wrong tree and failing setup all behave"
+
           # And the path that was dead code until now: setup itself failing.
           # Every run above uses LCA_RUN_SETUP=false, which is exactly why
           # nobody noticed that setup.sh printed "SETUP FINISHED WITH ERRORS"
@@ -332,18 +545,39 @@ jobs:
             LCA_RUN_SETUP=false bash install.sh
           test -x /tmp/lca-bootstrap/setup.sh
           test -x /tmp/lca-bootstrap/scripts/selftest.sh
+          # bin/ too. install.sh was the only one of the four re-chmod sites
+          # that left it out, and LCA_RUN_SETUP=false — this very path — is
+          # where nothing else re-applies the bit before the user runs setup by
+          # hand. 'lca' not being executable is the whole command gone.
+          test -x /tmp/lca-bootstrap/bin/lca
           echo "install.sh bootstrapped a working checkout on a bare image"
 
   e2e:
     name: E2E — real Ollama install + real generation
     runs-on: ubuntu-latest
     steps:
+      # Full history, for the same reason as the test job: the
+      # apply-and-verify step clones this checkout and pushes it to a scratch
+      # bare repo, and git refuses to push a shallow one.
       - uses: actions/checkout@v5
-      - name: Pin a CI-sized model (runners are small; 0.5b keeps this fast)
+        with:
+          fetch-depth: 0
+      - name: Pin the smallest model this project actually ships (3b)
+        # This pinned 0.5b, "because runners are small". It kept the job fast
+        # and it proved nothing about the one thing the product does: 0.5b
+        # answers with a bare fenced code block carrying no filename, so aider
+        # has nothing to apply and no file is ever written. The acceptance test
+        # only asked for a reply, so this stayed green anyway.
+        #
+        # Measured on a 4-vCPU 15 GiB box — the same class as this runner —
+        # asking for one file: 0.5b wrote it 0 times out of 10, 3b wrote it 10
+        # times out of 10 in about 25 seconds each. 3b is also the smallest
+        # rung scripts/tune.sh will ever auto-select, so this job now runs on
+        # the floor of what real deployments get, not below it.
         run: |
           cp .env.example .env
           sed -i 's/^AUTO_TUNE=.*/AUTO_TUNE=false/' .env
-          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:0.5b/' .env
+          sed -i 's/^MODEL_NAME=.*/MODEL_NAME=qwen2.5-coder:3b/' .env
           sed -i 's/^ENABLE_WEBUI=.*/ENABLE_WEBUI=false/' .env
       - name: install_ollama.sh for real (installer, drop-in, service, API)
         run: sudo scripts/install_ollama.sh
@@ -400,11 +634,19 @@ jobs:
           pull_model "${MODEL_NAME}"
           model_responds "${MODEL_NAME}" 300
           echo "real generation OK from ${MODEL_NAME}"
-      - name: update-model.sh end-to-end (pull -> validate -> pin)
+      - name: update-model.sh end-to-end (pull -> validate -> pin, and back)
+        # Switching DOWN to the tiny model is the cheap way to exercise a real
+        # pull-validate-pin. Switching back is not tidying-up: update-model.sh
+        # rewrites .env, so every step after this one — aider, the acceptance
+        # test — runs on whatever this leaves behind, and on 0.5b the
+        # acceptance test cannot pass. The second switch costs nothing; 3b is
+        # already pulled.
         run: |
           ./update-model.sh qwen2.5-coder:0.5b
           grep -q '^MODEL_NAME=qwen2.5-coder:0.5b' .env
           grep -q '^AUTO_TUNE=false' .env
+          ./update-model.sh qwen2.5-coder:3b
+          grep -q '^MODEL_NAME=qwen2.5-coder:3b' .env
       - name: Idempotency — re-running the installer must be safe
         run: |
           sudo scripts/install_ollama.sh
@@ -428,6 +670,52 @@ jobs:
         # live Ollama -> generation -> aider round-trip. WebUI is disabled in
         # this job, so its step 4 skips rather than fails.
         run: ./scripts/selftest.sh
+      - name: update.sh's apply-and-verify half, with the REAL acceptance test
+        # The one path in this project nothing had ever executed. The job above
+        # proves selftest.sh works; the lint job proves 'update.sh --check'
+        # detects and touches nothing. Between them sits the branch that
+        # decides whether an update is REPORTED as verified, and no container
+        # walk has ever reached it — a container has no network, so every walk
+        # dies at setup, three steps earlier.
+        #
+        # A scratch clone whose setup.sh is a no-op, because setup has already
+        # run in this job and re-running it buys no coverage for several
+        # minutes. Everything after that is real: the real update.sh, the real
+        # scripts/selftest.sh, against the live stack this job built. The venv
+        # is symlinked rather than rebuilt for the same reason — selftest
+        # resolves aider from its own REPO_ROOT, and it is the same machine.
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/upd-verify /tmp/upd-verify-origin
+          git init -q --bare /tmp/upd-verify-origin
+          git clone -q "${GITHUB_WORKSPACE}" /tmp/upd-verify
+          cd /tmp/upd-verify
+          cp "${GITHUB_WORKSPACE}/.env" .env
+          ln -s "${GITHUB_WORKSPACE}/.venv" .venv
+          printf '#!/usr/bin/env bash\necho "setup: no-op, this job already ran the real one"\n' > setup.sh
+          chmod +x setup.sh
+          git -c user.email=ci@example.com -c user.name=ci commit -qam "no-op setup for the verify check"
+          git remote set-url origin /tmp/upd-verify-origin
+          git push -q origin HEAD:refs/heads/main
+          # 'checkout -B', not 'branch -M'. actions/checkout leaves the
+          # workspace on a detached HEAD, and what a clone of a detached-HEAD
+          # repository lands on depends on the git version: 2.43 guesses the
+          # source's default branch, 2.55 leaves the clone detached too. On the
+          # newer one 'git branch -M main' is
+          #   fatal: cannot rename the current branch while not on any
+          # and this step failed on a runner-image upgrade with nothing in the
+          # project changed. 'checkout -B' creates-or-resets main at HEAD and
+          # works either way.
+          git checkout -qB main
+          git branch --set-upstream-to=origin/main main
+          out="$(./update.sh --yes --no-backup 2>&1)" || {
+            printf '%s\n' "${out}"; echo "FAIL: update.sh did not complete its apply-and-verify path"; exit 1; }
+          printf '%s\n' "${out}" | tail -25
+          grep -q 'SELF-TEST PASSED' <<<"${out}" \
+            || { echo "FAIL: the real acceptance test never ran inside update.sh"; exit 1; }
+          grep -q 'Update complete and verified' <<<"${out}" \
+            || { echo "FAIL: the self-test passed and update.sh still did not report the update verified"; exit 1; }
+          echo "update.sh apply -> re-run setup -> real self-test -> verdict: ran end to end"
       - name: lca speed measures a real generation and reaches a verdict
         # speed.sh is new and does real arithmetic on Ollama's timing counters.
         # A small num_predict keeps it quick while still exercising the warm-up
@@ -561,6 +849,26 @@ jobs:
           grep -q 'Downloading the model' <<<"${inflight}" \
             || { echo "FAIL: banner does not report how far the install got"; exit 1; }
           echo "login banner: installed, listed by run-parts, and truthful in both states"
+      - name: The installed 'lca' must read as this checkout
+        # That check compares the installed symlink against check-system.sh's
+        # own path, and the two are spelled differently the moment anything
+        # above the checkout is itself a symlink — 'cd && pwd' keeps the
+        # symlinked spelling, readlink -f does not. Getting it wrong fails
+        # nothing: it prints a confident warning about a healthy machine, and
+        # nobody reads a health check that does that twice. So assert it here,
+        # in the job where setup.sh has actually created the symlink.
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(./check-system.sh --quick 2>&1 || true)"
+          if ! grep -q "'lca' on PATH runs this checkout" <<<"${out}"; then
+            grep -i "lca' on PATH" <<<"${out}" || echo "(no lca line at all)"
+            echo "FAIL: the installed lca symlink was not recognised as this checkout"; exit 1
+          fi
+          if grep -q 'DIFFERENT checkout' <<<"${out}"; then
+            echo "FAIL: a healthy install was reported as a foreign checkout"; exit 1
+          fi
+          echo "lca symlink: recognised as this checkout"
       - name: lca apply agrees with a freshly-installed stack
         # setup.sh has just run, so by definition nothing has drifted. If apply
         # reports work here it disagrees with the installer about what .env
@@ -630,9 +938,21 @@ jobs:
           env_json="$(sudo docker inspect -f '{{json .Config.Env}}' open-webui)"
           printf '%s' "${env_json}" | jq -e 'map(select(startswith("DEFAULT_MODEL_PARAMS="))) | length == 1' >/dev/null \
             || { echo "FAIL: DEFAULT_MODEL_PARAMS was never passed to the container"; printf '%s' "${env_json}" | jq -r '.[]' | cut -c1-80; exit 1; }
-          printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
-            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -e '.system | test("local-code-agent")' >/dev/null \
-            || { echo "FAIL: DEFAULT_MODEL_PARAMS does not carry our system prompt"; exit 1; }
+          # Compared to THIS repo's prompt, byte for byte — not to a substring
+          # of it. The old assertion was `.system | test("local-code-agent")`,
+          # which every version of the prompt has ever satisfied, including the
+          # one that made a real user's chat invent a tool call. It proved the
+          # container had *a* prompt, never that it had the current one, which
+          # is the only failure that has actually happened here.
+          live_prompt="$(printf '%s' "${env_json}" \
+            | jq -r '.[] | select(startswith("DEFAULT_MODEL_PARAMS="))' \
+            | sed 's/^DEFAULT_MODEL_PARAMS=//' | jq -r '.system')"
+          want_prompt="$(bash -c 'source scripts/lib.sh >/dev/null 2>&1; lca_system_prompt')"
+          if [[ "${live_prompt}" != "${want_prompt}" ]]; then
+            echo "FAIL: the container's system prompt is not this repo's"
+            diff <(printf '%s\n' "${want_prompt}") <(printf '%s\n' "${live_prompt}") || true
+            exit 1
+          fi
           printf '%s' "${env_json}" | jq -r '.[] | select(startswith("DEFAULT_PROMPT_SUGGESTIONS="))' \
             | sed 's/^DEFAULT_PROMPT_SUGGESTIONS=//' | jq -e 'length > 0' >/dev/null \
             || { echo "FAIL: DEFAULT_PROMPT_SUGGESTIONS is missing or empty"; exit 1; }

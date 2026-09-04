@@ -1,0 +1,605 @@
+# Every gate in tests/test-lib.sh that reads repo source text, classified.
+#
+# Measured by reading all 278 of them, one at a time, in August 2026 — not
+# sampled and not extrapolated. Two earlier samples disagreed (4 of 12, then
+# 8 of 12), which is what a sample of this population does; the counts below
+# are the census.
+#
+#   A   the gate's claim is a RUNTIME behaviour and its only evidence is that
+#       the source still contains a token or a shape. It cannot tell "the code
+#       does this" from "the code says this". This is the debt.
+#   B   the subject genuinely IS text — documentation, a message, a config
+#       value, agreement between two written artefacts, or an exhaustive
+#       absence rule where the source itself is the thing under rule. A grep is
+#       the correct and complete instrument here.
+#   FP  not debt: the gate drives its subject and inspects the result. The
+#       scanner flags it because driving needs a path to the script.
+#   H   a helper, not a gate: it extracts source for a gate to judge. Its debt,
+#       if any, belongs to the gate that calls it.
+#
+# Format: LABEL <TAB> function <TAB> what it actually does.
+# The A rows are the debt and may only go down. Converting one means moving its
+# row to FP, not deleting it.
+#
+# ---------------------------------------------------------------------------
+# WHERE THIS ENDS, read the same way the census was made: all 115 remaining A
+# rows, one at a time, not sampled.
+#
+#   82  are worth driving. The claim is a runtime behaviour, driving it is
+#       feasible with the harnesses that now exist, and a grep of the source
+#       cannot tell "the code does this" from "the code says this".
+#   33  are correctly narrow and should end as B, not FP. Two kinds:
+#       14  the behaviour is ALREADY driven somewhere else — by a converted
+#           sibling in this file, by tests/test-netmode.sh, or by CI — and what
+#           the A row adds is a cheap structural belt. Its row moves to B with
+#           a pointer to what drives it, not to FP.
+#       19  the subject genuinely is text: an exhaustive absence rule, a
+#           uniqueness rule, agreement between two written artefacts, or the
+#           wording of a message.
+#
+# So the end state is A=0, FP≈146, B≈144 — about half of every source-reading
+# gate driving its subject and grepping only the result, and about half with
+# text as its honest subject. Not 100%, and 100% would be the wrong target:
+# a gate that reads a document to check what the document says is doing its
+# job. What ends at zero is the only class that was ever debt — a gate whose
+# claim is a runtime behaviour and whose evidence is that the source still
+# says so.
+#
+# Three of the 115 carried a written argument for why they could not be driven.
+# All three are now DRIVEN, and none needed anything the excuse claimed:
+#
+#   service_store_is_checked_first       "cannot be asserted on a box that has
+#                                         only one of them" -> two mkdirs, and
+#                                         OLLAMA_SYSTEM_MODELS_DIR is a seam
+#   tune_checks_the_model_is_downloaded  "needs a real Ollama, a real pull and
+#                                         a real interruption" -> none of them:
+#                                         model_present answers, and the state
+#                                         an interruption leaves can be written
+#   warm_is_detached                     "no behavioural test catches it
+#                                         without a host that accepts and never
+#                                         answers" -> that host is a curl that
+#                                         sleeps. 0s detached, 8s without the &
+#
+# uninstall_answers_help_first says running uninstall.sh "would delete the
+# tester's own stack" — it is already run, safely, in a copy of the tree with
+# recorders, by installers_answer_help_before_acting. An excuse written once is
+# worth re-reading against the tools that exist now; three for three so far.
+#
+# Work order is by cost, not by count: roughly 24 of the 82 would, if they
+# silently stopped holding, cost data, the ability to recover, an exposed port,
+# or a false all-clear about the one thing that is broken. Those first.
+#
+# PROGRESS against that projection, kept here rather than as a running count so
+# the end state stays visible. Re-derive it, do not trust it: the labels below
+# are the source of truth.
+#
+#   A rows now              75   of the 115 the projection was made from
+#   still worth driving     75
+#   correctly narrow         0   every row a re-read has CONFIRMED as narrow is
+#                                already B with a pointer. Nothing is counted as
+#                                narrow on a projection any more — see below.
+#
+# THE ORDER FOR THE REMAINING 75, by what a silent failure would cost.
+#
+# Re-derived rather than inherited. The earlier header split these into 52
+# worth driving and 33 correctly narrow; that 33 was a projection from one
+# reading pass and was never checked row by row. A second pass re-read the
+# likeliest candidates and confirmed SEVEN — those are B now, each with a
+# pointer to what actually drives the behaviour. The rest are back in the
+# debt where an unverified claim belongs, and every one of them is placed
+# in a tier below, so the ordering is a per-row fact anybody can check
+# rather than an aggregate nobody can.
+#
+# Within a tier, order is not significant; between tiers it is. Work a
+# tier to completion before starting the next.
+#
+# -------------------------------------------------------------------------
+# TIER 1  EXPOSURE, DATA, OR A MACHINE THAT DOES NOT COME BACK  (11)
+#   A silent failure here leaves a port open, a firewall that does not
+#   survive a reboot, a probe that hangs a login for ever, a pull that
+#   fills the disk, retention that quietly stops, or a half-provisioned
+#   box. Three of the week's real findings were in this class.
+#
+#     actions_opt_in_to_prompting
+#     every_boot_unit_is_verified
+#     harden_installs_the_boot_service
+#     install_verifies_the_clone
+#     netmode_checks_args_before_acting
+#     remove_old_failure_is_reported
+#     setup_refusal_precedes_every_side_effect
+#     shared_probes_let_the_caller_decide
+#     stop_collects_the_sandboxes
+#     sudo_asks_out_loud
+#     tune_consults_the_disk_before_pulling
+#
+# -------------------------------------------------------------------------
+# TIER 2  A COMMAND THAT REPORTS SUCCESS HAVING NOT DONE THE THING  (30)
+#   The false all-clear. 'lca apply' printing Applied with the relay
+#   missing, 'Uninstall complete' over running sandboxes, SELF-TEST
+#   PASSED without a file. Every instance found this month was here.
+#
+#     apply_asks_before_rendering
+#     apply_does_not_read_ollama_ps
+#     ask_keeps_its_answer_stream_clean
+#     ask_slices_without_a_pipe
+#     autotune_false_still_converges
+#     check_reports_dropin_drift
+#     check_reports_the_agent
+#     entry_points_forward_their_arguments
+#     errexit_survives_sourcing_tune
+#     every_baked_setting_is_compared
+#     fatal_callers_use_require_service
+#     group_check_asks_about_the_reader
+#     no_script_blames_ram_on_its_own
+#     optional_installers_are_not_fatal
+#     pin_is_sized_before_the_pull
+#     same_group_branch_kills_nothing
+#     seed_uses_a_diff_and_reads_it_back
+#     selftest_demands_aider_write_a_file
+#     selftest_uses_the_verdict
+#     setup_calls_the_webui_installer
+#     setup_chain_is_in_dependency_order
+#     setup_ensures_the_model_after_the_pull
+#     setup_only_dies_on_core_steps
+#     setup_skips_only_what_it_already_proved
+#     setup_uses_verdict
+#     start_seeds_the_settings
+#     tune_reconciles_after_a_model_change
+#     tune_unit_checked_regardless_of_auto_tune
+#     unreadable_is_not_reported_as_empty
+#     venv_without_pip_is_rebuilt
+#
+# -------------------------------------------------------------------------
+# TIER 3  A RUN THAT SILENTLY DOES THE WRONG WORK  (18)
+#   The command works, the answer is wrong: the wrong filesystem
+#   measured, the wrong endpoint asked, a watcher that stops early, a
+#   model that does not fit reported as one that does.
+#
+#     aider_pin_is_watched
+#     bench_asks_the_chat_endpoint
+#     disk_check_names_a_directory_that_exists
+#     disk_check_uses_the_shared_helpers
+#     drift_says_something_specific
+#     every_health_wait_checks_the_port
+#     help_examples_are_dispatched
+#     listing_flags_models_that_do_not_fit
+#     prompt_budget_overrun_is_reported
+#     run_agent_checks_where_it_is_running
+#     skip_is_understood
+#     start_bg_reads_the_file_rather_than_copying_it
+#     submit_refuses_an_ambiguous_id
+#     switches_are_reported
+#     uses_announced_start
+#     watch_follows_the_sandbox_too
+#     watch_log_arm_cannot_feed_an_armed_ceiling
+#     watch_reads_the_event_source
+#
+# -------------------------------------------------------------------------
+# TIER 4  THE READER IS MISINFORMED AND NOTHING BREAKS  (16)
+#   Banners, advice, wording. Worth driving, worth doing last.
+#
+#     apt_failure_checks_sudo_first
+#     both_commands_announce_a_model_load
+#     both_reporters_ask_lib
+#     both_surfaces_report_an_unknown_family
+#     every_banner_state_gets_the_warning
+#     lca_link_is_reported
+#     ready_banner_asks_about_the_model
+#     ready_banner_draws_the_chat_down_row
+#     ready_banner_offers_the_coding_agent
+#     ready_banner_warns_about_a_stale_chat
+#     restore_asks_for_the_advice
+#     run_agent_warns_on_an_odd_edit_format
+#     speed_classifies_the_placement
+#     speed_measures_reading_separately
+#     start_and_restart_draw_the_note
+#     tailscale_advice_is_conditional
+#
+# -------------------------------------------------------------------------
+#
+#   The ~24 highest-cost tranche is DONE: 23 driven, and one that turned out
+#   not to be debt at all — watch_judges_on_time_not_only_on_output is already
+#   driven by tests/test-agent-watch.sh against a real silent container, so its
+#   row is B with a pointer and the gate stays as the belt for the skip that
+#   file takes without a docker daemon. Reading a row is not the same as
+#   converting it, and one in twenty-four was worth more as a re-read.
+#
+#   The twenty-three driven:
+#     restore_validates_env_first     an .env that would execute, and did not
+#     restore_rebuilds_derived        a derived model rebuilt, not pulled
+#     backup_checks_paused_before_running   a container already paused
+#     recovery_scripts_survive_offline      the kill switch on, archive kept
+#     image_pulls_are_never_implicit        inspect before run, both scripts
+#     retention_ignores_enable_webui        a switched-off app still backed up
+#     logs_setup_tells_the_two_apart        absent vs unopenable, three arms
+#     logs_ollama_separates_absent_from_unreadable   the same, for the bg log
+#     logs_ollama_reads_the_background_log  the log itself, on a journal-less box
+#     signup_reported_by_check              open signups warned about
+#     check_system_asks_for_the_port_list    a disabled-but-live chat app's port
+#     webui_installer_applies_the_guard     the guard really re-applied
+#     backup_asks_the_state_helper          a daemon that did not answer
+#     restore_tells_unreadable_from_corrupt a good archive, unopenable
+#     uninstall_removes_the_agent           the container that hands out a shell
+#     uninstall_feeds_every_step_to_the_verdict  one failing step at a time
+#     restore_distinguishes_the_stages      wiped vs not wiped, six statuses
+#     selftest_checks_the_live_prompt       fresh, stale, and not comparable
+#     prompt_check_is_not_claimed_when_skipped   both reporters, both ways
+#     ask_bounds_the_whole_context          three windows, 48,000 characters
+#     ask_reports_a_cut_short_answer        a request that died mid-stream
+#     ask_announces_a_cold_load             resident and not, and on stderr
+#     start_bg_serialises_against_itself    three racers, one server
+#   (logs_setup_dates_the_install_log came with them: one harness, four rows.)
+# ---------------------------------------------------------------------------
+A	actions_opt_in_to_prompting	greps for LCA_MAY_PROMPT=true; the behaviour is what the probe does at runtime
+FP	agent_can_resolve_the_host	extract-to-drive: reads --add-host and LLM_BASE_URL off the real docker argv
+FP	agent_publishes_on_loopback	extract-to-drive: reads the publications off the real docker argv
+FP	agent_publishes_on_the_bridge_too	extract-to-drive: reads the address off the real docker argv
+FP	agent_publishes_on_the_tailscale_address	extract-to-drive: builds the argv with and without a Tailscale address
+FP	agent_sh_corrects_the_callback_address	extract-to-drive: reads the OH_* values off the real docker argv
+FP	agent_sh_passes_the_sandbox_env	extract-to-drive: reads the value off the real docker argv
+FP	aider_no_auto_commit_is_wired	extract-to-drive: builds the real aider argv and reads the flag off it
+H	agent_selftest_run	runs the whole of scripts/agent-selftest.sh against stand-in curl, docker and ollama, at a given tool-call mode
+A	aider_pin_is_watched	greps check-system.sh for pin handling
+FP	appliers_check_the_scripts_they_call	fails each sub-script apply.sh calls in turn: every run must reach its summary, count the failure, and still reconcile the guard
+A	apply_asks_before_rendering	awk over apply.sh for the order two calls appear in
+A	apply_does_not_read_ollama_ps	greps for the absence of a command in two function bodies
+FP	apply_reconciles_the_agent	drives apply_agent over five states of the container and .env
+H	apply_run_failing	runs the whole of scripts/apply.sh with one of its three sub-scripts failing on demand
+FP	apply_survives_a_failed_rebuild	runs a whole 'lca apply' against a chat-app installer that fails, and reads what it said and whether it finished
+A	apt_failure_checks_sudo_first	greps the apt branch for message order
+FP	ask_announces_a_cold_load	runs 'lca ask' with the model resident and with it not, and checks which run gets the notice and on which stream
+FP	ask_bounds_the_whole_context	runs 'lca ask' at three context windows with 48,000 characters of context and measures the prompt that reached the model
+A	ask_keeps_its_answer_stream_clean	source lint for stream routing
+FP	ask_reports_a_cut_short_answer	makes the request die mid-stream and reads what the reader was told, and the exit status
+H	ask_root_sandbox	builds the checkout, stand-in model server and context files a real 'lca ask' is run against
+H	ask_run_in	runs 'lca ask' in that checkout at a given context window, with the model resident or not, and captures the prompt, stderr and status
+A	ask_slices_without_a_pipe	greps for one literal string
+A	autotune_false_still_converges	awk over tune.sh for a branch shape
+FP	backup_and_restore_agree_on_the_component	runs the real restore over a workspace archive, twice, and looks at the disk
+FP	backup_asks_the_state_helper	runs a real backup with docker installed and its daemon down: older backups must survive, and must not with the daemon up and no volume
+FP	backup_checks_paused_before_running	runs a backup against a stand-in docker reporting an already-paused container
+FP	backup_cleans_up_a_partial_archive	drives do_backup with a failing tar and looks at what is left
+FP	backup_is_not_world_readable	drives do_backup and reads the modes off what it wrote
+FP	backup_ownership_is_consistent	drives do_backup with a stubbed invoking_user and reads the owners
+FP	backup_records_the_machine	drives do_backup and reads the record out of the archive
+FP	backup_serialises_itself	runs backup.sh against a lock another process really holds
+FP	backup_stages_no_empty_model_list	drives do_backup with a failing ollama and lists the archive
+B	banner_network_probes_bound_themselves	driven by reports_survive_a_world_that_never_answers, which runs every reporting command against a curl and a docker that accept and never answer; this row is the belt that the flags are still on the probe lines
+A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
+H	bg_race_spawns	runs N concurrent start_ollama_bg calls in a sandbox and returns how many actually spawned a server
+A	both_commands_announce_a_model_load	greps two scripts for a call
+A	both_reporters_ask_lib	greps for who computes the git identity
+A	both_surfaces_report_an_unknown_family	awk for a call inside main()
+FP	can_root_now_is_stricter	asks both, as not-root, against a stub sudo that refuses and one that does not
+H	census_claims_in_message	judges one message against one revision, so the judge can be shown failing
+H	census_counts_in	how many rows of one label a given revision of the census held
+B	census_header_counts_its_own_rows	the subject IS two numbers in this file's own header, checked against the rows under them
+FP	check_names_a_bad_port	extract-to-drive: runs check-system.sh's Settings block over real values
+A	check_reports_dropin_drift	a single grep for one function name
+A	check_reports_the_agent	awk over check-system.sh for a guarded call
+FP	check_reports_webui_drift	extract-to-drive: runs the drift-reporting block over four container states
+H	check_sandbox	builds the copy of the tree and the stubs a real 'lca check' is run in
+FP	check_system_asks_for_the_port_list	runs a real 'lca check' with the chat app off in .env but still listening, and reads the inbound section
+B	ci_compares_the_whole_prompt	the subject IS the shell inside ci.yml; the behaviour is CI's own prompt job, run on every push — this row is the belt that it still compares the WHOLE prompt and not a substring
+H	ci_fixture_values	reads the .env overrides CI's own workflow and the fresh-install script apply, which this run cannot see
+H	count_word	a number written as a word -> the number
+A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
+A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
+A	drift_says_something_specific	greps webui.sh for a warn line; reachability unobserved
+A	entry_points_forward_their_arguments	greps the last line for main "$@"
+A	errexit_survives_sourcing_tune	awk over check-system.sh for ordering
+A	every_baked_setting_is_compared	derived list, but the source side is a presence-grep for a call
+A	every_banner_state_gets_the_warning	awk inside headline() for one call
+A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
+FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an argument no script can know and checks it arrived
+FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
+A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
+FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
+B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
+B	every_test_script_has_a_way_in	the subject IS whether a file name appears in the files that could invoke it — an exhaustive absence rule over the repo
+B	every_surface_reads_one_instructions_source	lca_user_instructions and lca_system_prompt are driven at both values by instructions_reach_the_chat_app and the AIDER_CONVENTIONS pair; this row is the belt that agent.sh and run-agent.sh still call them
+A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
+A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
+B	guard_message_names_only_guarded_ports	driven by running apply_inbound_guard in tests/test-netmode.sh; this row is the structural belt that the message is still derived from the ruleset
+A	harden_installs_the_boot_service	awk over netmode.sh for calls inside do_harden
+H	hanging_world_sandbox	builds the tree, .env and stand-in commands a reporting command is run against when curl and docker accept and never answer
+A	help_examples_are_dispatched	greps bin/lca for branch order
+B	honours_skip	SKIP_TAILSCALE=true is driven end to end by tests/test-fresh-install.sh; this row is the belt that install_tailscale.sh still reads it
+FP	image_pulls_are_never_implicit	drives a backup and a restore, then reads the escalation log: 'docker image inspect' must precede 'docker run'
+FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both documented ways, and watches for side effects
+A	install_verifies_the_clone	greps for the existence test
+FP	installer_passes_the_banner	reads the banner off the argv docker was really given
+FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
+FP	installers_answer_help_before_acting	runs each installer with --help and -h in a stubbed world and checks nothing was installed
+FP	lca_reaches_aider_at_all	runs the whole of run-agent.sh through entry_run and reads the model off the argv a stub aider really got
+A	lca_link_is_reported	one grep for a function name
+A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
+FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
+FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
+H	logs_checkout	builds a checkout of logs.sh minus its 'main "$@"' line so the readers can be sourced and driven
+FP	logs_ollama_reads_the_background_log	runs the real reader, as not-root, over a background log that is there: its lines and its path must both appear
+FP	logs_ollama_separates_absent_from_unreadable	runs the real reader over an absent log and an unopenable one: opposite advice, and root asked for only in the second
+FP	logs_setup_dates_the_install_log	reads the heading of a real run back against the fixture's own mtime
+FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, unopenable and readable: three outcomes, and root asked for only in the middle one
+B	motd_bounds_the_docker_read	the same: the banner really has to come back from a docker that never answers, and does — this row stays as the structural belt
+A	netmode_checks_args_before_acting	awk ordering inside main()
+A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
+B	no_tracked_path_is_hostile_to_a_glob	the subject IS the set of names git tracks; a leading dash or whitespace breaks every glob and read loop in the tree
+A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
+A	pin_is_sized_before_the_pull	line-number ordering inside main()
+FP	port_is_checked_before_the_container_is_destroyed	runs the real installer against a stand-in docker and reads what it was asked to do
+FP	probes_use_the_stricter_test	runs each reporting command under a sudo that waits, and bounds it
+A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
+FP	prompt_check_is_not_claimed_when_skipped	runs 'lca check' and 'lca test' on a machine that cannot compare the prompt, and on one that can; greps only the file list of claimants
+FP	readability_still_wants_x_of_a_directory	calls readable_by_us as uid 65534 over four real directories and files
+A	ready_banner_asks_about_the_model	awk inside banner_ready for one call
+A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
+A	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call
+A	ready_banner_warns_about_a_stale_chat	awk inside banner_ready for one call
+FP	recovery_scripts_survive_offline	runs a real backup with the kill switch ON: it must still write an archive, say why the volume is missing, KEEP older ones, and never reach the network
+H	remove_agent_sandboxes_run	runs uninstall.sh's sandbox removal against a stand-in docker, with two sandboxes, none, and one that will not die
+A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
+H	restore_archive_sandbox	builds the checkout, the good-but-unopenable archive and the corrupt one a real restore is run against
+A	restore_asks_for_the_advice	awk inside main() for one call
+FP	restore_distinguishes_the_stages	produces each volume-restore status in turn and reads the verdict: which of them say the data survived, which says it did not, and which admits it cannot tell
+FP	restore_main_calls_the_volume_restore	runs the real restore over an archive with and without the volume
+FP	restore_rebuilds_derived	restores an archive naming a derived model and checks it was rebuilt, not pulled
+FP	restore_reconciles_with_apply	runs the real restore over an archive and watches apply.sh being called
+FP	restore_tells_unreadable_from_corrupt	runs a real restore against a good archive it cannot open and a file that is not a gzip, and reads the two verdicts
+FP	restore_validates_env_first	puts an .env that would execute inside the archive and checks nothing ran
+H	restore_verdict_for	drives restore.sh's volume restore to a given exit status and returns what it told the reader
+FP	retention_ignores_enable_webui	runs a real backup with ENABLE_WEBUI=false and a volume that exists: the volume must still be archived, and docker must have been asked
+A	run_agent_checks_where_it_is_running	presence-greps plus line-number ordering
+A	run_agent_warns_on_an_odd_edit_format	greps run-agent.sh for warn/die forms
+A	same_group_branch_kills_nothing	absence of a signal inside one branch
+A	seed_uses_a_diff_and_reads_it_back	awk over agent.sh for a read-back gate
+FP	seeds_a_real_boolean	extract-to-drive: builds the real payload and reads the value's type
+FP	seeds_max_output_as_a_number	extract-to-drive: builds the real payload and reads the value's type
+FP	selftest_checks_the_live_prompt	runs the real acceptance test three times — prompt fresh, stale, and not comparable — and reads which verdict each machine gets
+A	selftest_demands_aider_write_a_file	awk over the aider step for ordering
+H	selftest_run	builds a checkout with stand-in binaries and runs the real acceptance test, stubs appended to its copy of lib.sh
+A	selftest_uses_the_verdict	presence-grep for the call plus an absence rule
+FP	service_store_is_checked_first	builds a machine with BOTH model stores and asks ollama_models_dir which one it picks
+A	setup_calls_the_webui_installer	one grep for an invocation
+A	setup_chain_is_in_dependency_order	step numbering and line ordering
+A	setup_ensures_the_model_after_the_pull	line-number ordering in main()
+A	setup_only_dies_on_core_steps	call form in setup.sh plus a counted floor
+A	setup_refusal_precedes_every_side_effect	line-number ordering in setup.sh
+A	setup_skips_only_what_it_already_proved	awk over setup.sh for how --quick is gated
+A	setup_uses_verdict	presence-grep for the call plus an absence rule
+A	shared_probes_let_the_caller_decide	presence-greps inside three lib function bodies
+FP	signup_reported_by_check	runs a real 'lca check' with signups open and with them closed, and reads the two verdicts
+A	skip_is_understood	one grep for a condition
+B	sources_the_real_ladder	driven by ladder_agrees_with_tune, which runs check-system's chooser against tune.sh's own
+A	speed_classifies_the_placement	awk proximity in speed.sh
+A	speed_measures_reading_separately	presence-greps for which counters are used
+A	start_and_restart_draw_the_note	counts calls inside webui.sh's dispatch
+A	start_bg_reads_the_file_rather_than_copying_it	presence-grep for the shared reader plus a narrow absence
+FP	start_bg_serialises_against_itself	starts three commands at once against a stand-in server that takes two seconds to come up, and counts how many servers were spawned
+A	start_seeds_the_settings	two presence-greps in agent.sh
+A	stop_collects_the_sandboxes	awk inside the stop arm for one call
+A	submit_refuses_an_ambiguous_id	presence-greps in agent-task.sh
+A	sudo_asks_out_loud	awk over extracted regions for escalation order (via probe_region)
+H	sudo_waits_sandbox	builds the copy of the tree, the blocking sudo stub and the .env the stall gate drives commands in
+FP	suggested_switches_are_validated_too	measures the appendix at 'true' and at 'yes', then reads what a real 'lca check' says about each
+A	switches_are_reported	presence-grep plus an absence rule
+A	tailscale_advice_is_conditional	greps two regions for branch arms
+FP	tune_checks_the_model_is_downloaded	runs a real tune with .env matching the ladder and the model absent, and reads whether it called the machine tuned
+A	tune_consults_the_disk_before_pulling	awk ordering across three regions of tune.sh
+A	tune_reconciles_after_a_model_change	awk over tune.sh for a call inside a branch
+H	tune_run_with_model	runs a real 'lca tune' in a scratch checkout with model_present answering either way and a recording ollama
+A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch condition and messages
+B	uninstall_answers_help_first	driven by installers_answer_help_before_acting, which runs uninstall.sh --help in a copy of the tree with recorders and fails on any DID line
+FP	shipped_defaults_are_what_lib_resolves	loads lib.sh with no .env at all and compares what it resolves against what ships
+FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over a sandbox of fake homes
+FP	uninstall_feeds_every_step_to_the_verdict	runs the whole uninstall five times, failing one step each time, and reads the closing verdict
+B	uninstall_removals_can_reach_root	an exhaustive absence rule over the source: no bare rm anywhere in uninstall.sh, with a counted floor so it cannot stop watching
+FP	uninstall_removes_the_agent	runs the real removal step and reads the escalation log: the agent container removed, before the chat app, and reported as a survivor when it cannot be
+H	uninstall_run	builds a checkout and runs uninstall.sh's main with as_root recording rather than removing, one step failing at a time
+A	unreadable_is_not_reported_as_empty	presence-greps plus message content
+FP	update_mentions_restore_on_failure	runs update.sh one commit behind its remote with a real backup and a setup that fails, and reads the recovery advice off the run
+FP	update_refuses_unattended_after_a_failed_backup	drives update.sh's backup block against a failing backup, both terminal answers
+A	uses_announced_start	one grep for a call
+A	venv_without_pip_is_rebuilt	two presence-greps
+FP	warm_is_detached	runs warm_model against a curl that accepts and never answers, and times the return
+H	warm_returns_in	times one warm_model against a stand-in server that accepts and never answers
+A	watch_follows_the_sandbox_too	two presence-greps in agent-watch.sh
+B	watch_judges_on_time_not_only_on_output	ALREADY DRIVEN by tests/test-agent-watch.sh, which runs the real watcher against a real silent container; kept as the belt for the skip that file takes without a docker daemon
+A	watch_log_arm_cannot_feed_an_armed_ceiling	counts one line and checks what shares it
+A	watch_reads_the_event_source	three presence-greps in agent-watch.sh
+H	webui_guard_install_run	builds a checkout of install_webui.sh minus its 'main "$@"' line and runs it against a recording netmode.sh
+FP	webui_installer_applies_the_guard	runs the real installer with a recording netmode.sh: harden must be called, after the container, and its failure must not kill the install
+B	advice_names_only_documented_commands	the subject is user-facing advice text across scripts and docs
+B	advice_paths_are_absolute	the subject is the text of message/usage strings
+B	aider_privacy_settings_reach_aider	extract-to-drive: reads the config file aider is actually pointed at
+B	banner_states_are_documented	derived banner states must each be explained in the docs
+B	census_order_covers_every_a_row	the subject IS the order published in this file's own header, checked against the rows underneath it
+B	census_names_real_gates	the subject is a checked-in table and the suite's own definitions
+B	every_docker_question_is_bounded	an exhaustive absence rule: no docker question in lib.sh, webui.sh or check-system.sh may be asked without a bound
+B	every_honoured_setting_is_accounted_for	the subject is which names lib.sh resolves against which .env.example ships
+B	group_a_debt_has_not_grown	the subject is a recorded-debt table
+B	chmod_lists_agree	seven text artefacts must name the same paths
+B	ci_runs_the_acceptance_test_on_a_shipped_model	derives two lists (CI model, tune rungs) and compares
+B	commit_message_claims_match_its_diff	the subject IS the text of HEAD's commit message, compared with the census rows its own diff moved
+B	commit_message_gate_can_fail	the positive control for the row above: two invented claims must be rejected and a message with no claim accepted
+B	conventions_carry_the_measured_gotchas	the subject is a markdown document
+B	conventions_keep_their_keyed_phrases	the subject is a markdown document
+B	conventions_note_lists_the_same_phrases	the subject is a markdown document
+B	counted_headings_match_their_lists	CONTRIBUTING.md self-consistency
+B	defaults_agree_on_values	lib.sh defaults vs .env.example values
+B	dispatched_commands_are_all_documented	runs 'lca help' and compares with the dispatch table
+B	doc_section_references_resolve	messages vs the doc sections they name
+B	docs_repeat_the_ladder_correctly	docs vs the driven ladder function
+B	documented_ready_banner_shows_the_agent	the subject is a doc's fenced block
+B	drift_decision_is_shared	exhaustive absence + single-definition rule over the source itself
+B	drift_messages_name_apply	the subject is the text of drift messages
+B	env_keys_and_defaults_agree	two derived key lists compared
+B	every_advised_flag_is_real	advice text vs each script's own help text
+B	every_advised_path_exists	paths named in messages must exist on disk
+B	every_bash_script_is_linted	Makefile globs vs tracked bash scripts — lint coverage
+B	every_caller_uses_the_deciding_wrapper	exhaustive absence rule; one implementation is the deliverable
+B	every_dispatch_target_is_checked	dispatch targets vs the suite's own coverage list
+B	every_drift_key_is_reported	derived drift keys vs the derived status arms
+B	every_numeric_setting_is_guarded	.env.example numeric keys vs the validated-settings lists
+B	every_promised_setting_is_applied	README promises vs the values installers bake in
+B	every_setup_stop_names_a_command	the subject is the text of each stop message
+B	example_env_is_valid	.env.example must satisfy the parse rule load_env enforces
+B	faq_context_range_matches_the_ladder	docs vs the driven ladder function
+B	faq_does_not_overclaim_offline	the subject is doc prose
+B	gpu_doc_vram_table_matches_the_code	doc table vs the driven helper
+B	help_commands_all_real	'lca help' output vs the dispatch table
+B	hook_does_not_promise_more_than_it_runs	promise text in three files vs the CI job count
+B	install_doc_order_matches_setup	doc order vs the order setup.sh calls installers
+B	installer_does_not_reteach_next_steps	the subject is what install.sh prints after handover
+B	log_path_agrees	one literal path read out of two files and compared
+B	make_lint_matches_ci	three copies of one glob list compared
+B	makefile_header_matches_targets	header comment vs real targets
+B	md_anchor_links_resolve	markdown links vs real headings
+B	model_flags_are_discoverable	update-model.sh flags vs 'lca help' output
+B	motd_filename_is_runnable	the subject is a filename literal and run-parts' naming rule
+B	motd_markers_are_real	markers matched on vs markers printed
+B	new_source_greps_are_justified	meta-gate; the suite's own source is the subject
+B	no_aider_collision	.env.example keys vs aider's own env-var list
+B	no_bare_set_env_var	exhaustive prohibition; one helper is the deliverable
+B	no_commandless_exec_redirects_the_shell	exhaustive prohibition over the source
+B	no_conditional_caller_relies_on_errexit	exhaustive source lint
+B	no_gate_is_satisfied_by_a_comment	meta-gate over the suite's own source
+B	no_gate_passes_on_its_own_definition	meta-gate over the suite's own source
+B	no_hardcoded_ladder	absence rule; a second copy of the ladder is the defect
+B	no_helper_decides_for_its_caller	the subject is which lib.sh helper names the interactive answer
+B	no_ollama_lookup_matches_a_shell	exhaustive prohibition over every script and doc
+B	no_reader_uses_the_false_swallowing_form	absence rule for a forbidden idiom
+B	no_script_asks_who_by_hand	exhaustive absence rule plus a counted floor
+B	no_script_calls_an_unreachable_helper	whole-repo static analysis; the source is the subject
+B	no_silent_ollama_start	absence rule for a forbidden invocation
+B	no_sourced_script_declares_for_its_caller	the subject is what a sourced script executes in its caller's shell
+B	no_status_command_sends_you_to_an_installer	the subject is the text of status messages
+B	no_tee_into_a_root_file	absence rule for a forbidden idiom
+B	no_test_function_is_defined_and_never_run	the subject is the suite's own call graph
+B	no_test_function_is_defined_twice	the subject is which names a file defines twice
+B	no_unbounded_listing_is_piped_into_grep_q	absence rule for a forbidden idiom
+B	no_unsourced_subshell_calls_lib	meta lint over the suite's own source
+B	no_variable_is_piped_into_an_early_exiting_reader	absence rule for a forbidden idiom
+B	ollama_outwaits_the_probe	a config value compared with a constant
+B	one_copy_of_the_coverage_rule	absence rule against a second copy
+B	perf_baseline_is_stated_once	the subject is PERFORMANCE.md's own figures
+B	perf_measured_figures_match_the_table	the subject is PERFORMANCE.md's own figures
+B	perf_vram_within_the_computed_maximum	doc table vs the driven helper
+B	performance_doc_warns_about_the_prompt_cache	the subject is doc prose
+B	prompt_commands_all_real	commands named in the system prompt vs the dispatch table
+B	readme_documents_every_command	README table vs 'lca help'
+B	readme_documents_every_setting	README table vs .env.example keys and defaults
+B	readme_family_table_matches_the_code	README table vs the driven family_sizes
+B	readme_offers_coding_before_chat	ordering inside README.md
+B	readme_ram_ladder_matches_the_code	README table vs the driven chooser
+B	readme_sizes_match_ladder	README prose vs the driven family_sizes
+B	readme_supply_chain_matches_the_code	README claims vs the code and the pinned image tag
+B	readme_tree_lists_every_script	every script must appear in the README
+B	resync_rule_is_shared	one definition, several callers — a source-structure rule
+B	retention_is_described_once	the subject is how the retention sentence is written
+B	script_doc_references_resolve	every .md a script names must exist
+B	selftest_edit_failure_says_what_is_known	the subject is one message's wording
+B	selftest_floor_matches_the_rung_table	one constant vs the derived rung table
+B	selftest_task_names_an_absolute_path	the subject is the task text sent to the agent
+B	setup_failure_path_tells_the_reader_what_to_do	the subject is the guidance text
+B	setup_next_steps_lead_with_code	ordering of the printed next-steps list
+B	setup_runs_every_installer	installers on disk vs the ones setup.sh names
+B	skills_warning_names_the_cost	the subject is the warning's wording
+B	speed_comparison_does_not_blame_the_model	the subject is the wording of two verdict arms
+B	step_source_vocabulary_agrees	one literal default agreeing across three files
+B	submit_waits_longer_than_the_measured_lag	a numeric literal compared with a measured lag
+B	unbacked_settings	two derived key lists compared
+B	undocumented_settings	two derived key lists compared
+B	unrequested_edits_are_documented	the subject is a documentation section
+B	verdict_line_is_consistent	one literal line agreeing across four files
+B	view_cannot_touch_the_run	exhaustive absence of every mutating verb in one script
+B	walkthrough_reaches_the_coding_agent	the subject is a documentation walkthrough
+B	walkthrough_step_count_matches_its_own_promise	a doc's own step count
+B	webui_command_lists_agree	three derived command lists compared
+FP	a_real_answer_still_works	drives scripts/ask.sh and greps its output
+FP	announces_slow_start	sources lib.sh and drives ensure_ollama_up_announced
+FP	apply_distinguishes_daemon_down	sources apply.sh and drives apply_webui with stubs
+FP	baked_scanner_sees_array_form	drives the baked_keys scanner and checks its output
+FP	big_unknown_is_elided	runs scripts/agent-view.sh and greps its output
+FP	docker_advice_is_conditional	drives docker_hint_for on both hosts, then lints for copies
+FP	dropin_survives_a_failed_render	drives render_ollama_dropin with a failing renderer
+FP	dry_run_plan_is_on_stdout	drives would() and reads stdout
+FP	every_command_explains_itself	runs 'lca <cmd> --help' for every subcommand
+FP	every_installed_unit_is_removed	drives remove_boot_units against a real directory
+FP	every_supported_family_is_accepted	derives the family list and calls family_note_for on each
+FP	first_boot_help_touches_nothing	runs deploy/do-user-data.sh --help under stubs
+FP	help_is_answered_not_performed	runs every dispatch target with --help
+FP	identity_does_not_escalate_to_itself	sources lib.sh and drives git_identity with stubs
+FP	identity_label_matches_value	sources lib.sh and drives git_identity with stubs
+FP	ladder_agrees_with_tune	drives choose_for_ram across families and RAM sizes
+FP	net_guard_still_dies	drives net_guard through the real state file
+FP	netmode_help_is_not_an_action	runs netmode.sh status --help
+FP	note_never_reaches_the_model	drives lca_system_prompt and inspects the result
+FP	quick_flag_documented_in_usage	runs check-system.sh --help and reads the output
+FP	refused_value_is_not_re_explained	drives write_env_or_die and reads its output
+FP	relay_units_parse_as_systemd_units	extracts the renderers, evals them, runs systemd-analyze
+FP	seeds_the_timeout	extract-to-drive: renders agent.sh's real payload and parses it
+FP	shipped_default_is_inside_its_own_budget	renders the real prompt and measures it
+FP	uninstall_removes_only_derived	drives remove_agent_models with a recording stub
+FP	uninstall_says	drives report_ollama_removal in a subshell
+FP	view_reports_an_empty_payload	runs agent-view.sh on a crafted payload
+FP	wait_is_not_silent	sources lib.sh and drives wait_for_webui
+H	backup_retention_case	drives backup.sh's retention decision
+H	baked_keys	extracts the settings install_webui.sh bakes in
+H	drift_case_block	extracts webui.sh's drift case block
+H	drift_keys	extracts the keys webui_drift can report
+H	duplicate_definitions	lists the names a test file defines more than once
+H	entry_points	lists the repo's entry points
+H	env_root_for_nobody	builds a checkout at a chosen mode for the dropped-privilege probes
+H	example_keys	extracts the keys .env.example ships
+H	example_value	extracts one value from .env.example
+H	honoured_settings	lists the user-shaped settings lib.sh resolves a default for
+H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
+H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
+H	installed_units	lists the boot units this repo installs
+H	lca_exec_subcommands	lists every word bin/lca dispatches through an exec
+H	lca_subcommands	extracts the subcommands bin/lca dispatches
+H	lib_default_keys	extracts the keys load_env defaults
+H	model_block_says	drives update-model.sh's model block
+H	next_steps_with	drives setup.sh's next-steps block
+H	numeric_block	extracts check-system.sh's numeric-settings loop
+H	placement_verdict_for	drives speed.sh's placement verdict
+H	probe_region	extracts a named region of a file
+H	promised_privacy_settings	extracts the privacy settings the README promises
+H	qwen_rungs	extracts the rung table from tune.sh
+H	recommend_with	drives update-model.sh's recommender
+H	relay_units	renders the relay units from ollama-relay.sh
+H	render_unit_from	renders a boot unit from its installer
+H	rendered_tune_unit	renders the tune boot unit
+H	restore_env_is_not_run	runs a restore over an .env that would execute, and says whether it did
+H	restore_models_run	restores an archive naming the given models
+H	root_answer	the exit status an escalation probe gives as not-root on a chosen PATH
+H	seeded_settings_payload	renders agent.sh's real settings payload
+H	setup_installers	lists the installers setup.sh actually runs
+H	shipped_defaults_disagreeing	lists the settings .env.example and lib.sh disagree about
+H	sourced_scripts	lists the product scripts another product script sources
+H	step_source_check_says	drives agent-watch.sh's step-source check
+H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
+H	tune_builds_on_path	drives tune.sh's PATH construction
+H	tune_dry_run_in	runs lca tune --dry-run
+H	tune_gate_setup	prepares the environment the tune gates need
+H	unreached_functions	lists the functions in a test file that nothing can reach
+H	update_backup_block	extracts update.sh's backup block so it can be run
+H	vol_payload	extracts restore.sh's volume-restore payload
+H	aider_argv_with	builds the real aider argv by evaluating run-agent.sh's own block
+H	settings_verdict	runs check-system.sh's Settings block over a given configuration
+H	drift_verdict	runs check-system.sh's drift-reporting block over a given state
+H	uninstall_home_sweep	runs uninstall.sh's model sweep over a sandbox of fake homes
+H	agent_docker_argv	builds the argv agent.sh really hands docker run, with docker stubbed
+H	backup_run_in	takes a real backup into a sandbox with docker and ollama absent
+B	doc_blocks_establish_their_directory	the subject is the fenced blocks and prose of the docs
+B	docs_copy_one_backup_not_all	the subject is an instruction written in the docs
+B	docs_read_backups_safely	the subject is an instruction written in the docs
+B	docs_show_the_prompt_recipe	docs vs the recipe the driven prompt really emits
+B	every_path_stub_survives_sudo	meta lint over the suite's own source
+B	no_restart_as_apply_instruction	the subject is the wording of messages and docs
+B	no_test_breaks_docker_through_the_environment	meta lint over the suite's own source
+B	no_unannounced_long_wait	exhaustive absence rule for a silent wait
+B	root_docs_are_swept_or_exempt	coverage bookkeeping over the root documents
+H	census_rows	counts the rows of this table
+H	census_names	lists the names in this table

@@ -10,35 +10,75 @@
 | Open WebUI data volume — accounts, chat history, settings | The model blobs (multi-GB) — they re-pull on restore |
 | Your `.env` | Ollama itself, Docker, Tailscale — reinstalled by `setup.sh` |
 | The list of installed model names (`models.txt`) | |
+| Which machine it came from (`meta`: host, RAM, model, context, timestamp) | |
 
 Backups are gzipped tarballs in `backups/`, named
 `local-code-agent-backup-YYYYMMDD-HHMMSS.tar.gz`. The WebUI container is briefly
 paused around the volume archive so its SQLite database is captured consistently.
 
+**Treat an archive as a secret.** It contains the Open WebUI database — account
+password hashes and the signing key that mints valid sessions — plus a verbatim
+copy of `.env`. `backups/` is `0700` and every archive is `0600`; each run also
+tightens any older archive that predates that rule. When you copy one off the
+machine, it stops being protected by this directory, so put it somewhere with
+the same care.
+
+`meta` is there so a restore can tell you something useful rather than
+something generic. `.env` carries the **source** machine's model and context
+length, so restoring an 8 GB droplet's backup onto a 32 GB VM would otherwise
+leave the big machine running the small model with nothing saying so. With it,
+`restore.sh` names both sizes and points at `lca tune`; restoring onto the same
+machine, it stays quiet. Backups taken before `meta` existed still restore
+fine — you get the conditional advice instead of the specific one.
+
+Read it without restoring anything:
+
+```bash
+tar xzf "$(ls -t backups/local-code-agent-backup-*.tar.gz | head -1)" -O ./meta
+```
+
+(The newest is selected explicitly rather than globbing: once you have more
+than one backup — which is the point of `BACKUP_KEEP` — a bare `*.tar.gz` makes
+`tar` treat the second archive as a *file to extract from the first*, and it
+prints nothing useful.)
+
 ## Make one now
 
 ```bash
-./backup.sh
+lca backup
 ```
 
 Then copy it **off the machine** — a backup on the same disk won't survive a disk
 loss:
 
 ```bash
-scp user@host:/path/to/local-code-agent/backups/local-code-agent-backup-*.tar.gz .
+# the path backup.sh just printed — not a * glob, which would pull every
+# retained backup (BACKUP_KEEP defaults to 7, each holding the WebUI volume)
+scp user@host:/path/to/local-code-agent/backups/local-code-agent-backup-20260101-120000.tar.gz .
 ```
+
+Copying *all* of them off the box is a reasonable thing to want too — just do
+it deliberately, with `scp -r .../backups/ .`, rather than by accident.
 
 ## Restore
 
 On a fresh install (after `setup.sh`):
 
 ```bash
-./restore.sh                 # newest backup in backups/
-./restore.sh path/to/backup.tar.gz
+lca restore                  # newest backup in backups/
+lca restore path/to/backup.tar.gz
 ```
 
-Restore brings back the WebUI volume and `.env`, then re-pulls the models listed
-in the backup.
+Restore brings back the WebUI volume and `.env`, re-pulls the models listed in
+the backup, and then runs `lca apply` so the restored `.env` is actually **in
+effect** rather than merely on disk.
+
+That last step matters more than it sounds. Some settings are baked into the
+Ollama service and the chat app container when those are created, so putting
+the old `.env` back does not move them on its own — and a restore replaces
+every key at once. Without it a recovery could finish, report success, and
+leave the box running the settings you had just replaced, during the one
+operation whose whole purpose is putting things back how they were.
 
 ## Retention
 
@@ -48,21 +88,25 @@ ones so they can't slowly fill the disk — the same disk headroom
 to keep every backup instead.
 
 Pruning is deliberately **skipped** when a run could not capture WebUI data it
-believes exists — the volume is there but the archive failed, or Docker is down
-so its contents can't be verified. Without that guard, a week of unattended runs
-with Docker broken would quietly delete every backup that still held your
-accounts and chat history. When that happens the run warns and keeps the older
-backups; fix Docker and re-run `./backup.sh`. A machine with no WebUI data at all
-(`ENABLE_WEBUI=false`, or Docker running with no `open-webui` volume) prunes
-normally — there is nothing to lose.
+believes exists — the volume is there but the archive failed, or Docker is
+installed and its daemon is down, so nothing could look. Without that guard, a
+week of unattended runs with Docker broken would quietly delete every backup
+that still held your accounts and chat history. When that happens the run warns
+and keeps the older backups; fix Docker and re-run `lca backup`. A machine that
+genuinely has nothing to lose — no Docker at all, or Docker answering with no
+`open-webui` volume — prunes normally.
+
+`ENABLE_WEBUI` has no say in this, deliberately. The volume outlives the
+setting: turn the chat app off in `.env` and every account and chat is still
+sitting in `open-webui`, which is why a backup archives it either way.
 
 ## Automatic (scheduled) backups
 
 Opt in to a systemd timer that runs the backup for you:
 
 ```bash
-sudo ./backup.sh --install-timer     # enable
-sudo ./backup.sh --uninstall-timer   # disable
+sudo lca backup --install-timer     # enable
+sudo lca backup --uninstall-timer   # disable
 ```
 
 - Schedule: `BACKUP_SCHEDULE` in `.env` (systemd `OnCalendar` syntax). **Quote the
@@ -79,7 +123,7 @@ sudo ./backup.sh --uninstall-timer   # disable
   malformed one. Re-run `install-timer` after changing it.
 - `Persistent=true`, so a run missed while the box was off happens at next boot.
 - Check it: `systemctl list-timers local-code-agent-backup.timer`, or
-  `./check-system.sh` (the Backups section shows the timer state and the age of
+  `lca check` (the Backups section shows the timer state and the age of
   the newest backup).
 
 Scheduled backups still write to the same local disk, so they protect against

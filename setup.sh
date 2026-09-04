@@ -5,14 +5,113 @@
 #
 # Fully unattended when non-interactive (this is how deploy/do-user-data.sh
 # calls it on a fresh DigitalOcean droplet). Safe to re-run at any time.
+#
+# Usage: sudo ./setup.sh          (from the checkout; takes several minutes)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. It installs the whole
+# stack. Usually it is already root and this changes nothing; run with sudo
+# by an ordinary sudoer, it is what stops the shared probes answering
+# strictly and reporting components it could perfectly well have reached.
+LCA_MAY_PROMPT=true
 load_env
 
+# Every failing exit has to carry a verdict line, not just the orderly one at
+# the end of main.
+#
+# Three separate things read setup.sh's OUTPUT rather than its status:
+# deploy/do-user-data.sh promises the log "always ends with exactly one of
+# three lines" and then says "its verdict line is above"; docs/YOUR-TURN.md
+# step 2 tells the user to watch the log for exactly one of two lines; and
+# scripts/motd.sh classifies the install by grepping for them. A die() printed
+# none of the three. Measured on a log ending in "Model pull failed": with the
+# verdict line install_state says 'failed'; without it, 'running' for fifteen
+# minutes and 'stalled' after that. So the SSH banner told someone whose
+# install was over that it was still going, and do-user-data.sh pointed at a
+# verdict line that did not exist.
+#
+# An EXIT trap rather than fixing the die() calls one by one, because most of
+# these exits are not die() at all: the nine installer scripts main runs are
+# bare under 'set -e', and any of them aborting exits setup.sh with no verdict
+# by exactly the same route.
+VERDICT_PRINTED=false
+
+# partial_install_guidance — what to do when setup stopped before it finished.
+#
+# The README's very next instruction after ./setup.sh is "Then verify with
+# lca check" — and on this path there may be no 'lca' to run: the symlink is
+# created near the END of main(), so anything that aborts before it leaves the
+# reader typing a command that does not exist. Found by walking the README in a
+# clean container, where a pip failure ended exactly there.
+#
+# So this reports FACTS about the machine rather than assuming what got done,
+# and every command it gives is an absolute path, because PATH is the thing
+# that may be missing.
+partial_install_guidance() {
+  info "Setup stopped before it finished, so part of the stack is not installed yet."
+  info "See exactly what is missing:  sudo ${SCRIPT_DIR}/check-system.sh"
+  if have lca; then
+    info "The 'lca' command is installed, so 'lca check' works too."
+  else
+    info "'lca' is NOT on your PATH yet — that step had not been reached. Until it is, use the full path: ${SCRIPT_DIR}/bin/lca"
+  fi
+  # The guard is the one thing whose absence is a security question rather than
+  # an inconvenience, so it is named separately and checked rather than assumed.
+  # The same probe check-system.sh uses — asking the kernel whether the table is
+  # there. There is no inbound_guard_loaded() helper; writing one from memory is
+  # how a message ends up reporting on a function that does not exist.
+  if can_root && as_root nft list table inet lca_inbound >/dev/null 2>&1; then
+    info "The inbound guard IS loaded, so this machine's ports are not exposed."
+  else
+    warn "The inbound guard is NOT loaded, so any port this stack has already opened is reachable from anywhere that can reach this machine. Close them: sudo ${SCRIPT_DIR}/netmode.sh harden"
+  fi
+  info "Then re-run this script — it resumes rather than starting over: sudo ${SCRIPT_DIR}/setup.sh"
+}
+
+verdict_on_exit() {
+  local rc=$?
+  # Only on failure, and only when main did not get to say it itself. '--help'
+  # exits 0 before any side effect and must stay silent.
+  if (( rc != 0 )) && [[ "${VERDICT_PRINTED}" != "true" ]]; then
+    setup_verdict false || true
+    partial_install_guidance || true
+  fi
+  return 0
+}
+trap verdict_on_exit EXIT
+
 main() {
+  # Above every side effect. This installs packages, services and a model as
+  # root, so answering "--help" by starting is the worst possible reading of
+  # it — and it was the reading: './setup.sh --help' began installing.
+  case "${1:-}" in
+    "") ;;
+    -h|--help)
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    # ...and anything else, refused here for the same reason and in the same
+    # breath. This script takes NO arguments — there is no $1 below this case
+    # — so 'setup.sh --dry-run' fell straight through and installed packages,
+    # a model and system services as root, while appearing to have been told
+    # not to. The comment above records --help being fixed for exactly that
+    # reading; the rest of the option space was left open, as it was in
+    # install.sh and deploy/do-user-data.sh.
+    *)
+      # VERDICT_PRINTED, so the EXIT trap stays quiet. Without it a mistyped
+      # flag exits non-zero, the trap prints "SETUP FINISHED WITH ERRORS" into
+      # /var/log/local-code-agent-setup.log, and motd.sh's install_state reads
+      # that log and reports 'failed' — so every SSH login on a perfectly
+      # healthy machine would say the install failed, because of a typo.
+      # An argument error is not an install verdict, exactly as --help is not.
+      VERDICT_PRINTED=true
+      err "Unknown option: ${1} — setup.sh takes none. It is configured through ${ENV_FILE}: edit it, then re-run. 'lca apply' applies changes to an install that already exists."
+      exit 1
+      ;;
+  esac
   step "local-code-agent setup starting"
   info "Target: $(uname -m) · $(detect_ram_gib) GiB RAM · $(nproc) vCPU"
   # bin/ included: that is where the 'lca' command lives.
@@ -35,15 +134,54 @@ main() {
   # skipped only when we have already proved inference works ourselves.
   local smoke_tested=false
 
+  # Bare on purpose, and only these four: base packages, git, the venv that
+  # holds aider, and Ollama itself. Without any one of them there is no stack
+  # at all, so stopping is the honest outcome and the EXIT trap above still
+  # prints a verdict. Every OTHER step below is something the install can
+  # finish without, and each is guarded accordingly — a gate in
+  # tests/test-lib.sh fails if a new bare call joins this list.
   "${SCRIPT_DIR}/scripts/install_dependencies.sh"
   "${SCRIPT_DIR}/scripts/install_git.sh"
-  "${SCRIPT_DIR}/scripts/install_docker.sh"
-  "${SCRIPT_DIR}/scripts/install_python.sh"
-  "${SCRIPT_DIR}/scripts/install_ollama.sh"
+  # Docker is not one of those. Its only job here is to run the chat app, which
+  # .env can switch off and which setup already treats as non-fatal — so a
+  # Docker failure was aborting the install over precisely the component the
+  # next block is happy to continue without, taking the model pull, the 'lca'
+  # command, the boot services and the inbound guard with it.
+  if ! "${SCRIPT_DIR}/scripts/install_docker.sh"; then
+    warn "Docker did not install — continuing without the chat app; aider and 'lca ask' are unaffected. Re-run sudo ${SCRIPT_DIR}/scripts/install_docker.sh later, or set SKIP_DOCKER=true in .env if you do not want it."
+    setup_ok=false
+  fi
+  # Guarded, like docker above and Tailscale below, and for the reason spelled
+  # out at the Tailscale call: an installer that aborts here takes EVERYTHING
+  # after it with it — the model, the chat app, the 'lca' command, the login
+  # banner, the boot services and the inbound guard. That lesson was learned
+  # once and applied to one call; these two were left bare, and a walk through
+  # the README in a clean container found the consequence. A pip failure — a
+  # corporate proxy, a PyPI outage, an offline mirror — left a machine with no
+  # 'lca' on PATH, while the README's very next sentence says "verify with lca
+  # check", and with no inbound guard, which that same README calls always-on.
+  # A gate now holds every installer call in this function to this shape.
+  if ! "${SCRIPT_DIR}/scripts/install_python.sh"; then
+    warn "aider did not install — continuing so the rest of the stack still gets set up. The chat app, 'lca ask' and the inbound guard are unaffected; only the 'lca' coding agent needs this. Re-run: sudo ${SCRIPT_DIR}/scripts/install_python.sh"
+    setup_ok=false
+  fi
+  if ! "${SCRIPT_DIR}/scripts/install_ollama.sh"; then
+    warn "Ollama did not install, so nothing can generate yet — continuing so the 'lca' command, the login banner and the inbound guard still get installed. Re-run: sudo ${SCRIPT_DIR}/scripts/install_ollama.sh"
+    setup_ok=false
+  fi
 
   # Auto-tune BEFORE the model pull so we download the right model for this
   # machine's RAM straight away.
-  "${SCRIPT_DIR}/scripts/tune.sh"
+  #
+  # Not fatal, though: all this step does is choose a model tag, and .env
+  # already holds a usable one. Bare, a failure here took the model pull, the
+  # chat app, the 'lca' command, the login banner, both boot services, the
+  # inbound guard and the final check with it — over the choice between two
+  # model names.
+  if ! "${SCRIPT_DIR}/scripts/tune.sh"; then
+    warn "Auto-tune could not pick a model for this machine — continuing with .env's current MODEL_NAME. Re-run later with: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+    setup_ok=false
+  fi
   load_env  # tune.sh may have rewritten MODEL_NAME / OLLAMA_CONTEXT_LENGTH
 
   step "Ensuring model '${MODEL_NAME}' is available"
@@ -51,44 +189,111 @@ main() {
   # wait gave up after 30 silent seconds and marked the whole install failed,
   # when restarting the service it had just installed would usually have fixed
   # it — a worse outcome reached more slowly, and with nothing on screen.
+  # A missing model is recorded, not fatal — the same treatment the 'Ollama is
+  # not reachable' branch below already gives the identical outcome.
+  #
+  # Dying here skipped everything after this point: the 'lca' command, the
+  # login banner that would have reported the failure, the boot services, and
+  # 'netmode.sh harden' — so a droplet that ran out of disk during the pull was
+  # left with Ollama installed and running and no inbound guard in front of it.
+  # None of those steps need a model. Setup still reports failure at the end,
+  # and check-system.sh names the missing model in the summary above it.
+  local have_model=true
   if have ollama && ensure_ollama_up_announced 30; then
     if model_present "${MODEL_NAME}"; then
       ok "Model '${MODEL_NAME}' already downloaded."
     else
       net_guard "Downloading ${MODEL_NAME}"
-      pull_model "${MODEL_NAME}" || die "Model pull failed — cannot continue without a model."
+      if ! pull_model "${MODEL_NAME}"; then
+        warn "Could not download '${MODEL_NAME}' — the rest of the stack is still being installed, but nothing can answer a question until this succeeds. Common cause: no disk space (df -h). Retry with: sudo ${SCRIPT_DIR}/setup.sh"
+        have_model=false
+        setup_ok=false
+      fi
     fi
-    info "Smoke test: asking ${MODEL_NAME} for a real generation (first load can take a minute)..."
-    if model_responds "${MODEL_NAME}"; then
-      ok "Model '${MODEL_NAME}' generates text — inference works."
-      smoke_tested=true
-    else
-      die "Model '${MODEL_NAME}' did not respond. Check RAM headroom (free -h) and: journalctl -u ollama"
+    if [[ "${have_model}" == "true" ]]; then
+      info "Smoke test: asking ${MODEL_NAME} for a real generation. The model is loaded first, which on a CPU-only box has been measured at up to 5 minutes..."
+      if model_responds "${MODEL_NAME}"; then
+        ok "Model '${MODEL_NAME}' generates text — inference works."
+        smoke_tested=true
+      else
+        warn "Model '${MODEL_NAME}' did not respond — $(model_silence_reason)"
+        setup_ok=false
+      fi
     fi
   else
-    warn "Ollama is not reachable — skipping model pull and smoke test (re-run ./setup.sh once Ollama runs)."
+    warn "Ollama is not reachable — skipping model pull and smoke test (re-run sudo ${SCRIPT_DIR}/setup.sh once Ollama runs)."
     setup_ok=false
+  fi
+
+  # The agent's derived model, AFTER the pull and not before it.
+  #
+  # tune.sh already tries this on the way out of every path it can take — but
+  # setup runs tune BEFORE this block, so on a clean machine that attempt finds
+  # no base model to derive from and correctly does nothing. Without this second
+  # call nothing ever comes back to it, and a first install with
+  # ENABLE_AGENT=true ends with no <model>-agent: 'lca agent selftest' fails and
+  # sends the user to 'lca tune'. That is the bootstrap loop, and fixing tune.sh
+  # alone did not close it — tests/test-fresh-install.sh caught the other half
+  # on its first real run.
+  #
+  # Silent when the agent tier is off, and never fatal: it is a convenience
+  # model, and an install that has just pulled a working one must not be
+  # reported as failed over it.
+  if [[ "${have_model}" == "true" ]]; then
+    refresh_agent_model_after_tune "${MODEL_NAME}" || true
   fi
 
   if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then
     # A WebUI failure (e.g. the Docker daemon isn't running on a no-systemd
     # host) must NOT abort the rest of setup — the terminal stack still works.
     if ! "${SCRIPT_DIR}/scripts/install_webui.sh"; then
-      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run scripts/install_webui.sh once Docker is running."
+      warn "Open WebUI did not come up (Docker daemon down?) — continuing without it; run sudo ${SCRIPT_DIR}/scripts/install_webui.sh once Docker is running."
       setup_ok=false
     fi
   else
     info "Open WebUI disabled (ENABLE_WEBUI=${ENABLE_WEBUI}, SKIP_DOCKER=${SKIP_DOCKER}) — skipping."
   fi
 
-  "${SCRIPT_DIR}/scripts/install_tailscale.sh"
+  # Guarded for the same reason as the chat app two lines up, and it is the
+  # same reason: Tailscale is the phone-access half of this stack, and the
+  # terminal half works without it. Bare, a transient network failure here
+  # aborted setup before the 'lca' command, the login banner, the boot services
+  # and the inbound guard — none of which need Tailscale — had been installed.
+  if ! "${SCRIPT_DIR}/scripts/install_tailscale.sh"; then
+    warn "Tailscale did not install — continuing without private phone access; the terminal stack is unaffected. Re-run sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh when the network is stable, or set SKIP_TAILSCALE=true in .env if you reach this box over a private network of your own."
+    setup_ok=false
+  fi
 
   step "Installing the 'lca' command"
   # Daily use should be 'cd ~/project && lca', not the full path to a script in
   # /opt. Symlink rather than copy, so it always tracks this checkout.
   if can_root; then
     if as_root ln -sfn "${SCRIPT_DIR}/bin/lca" /usr/local/bin/lca 2>/dev/null; then
-      ok "'lca' is on your PATH — try: lca help"
+      # 'ln exited 0' is not 'lca runs', and this claimed the second from the
+      # first. Two things it did not check: the chmod +x at the top of this
+      # script is '|| true', so bin/lca can be left unrunnable and the link
+      # then points at a file nobody can execute; and a link created over
+      # someone else's /usr/local/bin/lca resolves somewhere else entirely.
+      # The login-banner block immediately below already reads back with
+      # [[ -x ]] and carries a comment about exactly this — the two were
+      # written a day apart and only one of them learned.
+      local lca_link=""
+      lca_link="$(readlink -f /usr/local/bin/lca 2>/dev/null || true)"
+      if [[ "${lca_link}" != "${SCRIPT_DIR}/bin/lca" ]]; then
+        warn "/usr/local/bin/lca does not resolve to ${SCRIPT_DIR}/bin/lca — it resolves to '${lca_link:-nothing at all}'. Use ${SCRIPT_DIR}/bin/lca directly, or remove the other one and re-run."
+        setup_ok=false
+      elif [[ ! -x /usr/local/bin/lca ]]; then
+        warn "/usr/local/bin/lca points at ${SCRIPT_DIR}/bin/lca but that file is not executable, so running 'lca' answers 'Permission denied'. Fix it with: sudo chmod +x ${SCRIPT_DIR}/bin/lca"
+        setup_ok=false
+      else
+        case ":${PATH}:" in
+          *:/usr/local/bin:*)
+            ok "'lca' is on your PATH and runnable — try: lca help" ;;
+          *)
+            ok "'lca' installed at /usr/local/bin/lca and runnable."
+            warn "/usr/local/bin is not on the PATH this install ran with, so 'lca' may not be found by name. Use ${SCRIPT_DIR}/bin/lca, or add it: export PATH=\"/usr/local/bin:\${PATH}\"" ;;
+        esac
+      fi
     else
       warn "Could not create /usr/local/bin/lca — use ${SCRIPT_DIR}/bin/lca directly."
     fi
@@ -103,8 +308,29 @@ main() {
   "${SCRIPT_DIR}/scripts/motd.sh" --install || warn "Could not install the login banner — everything else is unaffected."
 
   step "Installing boot services (auto-tune + netmode persistence)"
-  "${SCRIPT_DIR}/scripts/tune.sh" --install-service
-  "${SCRIPT_DIR}/netmode.sh" --install-service
+  # Neither is fatal, and both were. They install systemd units, which can fail
+  # on a masked unit or a systemd a container will not let us enable — and they
+  # sit two lines above the inbound guard and three above the final check, so
+  # a bare failure here left the ports unguarded and the install unverified,
+  # having already done everything else correctly.
+  if ! "${SCRIPT_DIR}/scripts/tune.sh" --install-service; then
+    warn "The on-boot auto-tune service could not be installed — resizing this VM will not re-pick the model until you run 'sudo lca tune' yourself. Continuing."
+    setup_ok=false
+  fi
+  if ! "${SCRIPT_DIR}/netmode.sh" --install-service; then
+    warn "The netmode boot service could not be installed — the kill switch's state will not survive a reboot. Continuing."
+    setup_ok=false
+  fi
+  # The relay, only when it was asked for. It is what makes ENABLE_AGENT=true an
+  # honest state: without it the agent runs in its own network namespace and
+  # cannot reach 127.0.0.1:11434 at all, so every task it is given fails without
+  # producing a token. Not fatal here for the same reason as the two above.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]]; then
+    if ! "${SCRIPT_DIR}/scripts/ollama-relay.sh" install; then
+      warn "The Ollama relay could not be installed — the agent tier will not be able to reach the model. Continuing."
+      setup_ok=false
+    fi
+  fi
   # Apply the always-on inbound guard now so the WebUI/Ollama ports are not
   # publicly reachable even before the first reboot.
   "${SCRIPT_DIR}/netmode.sh" harden || warn "Could not apply the inbound guard now — it will be applied on the next boot."
@@ -138,11 +364,28 @@ main() {
   # Teach the short command, not the long paths — 'lca' is the intended
   # interface now, and a next-steps list that contradicts it is how a tool ends
   # up with two half-remembered ways to do everything.
-  info "1. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
-  info "2. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
+  # Coding first, and not only as a statement of priorities — it is the
+  # dependency order. 'lca' needs nothing beyond what just finished
+  # installing, while phone access needs 'tailscale up' and an app installed
+  # on a second device. The shorter path was printed fourth, underneath two
+  # chat steps and 'lca ask', which is the door that cannot write files and
+  # looks the most like the one that can. Someone who reads three lines and
+  # stops has been pointed away from the product every time.
+  info "1. Code in the terminal: cd <your-project> && lca   (edits real files, commits each change)"
+  info "2. Ask one question:     lca ask \"how do I find the biggest files here?\"   (answers only — no files)"
+  # Conditional, because this same run tolerates a failed Tailscale install and
+  # carries on by design — so the unconditional version handed a command that
+  # setup.sh had just finished failing to provide, in its own closing advice.
+  # Same rule motd.sh and 'lca chat' follow.
+  if have tailscale; then
+    info "3. Private phone access: sudo tailscale up   (then open the printed URL to log in)"
+  elif [[ "${SKIP_TAILSCALE}" == "true" ]]; then
+    info "3. Private phone access: skipped (SKIP_TAILSCALE=true) — reach port ${WEBUI_PORT} over your own private network"
+  else
+    info "3. Private phone access: Tailscale did not install — retry: sudo ${SCRIPT_DIR}/scripts/install_tailscale.sh"
+  fi
+  info "4. Chat from your phone: lca chat   — prints http://${ts_ip}:${WEBUI_PORT} as a QR code to scan"
   info "   Install the Tailscale app on the phone first — docs/PHONE.md"
-  info "3. Ask one question:     lca ask \"how do I find the biggest files here?\""
-  info "4. Code in the terminal: cd <your-project> && lca"
   info "5. Prove it end-to-end:  lca test        · health check: lca check"
   info "6. When something looks wrong: lca logs   · when it feels slow: lca speed"
   info "7. Internet kill switch: sudo lca offline | sudo lca online | sudo lca status"
@@ -154,6 +397,10 @@ main() {
   # returns the matching status, and because this is main's last command that
   # becomes setup.sh's exit code — which is what deploy/do-user-data.sh and
   # update.sh branch on.
+  #
+  # Set first, so the EXIT trap does not print a second, contradictory verdict
+  # underneath this one when setup_ok is false.
+  VERDICT_PRINTED=true
   setup_verdict "${setup_ok}"
 }
 
