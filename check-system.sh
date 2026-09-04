@@ -9,6 +9,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 load_env
 
+# Every docker question this report asks, bounded. A daemon that accepts its
+# socket and never answers gives 'docker info' and 'docker inspect' no deadline
+# of their own, so an unbounded call here does not run slowly — it never
+# returns, and a health check that never returns is the worst thing in this
+# file. Measured against exactly that, in the SHIPPED configuration: this
+# report printed its Docker heading with nothing under it, for ever.
+#
+# Defined once, at the top, rather than inside the step that first needed it:
+# the WebUI step asks the same question 300 lines further down, and a name
+# defined inside a branch is unset under errexit wherever that branch was not
+# taken. Same knob as lib.sh's docker_daemon_reachable and webui.sh's
+# select_docker, which are the other two hand-written copies of this probe, so
+# the three cannot disagree.
+DOCKER_PROBE=()
+if have timeout; then DOCKER_PROBE=(timeout "${LCA_DOCKER_PROBE_TIMEOUT:-5}"); fi
+
 # --quick skips the one probe that costs real time: asking the model to
 # generate. On a CPU box that is 20 seconds to a minute, which is fine when a
 # human is diagnosing something and wasteful when a script has just done the
@@ -304,7 +320,8 @@ else
     # which STOPS on a password prompt nothing warned about — measured, it
     # waits indefinitely — and then reports a healthy daemon as "not
     # responding", advising a sudo command that same account cannot run.
-    if docker info >/dev/null 2>&1 || { can_root_now && as_root docker info >/dev/null 2>&1; }; then
+    if "${DOCKER_PROBE[@]}" docker info >/dev/null 2>&1 \
+       || { can_root_now && as_root "${DOCKER_PROBE[@]}" docker info >/dev/null 2>&1; }; then
       p_pass "docker daemon responding"
     elif ! can_root_now; then
       p_warn "cannot query the docker daemon from this account — it was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
@@ -584,15 +601,15 @@ elif [[ "${SKIP_DOCKER}" == "true" ]]; then
   info "SKIP_DOCKER=true — WebUI checks skipped."
 elif ! have docker; then
   p_fail "WebUI enabled but docker is missing"
-elif ! can_root_now && ! docker info >/dev/null 2>&1; then
+elif ! can_root_now && ! "${DOCKER_PROBE[@]}" docker info >/dev/null 2>&1; then
   p_warn "cannot inspect the WebUI container from this account — it was neither confirmed nor ruled out. Re-run as root (or with a sudo that does not need a password): sudo ${SCRIPT_DIR}/check-system.sh"
 else
   # _now, not can_root — same defect as the Docker step above, with a worse
   # sentence at the end of it: a non-sudoer fell past this guard, hit the
   # password prompt, and was told the chat app "does not exist" on a machine
   # where it is running. An empty answer here means "could not look".
-  webui_status="$(docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root_now && as_root docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
+  webui_status="$("${DOCKER_PROBE[@]}" docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { can_root_now && as_root "${DOCKER_PROBE[@]}" docker inspect -f '{{.State.Status}}' "${WEBUI_CONTAINER}" 2>/dev/null; } || true)"
   case "${webui_status}" in
     running)    p_pass "container '${WEBUI_CONTAINER}' is running" ;;
     restarting) p_fail "container '${WEBUI_CONTAINER}' is CRASH-LOOPING (restarting) — often port ${WEBUI_PORT} taken or a bad .env; see: ${SCRIPT_DIR}/webui.sh logs" ;;

@@ -745,6 +745,109 @@ probes_use_the_stricter_test() {
 check "no command that only reports ever waits for a password" \
   probes_use_the_stricter_test
 
+echo "# ...and a world that accepts and never answers must not hang a report either"
+# Tier 1 of the census order, and the class that has already shipped four live
+# stalls in this project. The two gates covering the NETWORK side of it read
+# source for a --max-time flag. A flag in the source survives being passed to a
+# call that is never made, sitting on the wrong one of four probes, or being
+# large enough not to matter — and it says nothing at all about the docker
+# reads beside it.
+#
+# Same sandbox shape as the sudo stall above, with the WORLD replaced instead
+# of the escalation: curl and docker accept and never answer, which is what an
+# unreachable coordination server, a wedged daemon and a half-open socket all
+# look like from inside a login banner. Every reporting command is run against
+# it, bounded, and has to come back.
+HANG_SB="${SANDBOX}/hangworld"
+hanging_world_sandbox() {   # ENABLE_AGENT
+  rm -rf "${HANG_SB}"; mkdir -p "${HANG_SB}" "${HANG_SB}/bin" "${HANG_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${HANG_SB}" )
+  cp "${REPO}/.env.example" "${HANG_SB}/.env"
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=${1:-false}/" "${HANG_SB}/.env"
+  record_configuration "${HANG_SB}/.env"
+  # A pass-through sudo, not a blocking one: the question here is the world,
+  # not the escalation, and a sudo that blocks would answer every command with
+  # the wrong hang.
+  make_stub_dir "${HANG_SB}/bin"
+  # A curl that is as slow as the caller allows, and a docker that never
+  # answers at all. The asymmetry is the point and it cost a false finding to
+  # learn: a real curl HONOURS --max-time, so a stub that ignores it reports
+  # every bounded call as a hang — 'netmode.sh status' printed its own
+  # "curl --max-time 5" and was scored as hanging. What this asks is whether
+  # the CALL is bounded, not whether curl can be made to sit there. docker has
+  # no such flag: the only bound is a timeout around it, so the stub simply
+  # stops answering, which is what a wedged daemon does.
+  # shellcheck disable=SC2016  # the stub's own variables, read when IT runs
+  { printf '#!/bin/sh\nt=""; prev=""\n'
+    printf 'for a in "$@"; do\n'
+    printf '  case "${prev}" in --max-time|-m) t="$a" ;; esac\n'
+    printf '  prev="$a"\ndone\n'
+    printf 'if [ -n "${t}" ]; then sleep "${t}"; exit 28; fi\n'
+    printf 'sleep 120\nexit 0\n'
+  } > "${HANG_SB}/bin/curl"
+  # Two minutes, not twenty seconds: a report may ask a dozen bounded
+  # questions and the bound below has to leave room for all of them, so the
+  # stub's silence has to be unmistakably longer than that.
+  printf '#!/bin/sh\nsleep 120\nexit 0\n' > "${HANG_SB}/bin/docker"
+  local c
+  for c in nft tailscale ollama systemctl; do
+    printf '#!/bin/sh\nexit 1\n' > "${HANG_SB}/bin/${c}"
+  done
+  printf '\nsystemd_available() { return 0; }\nwait_for_ollama() { return 1; }\n' \
+    >> "${HANG_SB}/scripts/lib.sh"
+  printf '#!/usr/bin/env bash\ncurl -sS http://127.0.0.1:1/ >/dev/null 2>&1\n' \
+    > "${HANG_SB}/hangprobe.sh"
+  chmod -R a+rX "${HANG_SB}"; chmod +x "${HANG_SB}/bin/"*
+}
+hanging_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
+  local secs="$1"; shift
+  local out rc=0
+  # The product's own bounds are turned down to a second for the run. What is
+  # under test is that the call IS bounded, not the size of the bound, and at
+  # the shipped five seconds a report that asks the wedged daemon five separate
+  # questions costs forty — twenty of those and this gate is slower than the
+  # rest of the suite together. The stub still sleeps twenty, so an UNBOUNDED
+  # call is as unmistakable as it ever was.
+  out="$( cd "${HANG_SB}" && env -i \
+        "PATH=$(stub_path "${HANG_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+        "HOME=${HANG_SB}/home" TERM=dumb \
+        LCA_DOCKER_PROBE_TIMEOUT=1 LCA_INSPECT_TIMEOUT=1 \
+        timeout "${secs}" bash "${HANG_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
+  printf 'RC=%s\n%s\n' "${rc}" "${out}"
+}
+reports_survive_a_world_that_never_answers() {
+  local cmd out tier bad=0 seen=0
+  for tier in false true; do
+    hanging_world_sandbox "${tier}"
+    # The harness has to be able to SEE a hang, or every "it came back" below
+    # means only that the stub is not blocking.
+    out="$(hanging_run 5 hangprobe.sh)"
+    grep -qx 'RC=124' <<<"${out}" || {
+      echo 'a deliberately unbounded curl returned inside the bound — the hanging stub is not hanging, so nothing here was tested' >&2
+      return 1; }
+    for cmd in "${REPORTING_COMMANDS[@]}"; do
+      seen=$(( seen + 1 ))
+      # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+      # 40s against one-second bounds. 'lca check' alone asks the wedged
+      # daemon in three steps, the inbound guard asks twice more, and it still
+      # runs a five-second live network probe on top — bounded, and not fast.
+      # A single UNBOUNDED call sits for the stub's full two minutes and goes
+      # straight through this, which is the only thing being measured.
+      out="$(hanging_run 40 ${cmd})"
+      ! grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) never came back from a curl and a docker that accept and never answer:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1; }
+    done
+  done
+  (( seen >= 10 )) || {
+    echo 'the reporting-command list has shrunk — this gate stopped watching' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "every report comes back from a world that accepts and never answers" \
+  reports_survive_a_world_that_never_answers
+
 # ...and the shape underneath both of the above, stated once.
 #
 # select_docker, run_reader and ensure_ollama_up each decided, inside the
@@ -1131,7 +1234,13 @@ sudo_probes_are_guarded() {
   # out later left the guard counting them: the first version of this passed
   # while every real call site had been renamed away, which is precisely the
   # vacuous pass it is supposed to prevent.
-  hits="$(grep -rn --include='*.sh' 'as_root docker info' "${REPO}" \
+  # 'as_root .* docker info', not the bare literal: the three copies of this
+  # probe now put a bound between the two words — 'as_root "${runner[@]}"
+  # docker info' — and the literal pattern matched none of them. It failed
+  # loudly rather than passing, which is what the emptiness guard below is for,
+  # but a gate that has to be rewritten every time its subject gains a word is
+  # a gate that will one day be deleted instead.
+  hits="$(grep -rnE --include='*.sh' 'as_root ([^;&|]* )?docker info' "${REPO}" \
     | grep -v '/tests/' \
     | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
   [[ -n "${hits}" ]] || {
@@ -5300,6 +5409,218 @@ seeds_a_real_boolean() {
 }
 check "native_tool_calling is seeded as a real boolean, tracking the setting" \
   seeds_a_real_boolean
+
+echo "# the agent tier's own selftest, run — including the channel nobody drove"
+# scripts/agent-selftest.sh is the command this project hands a user when the
+# agent tier does not work. Nothing in this repo had ever run it. Not "run it
+# in one configuration" — never run at all, in any configuration, while every
+# other lca command has a harness.
+#
+# The configuration census carried the reason: "high for the selftest arm,
+# which needs a live agent". That is the fourth written excuse in this project
+# to be re-read against the tools that exist now, and the fourth to be wrong.
+# Every link in this script reaches its world through curl, docker and ollama,
+# and this file has been standing in for all three for months.
+#
+# What it costs to leave undriven is the whole tier. With native tool calling
+# ON, qwen2.5-coder writes its tool calls into the message body, Ollama finds
+# no <tool_call> tags and reports zero, and OpenHands reads zero as "the
+# assistant has finished": the run ends at once, marked finished, with an empty
+# workspace and no error anywhere to find. link_channel is the one thing that
+# catches that before half an hour is spent discovering it from the other end
+# — and its catching branch is reached only when AGENT_NATIVE_TOOL_CALLING is
+# true, which is not the shipped value, which is why it had never executed.
+AGENT_ST_SB="${SANDBOX}/agentselftest"
+write_agent_selftest_stubs() {  # DIR
+  make_stub_dir "$1"
+  # Matched on the URL, not on argument position: the links call curl with
+  # different flag orders, and one of them sends the body before the URL.
+  cat > "$1/curl" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    */api/version)
+      [ "${LCA_ST_RELAY_RC:-0}" = 0 ] || exit "${LCA_ST_RELAY_RC}"
+      printf '{"version":"0.32.5"}'; exit 0 ;;
+    */api/v1/settings)
+      printf '{"agent_settings":{"llm":{"model":"%s","native_tool_calling":%s}}}' \
+        "${LCA_ST_MODEL:-}" "${LCA_ST_NATIVE:-false}"; exit 0 ;;
+    */v1/chat/completions)
+      # Two callers, one endpoint: agent_model_loaded_context only wants a
+      # status, link_channel wants the tool_calls field. Both are served.
+      if [ "${LCA_ST_TOOL_CALLS:-0}" = 0 ]; then
+        printf '{"choices":[{"message":{"content":"here is the call"}}]}'
+      else
+        printf '{"choices":[{"message":{"tool_calls":[{"function":{"name":"file_editor"}}]}}]}'
+      fi
+      exit 0 ;;
+    */api/ps)
+      printf '{"models":[{"name":"%s","context_length":%s}]}' \
+        "${LCA_ST_OLLAMA_MODEL:-}" "${LCA_ST_LOADED_CTX:-16384}"; exit 0 ;;
+    */api/generate)
+      printf '{"prompt_eval_count":120,"prompt_eval_duration":2000000000,"eval_count":40,"eval_duration":4000000000}'
+      exit 0 ;;
+    */api/v1/app-conversations*)
+      [ "${LCA_ST_CONV_RC:-0}" = 0 ] || exit "${LCA_ST_CONV_RC}"
+      printf '{"results":[{"conversation_id":"c1"}]}'; exit 0 ;;
+  esac
+done
+printf '{}'
+STUB
+  # Only the five docker questions this script's chain asks. 'ps' naming a
+  # sandbox is what makes link_task's wait end on its first pass, so no case
+  # here ever sleeps.
+  cat > "$1/docker" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "container inspect") printf '%s\n' "${LCA_ST_RUNNING:-true}"; exit 0 ;;
+  "container port")    printf '0.0.0.0:%s\n' "${LCA_ST_LIVE_PORT:-3001}"; exit 0 ;;
+  "network inspect")   printf '172.17.0.1\n'; exit 0 ;;
+esac
+case "$1" in
+  ps)   printf 'oh-agent-server-abc\n'; exit 0 ;;
+  exec) exit "${LCA_ST_FILE_RC:-0}" ;;
+esac
+exit 0
+STUB
+  cat > "$1/ollama" <<'STUB'
+#!/bin/sh
+# model_present is the only thing asked of the CLI here.
+case "${1:-}" in
+  show) exit "${LCA_ST_MODEL_RC:-0}" ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$1/curl" "$1/docker" "$1/ollama"
+}
+agent_selftest_sandbox() {
+  [[ -e "${AGENT_ST_SB}/scripts/agent-selftest.sh" ]] && return 0
+  mkdir -p "${AGENT_ST_SB}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${AGENT_ST_SB}" )
+  write_agent_selftest_stubs "${AGENT_ST_SB}/stub"
+  chmod -R a+rX "${AGENT_ST_SB}"
+}
+AGENT_ST_OUT=""; AGENT_ST_RC=0
+# agent_selftest_run NATIVE STORED-NATIVE TOOL-CALLS [KEY=VALUE ...]
+#   NATIVE         what .env says AGENT_NATIVE_TOOL_CALLING is
+#   STORED-NATIVE  what the running agent's settings API reports back
+#   TOOL-CALLS     how many native tool calls the model returns to the probe
+agent_selftest_run() {
+  local native="$1" stored="$2" calls="$3"; shift 3
+  agent_selftest_sandbox
+  local env_file="${AGENT_ST_SB}/.env" model
+  cp "${REPO}/.env.example" "${env_file}"
+  # The tier ON, the relay ON: neither is the shipped value, and with the
+  # shipped values this script refuses at its first two lines — which is
+  # exactly the configuration blindness that hid check-system.sh's hang.
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=true/; \
+          s/^ENABLE_OLLAMA_RELAY=.*/ENABLE_OLLAMA_RELAY=true/; \
+          s/^AGENT_NATIVE_TOOL_CALLING=.*/AGENT_NATIVE_TOOL_CALLING=${native}/" "${env_file}"
+  record_configuration "${env_file}"
+  model="$(sed -n 's/^MODEL_NAME=//p' "${env_file}" | head -1)"
+  AGENT_ST_RC=0
+  AGENT_ST_OUT="$( cd "${AGENT_ST_SB}" \
+    && PATH="$(stub_path "${AGENT_ST_SB}/stub")" \
+       LCA_ST_MODEL="openai/${model}-agent" \
+       LCA_ST_OLLAMA_MODEL="${model}-agent" \
+       LCA_ST_NATIVE="${stored}" \
+       LCA_ST_TOOL_CALLS="${calls}" \
+       env "$@" timeout 120 bash scripts/agent-selftest.sh 2>&1 )" || AGENT_ST_RC=$?
+}
+# The branch the docs call the difference between a working run and an instant
+# empty workspace. Native tool calling ON, and a model that answers the probe
+# with prose instead of a tool call: the selftest must stop here, name the
+# setting, and not go on to say the tier works.
+selftest_catches_a_dead_tool_call_channel() {
+  local bad=0
+  agent_selftest_run true true 0
+  (( AGENT_ST_RC != 0 )) || {
+    printf 'the selftest passed a tier whose tool-call channel returns nothing:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'ZERO native tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the tool-call channel failed and the report does not say so:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  # The remedy, because "the channel is dead" sends people to the model.
+  grep -q 'AGENT_NATIVE_TOOL_CALLING=false' <<<"${AGENT_ST_OUT}" || {
+    printf 'the failure does not name the setting that fixes it:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'works on this machine' <<<"${AGENT_ST_OUT}" && {
+    echo 'the selftest reported the tier working after the channel check failed' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "the agent selftest stops on a tool-call channel that returns nothing" \
+  selftest_catches_a_dead_tool_call_channel
+# ...and the same configuration with a model that DOES answer natively runs to
+# the end. Without this the gate above would pass on a selftest that refuses
+# every machine.
+selftest_accepts_a_live_native_channel() {
+  local bad=0
+  agent_selftest_run true true 1
+  (( AGENT_ST_RC == 0 )) || {
+    printf 'a tier with a working native channel was refused (rc=%s):\n%s\n' \
+      "${AGENT_ST_RC}" "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'returns native tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the native channel worked and the report does not say so:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'works on this machine' <<<"${AGENT_ST_OUT}" || {
+    printf 'every link passed and the selftest did not say the tier works:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and accepts one that answers the probe natively" \
+  selftest_accepts_a_live_native_channel
+# The shipped configuration, which had also never been run: zero native tool
+# calls is the EXPECTED answer here and must not be reported as a failure.
+selftest_expects_no_native_calls_when_it_is_off() {
+  local bad=0
+  agent_selftest_run false false 0
+  (( AGENT_ST_RC == 0 )) || {
+    printf 'the shipped configuration was refused (rc=%s):\n%s\n' \
+      "${AGENT_ST_RC}" "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -qi 'prompt-parsed tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the shipped tool-call mode is not named in the report:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'ZERO native tool calls' <<<"${AGENT_ST_OUT}" && {
+    echo 'zero native calls was reported as a failure with native tool calling off' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and does not call zero native calls a failure when it is off" \
+  selftest_expects_no_native_calls_when_it_is_off
+# The other half of the same setting: what the agent STORED, which is a
+# different fact from what .env asks for. The settings endpoint declares
+# additionalProperties true, so it answers 200 to a body it keeps none of —
+# this project shipped a "settings seeded" message about exactly that once.
+selftest_catches_settings_that_did_not_take() {
+  local bad=0
+  agent_selftest_run true false 1
+  (( AGENT_ST_RC != 0 )) || {
+    printf 'the agent stored the wrong tool-call mode and the selftest passed it:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q "native_tool_calling='false'" <<<"${AGENT_ST_OUT}" || {
+    printf 'the report does not say what the agent actually holds:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  # ...and it stops AT the settings, not three links later: the channel probe
+  # costs a real generation on a CPU box.
+  grep -q 'The tool-call channel' <<<"${AGENT_ST_OUT}" && {
+    printf 'the selftest went on to probe the channel after the settings were wrong:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and stops when the agent stored a different mode than .env asks for" \
+  selftest_catches_settings_that_did_not_take
 # Which sandboxes may be collected while the app is UP — the question nothing
 # asked, so nothing was ever collected until the tier was stopped.
 reclaimable_sandboxes_reads_the_conversation() {
@@ -7592,6 +7913,10 @@ lca_logs_says() {   # ollama|setup  STATE -> what the real reader printed, as no
   : > "${LOGS_ESCALATIONS}"; chmod 666 "${LOGS_ESCALATIONS}"
   # shellcheck disable=SC2016  # code for the dropped shell, not a string to expand here
   local code='LOG_PATH="$1"; ESC="$2"
+    # timeout(1) is a real program and cannot run a shell function, and
+    # run_reader now bounds its probe. Standing in for it keeps the real code
+    # path and lets these stubs answer — the same reason lib_probe does it.
+    timeout() { shift; "$@"; }
     # Both captured up front. run_reader calls as_root as "as_root test -r
     # PATH", so inside the stub "$2" is the word -r and not the recorder.
     can_root_now() { return 0; }
@@ -7609,7 +7934,12 @@ lca_logs_says() {   # ollama|setup  STATE -> what the real reader printed, as no
 }
 # Did the run just made try root? The probe's own output cannot say: run_reader
 # discards the probe call's output, which is where the attempt happens.
-logs_escalated() { grep -q 'ESCALATED test -r' "${LOGS_ESCALATIONS}" 2>/dev/null; }
+# The bound is part of the argv now: run_reader wraps its PROBE in
+# 'timeout N' because an unbounded question is how 'lca agent logs' sat for
+# ever on a wedged daemon. The escalation is the same escalation.
+logs_escalated() {
+  grep -qE 'ESCALATED (timeout [0-9]+ )?test -r' "${LOGS_ESCALATIONS}" 2>/dev/null
+}
 logs_setup_tells_the_two_apart() {
   local out bad=0
   # 1. Nothing there. "Normal unless this machine was built from
@@ -7789,6 +8119,9 @@ lca_logs_all_with() {   # ENABLE_AGENT  CONTAINER-EXISTS  SOURCE -> what it prin
   local sb; sb="$(logs_checkout)"
   # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
   local code='ENABLE_AGENT="$1"; AGENT_EXISTS="$2"
+    # run_reader bounds its probe, and timeout(1) cannot run the docker shell
+    # function below. Standing in for it keeps the stub reachable.
+    timeout() { shift; "$@"; }
     # Neither of this box facts, so the two log readers above take their
     # no-journal and no-file branches and stay out of the way.
     systemd_available() { return 1; }
@@ -9569,7 +9902,13 @@ echo "# 'lca update' must re-run setup even when the checkout is already current
 # What is under test is update.sh's own wiring and its verdicts — which is
 # exactly what was untested. (The REAL selftest.sh runs through this same path
 # in CI's end-to-end job, where a working stack exists.)
-drive_update() {   # SETUP_RC SELFTEST_RC -> output, then RC:<status>
+drive_update() {   # SETUP_RC SELFTEST_RC [BACKUP_RC] [BEHIND] -> output, then RC:<status>
+  # BACKUP_RC absent means --no-backup, which is what every case below wanted
+  # until the recovery advice needed driving. update.sh offers restore.sh only
+  # when a backup was really taken AND new code was really applied, and with
+  # neither of those true the whole branch was unreachable — asserted by an awk
+  # over the source and never once produced.
+  local setup_rc="$1" selftest_rc="$2" backup_rc="${3:-}" behind="${4:-0}"
   local root="${SANDBOX}/upd" work="${SANDBOX}/upd/work" origin="${SANDBOX}/upd/origin.git"
   rm -rf "${root}"; mkdir -p "${root}"
   git init -q --bare "${origin}"
@@ -9578,17 +9917,31 @@ drive_update() {   # SETUP_RC SELFTEST_RC -> output, then RC:<status>
   cp "${REPO}/update.sh" "${work}/update.sh"
   cp "${REPO}/scripts/lib.sh" "${work}/scripts/lib.sh"
   cp "${REPO}/.env.example" "${work}/.env.example"
-  printf '#!/usr/bin/env bash\necho "SETUP RAN"\nexit %s\n' "$1" > "${work}/setup.sh"
-  printf '#!/usr/bin/env bash\necho "SELFTEST RAN"\nexit %s\n' "$2" > "${work}/scripts/selftest.sh"
-  chmod +x "${work}/update.sh" "${work}/setup.sh" "${work}/scripts/selftest.sh"
+  printf '#!/usr/bin/env bash\necho "SETUP RAN"\nexit %s\n' "${setup_rc}" > "${work}/setup.sh"
+  printf '#!/usr/bin/env bash\necho "SELFTEST RAN"\nexit %s\n' "${selftest_rc}" > "${work}/scripts/selftest.sh"
+  printf '#!/usr/bin/env bash\necho "BACKUP RAN"\nexit %s\n' "${backup_rc:-0}" > "${work}/backup.sh"
+  chmod +x "${work}/update.sh" "${work}/setup.sh" "${work}/scripts/selftest.sh" "${work}/backup.sh"
   git -C "${work}" add -A >/dev/null
   git -C "${work}" -c user.email=t@t -c user.name=t commit -qm base >/dev/null
   git -C "${work}" branch -M main >/dev/null 2>&1
   git -C "${work}" remote add origin "${origin}"
   git -C "${work}" push -q origin main 2>/dev/null
   git -C "${work}" branch --set-upstream-to=origin/main main >/dev/null 2>&1
+  # ...and, when asked, a checkout that is genuinely BEHIND its remote: commit
+  # forward, push, step back. 'behind' is what update.sh computes from
+  # HEAD..origin/main, and it is the whole difference between "roll back to the
+  # pre-update state" and "there is nothing to roll back".
+  if (( behind > 0 )); then
+    printf 'a newer commit\n' > "${work}/NEWER"
+    git -C "${work}" add -A >/dev/null
+    git -C "${work}" -c user.email=t@t -c user.name=t commit -qm newer >/dev/null
+    git -C "${work}" push -q origin main 2>/dev/null
+    git -C "${work}" reset -q --hard HEAD~1
+  fi
   local out rc=0
-  out="$(cd "${work}" && ./update.sh --yes --no-backup </dev/null 2>&1)" || rc=$?
+  local -a flags=(--yes)
+  [[ -n "${backup_rc}" ]] || flags+=(--no-backup)
+  out="$(cd "${work}" && ./update.sh "${flags[@]}" </dev/null 2>&1)" || rc=$?
   printf '%s\nRC:%s\n' "${out}" "${rc}"
 }
 UPDATE_OK="$(drive_update 0 0)"
@@ -9627,6 +9980,44 @@ check "...saying so, and exiting non-zero" \
 # had not changed.
 check "...without offering a rollback it did not create" \
   grep -qF 'nothing to roll back' <<<"${UPDATE_SETUP_FAILED}"
+# ...and the branch on the other side of that, which had never run.
+#
+# Tier 1 of the census order: what a silent failure costs here is the ability
+# to recover. update.sh offers the restore point only when a backup was really
+# taken AND new code was really applied; every case above has neither, so the
+# one sentence that tells a reader how to get their machine back was asserted
+# by reading update.sh for the words 'restore.sh' and produced by nothing.
+#
+# A checkout genuinely one commit behind its remote, a backup that really ran,
+# and a setup that fails after the new code is in.
+UPDATE_RECOVERABLE="$(drive_update 1 0 0 1)"
+# One line, not two greps. The first draft of this asserted 'restore.sh'
+# anywhere in the output and passed with the branch disabled — update.sh names
+# restore.sh in its BACKUP message as well ("restore with ... if this update
+# goes wrong"), so the weak version was measuring the successful backup and
+# calling it recovery advice. Mutating the branch away is what found it.
+recovery_advice_names_the_restore_script() {
+  grep -qE 'Roll back to the pre-update state with: .*restore\.sh' \
+    <<<"${UPDATE_RECOVERABLE}"
+}
+check "...while a failed setup that DID apply new code offers the restore point" \
+  recovery_advice_names_the_restore_script
+check "...having really taken that backup first" \
+  grep -qF 'BACKUP RAN' <<<"${UPDATE_RECOVERABLE}"
+check "...and exiting non-zero" \
+  grep -qF 'RC:1' <<<"${UPDATE_RECOVERABLE}"
+# The other half of the same protection: a backup that FAILS must stop the
+# update rather than proceed without a restore point. Unattended is unattended,
+# however it got that way — a cron'd update has no terminal and confirm()
+# auto-answers yes.
+UPDATE_BACKUP_FAILED="$(drive_update 0 0 1 1)"
+setup_not_reached_without_a_restore_point() {
+  ! grep -qF 'SETUP RAN' <<<"${UPDATE_BACKUP_FAILED}"
+}
+check "a backup that fails refuses to update unattended" \
+  grep -qF 'refusing to update unattended' <<<"${UPDATE_BACKUP_FAILED}"
+check "...and never reaches setup, so there is nothing to roll back FROM" \
+  setup_not_reached_without_a_restore_point
 
 echo "# ...and a fetch that failed must name the reason it actually had"
 # One line covered every cause: "Could not reach the remote. Check
@@ -21925,6 +22316,8 @@ INTERNAL_SETTINGS=(
   LCA_ENV_READONLY          # set by load_env_readonly for one call
   LCA_LOG                   # deploy/do-user-data.sh names its own log
   LCA_INSPECT_TIMEOUT       # the login banner's short leash on one probe
+  LCA_DOCKER_PROBE_TIMEOUT  # the bound every read-only docker question runs under
+  LCA_READER_PROBE_TIMEOUT  # ...and the one run_reader's "can this be read" gets
   MODEL_PROBE_TIMEOUT       # how long a probe waits, not what it probes
   WEBUI_START_TIMEOUT       # likewise
   OLLAMA_DROPIN             # a path this project owns
@@ -23050,6 +23443,38 @@ census_header_counts_its_own_rows() {
 }
 check "the census header's numbers are the ones under it" \
   census_header_counts_its_own_rows
+# ...and the order published in that header has to cover the rows it orders.
+#
+# The order is the reason the tranche was worth doing, and until this gate it
+# was a list in a comment: a statement about the work with nothing driving it,
+# in the file that exists to remove those. A row that is quietly dropped from
+# the order is a row nobody will ever reach, and a name in the order that is no
+# longer an A row makes the tiers look fuller than they are.
+#
+# SOURCE-GREP: the subject IS a list in this file's own header, checked against
+# the rows underneath it. There is no behaviour to drive.
+census_order_covers_every_a_row() {
+  local ordered rows dupes only_order only_rows
+  # The order's entries are the only five-space-indented bare names in the
+  # header; the tier headings and prose are all wider or contain spaces.
+  ordered="$(sed -n 's/^#     \([a-z_][a-z0-9_]*\)$/\1/p' "${CENSUS}" | sort)"
+  rows="$(grep '^A'$'\t' "${CENSUS}" | cut -f2 | sort)"
+  [[ -n "${ordered}" ]] || {
+    echo 'the census header no longer publishes an order — this gate stopped watching' >&2
+    return 1; }
+  dupes="$(uniq -d <<<"${ordered}")"
+  [[ -z "${dupes}" ]] || {
+    printf 'these rows are in the published order more than once:\n%s\n' "${dupes}" >&2
+    return 1; }
+  only_order="$(comm -23 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  only_rows="$(comm -13 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  [[ -z "${only_order}" && -z "${only_rows}" ]] || {
+    [[ -z "${only_order}" ]] || printf 'the published order names rows that are no longer A:\n%s\n' "${only_order}" >&2
+    [[ -z "${only_rows}" ]] || printf 'these A rows are in no tier, so nobody will ever reach them:\n%s\n' "${only_rows}" >&2
+    return 1; }
+}
+check "...and the order published in the header covers every A row exactly once" \
+  census_order_covers_every_a_row
 # ...and the same for what the COMMIT MESSAGE says about them.
 #
 # The other half of the same audit. Every message in this branch's history that
@@ -23402,8 +23827,8 @@ check "...and what it claims agrees with the .env files the fixtures built" \
 config_blindness_has_not_grown() {
   local n
   n="$(grep -cE '^SHIPPED-ONLY'$'\t' "${CONFIG_CENSUS}")"
-  (( n <= 5 )) || {
-    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and three have since been driven, and the only honest direction is down\n' \
+  (( n <= 4 )) || {
+    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and four have since been driven, and the only honest direction is down\n' \
       "${n}" >&2
     return 1
   }

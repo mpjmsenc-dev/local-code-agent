@@ -669,6 +669,45 @@ driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
 
+### An aggregate nobody could check, replaced by a per-row fact
+
+The census header carried a split: of the A rows left, *52 worth driving and 33
+correctly narrow*. The 33 was a projection from a single reading pass and was
+never checked row by row — which makes it the same shape as everything else in
+this document, sitting in the ledger that exists to record removing that shape.
+
+Re-reading the likeliest candidates confirmed **seven**, and they are B now,
+each with a pointer to what actually drives the behaviour: `honours_skip` to
+`tests/test-fresh-install.sh`, `sources_the_real_ladder` to
+`ladder_agrees_with_tune`, `uninstall_answers_help_first` to
+`installers_answer_help_before_acting`,
+`guard_message_names_only_guarded_ports` to `apply_inbound_guard` in
+`tests/test-netmode.sh`, `every_surface_reads_one_instructions_source` to the
+pair that drives `lca_user_instructions` at both values. The other two are
+honestly text: `ci_compares_the_whole_prompt`, whose subject is the shell inside
+`ci.yml`, and `uninstall_removals_can_reach_root`, an exhaustive absence rule
+over the source with a counted floor.
+
+An eighth candidate did not survive the re-read.
+`watch_log_arm_cannot_feed_an_armed_ceiling` looks like a uniqueness rule — one
+`iters` increment, on the `step_source` line — and `tests/test-agent-watch.sh`
+does drive the step ceiling. It drives the *events* arm with the ceiling armed
+and the *log* arm with it disarmed, which is not the combination this row is
+about. It went back into the debt, and into a tier. Reading a row is not the
+same as classifying it from the sentence you wrote about it last month.
+
+So the aggregate is withdrawn. Every remaining A row is now placed in one of
+four cost tiers in the census header — exposure and data first, false all-clears
+second, silently-wrong work third, misinformed readers last — and
+`census_order_covers_every_a_row` requires the published order to name every A
+row exactly once. A row dropped from the order is a row nobody will ever reach;
+a name in the order that is no longer A makes the tiers look fuller than they
+are. Both now fail the suite.
+
+The debt count went **up**, from 52 to 78, and that is the honest direction: the
+33 was never a measurement. What replaced it is a per-row assignment anybody can
+re-derive.
+
 ## A gate that is never run is worse than no gate
 
 `tests/test-lib.sh` is a linear script: a function is a gate only because a
@@ -999,6 +1038,131 @@ The rule that came out of it, and it is the useful part:
 > beside it costs nothing today and buys a list nobody works through.
 
 
+### The fifth stall, and the probe that was written out three times
+
+Tier 1 of the census order is the hang class: four live stalls have shipped from
+it and every one was found by hand. The two gates covering the *network* side of
+it read source for a `--max-time` flag — which survives being passed to a call
+that is never made, sitting on the wrong one of four probes, or being large
+enough not to matter, and says nothing at all about the `docker` reads beside it.
+
+So: the same sandbox shape as the sudo-stall gate, with the **world** replaced
+instead of the escalation. `curl` and `docker` accept and never answer, every
+reporting command is run against it, bounded, and has to come back. Five did
+not, in the shipped configuration:
+
+| | |
+|---|---|
+| `lca check` | printed its Docker heading and nothing under it |
+| `lca webui status` | never returned |
+| `lca logs` | never returned |
+| `lca agent logs` | never returned |
+| `lca agent status` | never returned |
+
+The first look found one probe written out by hand three times, unbounded in all
+three: `docker_daemon_reachable` in `scripts/lib.sh` (thirteen callers, one of
+them the login banner), `select_docker` in `webui.sh` (which runs for every
+`webui.sh` subcommand), and an inline pair in `check-system.sh`. `docker info`
+against a daemon that accepts its socket and never answers has no client-side
+deadline: the call does not run slowly, it never returns.
+
+Bounding those three moved the hang rather than removing it — `lca check` then
+reached its inbound-guard step and stopped there instead. Counting properly:
+**`scripts/lib.sh` has nine read-only docker probes and exactly one of them was
+bounded.** Container inspects, `docker ps`, `docker network inspect`, the volume
+inspect: all unbounded, all reachable from a report.
+
+The sharpest part is that the argument was already written down. The one bounded
+probe, `webui_container_env_list`, sits six lines above `docker_daemon_reachable`
+and carries a comment explaining exactly why *its* `docker inspect` is wrapped in
+`timeout` — "a reporter that hangs is strictly worse than one that says cannot
+tell, and the banner runs on every SSH login". `scripts/install_docker.sh`
+carries another, written when a local copy of the daemon probe was removed,
+saying that local copies are the problem. Every one of the eight unbounded
+probes was written after both comments existed. **A rule that lives in a comment
+protects the function the comment is attached to, and nothing else — which is
+why it is now one shared `LCA_DOCKER_RUNNER` array rather than eight correct
+decisions.**
+
+An array, not a wrapper function, because half of these run through `as_root`
+and sudo cannot execute a shell function. `tests/test-lib.sh`'s `lib_probe`
+already stands in for `timeout` for exactly that reason, so the in-process
+stubs still reach the code they stub.
+
+Actions are deliberately left unbounded: `docker run`, `docker pull` and
+`docker rm` are things the reader asked for and may legitimately take minutes.
+This is for questions. The bound is `LCA_DOCKER_PROBE_TIMEOUT`, default five
+seconds — not one: the cost of being too tight is not a slow report but a wrong
+one, a false "cannot reach the daemon" that refuses to start the agent, and this
+project has already shipped the mirror-image bug.
+
+`lca check` against a wedged daemon now takes about forty seconds, because it
+asks in three steps and the inbound guard asks twice more. That is a broken
+machine being reported slowly, and the gate's bound is loose enough to allow it.
+Slow is not the defect. Never arriving is.
+
+**An instrument artefact, recorded because it nearly became a finding.** The
+first sweep also reported `lca status` hanging — inside its own printed line
+`Live probe: curl --max-time 5 https://example.com`. The stub `curl` was
+sleeping regardless of `--max-time`, which no real curl does, so a correctly
+bounded call scored as a hang. The stub now honours `--max-time` and exits 28;
+`docker`, which has no such flag and can only be bounded by a `timeout` around
+it, simply stops answering. That asymmetry *is* the gate: the question is
+whether the call is bounded, not whether the command can be made to sit there.
+A stub encodes a belief about the world, and a wrong belief in a stub produces a
+confident wrong answer about the product — which is the same failure this whole
+document is about, one level down.
+
+Two more came out of running the sweep again after each fix, which is the only
+way this kind of thing is ever finished — every repair moves the hang rather
+than removing it, and the next one is only visible from where you now are.
+
+- `run_reader` takes a **probe** and a **real** command: "can this be read?",
+  then the reader's output. The probe was unbounded, so `lca agent logs` asked
+  `docker container inspect` of a wedged daemon and sat there having printed
+  nothing — the exact failure `run_reader` was written one layer up to remove.
+  The probe is bounded now and the real command deliberately is not: a log
+  stream may run as long as it likes. That distinction is the whole helper.
+- The gate itself had to stop testing the size of the bound. At the shipped
+  five seconds, `lca check` spends about forty seconds asking a wedged daemon
+  in five separate places, and a gate that waits that out twice is slower than
+  the rest of the suite. It now runs the product at a one-second bound and
+  leaves the stub silent for two minutes, so what it measures is whether the
+  call is bounded at all — which is the claim — and not how generously.
+
+### The one sentence that tells you how to get your machine back
+
+Tier 1 of the census order is what a silent failure costs, and `update.sh`'s
+recovery advice is the sharpest instance in it. If `lca update` applies new code
+and then setup fails, one line tells the reader they have a restore point taken
+minutes earlier. `update_mentions_restore_on_failure` asserted that line by
+reading `update.sh` for the word `restore.sh` inside the setup step.
+
+**It had never run.** It fires only when a backup was really taken *and* new code
+was really applied, and the harness drove neither: every case passed
+`--no-backup` against a checkout zero commits behind its remote. All three cases
+that did run take the other branch — "there is nothing to roll back".
+
+`drive_update` now takes a backup status and a commits-behind count, and makes
+the checkout genuinely behind by committing forward, pushing, and stepping back.
+Two branches that had never executed now do:
+
+- setup fails after a real backup and a real pull → the roll-back advice, naming
+  `restore.sh`, and a non-zero exit;
+- the backup itself fails → the update refuses to run unattended and never
+  reaches setup, so there is nothing to roll back *from*. Unattended is
+  unattended however it got that way: `confirm()` auto-answers yes with no
+  terminal, which is right for an install prompt and exactly wrong here.
+
+And a lesson about the first of those, because **the first draft of it passed on
+mutated code.** It asserted `restore.sh` anywhere in the output — but `update.sh`
+names `restore.sh` in its *successful backup* message too ("restore with … if
+this update goes wrong"), so with the recovery branch disabled the check was
+contentedly measuring the backup. Mutating the branch away is what found it.
+The assertion is one line now: the roll-back sentence and the script name
+together, on the same line, which is the only place they mean what the gate
+claims.
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide
@@ -1287,6 +1451,50 @@ and a fixture built for a machine nobody has is its own kind of lie. The
 question to ask of a driven gate is not "is it matrixed" but: *what does its
 fixture actually produce, and which branches of its subject can therefore never
 run?*
+
+### The fourth excuse, and the command nobody had ever run
+
+`AGENT_NATIVE_TOOL_CALLING` is the setting this tier's own documentation calls
+the difference between a run that works and one that ends instantly with an
+empty workspace and no error. `tests/config-coverage.tsv` had it SHIPPED-ONLY,
+with a cost note: *"low for the payload (the agent settings harness already
+stubs the API), high for the selftest arm, which needs a live agent."*
+
+The payload half turned out to be driven at both values already —
+`seeds_a_real_boolean` loops over `true` and `false` and reads the JSON back.
+The selftest half was driven at neither, because **nothing in this repo had ever
+run `scripts/agent-selftest.sh` at all.** Not "only in the shipped
+configuration": never, in any, while every other `lca` command has a harness.
+A whole product command — the one this project hands a user when the tier does
+not work — with no coverage of any kind.
+
+And the cost note was wrong, which makes it the fourth written excuse here to be
+re-read against the tools that now exist, and the fourth to fall. Every link in
+that script reaches its world through `curl`, `docker` and `ollama`, and this
+suite has been standing in for all three for months. The whole chain now runs
+against stand-ins — relay, model, container, settings, channel, task, and the
+speed report — in four configurations:
+
+| `.env` says | the agent stored | the model returns | must |
+|---|---|---|---|
+| `true` | `true` | 0 native calls | stop at 5/6, name `AGENT_NATIVE_TOOL_CALLING=false`, and not say the tier works |
+| `true` | `true` | 1 native call | run to the end and say the tier works |
+| `false` | `false` | 0 native calls | treat zero as the expected answer, not a failure |
+| `true` | `false` | — | stop at 4/6, quote what the agent actually holds, and not go on to probe the channel |
+
+The second row is not padding. Without it the first would pass a selftest that
+refused every machine, which is the same shape as a gate that greps for a
+warning without ever checking the quiet case.
+
+The last row is the sharpest. The settings endpoint declares
+`additionalProperties: true`, so it answers 200 to a body it stores none of —
+this project shipped a "settings seeded" message about exactly that once. What
+`.env` asks for and what the agent actually holds are two different facts, and
+only the second decides whether the run works.
+
+Two mutations, each shown to land: `link_channel` stops asking whether the
+channel is dead, and `link_settings` compares the stored value with itself. Each
+turns exactly one row red, with the unmutated run green as the control.
 
 ## The bookkeeping is a claim too, and nothing was driving it
 

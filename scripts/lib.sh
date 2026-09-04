@@ -2494,7 +2494,17 @@ run_reader() {
     if [[ "${seen}" == "false" ]]; then probe+=( "${arg}" ); else real+=( "${arg}" ); fi
   done
   (( ${#probe[@]} > 0 && ${#real[@]} > 0 )) || return 2
-  if "${probe[@]}" >/dev/null 2>&1; then
+  # The probe is bounded and the real command is not, because they are
+  # different kinds of thing: the probe is a question ("can this be read?")
+  # and the reader's output may legitimately stream for as long as it likes.
+  # Unbounded, the question was the hang: 'lca agent logs' asks
+  # 'docker container inspect' first, and against a daemon that accepts its
+  # socket and never answers that call never returns — so the command sat
+  # there having printed nothing, which is exactly the failure this helper was
+  # written to remove one layer further up.
+  local -a bound=()
+  if have timeout; then bound=(timeout "${LCA_READER_PROBE_TIMEOUT:-5}"); fi
+  if "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
     "${real[@]}"
     return 0
   fi
@@ -2515,7 +2525,7 @@ run_reader() {
       # stderr, so it cannot land inside a log stream someone is piping.
       warn "Reading this needs root — sudo may ask for your password."
     fi
-    if as_root "${probe[@]}" >/dev/null 2>&1; then
+    if as_root "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
       as_root "${real[@]}"
       return 0
     fi
@@ -2696,6 +2706,28 @@ webui_container_env() {
   printf '%s' "${out}"
 }
 
+# LCA_DOCKER_RUNNER — the bound every read-only docker question runs under.
+#
+# 'docker inspect', 'docker info', 'docker ps' and 'docker network inspect'
+# have no client-side deadline against a daemon that accepts its socket and
+# never answers: the call does not run slowly, it never returns. Exactly one
+# probe in this file used to be bounded — webui_container_env_list, whose
+# comment gives the reason in full — and the other eight were not, so every
+# reporting command that asked any of them stopped there for ever. Measured
+# against a docker that accepts and never answers, in the SHIPPED
+# configuration: 'lca check', 'lca webui status', 'lca logs', 'lca agent logs'
+# and 'lca agent status' all sat there.
+#
+# An array rather than a wrapper function, because half of these run through
+# 'as_root' and sudo cannot execute a shell function. Empty when timeout is
+# absent, which expands to nothing.
+#
+# ACTIONS are deliberately not bounded by it: 'docker run', 'docker pull' and
+# 'docker rm' are things the reader asked for and may legitimately take
+# minutes. This is for questions.
+LCA_DOCKER_RUNNER=()
+if have timeout; then LCA_DOCKER_RUNNER=(timeout "${LCA_DOCKER_PROBE_TIMEOUT:-5}"); fi
+
 # docker_daemon_reachable — true when docker commands can actually run here.
 #
 # Needed because "no container" and "cannot ask" are different answers that
@@ -2707,17 +2739,40 @@ webui_container_env() {
 # password; the login banner may not.
 docker_daemon_reachable() {
   have docker || return 1
-  docker info >/dev/null 2>&1 && return 0
+  # Bounded, exactly like webui_container_env_list six lines above and for the
+  # same reason — which is why this one is worth reading twice: the argument
+  # was already written down in this file and applied to the neighbouring
+  # probe, not to this one. A daemon that accepts its socket and never answers
+  # gives 'docker info' no deadline of its own, so an unbounded call does not
+  # run slowly, it never returns.
+  #
+  # Measured against a docker that accepts and never answers, in the SHIPPED
+  # configuration: 'lca check' printed its Docker heading with nothing under
+  # it, and 'lca webui status', 'lca logs', 'lca agent logs' and 'lca agent
+  # status' all sat there too. This is the probe with thirteen callers.
+  #
+  # Five seconds. 'docker info' on a healthy daemon here is well under one —
+  # this project's boxes run two or three containers — and the cost of being
+  # too tight is not a slow report but a WRONG one: a false "cannot reach the
+  # daemon" refuses to start the agent, and this project has already shipped
+  # the mirror-image bug, a healthy daemon called unusable. Overridable with
+  # LCA_DOCKER_PROBE_TIMEOUT for a box where that is not true.
+  "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 && return 0
   # The announcement below is here because sudo's own prompt goes to the same
   # /dev/null as docker's noise, so without it a command that IS allowed to ask
   # sits on a password prompt with nothing on screen. Measured on 'lca agent
   # start': RC=124, no output whatsoever. Kept to one line so the guard stays
   # inside the window sudo_probes_are_guarded looks at.
+  # The bound goes INSIDE the sudo, not around it: the password prompt happens
+  # before timeout is ever exec'd, so it is outside the bound either way — the
+  # same note webui_container_env_list carries. And the comment below it stays
+  # two lines, because sudo_probes_are_guarded reads the call line and the four
+  # above it, and a longer explanation pushes root_for_probe out of that window.
   root_for_probe || return 1
   announce_possible_prompt "Reaching the Docker daemon"
   # The outcome stated rather than fallen through to: both callers ask this
   # from inside a condition, where errexit does not fire.
-  as_root docker info >/dev/null 2>&1 || return 1
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 || return 1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -2727,8 +2782,8 @@ docker_daemon_reachable() {
 # project keeps taking out.
 webui_container_exists() {
   have docker || return 1
-  docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
-  root_for_probe && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
+  root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
 # webui_container_running — true when the chat app's container is not merely
@@ -2742,8 +2797,8 @@ webui_container_exists() {
 webui_container_running() {
   have docker || return 1
   local state
-  state="$(docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
            || true)"
   [[ "${state}" == "true" ]]
 }
@@ -3118,8 +3173,8 @@ agent_conversation_count() {
 # tier off and once with it on. The gate held — for the shipped default only.
 agent_live_sandboxes() {
   have docker || return 1
-  { docker ps --format '{{.Names}}' 2>/dev/null \
-    || { root_for_probe && as_root docker ps --format '{{.Names}}' 2>/dev/null; } \
+  { "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null; } \
     || true; } | grep -E '^oh-agent-server-' || true
 }
 
@@ -3993,8 +4048,8 @@ agent_backup_decision() {
 agent_container_running() {
   have docker || return 1
   local state
-  state="$(docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
-           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
            || true)"
   [[ "${state}" == "true" ]]
 }
@@ -4003,8 +4058,8 @@ agent_container_running() {
 # it been created" and the wrong one for "is it exposed".
 agent_container_exists() {
   have docker || return 1
-  docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
-    || { root_for_probe && as_root docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
 }
 
 # agent_live_port — the host port the running agent container really publishes.
@@ -4018,8 +4073,8 @@ agent_container_exists() {
 agent_live_port() {
   have docker || return 1
   local spec
-  spec="$(docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
-          || { root_for_probe && as_root docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
+  spec="$("${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
           || true)"
   # '0.0.0.0:3001' / '[::]:3001' -> 3001. First line only: docker prints one
   # per address family and they are the same host port.
@@ -4198,8 +4253,8 @@ agent_sandbox_env() {
 docker_bridge_gateway() {
   local gw=""
   if have docker; then
-    gw="$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
-          || { root_for_probe && as_root docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
+    gw="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
           || true)"
   fi
   # One address, even if docker ever reports several IPAM entries.
@@ -4218,8 +4273,8 @@ docker_bridge_gateway() {
 docker_bridge_interface() {
   local name=""
   if have docker; then
-    name="$(docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
-            || { root_for_probe && as_root docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
+    name="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
+            || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
             || true)"
   fi
   name="${name%%$'\n'*}"
@@ -4343,7 +4398,7 @@ tailscale_promise_gaps() {
 # the archive before it clears anything either way.
 webui_volume_has_data() {
   have docker || return 1
-  as_root docker volume inspect open-webui >/dev/null 2>&1 || return 1
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker volume inspect open-webui >/dev/null 2>&1 || return 1
   local listing
   listing="$(as_root docker run --rm --entrypoint sh -v open-webui:/v:ro \
                "${WEBUI_IMAGE}" -c 'ls -A /v' 2>/dev/null || true)"

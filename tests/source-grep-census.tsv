@@ -73,10 +73,129 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              85   of the 115 the projection was made from
-#   still worth driving     52
-#   correctly narrow        33   still labelled A; each needs re-reading and a
-#                                pointer before it may move to B
+#   A rows now              75   of the 115 the projection was made from
+#   still worth driving     75
+#   correctly narrow         0   every row a re-read has CONFIRMED as narrow is
+#                                already B with a pointer. Nothing is counted as
+#                                narrow on a projection any more — see below.
+#
+# THE ORDER FOR THE REMAINING 75, by what a silent failure would cost.
+#
+# Re-derived rather than inherited. The earlier header split these into 52
+# worth driving and 33 correctly narrow; that 33 was a projection from one
+# reading pass and was never checked row by row. A second pass re-read the
+# likeliest candidates and confirmed SEVEN — those are B now, each with a
+# pointer to what actually drives the behaviour. The rest are back in the
+# debt where an unverified claim belongs, and every one of them is placed
+# in a tier below, so the ordering is a per-row fact anybody can check
+# rather than an aggregate nobody can.
+#
+# Within a tier, order is not significant; between tiers it is. Work a
+# tier to completion before starting the next.
+#
+# -------------------------------------------------------------------------
+# TIER 1  EXPOSURE, DATA, OR A MACHINE THAT DOES NOT COME BACK  (11)
+#   A silent failure here leaves a port open, a firewall that does not
+#   survive a reboot, a probe that hangs a login for ever, a pull that
+#   fills the disk, retention that quietly stops, or a half-provisioned
+#   box. Three of the week's real findings were in this class.
+#
+#     actions_opt_in_to_prompting
+#     every_boot_unit_is_verified
+#     harden_installs_the_boot_service
+#     install_verifies_the_clone
+#     netmode_checks_args_before_acting
+#     remove_old_failure_is_reported
+#     setup_refusal_precedes_every_side_effect
+#     shared_probes_let_the_caller_decide
+#     stop_collects_the_sandboxes
+#     sudo_asks_out_loud
+#     tune_consults_the_disk_before_pulling
+#
+# -------------------------------------------------------------------------
+# TIER 2  A COMMAND THAT REPORTS SUCCESS HAVING NOT DONE THE THING  (30)
+#   The false all-clear. 'lca apply' printing Applied with the relay
+#   missing, 'Uninstall complete' over running sandboxes, SELF-TEST
+#   PASSED without a file. Every instance found this month was here.
+#
+#     apply_asks_before_rendering
+#     apply_does_not_read_ollama_ps
+#     ask_keeps_its_answer_stream_clean
+#     ask_slices_without_a_pipe
+#     autotune_false_still_converges
+#     check_reports_dropin_drift
+#     check_reports_the_agent
+#     entry_points_forward_their_arguments
+#     errexit_survives_sourcing_tune
+#     every_baked_setting_is_compared
+#     fatal_callers_use_require_service
+#     group_check_asks_about_the_reader
+#     no_script_blames_ram_on_its_own
+#     optional_installers_are_not_fatal
+#     pin_is_sized_before_the_pull
+#     same_group_branch_kills_nothing
+#     seed_uses_a_diff_and_reads_it_back
+#     selftest_demands_aider_write_a_file
+#     selftest_uses_the_verdict
+#     setup_calls_the_webui_installer
+#     setup_chain_is_in_dependency_order
+#     setup_ensures_the_model_after_the_pull
+#     setup_only_dies_on_core_steps
+#     setup_skips_only_what_it_already_proved
+#     setup_uses_verdict
+#     start_seeds_the_settings
+#     tune_reconciles_after_a_model_change
+#     tune_unit_checked_regardless_of_auto_tune
+#     unreadable_is_not_reported_as_empty
+#     venv_without_pip_is_rebuilt
+#
+# -------------------------------------------------------------------------
+# TIER 3  A RUN THAT SILENTLY DOES THE WRONG WORK  (18)
+#   The command works, the answer is wrong: the wrong filesystem
+#   measured, the wrong endpoint asked, a watcher that stops early, a
+#   model that does not fit reported as one that does.
+#
+#     aider_pin_is_watched
+#     bench_asks_the_chat_endpoint
+#     disk_check_names_a_directory_that_exists
+#     disk_check_uses_the_shared_helpers
+#     drift_says_something_specific
+#     every_health_wait_checks_the_port
+#     help_examples_are_dispatched
+#     listing_flags_models_that_do_not_fit
+#     prompt_budget_overrun_is_reported
+#     run_agent_checks_where_it_is_running
+#     skip_is_understood
+#     start_bg_reads_the_file_rather_than_copying_it
+#     submit_refuses_an_ambiguous_id
+#     switches_are_reported
+#     uses_announced_start
+#     watch_follows_the_sandbox_too
+#     watch_log_arm_cannot_feed_an_armed_ceiling
+#     watch_reads_the_event_source
+#
+# -------------------------------------------------------------------------
+# TIER 4  THE READER IS MISINFORMED AND NOTHING BREAKS  (16)
+#   Banners, advice, wording. Worth driving, worth doing last.
+#
+#     apt_failure_checks_sudo_first
+#     both_commands_announce_a_model_load
+#     both_reporters_ask_lib
+#     both_surfaces_report_an_unknown_family
+#     every_banner_state_gets_the_warning
+#     lca_link_is_reported
+#     ready_banner_asks_about_the_model
+#     ready_banner_draws_the_chat_down_row
+#     ready_banner_offers_the_coding_agent
+#     ready_banner_warns_about_a_stale_chat
+#     restore_asks_for_the_advice
+#     run_agent_warns_on_an_odd_edit_format
+#     speed_classifies_the_placement
+#     speed_measures_reading_separately
+#     start_and_restart_draw_the_note
+#     tailscale_advice_is_conditional
+#
+# -------------------------------------------------------------------------
 #
 #   The ~24 highest-cost tranche is DONE: 23 driven, and one that turned out
 #   not to be debt at all — watch_judges_on_time_not_only_on_output is already
@@ -119,6 +238,7 @@ FP	agent_publishes_on_the_tailscale_address	extract-to-drive: builds the argv wi
 FP	agent_sh_corrects_the_callback_address	extract-to-drive: reads the OH_* values off the real docker argv
 FP	agent_sh_passes_the_sandbox_env	extract-to-drive: reads the value off the real docker argv
 FP	aider_no_auto_commit_is_wired	extract-to-drive: builds the real aider argv and reads the flag off it
+H	agent_selftest_run	runs the whole of scripts/agent-selftest.sh against stand-in curl, docker and ollama, at a given tool-call mode
 A	aider_pin_is_watched	greps check-system.sh for pin handling
 FP	appliers_check_the_scripts_they_call	fails each sub-script apply.sh calls in turn: every run must reach its summary, count the failure, and still reconcile the guard
 A	apply_asks_before_rendering	awk over apply.sh for the order two calls appear in
@@ -144,7 +264,7 @@ FP	backup_ownership_is_consistent	drives do_backup with a stubbed invoking_user 
 FP	backup_records_the_machine	drives do_backup and reads the record out of the archive
 FP	backup_serialises_itself	runs backup.sh against a lock another process really holds
 FP	backup_stages_no_empty_model_list	drives do_backup with a failing ollama and lists the archive
-A	banner_network_probes_bound_themselves	greps motd.sh probe lines for --max-time
+B	banner_network_probes_bound_themselves	driven by reports_survive_a_world_that_never_answers, which runs every reporting command against a curl and a docker that accept and never answer; this row is the belt that the flags are still on the probe lines
 A	bench_asks_the_chat_endpoint	greps prompt-bench.sh for the endpoint it calls
 H	bg_race_spawns	runs N concurrent start_ollama_bg calls in a sandbox and returns how many actually spawned a server
 A	both_commands_announce_a_model_load	greps two scripts for a call
@@ -160,7 +280,7 @@ A	check_reports_the_agent	awk over check-system.sh for a guarded call
 FP	check_reports_webui_drift	extract-to-drive: runs the drift-reporting block over four container states
 H	check_sandbox	builds the copy of the tree and the stubs a real 'lca check' is run in
 FP	check_system_asks_for_the_port_list	runs a real 'lca check' with the chat app off in .env but still listening, and reads the inbound section
-A	ci_compares_the_whole_prompt	greps shell inside ci.yml for how it builds the expectation
+B	ci_compares_the_whole_prompt	the subject IS the shell inside ci.yml; the behaviour is CI's own prompt job, run on every push — this row is the belt that it still compares the WHOLE prompt and not a substring
 H	ci_fixture_values	reads the .env overrides CI's own workflow and the fresh-install script apply, which this run cannot see
 H	count_word	a number written as a word -> the number
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
@@ -177,13 +297,14 @@ A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
 B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
 B	every_test_script_has_a_way_in	the subject IS whether a file name appears in the files that could invoke it — an exhaustive absence rule over the repo
-A	every_surface_reads_one_instructions_source	presence-grep for a call in two scripts
+B	every_surface_reads_one_instructions_source	lca_user_instructions and lca_system_prompt are driven at both values by instructions_reach_the_chat_app and the AIDER_CONVENTIONS pair; this row is the belt that agent.sh and run-agent.sh still call them
 A	fatal_callers_use_require_service	counts call sites; the deliverable is a runtime refusal
 A	group_check_asks_about_the_reader	awk over check-system.sh for an assignment and its use
-A	guard_message_names_only_guarded_ports	structural awk; the behaviour itself is driven in test-netmode.sh
+B	guard_message_names_only_guarded_ports	driven by running apply_inbound_guard in tests/test-netmode.sh; this row is the structural belt that the message is still derived from the ruleset
 A	harden_installs_the_boot_service	awk over netmode.sh for calls inside do_harden
+H	hanging_world_sandbox	builds the tree, .env and stand-in commands a reporting command is run against when curl and docker accept and never answer
 A	help_examples_are_dispatched	greps bin/lca for branch order
-A	honours_skip	one grep for a literal condition
+B	honours_skip	SKIP_TAILSCALE=true is driven end to end by tests/test-fresh-install.sh; this row is the belt that install_tailscale.sh still reads it
 FP	image_pulls_are_never_implicit	drives a backup and a restore, then reads the escalation log: 'docker image inspect' must precede 'docker run'
 FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both documented ways, and watches for side effects
 A	install_verifies_the_clone	greps for the existence test
@@ -199,7 +320,7 @@ FP	logs_ollama_reads_the_background_log	runs the real reader, as not-root, over 
 FP	logs_ollama_separates_absent_from_unreadable	runs the real reader over an absent log and an unopenable one: opposite advice, and root asked for only in the second
 FP	logs_setup_dates_the_install_log	reads the heading of a real run back against the fixture's own mtime
 FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, unopenable and readable: three outcomes, and root asked for only in the middle one
-A	motd_bounds_the_docker_read	awk inside chat_stale_row for a timeout
+B	motd_bounds_the_docker_read	the same: the banner really has to come back from a docker that never answers, and does — this row stays as the structural belt
 A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
 B	no_tracked_path_is_hostile_to_a_glob	the subject IS the set of names git tracks; a leading dash or whitespace breaks every glob and read loop in the tree
@@ -248,7 +369,7 @@ A	setup_uses_verdict	presence-grep for the call plus an absence rule
 A	shared_probes_let_the_caller_decide	presence-greps inside three lib function bodies
 FP	signup_reported_by_check	runs a real 'lca check' with signups open and with them closed, and reads the two verdicts
 A	skip_is_understood	one grep for a condition
-A	sources_the_real_ladder	one grep for a source line
+B	sources_the_real_ladder	driven by ladder_agrees_with_tune, which runs check-system's chooser against tune.sh's own
 A	speed_classifies_the_placement	awk proximity in speed.sh
 A	speed_measures_reading_separately	presence-greps for which counters are used
 A	start_and_restart_draw_the_note	counts calls inside webui.sh's dispatch
@@ -267,15 +388,15 @@ A	tune_consults_the_disk_before_pulling	awk ordering across three regions of tun
 A	tune_reconciles_after_a_model_change	awk over tune.sh for a call inside a branch
 H	tune_run_with_model	runs a real 'lca tune' in a scratch checkout with model_present answering either way and a recording ollama
 A	tune_unit_checked_regardless_of_auto_tune	greps a region for a branch condition and messages
-A	uninstall_answers_help_first	awk ordering inside main()
+B	uninstall_answers_help_first	driven by installers_answer_help_before_acting, which runs uninstall.sh --help in a copy of the tree with recorders and fails on any DID line
 FP	shipped_defaults_are_what_lib_resolves	loads lib.sh with no .env at all and compares what it resolves against what ships
 FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over a sandbox of fake homes
 FP	uninstall_feeds_every_step_to_the_verdict	runs the whole uninstall five times, failing one step each time, and reads the closing verdict
-A	uninstall_removals_can_reach_root	exhaustive absence of bare rm plus a counted floor
+B	uninstall_removals_can_reach_root	an exhaustive absence rule over the source: no bare rm anywhere in uninstall.sh, with a counted floor so it cannot stop watching
 FP	uninstall_removes_the_agent	runs the real removal step and reads the escalation log: the agent container removed, before the chat app, and reported as a survivor when it cannot be
 H	uninstall_run	builds a checkout and runs uninstall.sh's main with as_root recording rather than removing, one step failing at a time
 A	unreadable_is_not_reported_as_empty	presence-greps plus message content
-A	update_mentions_restore_on_failure	awk over update.sh for a guarded call
+FP	update_mentions_restore_on_failure	runs update.sh one commit behind its remote with a real backup and a setup that fails, and reads the recovery advice off the run
 FP	update_refuses_unattended_after_a_failed_backup	drives update.sh's backup block against a failing backup, both terminal answers
 A	uses_announced_start	one grep for a call
 A	venv_without_pip_is_rebuilt	two presence-greps
@@ -291,6 +412,7 @@ B	advice_names_only_documented_commands	the subject is user-facing advice text a
 B	advice_paths_are_absolute	the subject is the text of message/usage strings
 B	aider_privacy_settings_reach_aider	extract-to-drive: reads the config file aider is actually pointed at
 B	banner_states_are_documented	derived banner states must each be explained in the docs
+B	census_order_covers_every_a_row	the subject IS the order published in this file's own header, checked against the rows underneath it
 B	census_names_real_gates	the subject is a checked-in table and the suite's own definitions
 B	every_honoured_setting_is_accounted_for	the subject is which names lib.sh resolves against which .env.example ships
 B	group_a_debt_has_not_grown	the subject is a recorded-debt table

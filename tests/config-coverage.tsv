@@ -54,7 +54,7 @@
 #
 # Format: LABEL <TAB> setting <TAB> shipped <TAB> what the other side is, and what reaches it.
 # ---------------------------------------------------------------------------
-SHIPPED-ONLY	AGENT_NATIVE_TOOL_CALLING	false	true puts native tool-calling into the settings agent.sh pushes, and makes agent-selftest require a real tool call. Cost: low for the payload (the agent settings harness already stubs the API), high for the selftest arm, which needs a live agent
+BOTH	AGENT_NATIVE_TOOL_CALLING	false	DRIVEN at both values, twice over: the settings payload agent.sh really builds (seeds_a_real_boolean), and the whole of scripts/agent-selftest.sh run end to end against stand-in curl, docker and ollama. The 'needs a live agent' cost in this row was wrong — every link in that script reaches its world through those three commands. true with a model that returns no native tool calls must stop at 5/6 and name the setting; true with one that does must reach the end
 SHIPPED-ONLY	AIDER_CONVENTIONS	true	false turns the conventions appendix off for all three surfaces at once, chat included, whatever CONVENTIONS_CHAT says. Cost: low — the aider argv builder and check_report both reach it
 SHIPPED-ONLY	AIDER_NO_AUTO_COMMIT	false	true adds --no-auto-commit to the aider argv, so the agent stops committing its own work. Driven at both values by the argv probe; no whole-command run of run-agent.sh exists at EITHER value. Cost: low
 BOTH	AUTO_TUNE	true	false pins the model and skips the recommendation drift check. CI's ollama E2E job runs the whole stack at false; every other fixture is true

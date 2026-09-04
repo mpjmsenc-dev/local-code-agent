@@ -52,7 +52,16 @@ EOF
 # root reaching rung 2 and failing has a broken daemon, not a missing password.
 DOCKER=(docker)
 select_docker() {
-  if docker info >/dev/null 2>&1; then
+  # Bounded, for the reason lib.sh's docker_daemon_reachable now carries: a
+  # daemon that accepts its socket and never answers gives 'docker info' no
+  # deadline of its own. This function is a second, hand-written copy of that
+  # probe — it has to be, because it also decides WHICH docker the rest of the
+  # script uses — and it inherited the missing bound along with the shape.
+  # Measured: 'lca webui status' never returned against a docker that accepts
+  # and never answers. Same knob as lib.sh, so the two cannot disagree.
+  local runner=()
+  if have timeout; then runner=(timeout "${LCA_DOCKER_PROBE_TIMEOUT:-5}"); fi
+  if "${runner[@]}" docker info >/dev/null 2>&1; then
     DOCKER=(docker)
     return 0
   fi
@@ -70,7 +79,7 @@ select_docker() {
     if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
       warn "Docker is not reachable as '$(id -un)' — retrying with sudo, which may ask for your password."
     fi
-    if as_root docker info >/dev/null 2>&1; then
+    if as_root "${runner[@]}" docker info >/dev/null 2>&1; then
       DOCKER=(as_root docker)
       return 0
     fi
