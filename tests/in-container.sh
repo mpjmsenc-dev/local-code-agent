@@ -61,6 +61,12 @@ fi
 
 limit=()
 [[ -z "${LCA_GATES_MEMORY:-}" ]] || limit=(--memory "${LCA_GATES_MEMORY}" --memory-swap "${LCA_GATES_MEMORY}")
+# A git worktree's .git is a FILE naming a directory inside the main checkout's
+# .git, which is not under ${REPO}; mounted alone, the clone below fails with
+# "not a git repository" and no gate runs. Mounted read-only at its own path,
+# the pointer resolves. In an ordinary clone this is ${REPO}/.git, already there.
+common_git="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[[ -z "${common_git}" || "${common_git}" == "${REPO}/.git" ]] || limit+=(-v "${common_git}:${common_git}:ro")
 # "I know better" reaches the check inside the container too, or the run the
 # host let through is refused by 'lint' a minute later.
 [[ -z "${LCA_GATES_MIN_MEM_MB:-}" ]] || limit+=(-e "LCA_GATES_MIN_MEM_MB=${LCA_GATES_MIN_MEM_MB}")
