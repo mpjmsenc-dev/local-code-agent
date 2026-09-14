@@ -68,6 +68,50 @@ step non-optional rather than remembered.
 | `make dry-run` | preview the auto-tune decision without changing anything |
 | `make check` | full `check-system.sh` health check (degrades gracefully) |
 
+## Where the gates run
+
+**Never as root on a machine this project is installed on. Run them in a
+container: `make gates-container`.** `tests/test-lib.sh` refuses root outside a
+container and says why; `LCA_SUITE_ON_THIS_HOST=yes` overrides it, and you
+should need a reason.
+
+This is a rule because it already cost something. On 2026-09-14 the suite, run
+as root on the development droplet, drove `setup.sh` with the login banner's
+path redirected and nothing else. `setup.sh` wrote the rest of the host for
+real — `/usr/local/bin/lca`, and the netmode and tune boot units — pointing into
+a `mktemp` directory the suite deleted when it finished. An earlier run had done
+the same. At the next boot the netmode unit exited 203/EXEC, **the inbound guard
+was not loaded, and Open WebUI sat on `0.0.0.0:3000` on a public address for
+four and a half hours.** Every report read green: the escape check at the top of
+the suite watched the login banner, and the banner had not moved.
+
+That check covered one instance of a class, which is the shape of most of what
+this document records. What replaced it covers the class:
+
+- **One root for the host.** `LCA_HOST_ROOT` (empty in production) prefixes every
+  path the product reads or writes outside the checkout, each named once in
+  `scripts/lib.sh`. `lca_host_paths` lists them.
+- **No path outside it.** A gate rejects any absolute host path spelled out in a
+  product script that is not one of those names; the few real reads that must
+  stay real (`/etc/os-release`, PATH entries, the docker socket as a mount spec)
+  are listed with their reasons.
+- **Every harness moves it.** The suite exports it, and a gate rejects any
+  `env -i` harness that does not pass it on — `env -i` is the one construction
+  that defeats an export, and the setup harness that did the damage used it.
+- **The escape check watches the product's list.** Every path `lca_host_paths`
+  names is fingerprinted on the real machine before the run and compared after —
+  links by target, files by size, change time and content, directories by their
+  entries. A rewrite that puts back identical bytes still changes the time.
+
+The container rule stays even with all of that in place. Those four are code,
+and this project's record on code that guards itself is the reason they exist.
+A container costs nothing to lose.
+
+`tests/in-container.sh` copies the working tree as it is on disk — history
+included, uncommitted edits included — so what is tested is what you are about
+to commit. `LCA_GATES_MEMORY=4g` also sets the RAM the product detects inside it,
+which is one way to put the suite on a different rung of the ladder.
+
 ## What CI enforces
 
 Every push and PR runs `.github/workflows/ci.yml`:

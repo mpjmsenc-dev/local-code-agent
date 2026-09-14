@@ -16,7 +16,7 @@ install_docker_repo_and_engine() {
   net_guard "Installing Docker"
 
   info "Setting up the official Docker apt repository..."
-  as_root install -m 0755 -d /etc/apt/keyrings
+  as_root install -m 0755 -d "${DOCKER_APT_KEY%/*}" "${DOCKER_APT_LIST%/*}"
 
   local distro_id codename arch
   distro_id="$(. /etc/os-release && echo "${ID}")"
@@ -28,11 +28,11 @@ install_docker_repo_and_engine() {
   esac
 
   curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" \
-    | write_root_file /etc/apt/keyrings/docker.asc 0644
-  as_root chmod a+r /etc/apt/keyrings/docker.asc
+    | write_root_file "${DOCKER_APT_KEY}" 0644
+  as_root chmod a+r "${DOCKER_APT_KEY}"
 
-  echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro_id} ${codename} stable" \
-    | write_root_file /etc/apt/sources.list.d/docker.list 0644
+  echo "deb [arch=${arch} signed-by=${DOCKER_APT_KEY#"${LCA_HOST_ROOT}"}] https://download.docker.com/linux/${distro_id} ${codename} stable" \
+    | write_root_file "${DOCKER_APT_LIST}" 0644
 
   apt_get update -y
   apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin

@@ -652,7 +652,7 @@ step "The 'lca' command and the login banner"
 # is a symlink into this checkout, so moving or renaming the directory breaks
 # it — including 'lca check', which is what someone reaches for when the stack
 # seems broken. This copy still runs, so it is the one that can explain.
-LCA_LINK=/usr/local/bin/lca
+# LCA_LINK is lib.sh's, under LCA_HOST_ROOT.
 case "$(lca_link_state "${LCA_LINK}" "${SCRIPT_DIR}/bin/lca")" in
   ok)      p_pass "'lca' on PATH runs this checkout" ;;
   broken)  p_warn "'lca' on PATH points at $(readlink "${LCA_LINK}" 2>/dev/null || echo 'nothing'), which is not there — the lca command is broken (was this checkout moved or renamed?). Fix: sudo ${SCRIPT_DIR}/setup.sh" ;;

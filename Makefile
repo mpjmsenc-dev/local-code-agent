@@ -4,6 +4,8 @@
 #
 # Targets:
 #   make gates    lint + syntax + unit tests (the pre-push gate; matches CI)
+#   make gates-container  the same, in a throwaway Ubuntu 24.04 container —
+#                 where they run on any machine this project is installed on
 #   make lint     ShellCheck (zero findings required), same flags as CI
 #   make syntax   bash -n on every script
 #   make test     both unit suites (lib + netmode ruleset)
@@ -25,12 +27,19 @@ SHELL := /usr/bin/env bash
 # gates through, which is the one thing it exists to prevent.
 SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
 
-.PHONY: gates lint syntax test coverage live-verify dry-run check smoke bench hooks hooks-status help
+.PHONY: gates gates-container lint syntax test coverage live-verify dry-run check smoke bench hooks hooks-status help
 .DEFAULT_GOAL := help
 
 gates: syntax lint test ## The CI gates that can run locally (2 of CI's 7 jobs)
 	@echo "== gates passed =="
 	@$(MAKE) --no-print-directory hooks-status
+
+# Not a convenience. The suite, run as root on an installed machine, once wrote
+# that machine's firewall boot unit into a sandbox it then deleted; see
+# CONTRIBUTING, "Where the gates run". tests/test-lib.sh refuses root outside
+# a container for that reason, and this is the way in.
+gates-container: ## The CI gates, in a throwaway container (the way to run them on an installed box)
+	bash tests/in-container.sh gates
 
 lint: ## ShellCheck, same invocation as CI
 	@command -v shellcheck >/dev/null || { echo "shellcheck not installed (apt-get install -y shellcheck)"; exit 1; }

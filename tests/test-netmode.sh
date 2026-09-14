@@ -9,6 +9,10 @@ set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${TESTS_DIR}/.." && pwd)"
+# The same host root tests/test-lib.sh uses, so nothing here that reaches a
+# product path outside the checkout can reach the real one. See lib.sh.
+LCA_HOST_ROOT="$(mktemp -d)"
+export LCA_HOST_ROOT
 
 FAILED=0
 t_ok()   { printf '%s\n' "ok   - $*"; }
@@ -34,7 +38,7 @@ NFT_SHEBANG='#!/usr/sbin/nft -f'
 
 RULES="$(mktemp)"
 INBOUND="$(mktemp)"
-trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${MISSING_CMD_LOG:-}"' EXIT
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${MISSING_CMD_LOG:-}" "${LCA_HOST_ROOT:-}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 "${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 

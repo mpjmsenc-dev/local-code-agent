@@ -37,6 +37,26 @@ LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 ENV_EXAMPLE="${REPO_ROOT}/.env.example"
+# LCA_HOST_ROOT — the one override for every path this project reads or writes
+# OUTSIDE its own checkout. Empty on a real machine, so every path below is
+# exactly what it always was. A test sets it to a sandbox and the whole host
+# moves with it.
+#
+# Why one root rather than a variable per path: that was the design until
+# 2026-09-14, and it covered exactly the paths that had already escaped. The
+# unit suite ran setup.sh as root with LCA_MOTD_FILE redirected — the banner
+# was the path that had burned somebody twice — and setup.sh wrote the rest
+# of the host for real: /usr/local/bin/lca and both boot units, pointed into
+# a mktemp directory the suite then deleted. The netmode unit failed at the
+# next boot with 203/EXEC, so the inbound guard was not loaded and the chat
+# app sat on a public address for four and a half hours while every report
+# read green. A seam per path is a guard per instance. A root is a guard for
+# the class, and lca_host_paths below is the list the escape check reads.
+#
+# Nothing reads it from .env: it is not a setting, and sync_env_keys works from
+# .env.example, which does not carry it.
+LCA_HOST_ROOT="${LCA_HOST_ROOT:-}"
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-${LCA_HOST_ROOT}/etc/systemd/system}"
 # Overridable ONLY so a test can keep tune.sh out of the real /etc. The default
 # is the systemd location and nothing in the product ever sets these; a test
 # that did not have this was writing the machine's actual Ollama drop-in from a
@@ -44,10 +64,37 @@ ENV_EXAMPLE="${REPO_ROOT}/.env.example"
 # two gates came to pass on every developer box and fail on every CI run.
 # Nothing reads them from .env: sync_env_keys works from .env.example, and these
 # are not in it.
-OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-${LCA_HOST_ROOT}/etc/systemd/system/ollama.service.d}"
 OLLAMA_DROPIN="${OLLAMA_DROPIN:-${OLLAMA_DROPIN_DIR}/local-code-agent.conf}"
-NETMODE_DIR="/etc/local-code-agent"
+NETMODE_DIR="${LCA_HOST_ROOT}/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
+# The boot units this project installs, each named once. They were literals in
+# tune.sh, netmode.sh and backup.sh, which is why no harness could move them.
+# shellcheck disable=SC2034  # read by tune.sh, netmode.sh, backup.sh, uninstall.sh
+TUNE_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-tune.service"
+# shellcheck disable=SC2034
+NETMODE_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-netmode.service"
+# shellcheck disable=SC2034
+BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.service"
+# shellcheck disable=SC2034
+BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.timer"
+# The 'lca' command setup.sh links onto PATH, and the directory it lives in.
+# shellcheck disable=SC2034
+LCA_LINK="${LCA_HOST_ROOT}/usr/local/bin/lca"
+# What Ollama's own installer puts on the machine, which uninstall.sh removes.
+# shellcheck disable=SC2034
+OLLAMA_UNIT_FILE="${SYSTEMD_UNIT_DIR}/ollama.service"
+# shellcheck disable=SC2034
+OLLAMA_BIN_FILE="${LCA_HOST_ROOT}/usr/local/bin/ollama"
+# shellcheck disable=SC2034
+OLLAMA_LIB_DIR="${LCA_HOST_ROOT}/usr/local/lib/ollama"
+OLLAMA_HOME_DIR="${LCA_HOST_ROOT}/usr/share/ollama"
+OLLAMA_SYSTEM_MODELS_DIR="${OLLAMA_SYSTEM_MODELS_DIR:-${OLLAMA_HOME_DIR}/.ollama/models}"
+# Docker's apt repository, written by install_docker.sh.
+# shellcheck disable=SC2034
+DOCKER_APT_KEY="${LCA_HOST_ROOT}/etc/apt/keyrings/docker.asc"
+# shellcheck disable=SC2034
+DOCKER_APT_LIST="${LCA_HOST_ROOT}/etc/apt/sources.list.d/docker.list"
 # Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs
 # setup' and the login banner read it to answer "is it still installing?".
 # do-user-data.sh cannot source this file — it runs before the clone exists —
@@ -55,7 +102,7 @@ NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
 # Read by scripts/logs.sh and scripts/motd.sh, not here — ShellCheck analyses
 # one file at a time and cannot see a sourcing consumer.
 # shellcheck disable=SC2034
-SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
+SETUP_LOG="${LCA_LOG:-${LCA_HOST_ROOT}/var/log/local-code-agent-setup.log}"
 # Likewise: check-system.sh, uninstall.sh and scripts/motd.sh. The filename
 # must stay free of dots — run-parts --lsbsysinit, which is how pam_motd runs
 # these, skips any name containing one.
@@ -72,7 +119,29 @@ SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
 # since has printed "run-parts: failed to stat component" and no banner at all,
 # which is the one screen this project's only real bug report was about. A test
 # reached out of its sandbox and broke the live box it was running on.
-MOTD_FILE="${LCA_MOTD_FILE:-/etc/update-motd.d/99-local-code-agent}"
+MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT}/etc/update-motd.d/99-local-code-agent}"
+
+# lca_host_paths — every path outside the checkout that this project writes,
+# one per line, under the current LCA_HOST_ROOT.
+#
+# The escape check in tests/test-lib.sh fingerprints each of these on the real
+# machine before the suite runs and again after, and a gate requires every
+# absolute host path written anywhere in the product to be one of the names
+# defined above. So a new path is either added here, and watched, or it fails
+# the suite for being a literal — there is no third way for it to arrive.
+lca_host_paths() {
+  printf '%s\n' \
+    "${TUNE_SERVICE}" "${NETMODE_SERVICE}" "${BACKUP_SERVICE}" "${BACKUP_TIMER}" \
+    "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket" \
+    "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service" \
+    "${SYSTEMD_UNIT_DIR}/multi-user.target.wants" \
+    "${SYSTEMD_UNIT_DIR}/sockets.target.wants" \
+    "${SYSTEMD_UNIT_DIR}/timers.target.wants" \
+    "${OLLAMA_DROPIN_DIR}" "${OLLAMA_UNIT_FILE}" \
+    "${NETMODE_DIR}" "${SETUP_LOG}" "${MOTD_FILE}" "${LCA_LINK}" \
+    "${OLLAMA_BIN_FILE}" "${OLLAMA_LIB_DIR}" "${OLLAMA_HOME_DIR}" \
+    "${DOCKER_APT_KEY}" "${DOCKER_APT_LIST}"
+}
 
 # Where start_ollama_bg() sends Ollama's output on a host with no service
 # manager — and therefore where 'lca logs ollama' has to look on that host.
@@ -1351,7 +1420,7 @@ input_file_ok() {
 ollama_models_dir() {
   local d
   if [[ -n "${OLLAMA_MODELS:-}" ]]; then printf '%s' "${OLLAMA_MODELS}"; return 0; fi
-  for d in "${OLLAMA_SYSTEM_MODELS_DIR:-/usr/share/ollama/.ollama/models}" "${HOME}/.ollama/models"; do
+  for d in "${OLLAMA_SYSTEM_MODELS_DIR}" "${HOME}/.ollama/models"; do
     [[ -d "${d}" ]] && { printf '%s' "${d}"; return 0; }
   done
   printf '%s' "${HOME}/.ollama/models"
@@ -4177,7 +4246,7 @@ ollama_relay_healthy() {
 # drift class as a chat app still serving the old WEBUI_PORT. Reported, not
 # silently repaired.
 ollama_relay_unit_address() {
-  local unit="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.socket"
+  local unit="${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket"
   local line
   [[ -r "${unit}" ]] || return 1
   line="$(grep -m1 '^ListenStream=' "${unit}" 2>/dev/null || true)"
@@ -5089,7 +5158,7 @@ unit_boot_program() {
     out="$(systemctl show -p ExecStart --value "$1" 2>/dev/null | show_execstart_program)"
   fi
   [[ -n "${out}" ]] \
-    || out="$(execstart_program "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" || true)"
+    || out="$(execstart_program "${SYSTEMD_UNIT_DIR}/$1" || true)"
   [[ -n "${out}" ]] || return 1
   printf '%s' "${out}"
 }
@@ -5141,7 +5210,7 @@ lca_link_state() {
 # offering it unconditionally names a command that fails in the common case.
 # INSTALLER is the heavier thing that writes the file.
 reenable_hint() {
-  if [[ -f "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" ]]; then
+  if [[ -f "${SYSTEMD_UNIT_DIR}/$1" ]]; then
     # Deliberately not '--now': that would run the unit immediately, and for
     # auto-tune that can mean an unasked-for model download. The question was
     # about the next boot.

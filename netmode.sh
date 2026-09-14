@@ -46,7 +46,7 @@ NFT_TABLE="lca_netmode"
 NFT_RULES_FILE="${NETMODE_DIR}/netmode.nft"
 INBOUND_TABLE="lca_inbound"
 INBOUND_RULES_FILE="${NETMODE_DIR}/inbound.nft"
-NETMODE_SERVICE=/etc/systemd/system/local-code-agent-netmode.service
+# NETMODE_SERVICE is defined in lib.sh, under LCA_HOST_ROOT.
 
 # render_rules — print the OFFLINE ruleset to stdout. Kept separate from
 # write_rules_file so tests can validate it (nft --check) without root

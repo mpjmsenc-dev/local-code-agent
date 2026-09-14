@@ -47,8 +47,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_env
 
-RELAY_SOCKET_UNIT="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.socket"
-RELAY_SERVICE_UNIT="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.service"
+RELAY_SOCKET_UNIT="${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket"
+RELAY_SERVICE_UNIT="${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service"
 
 # The proxy binary, wherever this distribution keeps it. Not hardcoded to one
 # path: Debian and Ubuntu ship it under /lib, others under /usr/lib, and a unit

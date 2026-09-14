@@ -300,6 +300,7 @@ FP	every_dispatch_forwards_its_arguments	runs the real bin/lca against stub targ
 FP	every_entry_point_refuses_or_forwards	runs every entry point in a sandboxed checkout with a flag none of them takes
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
+B	every_clean_environment_moves_the_host	reads each test file's env -i lines for the host root; what a harness that forgets does is suite_did_not_touch_the_host's subject
 B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
 B	every_test_script_has_a_way_in	the subject IS whether a file name appears in the files that could invoke it — an exhaustive absence rule over the repo
 B	every_surface_reads_one_instructions_source	lca_user_instructions and lca_system_prompt are driven at both values by instructions_reach_the_chat_app and the AIDER_CONVENTIONS pair; this row is the belt that agent.sh and run-agent.sh still call them
@@ -322,6 +323,7 @@ A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
 FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
+H	literal_host_paths_in	lists the absolute host paths a file spells out
 H	logs_checkout	builds a checkout of logs.sh minus its 'main "$@"' line so the readers can be sourced and driven
 FP	logs_ollama_reads_the_background_log	runs the real reader, as not-root, over a background log that is there: its lines and its path must both appear
 FP	logs_ollama_separates_absent_from_unreadable	runs the real reader over an absent log and an unopenable one: opposite advice, and root asked for only in the second
@@ -330,6 +332,7 @@ FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, 
 B	motd_bounds_the_docker_read	the same: the banner really has to come back from a docker that never answers, and does — this row stays as the structural belt
 A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
+B	no_host_path_outside_lib	reads product scripts for literal host paths; the subject is which paths are spelled out, and the driven half is host_paths_all_move
 B	no_tracked_path_is_hostile_to_a_glob	the subject IS the set of names git tracks; a leading dash or whitespace breaks every glob and read loop in the tree
 A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
 A	pin_is_sized_before_the_pull	line-number ordering inside main()

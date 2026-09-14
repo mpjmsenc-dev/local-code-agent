@@ -63,6 +63,39 @@ check() {
   if "$@"; then t_ok "${desc}"; else t_fail "${desc}"; fi
 }
 
+# WHERE THIS SUITE MAY RUN AS ROOT. Not on a machine this project is installed
+# on, outside a container, unless you say so.
+#
+# Measured, not feared. On 2026-09-14 this suite, run as root on the droplet it
+# was developed on, drove setup.sh with LCA_MOTD_FILE redirected and nothing
+# else, and setup.sh wrote the rest of the host for real: /usr/local/bin/lca,
+# and the netmode and tune boot units, pointed into a mktemp directory this
+# suite then deleted. It had happened on at least one earlier run too. The
+# netmode unit failed at the next boot with 203/EXEC, so the inbound guard was
+# not loaded, and the chat app sat on a public address for four and a half
+# hours. The escape check below watched the login banner only.
+#
+# LCA_HOST_ROOT now moves every host path the product writes, and that check
+# now watches all of them. This refusal is there anyway, because both of those
+# are code and code has been wrong here before: a container costs nothing to
+# lose. CI's runner is not root and a container is a container, so neither is
+# affected. 'make gates-container' is the way in; see CONTRIBUTING, "Where the
+# gates run".
+suite_in_a_container() {
+  [[ -f /.dockerenv || -f /run/.containerenv ]] && return 0
+  command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container >/dev/null 2>&1
+}
+if [[ "${EUID}" -eq 0 && -z "${CI:-}" && "${LCA_SUITE_ON_THIS_HOST:-}" != "yes" ]] \
+   && ! suite_in_a_container; then
+  printf '%s\n' \
+    "This suite will not run as root on a real machine: on 2026-09-14 it rewrote this" \
+    "droplet's firewall boot unit and the guard did not come back after a reboot." \
+    "Run it in a container:   make gates-container" \
+    "or, knowing that, here:  LCA_SUITE_ON_THIS_HOST=yes bash tests/test-lib.sh" \
+    "RESULT: REFUSED — no check was run." >&2
+  exit 2
+fi
+
 # Work in a throwaway copy so the real .env is never touched.
 SANDBOX="$(mktemp -d)"
 # ...and the copy is not enough, because not everything this suite drives
@@ -82,10 +115,55 @@ SANDBOX="$(mktemp -d)"
 # exactly the fix that will be forgotten by the third one, because it already
 # was by the second. So the property is asserted centrally instead: whatever
 # the live link was when this suite started, it must still be that at the end.
-REAL_MOTD_LINK="/etc/update-motd.d/99-local-code-agent"
-# readlink, not 'test -e': a link whose target is gone is still a state worth
-# comparing, and a dangling one is precisely what the escape leaves behind.
-REAL_MOTD_BEFORE="$(readlink "${REAL_MOTD_LINK}" 2>/dev/null || printf '(absent)')"
+#
+# ...and then a third harness did it with a DIFFERENT path, which is exactly the
+# failure this comment predicted and exactly the failure a check on the banner
+# alone could not see. setup.sh, run as root with LCA_MOTD_FILE set, wrote
+# /usr/local/bin/lca and the netmode and tune boot units into its own sandbox.
+# The banner stayed put; the check passed; the firewall's boot unit pointed at a
+# deleted directory. So the watched set is no longer a path written here. It is
+# lca_host_paths — the product's own list of everything it writes outside the
+# checkout — and a gate near the end of this file holds the product to naming
+# no host path that is not on it. A new path is watched the day it exists.
+#
+# Fingerprinted rather than read: a symlink by where it points, a file by size,
+# change time and content, a directory by its entries and their change times.
+# The change time is what catches a write that put back identical bytes.
+host_fingerprint() {   # stdin: paths -> one line per path saying what is there
+  local p
+  while IFS= read -r p; do
+    [[ -n "${p}" ]] || continue
+    # Inode and nanosecond change time, not '%Z': that is whole seconds, and
+    # the non-vacuity probe below rewrote a file with identical bytes inside
+    # one second and this fingerprint called it unchanged. 'mv' over a file,
+    # which is how write_root_file installs every unit, always gets a new inode.
+    if [[ -L "${p}" ]]; then
+      printf '%s link %s %s\n' "${p}" "$(readlink "${p}")" "$(stat -c '%i %z' "${p}" 2>/dev/null)"
+    elif [[ -f "${p}" ]]; then
+      printf '%s file %s %s\n' "${p}" "$(stat -c '%i %s %z' "${p}" 2>/dev/null)" \
+        "$(sha256sum < "${p}" 2>/dev/null | cut -c1-16)"
+    elif [[ -d "${p}" ]]; then
+      printf '%s dir %s\n' "${p}" \
+        "$(find "${p}" -mindepth 1 -maxdepth 1 -printf '%P:%y:%i:%C@;' 2>/dev/null | tr ';' '\n' | sort | tr '\n' ';')"
+    elif [[ -e "${p}" ]]; then
+      printf '%s other\n' "${p}"
+    else
+      printf '%s absent\n' "${p}"
+    fi
+  done
+}
+# The REAL machine's list: every override unset, so this is what lib.sh answers
+# on a box with nothing redirected — the box this run could damage.
+HOST_WATCHED="$(env -u LCA_HOST_ROOT -u SYSTEMD_UNIT_DIR -u OLLAMA_DROPIN_DIR -u OLLAMA_DROPIN \
+                    -u LCA_MOTD_FILE -u LCA_LOG -u OLLAMA_SYSTEM_MODELS_DIR \
+                    bash -c 'source "$1" >/dev/null 2>&1 && lca_host_paths' _ "${REPO}/scripts/lib.sh")"
+HOST_BEFORE="$(host_fingerprint <<<"${HOST_WATCHED}")"
+# ...and every product script this suite runs sees a host inside the sandbox.
+# Exported, so a harness that inherits the environment is covered without
+# knowing; the ones that start from 'env -i' pass it on by name, and a gate
+# below refuses an 'env -i' that does not.
+export LCA_HOST_ROOT="${SANDBOX}/host"
+mkdir -p "${LCA_HOST_ROOT}"
 # The trap says so when the suite ended EARLY. A check that fails prints FAIL
 # and the run carries on to a verdict; anything else — errexit on an unguarded
 # command, a die() reached from a helper — ends the process wherever it
@@ -689,7 +767,7 @@ reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
   local out rc=0
   local -a as_who=()
   [[ "${EUID}" -eq 0 ]] && as_who=( setpriv --reuid="${NOBODY_UID}" --regid="${NOBODY_UID}" --clear-groups )
-  out="$( cd "${WAITS_SB}" && env -i \
+  out="$( cd "${WAITS_SB}" && env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" \
         "PATH=$(stub_path "${WAITS_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
         "HOME=${WAITS_SB}/home" TERM=dumb \
         "${as_who[@]}" timeout "${secs}" bash "${WAITS_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
@@ -829,7 +907,7 @@ hanging_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
   # questions costs forty — twenty of those and this gate is slower than the
   # rest of the suite together. The stub still sleeps twenty, so an UNBOUNDED
   # call is as unmistakable as it ever was.
-  out="$( cd "${HANG_SB}" && env -i \
+  out="$( cd "${HANG_SB}" && env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" \
         "PATH=$(stub_path "${HANG_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
         "HOME=${HANG_SB}/home" TERM=dumb \
         LCA_DOCKER_PROBE_TIMEOUT=1 LCA_INSPECT_TIMEOUT=1 \
@@ -5170,7 +5248,7 @@ setup_sandbox() {   # FAILING-INSTALLER (or empty) -> a tree where only that one
   done
 }
 setup_run() {   # -> everything setup.sh printed
-  ( cd "${SETUP_SB}" && env -i \
+  ( cd "${SETUP_SB}" && env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" \
       "PATH=$(stub_path "${SETUP_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
       "HOME=${SETUP_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
       "LCA_MOTD_FILE=${SETUP_SB}/99-local-code-agent" \
@@ -12819,7 +12897,7 @@ models_dir_for() {  # OLLAMA_MODELS HOME -> the answer
            HOME="$3"; ollama_models_dir' _ "${REPO}/scripts/lib.sh" "$1" "$2"
 }
 ollama_models_dir_answers_correctly() {
-  local home="${SANDBOX}/mdir" service=/usr/share/ollama/.ollama/models got want
+  local home="${SANDBOX}/mdir" service="${LCA_HOST_ROOT}/usr/share/ollama/.ollama/models" got want
   rm -rf "${home}"; mkdir -p "${home}/.ollama/models"
   # 1. An explicit OLLAMA_MODELS wins over any directory that happens to exist.
   got="$(models_dir_for /mnt/big-disk/models "${home}")"
@@ -16804,7 +16882,7 @@ ep_run() {
   : > "${EP_SB}/acted"; : > "${EP_SB}/looked"
   out="$(
     cd "${EP_SB}/cwd" || exit 111
-    env -i \
+    env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" \
       PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       HOME="${EP_SB}/home" \
       TERM=dumb \
@@ -18585,7 +18663,7 @@ entry_run() {   # SCRIPT ARGS... -> EXIT n, then what it printed, then a DID lin
   local out rc=0
   # env -i, so nothing this suite happens to export leaks in and answers a
   # question the user's shell would not have answered.
-  out="$( cd "${ENTRY_SB}/repo" && env -i "PATH=${ENTRY_PATH}" \
+  out="$( cd "${ENTRY_SB}/repo" && env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" "PATH=${ENTRY_PATH}" \
             "HOME=${ENTRY_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
             timeout 25 bash "${ENTRY_SB}/repo/${t}" "$@" </dev/null 2>&1 )" || rc=$?
   printf 'EXIT %s\n%s\n' "${rc}" "${out}"
@@ -23258,7 +23336,7 @@ typed_run() {   # SECONDS ARG... -> "RC=n" then whatever it printed
   # before an inner timeout is ever exec'd, which is why the login banner's own
   # bound never got to start.
   out="$( cd "${TYPED_SB}" && timeout "${secs}" runuser -u "${TYPED_USER}" -- \
-        env -i "PATH=$(stub_path "${TYPED_SB}/stub" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+        env -i "LCA_HOST_ROOT=${LCA_HOST_ROOT}" "PATH=$(stub_path "${TYPED_SB}/stub" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
         "HOME=${TYPED_SB}/home" TERM=dumb \
         "${TYPED_SB}/bin/lca" "$@" </dev/null 2>&1 )" || rc=$?
   printf 'RC=%s\n%s\n' "${rc}" "${out}"
@@ -25148,20 +25226,139 @@ config_blindness_has_not_grown() {
 check "...and the number of undriven configurations never gets bigger" \
   config_blindness_has_not_grown
 
-# The tripwire recorded at the top, read here: nothing this suite ran may have
-# repointed the live machine's login banner. Last, so it covers every harness
-# above it including ones written after this line.
-suite_did_not_touch_the_live_banner() {
-  local now
-  now="$(readlink "${REAL_MOTD_LINK}" 2>/dev/null || printf '(absent)')"
-  [[ "${now}" == "${REAL_MOTD_BEFORE}" ]] || {
-    printf 'this suite repointed the LIVE login banner while it ran:\n  before: %s\n  after:  %s\nA harness drove something that installs the banner without setting LCA_MOTD_FILE. Every SSH login gets that link, and the sandbox it now names is deleted when this run ends.\n' \
-      "${REAL_MOTD_BEFORE}" "${now}" >&2
+# ---------------------------------------------------------------------------
+# The host, kept out of every harness — the class, not the instance.
+#
+# Four gates, one property: nothing this suite runs can write the machine it
+# runs on. The product names every host path once, under LCA_HOST_ROOT; every
+# harness moves that root; and the fingerprint taken at the top is compared
+# here, last, over the product's own list.
+
+# 1. Every path lib.sh names for the host really moves with the root. Driven:
+# lib.sh is sourced with a root no real path starts with, and every answer must
+# start with it.
+host_paths_all_move() {
+  local out n bad=0 p
+  out="$(env -u SYSTEMD_UNIT_DIR -u OLLAMA_DROPIN_DIR -u OLLAMA_DROPIN -u LCA_MOTD_FILE \
+             -u LCA_LOG -u OLLAMA_SYSTEM_MODELS_DIR LCA_HOST_ROOT=/lca-host-root-probe \
+         bash -c 'source "$1" >/dev/null 2>&1 || exit 1
+                  lca_host_paths
+                  printf "%s\n" "${OLLAMA_SYSTEM_MODELS_DIR}" "${NETMODE_STATE_FILE}" "${OLLAMA_DROPIN}"' \
+         _ "${REPO}/scripts/lib.sh")" || { echo 'lib.sh could not be sourced to ask it' >&2; return 1; }
+  n="$(grep -c . <<<"${out}")"
+  (( n >= 20 )) || { printf 'only %s host paths named — this stopped watching\n' "${n}" >&2; return 1; }
+  while IFS= read -r p; do
+    [[ "${p}" == /lca-host-root-probe/* ]] || { printf 'a host path ignores LCA_HOST_ROOT: %s\n' "${p}" >&2; bad=1; }
+  done <<<"${out}"
+  return "${bad}"
+}
+check "every host path the product names moves with LCA_HOST_ROOT" \
+  host_paths_all_move
+
+# 2. ...and there is no host path that is NOT one of those names. A literal
+# /etc/... in a product script is a path no harness can move and no fingerprint
+# is watching, which is precisely what TUNE_SERVICE and NETMODE_SERVICE were.
+# The exemptions are READS of the real machine that must stay real, each with
+# its reason — plus one write that is not host state: the installers' default
+# checkout location, which is the checkout itself, spelled in scripts that run
+# before lib.sh exists and moved by LCA_DIR in every harness that runs them.
+# Nothing that lands OUTSIDE the checkout belongs on this list.
+# SOURCE-GREP: which absolute paths a script spells out is a property of its
+# text. What those paths DO under a harness is gate 4's subject, which is
+# driven; this is what stops a new one arriving where gate 4 is not looking.
+HOST_PATH_READS=(
+  /etc/os-release                       # which distro, in install_docker.sh
+  /run/systemd/system                   # whether systemd is PID 1
+  /var/run/docker.sock                  # a mount spec, named as the container sees it
+  /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin   # PATH composition and PATH membership
+  /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd   # which binary exists
+  /var/log/local-code-agent-setup.log   # do-user-data.sh: runs before the checkout exists, LCA_LOG moves it
+  /opt/local-code-agent                 # install.sh, do-user-data.sh: the default checkout; LCA_DIR moves it
+)
+literal_host_paths_in() {   # FILE -> LINE PATH for every absolute host path it spells out
+  sed 's/#.*//' "$1" | grep -n -oE '(^|[^A-Za-z0-9_.$}])/(etc|var|usr|opt|root|srv|home|lib|run|boot|mnt)(/[A-Za-z0-9._@%+-]+)+' \
+    | sed -E 's/^([0-9]+):[^/]?/\1 /' || true
+}
+no_host_path_outside_lib() {
+  local f line path e ok bad=0 n=0 probe="${SANDBOX}/host-literal-probe.sh"
+  for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca"; do
+    while read -r line path; do
+      [[ -n "${path}" ]] || continue
+      n=$(( n + 1 ))
+      ok=false
+      for e in "${HOST_PATH_READS[@]}"; do [[ "${path}" == "${e}" ]] && ok=true; done
+      [[ "${ok}" == "true" ]] && continue
+      printf '%s:%s spells out %s — name it in lib.sh under LCA_HOST_ROOT and add it to lca_host_paths, or no harness can keep it off the real machine\n' \
+        "${f#"${REPO}/"}" "${line}" "${path}" >&2
+      bad=1
+    done < <(literal_host_paths_in "${f}")
+  done
+  (( n >= 5 )) || { printf 'only %s literal paths seen across the product — the extractor stopped matching\n' "${n}" >&2; bad=1; }
+  # Non-vacuity: a write to a new literal must be caught, including as a
+  # ':-' default, which is how every earlier seam was spelled.
+  printf 'X="${X:-/etc/new-thing}"\nprintf x > /usr/local/bin/new-thing\n' > "${probe}"
+  [[ "$(literal_host_paths_in "${probe}" | grep -c .)" == 2 ]] || {
+    echo 'the extractor cannot see a new host path, spelled either way' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and no product script spells out a host path lib.sh does not own" \
+  no_host_path_outside_lib
+
+# 3. Every harness that starts from an empty environment passes the root on.
+# 'env -i' is the one construction that defeats the export at the top, and six
+# harnesses use it; the setup one is the one that did the damage.
+# SOURCE-GREP: whether an env -i line names LCA_HOST_ROOT is a property of the
+# test file's text. What a harness that forgets does is gate 4's subject.
+every_clean_environment_moves_the_host() {
+  local f line n=0 bad=0
+  for f in "${TESTS_DIR}"/*.sh; do
+    while IFS= read -r line; do
+      n=$(( n + 1 ))
+      grep -q 'LCA_HOST_ROOT' <<<"${line}" || {
+        printf '%s: a clean-environment (env -i) harness that does not pass LCA_HOST_ROOT, so the product it runs writes the real machine:\n  %s\n' \
+          "${f##*/}" "${line}" >&2
+        bad=1; }
+    done < <(sed 's/#.*//' "${f}" | grep -E '(^|[^[:alnum:]_])env -i( |$)' || true)
+  done
+  (( n >= 6 )) || { printf 'only %s clean-environment harnesses found — this stopped watching\n' "${n}" >&2; bad=1; }
+  return "${bad}"
+}
+check "...and every harness that clears the environment passes the host root on" \
+  every_clean_environment_moves_the_host
+
+# 4. The fingerprint recorded at the top, read here, over every path on the
+# product's list. Last, so it covers every harness above it including ones
+# written after this line. It replaced a check on the login banner alone, which
+# passed on the run that rewrote the firewall's boot unit.
+host_fingerprint_sees_a_change() {   # non-vacuity: the fingerprint must notice each kind of write
+  local d="${SANDBOX}/fp-probe" before after
+  rm -rf "${d}"; mkdir -p "${d}/dir"; printf 'a\n' > "${d}/file"; ln -s /nowhere "${d}/link"
+  before="$(printf '%s\n' "${d}/file" "${d}/link" "${d}/dir" "${d}/absent" | host_fingerprint)"
+  sleep 0.02
+  printf 'a\n' > "${d}/file.new" && mv -f "${d}/file.new" "${d}/file"   # identical bytes, rewritten
+  ln -sfn /elsewhere "${d}/link"
+  : > "${d}/dir/entry"
+  : > "${d}/absent"
+  after="$(printf '%s\n' "${d}/file" "${d}/link" "${d}/dir" "${d}/absent" | host_fingerprint)"
+  [[ "$(diff <(printf '%s\n' "${before}") <(printf '%s\n' "${after}") | grep -c '^>')" == 4 ]] || {
+    printf 'the fingerprint missed a write:\nbefore:\n%s\nafter:\n%s\n' "${before}" "${after}" >&2
+    return 1; }
+}
+check "...and the host fingerprint notices a relink, a rewrite, a new entry and a new file" \
+  host_fingerprint_sees_a_change
+suite_did_not_touch_the_host() {
+  local now changed
+  [[ -n "${HOST_WATCHED}" ]] || { echo 'no host paths were watched — lib.sh did not answer lca_host_paths at the start' >&2; return 1; }
+  now="$(host_fingerprint <<<"${HOST_WATCHED}")"
+  changed="$(diff <(printf '%s\n' "${HOST_BEFORE}") <(printf '%s\n' "${now}") || true)"
+  [[ -z "${changed}" ]] || {
+    printf 'this suite WROTE THE MACHINE IT RAN ON. Before (<) and after (>):\n%s\nA harness ran product code without LCA_HOST_ROOT. Check what these now point at before rebooting: a boot unit naming a deleted sandbox fails at boot, and one of them is the firewall.\n' \
+      "${changed}" >&2
     return 1
   }
 }
-check "...and the suite left the live machine's login banner alone" \
-  suite_did_not_touch_the_live_banner
+check "...and the suite wrote nothing on the machine it ran on" \
+  suite_did_not_touch_the_host
 
 echo
 SUITE_FINISHED=true

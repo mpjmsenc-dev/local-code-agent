@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
-TUNE_SERVICE=/etc/systemd/system/local-code-agent-tune.service
+# TUNE_SERVICE is defined in lib.sh, under LCA_HOST_ROOT.
 
 # largest_present_within TARGET — echo the largest already-downloaded
 # qwen2.5-coder ladder model no larger than TARGET, or nothing (exit 1).

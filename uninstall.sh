@@ -44,7 +44,7 @@ report_ollama_removal() {
   if [[ "${1:-false}" != "true" ]]; then
     info "Ollama was not installed here — nothing to remove."
   elif have ollama; then
-    warn "Ollama is STILL on PATH at $(command -v ollama) — that copy lives somewhere this script does not manage (it removes /usr/local/bin/ollama, /usr/local/lib/ollama and /usr/share/ollama). Remove it yourself if you meant to; its models are still on disk."
+    warn "Ollama is STILL on PATH at $(command -v ollama) — that copy lives somewhere this script does not manage (it removes ${OLLAMA_BIN_FILE}, ${OLLAMA_LIB_DIR} and ${OLLAMA_HOME_DIR}). Remove it yourself if you meant to; its models are still on disk."
   else
     ok "Ollama removed (including all downloaded models)."
   fi
@@ -282,7 +282,7 @@ BOOT_UNITS=(
 # which cannot write to /etc — because a removal nobody can drive is a removal
 # nobody can prove.
 remove_boot_units() {
-  local dir="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}" unit
+  local dir="${SYSTEMD_UNIT_DIR}" unit
   local -a left=()
   if systemd_available; then
     for unit in "${BOOT_UNITS[@]}"; do
@@ -391,9 +391,9 @@ main() {
   if systemd_available; then
     as_root systemctl disable --now ollama >/dev/null 2>&1 || true
   fi
-  as_root rm -rf /etc/systemd/system/ollama.service.d
-  as_root rm -f /etc/systemd/system/ollama.service /usr/local/bin/ollama
-  as_root rm -rf /usr/local/lib/ollama /usr/share/ollama
+  as_root rm -rf "${OLLAMA_DROPIN_DIR}"
+  as_root rm -f "${OLLAMA_UNIT_FILE}" "${OLLAMA_BIN_FILE}"
+  as_root rm -rf "${OLLAMA_LIB_DIR}" "${OLLAMA_HOME_DIR}"
   if id ollama >/dev/null 2>&1; then
     as_root userdel ollama 2>/dev/null || true
   fi
@@ -439,14 +439,14 @@ main() {
 
   # 6. The 'lca' command on PATH — but only if it points at THIS checkout, so a
   # second install elsewhere is never silently disarmed by this uninstall.
-  if [[ -L /usr/local/bin/lca ]]; then
+  if [[ -L "${LCA_LINK}" ]]; then
     local lca_target
-    lca_target="$(readlink -f /usr/local/bin/lca 2>/dev/null || true)"
+    lca_target="$(readlink -f "${LCA_LINK}" 2>/dev/null || true)"
     if [[ "${lca_target}" == "${SCRIPT_DIR}/bin/lca" ]]; then
-      as_root rm -f /usr/local/bin/lca
+      as_root rm -f "${LCA_LINK}"
       ok "'lca' command removed."
     else
-      info "/usr/local/bin/lca points elsewhere (${lca_target:-unknown}) — leaving it alone."
+      info "${LCA_LINK} points elsewhere (${lca_target:-unknown}) — leaving it alone."
     fi
   fi
 
