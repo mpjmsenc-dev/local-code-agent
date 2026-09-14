@@ -20421,6 +20421,59 @@ counted_headings_match_their_lists() {
 check "CONTRIBUTING's counted headings match their lists" \
   counted_headings_match_their_lists
 
+# ...and the prose under such a heading must not contradict it.
+#
+# The counting gate above compares the heading to the numbered list and never
+# reads a word of the prose between them. So "## Nine shell traps" sat above
+# "All eight were shipped here at least once" — trap 9 was added and the
+# sentence introducing them was not — and the gate passed, because the thing it
+# compares still agreed. Fourth instance in this project of a header
+# disagreeing with what sits under it, and the second found in its own
+# bookkeeping.
+#
+# DELIBERATELY NARROW, and please leave it that way. It triggers only on a
+# sentence OPENING with "All <number>", because that idiom can only be
+# restating the section's own count. A broader rule — any number word near the
+# heading's noun — flags "the two cost notes that were wrong" inside a section
+# headed "Nine shell traps", which is a correct sentence about something else.
+# A gate that makes a false accusation is worse here than a gate that misses:
+# the miss costs a stale sentence, the false accusation costs the next person's
+# trust in every other gate in this file, and they will widen or delete it. The
+# narrow form catches the instance that actually occurred.
+counted_sections_do_not_contradict_themselves() {
+  local out seen
+  out="$(awk '
+    function num(w) {
+      split("one two three four five six seven eight nine ten", a, " ")
+      for (i in a) if (tolower(w) == a[i]) return i
+      return 0
+    }
+    /^## / { heading = ""; stated = 0; split($0, f, " "); n = num(f[2])
+             if (n > 0) { heading = $0; stated = n } ; next }
+    heading != "" && /^[Aa]ll [a-z]+ / {
+      split($0, g, " "); m = num(g[2])
+      if (m > 0 && m != stated) printf "%s: heading says %s, prose says \"%s %s\"\n", heading, stated, g[1], g[2]
+    }
+  ' "${REPO}/CONTRIBUTING.md")"
+  # Non-vacuity: there has to BE a counted section with an "All <number>"
+  # sentence under it, or this proves nothing.
+  seen="$(awk '
+    /^## / { heading = ($2 ~ /^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)$/) ? 1 : 0; next }
+    heading && /^[Aa]ll [a-z]+ / { n++ }
+    END { print n + 0 }
+  ' "${REPO}/CONTRIBUTING.md")"
+  (( seen >= 1 )) || {
+    echo 'no counted section restates its count any more — this gate stopped watching' >&2
+    return 1
+  }
+  [[ -z "${out}" ]] || {
+    printf 'a counted heading and its own prose disagree:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+check "...and the prose under them does not contradict them" \
+  counted_sections_do_not_contradict_themselves
+
 echo "# every doc that repeats the RAM ladder must repeat it correctly"
 # There are FOUR copies of the auto-tune ladder in prose: README's table (gated
 # below), INSTALL.md's sizing table, TROUBLESHOOTING.md's inline list, and
@@ -23860,6 +23913,13 @@ census_names() { grep -v '^#' "${CENSUS}" | cut -f2 | sort -u ; }
 # subject. What it cannot check is whether a justification is honest — only a
 # reader can do that.
 new_source_greps_are_justified() {
+  # Its subject is the suite's own text, so that is the file it must have.
+  # Found by the empty-world gate: with nothing to read, every list came back
+  # empty, comm found no difference, and it passed. My own driver had called
+  # this one "notices" because in isolation it died on an unbound global —
+  # the suite's real run disagreed, which is the third time a harness of mine
+  # has and the reason the product's run is the one that counts.
+  searched_at_least 1 "${REPO}/tests/test-lib.sh" || return 1
   [[ -r "${CENSUS}" ]] || { echo "the source-grep census is missing" >&2; return 1; }
   local allowed="${SANDBOX}/sg-allowed" found="${SANDBOX}/sg-found" bad
   census_names > "${allowed}.b"

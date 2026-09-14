@@ -611,3 +611,4 @@ B	every_path_the_suite_names_is_there	the subject IS which paths the suite names
 H	absence_shaped_functions	lists every function in this file that passes on an empty search of repo source
 B	every_absence_rule_is_registered	the subject IS which functions have that shape, checked against the registry
 FP	every_absence_rule_notices_an_empty_world	runs each registered rule against a world with nothing in it and reads what it did
+B	counted_sections_do_not_contradict_themselves	the subject IS a counted heading and the prose under it, in this project's own documentation

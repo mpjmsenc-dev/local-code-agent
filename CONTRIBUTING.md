@@ -319,6 +319,31 @@ Every one would have been reported as fact.
 minutes; the cost of not checking is a confident false statement that somebody
 then acts on.
 
+### The guard that caught the patch that was enforcing guards
+
+Worth recording in its own right. The commit that added the empty-world
+property — a gate whose entire purpose is that a rule may not fail silently —
+placed its helper `searched_at_least` at line 6801 and its earliest caller at
+line 1488. Trap #6: a helper defined below its caller in a linear script. Ten
+gates called a function that did not exist yet.
+
+What made it visible was `command_not_found_handle`, sitting at the top of the
+suite since an earlier session, printing *"test suite called a command that
+does not exist"*. Without it, ten gates would have quietly taken whatever bash
+returns for an unknown command and carried on.
+
+Every guard in this project was built after something silent got through. That
+one caught a silent failure **inside the patch that was enforcing non-silence**,
+written by someone who had spent the week thinking about exactly this. It is a
+better argument for building them than any paragraph here.
+
+The same run produced the matching lesson about instruments: the empty-world
+gate failed on `new_source_greps_are_justified`, which my own standalone driver
+had cleared. In isolation it died on an unbound global and the driver scored
+that as "refuses"; with the suite's real globals set, it passes on nothing. The
+product's own run is the one that counts, and that is the third time this week
+it has disagreed with a harness of mine.
+
 ## Plant the violation in a clone and let its own suite find it
 
 The standard technique for answering "does the suite actually catch X". Not a
