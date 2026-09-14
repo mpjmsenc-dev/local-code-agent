@@ -25501,6 +25501,87 @@ memory_preflight_refuses_and_says_what_to_unload() {
 check "the gates refuse to start without the memory to finish, and name what to unload" \
   memory_preflight_refuses_and_says_what_to_unload
 
+# ...and a run that is killed anyway has to SAY it was killed. The refusal
+# above covers a box that is short when the gates start; a model loaded twenty
+# minutes in is not something a check at the start can see. What a killed run
+# left behind was "make: *** [Makefile:46: lint] Killed", exit 2 — and the
+# only way to learn it was the machine was to find the kernel's own record by
+# hand. Driven with planted kernel records, including one that names a
+# DIFFERENT container: a kill somewhere else on the box must not be blamed on
+# this run, or the explanation is just a new way to be confidently wrong.
+# SOURCE-GREP: the false positive above, again: it RUNS memory-preflight.sh
+# --killed and greps what it printed. What it cannot check is a live OOM kill;
+# the planted records are the shape of the kernel's real ones from 2026-09-13.
+memory_preflight_names_a_kill_as_a_kill() {
+  local d="${SANDBOX}/killprobe" pf="${TESTS_DIR}/memory-preflight.sh" out rc bad=0
+  local cid=46ad1feb8b9310322873743b1abe6fb2674c37d7dd98ece20cc4804be5357a48
+  rm -rf "${d}"; mkdir -p "${d}"
+  printf 'Running...\nmake: *** [Makefile:46: lint] Killed\n' > "${d}/killed.log"
+  printf 'FAIL - a gate\nmake: *** [Makefile:54: test] Error 1\n' > "${d}/failed.log"
+  # The shape of the real record, from the droplet's journal on 2026-09-13.
+  { printf 'kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=x,mems_allowed=0,global_oom,task_memcg=/system.slice/docker-%s.scope,task=shellcheck,pid=50140,uid=0\n' "${cid}"
+    printf 'kernel: Out of memory: Killed process 50140 (shellcheck) total-vm:1073765996kB, anon-rss:3763000kB, file-rss:256kB, shmem-rss:0kB, UID:0\n'
+  } > "${d}/kern.this"
+  sed "s/docker-${cid}/docker-ffff${cid:4}/" "${d}/kern.this" > "${d}/kern.other"
+
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.this" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || ! grep -q 'RESULT: KILLED' <<<"${out}" \
+     || ! grep -q 'killed shellcheck (pid 50140) at 3674 MB' <<<"${out}"; then
+    printf 'a run the kernel OOM-killed was not named as killed, with the process and its size (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.other" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || grep -q 'ran out of memory' <<<"${out}"; then
+    printf "another container's OOM record was blamed on this run (rc=%s):\n%s\n" "${rc}" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/absent" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || ! grep -q 'UNKNOWN' <<<"${out}"; then
+    printf 'a kill with an unreadable kernel log was not reported as cause UNKNOWN (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  # Non-vacuity the other way: an ordinary red run is a verdict on the code,
+  # and must not be excused as the machine's doing.
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.this" bash "${pf}" --killed "${d}/failed.log" 1 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ -n "${out}" ]]; then
+    printf 'an ordinary failing run was explained away as a kill (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  return "${bad}"
+}
+check "a gates run killed partway says it was killed, and by what, from the kernel's record" \
+  memory_preflight_names_a_kill_as_a_kill
+
+# ...and the container runner asks BEFORE it starts anything. Driven with a
+# docker that records every call: a refusal that still built the image or
+# started the container would be a refusal in name only. The second arm is the
+# proof that the recorder can see a call at all.
+# SOURCE-GREP: the same false positive: it RUNS in-container.sh with a docker
+# that records its calls, and reads the recording. What it cannot check is a
+# real daemon, which is the thing the refusal exists never to reach.
+in_container_refuses_before_docker() {
+  local d="${SANDBOX}/ctrprobe" out rc bad=0
+  rm -rf "${d}"; mkdir -p "${d}/stub"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 3000000 kB\n' > "${d}/low"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 7000000 kB\n' > "${d}/high"
+  make_stub_dir "${d}/stub"
+  # shellcheck disable=SC2016  # the stub's own text, expanded when it runs
+  printf '#!/bin/sh\necho "docker $*" >> "%s/calls"\nexit 1\n' "${d}" > "${d}/stub/docker"
+  chmod +x "${d}/stub/docker"
+  : > "${d}/calls"
+  rc=0; out="$(PATH="$(stub_path "${d}/stub")" LCA_MEMINFO="${d}/low" LCA_OLLAMA_PS_JSON='{"models":[]}' \
+               LCA_PREFLIGHT_NO_DOCKER=1 LCA_GATES_OUT="${d}/out1" \
+               bash "${TESTS_DIR}/in-container.sh" gates 2>&1)" || rc=$?
+  if (( rc != 3 )) || [[ -s "${d}/calls" ]]; then
+    printf 'too little memory did not stop the container runner before docker (rc=%s, docker calls: %s):\n%s\n' \
+      "${rc}" "$(tr '\n' ';' < "${d}/calls")" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(PATH="$(stub_path "${d}/stub")" LCA_MEMINFO="${d}/high" LCA_GATES_OUT="${d}/out2" \
+               bash "${TESTS_DIR}/in-container.sh" gates 2>&1)" || rc=$?
+  [[ -s "${d}/calls" ]] || {
+    printf 'with memory to spare the runner never reached docker, so the refusal above proved nothing (rc=%s):\n%s\n' \
+      "${rc}" "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "the container runner refuses before it starts anything, where memory is short" \
+  in_container_refuses_before_docker
+
 # 4. The fingerprint recorded at the top, read here, over every path on the
 # product's list. Last, so it covers every harness above it including ones
 # written after this line. It replaced a check on the login banner alone, which

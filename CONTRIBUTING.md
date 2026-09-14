@@ -110,14 +110,21 @@ The container rule stays even with all of that in place. Those four are code,
 and this project's record on code that guards itself is the reason they exist.
 A container costs nothing to lose.
 
-**The gates refuse to start without the memory to finish.** ShellCheck over
-`tests/test-lib.sh` peaks near 3.8 GB. Two full runs on the 7.9 GB droplet were
-killed partway because an Ollama model was resident — each ended in `Killed`,
-exit 2, twenty minutes in, which reads like a failure of the code. `make lint`
-now runs `tests/memory-preflight.sh` first: with too little available it exits 3
-before anything runs, and lists the resident models with the command that
-unloads each, the containers, and the largest processes. Memory it cannot read
-is "could not tell", exit 2, never a pass.
+**The gates refuse to start without the memory to finish, and a run killed
+anyway says so.** ShellCheck over `tests/test-lib.sh` was OOM-killed at 3763 MB
+resident, and a whole container run that finished peaked at 4879 MB. Two full
+runs on the 7.9 GB droplet were killed partway because an Ollama model was
+resident — each ended in `Killed`, exit 2, twenty minutes in, which reads like a
+failure of the code. `tests/in-container.sh` now runs `tests/memory-preflight.sh`
+on the host before docker is asked anything (5000 MB; `LCA_GATES_MIN_MEM_MB`
+overrides it, inside the container too), and `make lint` asks again as ShellCheck
+starts. Too little is exit 3 with nothing run, and a list of the resident models
+with the command that unloads each, the containers, and the largest processes.
+Memory it cannot read is "could not tell", exit 2, never a pass. A run killed
+after it started ends in `RESULT: KILLED — no verdict`, exit 137, quoting the
+kernel's OOM record — matched on the container's id, so a kill elsewhere on the
+machine is not blamed on this run, and a kernel log it cannot read makes the
+cause UNKNOWN rather than memory.
 
 `tests/in-container.sh` copies the working tree as it is on disk — history
 included, uncommitted edits included — so what is tested is what you are about
