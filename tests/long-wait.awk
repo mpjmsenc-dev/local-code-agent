@@ -11,7 +11,7 @@
 # exactly that. Printing something first is NOT enough, and was tried: with
 # 'info|warn|step' in the allow list, a 60-second silent poll under the heading
 # "==> Switching default model" counted as announced, which is the bug wearing
-# a hat. The mutation that exposed that is in tests/test-lib.sh.
+# a hat.
 #
 # FNR, not NR: NR keeps counting across files, so the reported line numbers
 # pointed into the middle of nowhere (setup.sh:1488 for a 150-line script).
@@ -35,7 +35,8 @@ LEX_CODE && /wait_for_ollama ([1-9][0-9]|[0-9][0-9][0-9])/ && $0 !~ /^[[:space:]
     if (i < 1) continue
     # Comments are not evidence. Skipping this let a mutation through: the
     # comment ABOVE the bare wait explained the announced helper by name, and
-    # the rule read its own prose as proof the server had been started.
+    # the rule read its own prose as proof the server had been started. That
+    # mutation was run by hand, once; nothing in the suite replays it.
     if (hist[i] ~ /^[[:space:]]*#/) continue
     # Data is not evidence either: a 'systemctl start ollama' written into a
     # heredoc is a line this script emits, not one it runs.

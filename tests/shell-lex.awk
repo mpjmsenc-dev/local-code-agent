@@ -29,7 +29,8 @@
 #   justified_gates   accepted a '# SOURCE-GREP:' marker written inside a shim
 #                     as justifying it.
 #
-# So: one lexer, one fixture (tests/quoting-fixture.sh), one place to be wrong.
+# So: one lexer, one fixture (quoting-fixture.sh, which tests/test-lib.sh writes
+# into its sandbox), one place to be wrong.
 #
 # What it tracks, per character, in the states the shell actually has:
 #

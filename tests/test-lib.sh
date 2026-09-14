@@ -1059,8 +1059,9 @@ no_helper_decides_for_its_caller() {
       /^[a-z_][a-z0-9_]*\(\) *\{/ { fn = $0; sub(/\(\).*/, "", fn); inb = 1; hit = 0 }
       inb && /(^|[^a-z_])can_root([^_a-z]|$)/ { hit = 1 }
       inb && /^\}/ { if (hit) printf "%s\t\n", fn; inb = 0 }')
-  # Non-vacuity: the three exempt ones must still be found, or the scanner has
-  # stopped matching and every helper reads as clean.
+  # A floor, not a probe: at least three functions naming can_root must be
+  # found, or the scanner has stopped matching and every helper reads as clean.
+  # Any three count; it does not check that the exempt ones are among them.
   (( seen >= 3 )) || {
     printf 'the escalation scanner found only %s functions naming can_root — it has stopped matching lib.sh\n' \
       "${seen}" >&2
@@ -1215,7 +1216,8 @@ sudo_asks_out_loud() {
     # at the start of the statement. A bare /info |warn / also matches
     # "docker info >/dev/null", which is the first line of select_docker — so
     # that version passed with the announcement deleted, for the wrong reason.
-    # Caught by mutating it; a gate that has not been made to fail is decoration.
+    # Found once by deleting the announcement by hand; nothing in this suite
+    # repeats that, so this gate has not been made to fail since.
     awk '/can_root_now/            { now = 1; next }
          /can_root([^_]|$)/        { if (!now) early = 1; pending = 1 }
          /^[[:space:]]*(info|warn|ok|err) / { said = 1 }
@@ -8853,8 +8855,8 @@ check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_
 #
 # The notice moved to lib.sh's model_load_notice when 'lca' needed the same
 # words, so each arm below now checks it where it lives. All three are kept:
-# relocating a guard is not an excuse to drop one, and the mutation that beat
-# the first version of this check is still the mutation to beat.
+# relocating a guard is not an excuse to drop one. The mutation that beat the
+# first version of this check was run by hand, once; nothing here replays it.
 #
 # Driven. The greps this replaces read model_load_notice for the name of a
 # helper, for a redirect (after joining continuations, because the first
@@ -19880,9 +19882,6 @@ root_docs_are_swept_or_exempt() {
     printf 'add them to DOC_SURFACES, or to DOC_SURFACES_EXEMPT with the reason\n' >&2
     return 1
   }
-  # Non-vacuous: a list that had drifted to nothing would pass the loop above
-  # while checking no document at all.
-  (( ${#DOC_SURFACES[@]} >= 3 ))
 }
 check "a document at the repo root is swept by the prose gates, or exempt on purpose" \
   root_docs_are_swept_or_exempt
@@ -22418,7 +22417,7 @@ no_commandless_exec_redirects_the_shell() {
             "${REPO}"/tests/*.sh "${REPO}/bin/lca" 2>/dev/null \
           | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
   # An empty hit list is a legitimate pass: this is a prohibition, and there
-  # may simply be no command-less exec in the repo. Proved by mutation.
+  # may simply be no command-less exec in the repo.
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     # Strip the legitimate '{VAR}>target' opening, then see what redirection
@@ -22457,9 +22456,7 @@ check "no command-less 'exec' redirects the shell's own streams" \
 # reading a repo file it has already located.
 #
 # The pattern lives in a variable so this gate does not find ITSELF, the
-# vacuity trap two gates in this file have already fallen into. Anti-vacuity
-# is by mutation, not by a non-empty hit list: a prohibition is proved by
-# planting a violation, not by finding one.
+# vacuity trap two gates in this file have already fallen into.
 no_pipe_into_grep_q_in_the_suite() {
   local hits pat='\$\{[A-Za-z_]+\}[^|]*\|[[:space:]]*grep -q'
   hits="$(grep -nE "${pat}" "${REPO}"/tests/*.sh 2>/dev/null \
@@ -24937,8 +24934,8 @@ no_tracked_path_is_hostile_to_a_glob() {
       "${spaced}" >&2
     bad=1
   }
-  # Non-vacuity: the scanner has to be able to SEE a bad name, or an empty
-  # answer above means nothing. Asked of the matcher, not of the tree — there
+  # Non-vacuity for the leading-dash matcher only; nothing here shows the
+  # whitespace matcher a bad name. Asked of the matcher, not of the tree — there
   # is deliberately no such file to find, and the made-up name must not look
   # like a document either: the gate that checks every doc a script names is a
   # file will go looking for it.
@@ -25352,8 +25349,9 @@ no_host_path_outside_lib() {
     done < <(literal_host_paths_in "${f}")
   done
   (( n >= 5 )) || { printf 'only %s literal paths seen across the product — the extractor stopped matching\n' "${n}" >&2; bad=1; }
-  # Non-vacuity: a write to a new literal must be caught, including as a
-  # ':-' default, which is how every earlier seam was spelled.
+  # Non-vacuity for the extractor only: it must SEE a new literal, including as
+  # a ':-' default, which is how every earlier seam was spelled. Whether the
+  # allow-list then refuses it is not probed.
   # shellcheck disable=SC2016  # the probe's source text, never expanded here
   printf 'X="${X:-/etc/new-thing}"\nprintf x > /usr/local/bin/new-thing\n' > "${probe}"
   [[ "$(literal_host_paths_in "${probe}" | grep -c .)" == 2 ]] || {
