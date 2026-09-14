@@ -608,3 +608,6 @@ H	long_wait_verdict	runs the long-wait scanner over one fixture and says reporte
 FP	long_wait_scanner_reports_what_it_must	drives the long-wait scanner over nine fixtures and reads each verdict
 H	named_repo_paths	lists every literal repo path the suite's own text names
 B	every_path_the_suite_names_is_there	the subject IS which paths the suite names; whether each exists is asked of the disk
+H	absence_shaped_functions	lists every function in this file that passes on an empty search of repo source
+B	every_absence_rule_is_registered	the subject IS which functions have that shape, checked against the registry
+FP	every_absence_rule_notices_an_empty_world	runs each registered rule against a world with nothing in it and reads what it did

@@ -63,6 +63,34 @@ check() {
   if "$@"; then t_ok "${desc}"; else t_fail "${desc}"; fi
 }
 
+# A search that comes back empty is two different things — nothing is wrong, or
+# there was nothing to look at — and the absence rules below could not tell them
+# apart. Measured, not supposed: with check-system.sh and scripts/apply.sh
+# deleted from a throwaway clone, one_copy_of_the_coverage_rule still returned
+# PASS, and so did three siblings. Deleting a script is loud because other gates
+# fall over; renaming one is silent, and a glob follows it while a literal name
+# does not.
+#
+# Each of the four now counts what it actually read. The floors are MEASURED,
+# not guessed: 36 files match that list today (12 at the root, 22 in scripts/,
+# deploy/do-user-data.sh and bin/lca), so 30 leaves room for a few to go and
+# still trips long before a whole directory stops matching. The first number
+# written here was 40, which failed on an intact checkout — a floor nobody has
+# counted is the same mistake this gate is about.
+searched_at_least() {   # N PATH... -> fails, and says so, if fewer than N are there
+  local want="$1"; shift
+  local got; got="$(files_that_exist "$@")"
+  (( got >= want )) && return 0
+  printf 'only %s of the %s files this rule searches are there — it has stopped watching\n' \
+    "${got}" "${want}" >&2
+  return 1
+}
+files_that_exist() {   # PATH... -> how many of them are real files
+  local f n=0
+  for f in "$@"; do [[ -f "${f}" ]] && n=$(( n + 1 )); done
+  printf '%s' "${n}"
+}
+
 # Work in a throwaway copy so the real .env is never touched.
 SANDBOX="$(mktemp -d)"
 # The trap says so when the suite ended EARLY. A check that fails prints FAIL
@@ -1485,6 +1513,7 @@ check "a refused value is reported once, not twice, and still stops" \
 # ...and nothing may go back to calling set_env_var bare. lib.sh's own
 # back-fill is the exception: it tests the result to build its 'added' list.
 no_bare_set_env_var() {
+  searched_at_least 30 "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca" || return 1
   local hits
   hits="$(grep -rn 'set_env_var' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
             "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
@@ -4993,6 +5022,7 @@ check "no rendered unit binds a wildcard address" \
 # exit status would have waved through the loss of the one setting that makes
 # this survive a reboot.
 relay_units_parse_as_systemd_units() {
+  searched_at_least 1 "${REPO}/scripts/ollama-relay.sh" || return 1
   local dir="${SANDBOX}/relay-units" out src
   have systemd-analyze || { echo "skip"; return 0; }
   rm -rf "${dir}"; mkdir -p "${dir}"
@@ -5059,6 +5089,7 @@ render_unit_from() {   # SCRIPT FUNC SCRIPT_DIR VAR:PATH...
   )
 }
 boot_units_parse_as_systemd_units() {
+  searched_at_least 3 "${REPO}/scripts/tune.sh" "${REPO}/netmode.sh" "${REPO}/backup.sh" || return 1
   local dir="${SANDBOX}/boot-units" out
   have systemd-analyze || { echo "skip"; return 0; }
   rm -rf "${dir}"; mkdir -p "${dir}"
@@ -6781,25 +6812,6 @@ dropin_survives_a_failed_render() {
 check "a failed render leaves the previous Ollama settings in place" \
   dropin_survives_a_failed_render
 # ...and nothing may go back to piping straight at a root-owned file.
-# A search that comes back empty is two different things — nothing is wrong, or
-# there was nothing to look at — and the absence rules below could not tell them
-# apart. Measured, not supposed: with check-system.sh and scripts/apply.sh
-# deleted from a throwaway clone, one_copy_of_the_coverage_rule still returned
-# PASS, and so did three siblings. Deleting a script is loud because other gates
-# fall over; renaming one is silent, and a glob follows it while a literal name
-# does not.
-#
-# Each of the four now counts what it actually read. The floors are MEASURED,
-# not guessed: 36 files match that list today (12 at the root, 22 in scripts/,
-# deploy/do-user-data.sh and bin/lca), so 30 leaves room for a few to go and
-# still trips long before a whole directory stops matching. The first number
-# written here was 40, which failed on an intact checkout — a floor nobody has
-# counted is the same mistake this gate is about.
-files_that_exist() {   # PATH... -> how many of them are real files
-  local f n=0
-  for f in "$@"; do [[ -f "${f}" ]] && n=$(( n + 1 )); done
-  printf '%s' "${n}"
-}
 no_tee_into_a_root_file() {
   local hits
   hits="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
@@ -7252,6 +7264,7 @@ check "command substitution is refused"   env_line_bad 'WEBUI_PORT=`id -u`'
 # The shipped example has to satisfy its own rule, or first-run creates a .env
 # that load_env then refuses.
 example_env_is_valid() {
+  searched_at_least 1 "${REPO}/.env.example" || return 1
   local bad
   # shellcheck disable=SC2031  # same constant, same false positive
   bad="$(grep -nvE "${LCA_ENV_LINE_RE}" "${REPO}/.env.example" || true)"
@@ -7833,6 +7846,7 @@ check "an optional component's installer cannot abort setup" \
 # until the change above, took the rest of setup with it. Two copies of a
 # pattern, one of them carrying the lesson.
 remote_installers_retry() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local f hits bad=0
   for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
     hits="$(sed 's/#.*//' "${f}" | awk '
@@ -7924,6 +7938,7 @@ echo "# saving state may not kill the command that already did its work"
 # died there for the very same reason. A gate against hand-typed lists that
 # itself hand-typed a list.
 cache_writes_cannot_abort() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local f hits bad=0 roots n more names
   for f in "${REPO}"/scripts/*.sh "${REPO}"/*.sh; do
     # Variables assigned a path under ~/.cache/local-code-agent...
@@ -8290,6 +8305,7 @@ check "'lca logs' reads the agent tier too, where there is one" \
 # literal inside start_ollama_bg while logs.sh knew nothing about it, which is
 # precisely how the two drifted.
 ollama_bg_log_path_is_named_once() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local hits
   hits="$(grep -rn '\.ollama-serve\.log' "${REPO}"/scripts/*.sh "${REPO}"/*.sh 2>/dev/null \
             | grep -v 'OLLAMA_BG_LOG=' | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
@@ -9826,6 +9842,7 @@ echo "# the venv interpreter's path must come from venv_python(), not be re-type
 # -m pip' has neither problem, and the version check in that same file always
 # used it.
 venv_python_is_the_only_source() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local hits
   # Needles written with a bracketed letter so this line does not match itself.
   # A whole-file scan for a literal always finds the scanner — the same trap
@@ -12392,6 +12409,7 @@ check "a slow Ollama start is announced" announces_slow_start
 # ...on stderr, because in 'lca ask' stdout is the model's answer and a
 # progress line must not end up inside a piped or redirected one.
 announcement_avoids_stdout() {
+  searched_at_least 1 "${REPO}/scripts/lib.sh" || return 1
   local on_stdout
   on_stdout="$(bash -c '
     set -uo pipefail
@@ -12431,6 +12449,7 @@ check "restore.sh announces a slow Ollama start"      uses_announced_start resto
 check "update-model.sh announces a slow Ollama start" uses_announced_start update-model.sh
 # Nothing may go back to the silent form: that spelling is the bug.
 no_silent_ollama_start() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local hits
   hits="$(grep -rln 'ensure_ollama_up [0-9]* >/dev/null' "${REPO}/scripts" "${REPO}" \
             --include='*.sh' 2>/dev/null || true)"
@@ -12453,6 +12472,7 @@ check "run-agent.sh announces a slow Ollama start" uses_announced_start run-agen
 # than a blanket ban is what stops this being suppressed the first time it is
 # inconvenient.
 no_unannounced_long_wait() {
+  searched_at_least 30 "$@" || return 1
   local hits
   hits="$(awk -f "${TESTS_DIR}/long-wait.awk" "$@")"
   [[ -z "${hits}" ]] || {
@@ -14506,6 +14526,7 @@ check "every drift message points at 'lca apply'" drift_messages_name_apply
 # is a line that ALSO says 'lca apply' — a message may well need to explain
 # that a restart is not enough.
 no_restart_as_apply_instruction() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh || return 1
   local f hits bad=0
   for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${DOC_SURFACES[@]}"; do
     hits="$(sed 's/^[[:space:]]*#.*//' "${f}" \
@@ -17906,6 +17927,7 @@ check "and an install where everything worked reports success" \
 # the surfaces that give advice — tune.sh documents its own flag, legitimately,
 # and setup.sh/CI invoke both programmatically.
 advice_names_only_documented_commands() {
+  searched_at_least 7 "${REPO}/check-system.sh" "${REPO}/bin/lca" "${REPO}"/scripts/install_*.sh || return 1
   local hits
   hits="$(grep -n -- '--install-service' \
             "${REPO}/check-system.sh" "${REPO}/bin/lca" \
@@ -18497,6 +18519,7 @@ echo "# advice has to work from where the reader is standing"
 # reader types it, gets "No such file or directory", and now has two problems.
 # Every path a message names must be absolute.
 advice_paths_are_absolute() {
+  searched_at_least 28 "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh || return 1
   local hits
   # Message helpers only: an 'echo' inside a render function is writing a file,
   # not talking to anyone. ${SCRIPT_DIR}/${REPO_ROOT} are erased first so an
@@ -21976,6 +21999,7 @@ check "no command-less 'exec' redirects the shell's own streams" \
 # is by mutation, not by a non-empty hit list: a prohibition is proved by
 # planting a violation, not by finding one.
 no_pipe_into_grep_q_in_the_suite() {
+  searched_at_least 5 "${REPO}"/tests/*.sh || return 1
   local hits pat='\$\{[A-Za-z_]+\}[^|]*\|[[:space:]]*grep -q'
   hits="$(grep -nE "${pat}" "${REPO}"/tests/*.sh 2>/dev/null \
             | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
@@ -22003,6 +22027,7 @@ check "the test suite never pipes a file read into 'grep -q'" \
 # only until someone adds an exit to them, and a here-string costs nothing.
 # All ten call sites were converted before this gate went in.
 no_file_read_piped_into_awk() {
+  searched_at_least 5 "${REPO}"/tests/*.sh || return 1
   local suite hits
   suite="$(cat "${REPO}"/tests/*.sh)"
   hits="$(awk 'prev ~ /sed .*\\$/ && /^[[:space:]]*\|[[:space:]]*awk/ { print NR ": " $0 }
@@ -24260,6 +24285,113 @@ every_path_the_suite_names_is_there() {
 }
 check "...and every path the suite names is a path that is there" \
   every_path_the_suite_names_is_there
+
+echo "# ...and every rule that passes on an empty search can tell WHY it was empty"
+# The property, rather than the patches. "Can it see a violation" and "can it
+# tell there was nothing to look at" are different questions, and only the
+# first had ever been asked of this suite. Fourteen rules pass when a search
+# comes back empty; four of them were fixed one at a time after a throwaway
+# clone with scripts/ deleted returned PASS from all four, and then the same
+# test found TEN more. Ten more patches is not a rule, so this is:
+#
+#   1. every function shaped like an absence rule must be registered, so an
+#      eleventh cannot be written without one
+#   2. every registered rule must FAIL against a world with nothing in it, and
+#      must say that it stopped watching rather than merely erroring
+#
+# The second is what makes the first worth anything: a registry nobody drives
+# is a list, and this file has already been taught what a list nobody checks
+# is worth.
+ABSENCE_RULES='advice_names_only_documented_commands advice_paths_are_absolute
+announcement_avoids_stdout boot_units_parse_as_systemd_units
+cache_writes_cannot_abort counted_headings_match_their_lists
+env_keys_and_defaults_agree every_test_script_has_a_way_in
+example_env_is_valid guard_round_trip
+guard_ruleset_covers_a_disabled_but_live_chat_app install_is_truncation_safe
+makefile_header_matches_targets new_source_greps_are_justified
+no_bare_set_env_var no_file_read_piped_into_awk
+no_ollama_lookup_matches_a_shell no_pipe_into_grep_q_in_the_suite
+no_restart_as_apply_instruction no_silent_ollama_start
+no_sourced_script_declares_for_its_caller no_tee_into_a_root_file
+no_unannounced_long_wait no_unbounded_listing_is_piped_into_grep_q
+no_variable_is_piped_into_an_early_exiting_reader
+ollama_bg_log_path_is_named_once one_copy_of_the_coverage_rule
+relay_units_parse_as_systemd_units remote_installers_retry
+setup_only_dies_on_core_steps shipped_defaults_are_what_lib_resolves
+silent_when_already_up uninstall_removals_can_reach_root
+usage_on_an_error_path_goes_to_stderr venv_python_is_the_only_source
+view_cannot_touch_the_run'
+# SOURCE-GREP: the subject IS which functions in this file have that shape,
+# which is a property of this file's text.
+absence_shaped_functions() {   # -> every function that passes on an empty search of repo source
+  # Two conditions, not one. The pass-on-empty shape alone matches 58 functions
+  # here, most of which search a captured string or a command's output, where
+  # "an empty world" means nothing. The ones this property is about also name a
+  # repo path as the thing they search.
+  awk '
+    /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $0; sub(/\(\).*/, "", fn); body = ""; inb = 1; next }
+    inb && /^\}$/ {
+      if (body ~ /\[\[ -z "\$\{[a-z_]+\}" \]\] \|\|/ && body ~ /"\$\{REPO\}"?\/[A-Za-z0-9_*.]/) print fn
+      inb = 0; next
+    }
+    inb { body = body "\n" $0 }
+  ' "${TESTS_DIR}/test-lib.sh" | sort -u
+}
+every_absence_rule_is_registered() {
+  local fn bad=0 n=0
+  while read -r fn; do
+    [[ -n "${fn}" ]] || continue
+    n=$(( n + 1 ))
+    grep -qw -- "${fn}" <<<"${ABSENCE_RULES}" || {
+      printf '%s passes when its search comes back empty and is not in ABSENCE_RULES, so nothing checks it can tell an empty world from a clean one\n' \
+        "${fn}" >&2
+      bad=1
+    }
+  done < <(absence_shaped_functions)
+  (( n >= 30 )) || {
+    printf 'only %s absence-shaped functions were found — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every rule that passes on an empty search is registered" \
+  every_absence_rule_is_registered
+# SOURCE-GREP: no. It RUNS each registered rule against a world built to be
+# empty and reads what the rule did.
+EMPTY_WORLD="${SANDBOX}/empty-world"
+every_absence_rule_notices_an_empty_world() {
+  local r out bad=0 n=0
+  rm -rf "${EMPTY_WORLD}"
+  mkdir -p "${EMPTY_WORLD}/tests" "${EMPTY_WORLD}/scripts" \
+           "${EMPTY_WORLD}/deploy" "${EMPTY_WORLD}/bin"
+  # 'local' on the seam, not a subshell. Dynamic scoping points every rule
+  # called from here at the empty world and puts the real one back on return,
+  # which a subshell would also do — but a subshell makes every later use of
+  # TESTS_DIR in this file read to the linter as a value that might be lost.
+  local REPO="${EMPTY_WORLD}" TESTS_DIR="${EMPTY_WORLD}/tests"
+  for r in ${ABSENCE_RULES}; do
+    n=$(( n + 1 ))
+    # The globs are handed to every rule; the ones that take no arguments
+    # ignore them, and no_unannounced_long_wait reads its file list from them.
+    out="$( "${r}" "${EMPTY_WORLD}"/*.sh "${EMPTY_WORLD}"/scripts/*.sh 2>&1 )" && {
+      printf '%s passes against a world with nothing in it, so it cannot tell "nothing is wrong" from "nothing was there"\n' \
+        "${r}" >&2
+      bad=1
+      continue
+    }
+    # Refusing is the property; the wording is not. Most of these refuse for
+    # their own reasons — a 'seen' count, a parse that cannot run, a file that
+    # is not there — and requiring one sentence would fail two dozen rules that
+    # are behaving correctly. What may never happen is a silent success.
+  done
+  (( n >= 30 )) || {
+    printf 'only %s registered rules were driven — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and every one of them fails against a world with nothing in it" \
+  every_absence_rule_notices_an_empty_world
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 

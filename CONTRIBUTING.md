@@ -100,7 +100,7 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
 
 ## Nine shell traps that turn a gate into decoration
 
-All eight were shipped here at least once. They matter more in an assertion
+All nine were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -279,6 +279,82 @@ looks exactly like a test that cannot fail. Twice, a `sed` that silently
 matched nothing was read as "the test didn't catch it" and nearly cost a good
 assertion. **Print proof the mutation landed** (`grep -c`) before believing
 what the test says about it.
+
+## A sweep that confirms what you expected is the one to distrust
+
+Every trap above fails silently in the passing direction. So does every
+*instrument you point at them*, and that is the harder half: a broken gate
+reports green, and a broken measurement reports whatever you went looking for.
+
+**Worked example, and the best result this project has produced.** The question
+was whether every absence rule in the suite could still see a violation. The
+first harness said **eleven were vacuous**. Every one of those verdicts was
+wrong:
+
+- `no_unannounced_long_wait` takes its file list as *arguments*; the harness
+  passed none, so awk read stdin and found nothing.
+- `no_pipe_into_grep_q_in_the_suite` needs a `${VAR}` before the pipe; the
+  planted `ss -ltn | grep -q` was not a violation of it.
+- `advice_paths_are_absolute` matches `./zz.sh`, not the `./scripts/zz.sh`
+  that was planted.
+- The other eight were presence rules, or had no violation planted at all.
+  Green proves nothing there.
+
+Had that run been believed, it would have produced a confident report of eleven
+defects that do not exist, and eleven "fixes" to gates that were working.
+
+The instrument was thrown away rather than patched. What replaced it is below.
+**The suite was healthy and the instrument was broken** — which is the outcome
+to expect whenever a sweep tells you what you set out to find.
+
+Five more self-corrections came out of the same week, each one a first answer
+produced by an untested instrument: a BRE pattern measured against an ERE
+scanner; a floor detector that missed `(( seen == 4 ))`; `${SCRIPT_DIR}`
+resolved at the repo root when it is per-file; a loop that stopped after three
+iterations because the inner `bash -c` ate the rest of its stdin; and generated
+code where `\\n` printed a literal backslash-n while `bash -n` called it valid.
+Every one would have been reported as fact.
+
+*Measure your own first answer before you report it.* The cost of checking is
+minutes; the cost of not checking is a confident false statement that somebody
+then acts on.
+
+## Plant the violation in a clone and let its own suite find it
+
+The standard technique for answering "does the suite actually catch X". Not a
+one-off — **this is how that question gets answered here.**
+
+```
+git clone --local . /tmp/probe     # a real clone: git ls-files and HEAD work
+# ...plant real violations in it...
+cd /tmp/probe && git add -A && git commit -qm planted
+cd /tmp/probe && bash tests/test-lib.sh
+```
+
+The point is the last line. The clone runs **its own** suite against **itself**:
+real globals, real arguments, real fixtures, and none of your machinery
+anywhere in the path. Every artefact listed above came from a driver that
+extracted gate bodies and ran them by hand; none of them could have survived
+this.
+
+Applied once already: 18 violations across 13 files, **all 18 caught**, 30
+failures in total — the 18 plus collateral from one plant
+(`LCA_MAY_PROMPT=true` in `lib.sh`) changing prompting behaviour elsewhere.
+Plant many violations in one clone rather than one per run: a gate that stays
+green while its own violation is present is the finding, and extra failures
+from interference cannot hide it, because interference makes gates fail, not
+pass.
+
+Two rules for it:
+
+- **Print proof the mutation landed.** A probe that hardcoded `REPO` once
+  reported all three mutants passing, because the mutations never applied. Then
+  it happened again: `sed 's/name //'` removed nothing, because the name sat at
+  the end of a line and had no trailing space. Both times the verdict looked
+  like good news.
+- **Conclusions from a harness are provisional.** If a claim in this document
+  rests on an extracted-function driver rather than on the product's own run,
+  it says so.
 
 ## A scalar flag named like an array elsewhere fails ShellCheck
 
