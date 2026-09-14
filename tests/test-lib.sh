@@ -56,11 +56,35 @@ DOC_SURFACES_EXEMPT=( CONTRIBUTING.md CLAUDE.md )
 }
 
 FAILED=0
-t_ok()   { printf '%s\n' "ok   - $*"; }
+PASSED=0
+SKIPPED=0
+SKIPPED_WHAT=""
+t_ok()   { printf '%s\n' "ok   - $*"; PASSED=$((PASSED+1)); }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
+# t_skip WHAT — a check that was NOT RUN, and it is counted as exactly that.
+#
+# Until this existed a skip was an 'echo', and the verdict at the bottom counted
+# FAILED and nothing else — so a run that could not attempt the typed surface,
+# the systemd parse of the firewall's boot unit, or the ollama stand-in printed
+# "RESULT: all tests passed" all the same. Two gates went further and returned
+# 0 after printing "skip", which 'check' reported as ok. A report that cannot
+# tell "verified" from "not attempted" is how a firewall went unloaded for four
+# and a half hours while everything read green.
+t_skip() { printf '%s\n' "SKIP - $*"; SKIPPED=$((SKIPPED+1)); SKIPPED_WHAT+="  - $*"$'\n'; }
+# What a gate returns to say "I could not run", as opposed to 0, "I ran and it
+# held". The reason goes in SKIP_REASON, which 'check' prints with the skip.
+# 77 is automake's skip status; nothing in these suites used it before.
+SKIP_RC=77
+SKIP_REASON=""
 check() {
-  local desc="$1"; shift
-  if "$@"; then t_ok "${desc}"; else t_fail "${desc}"; fi
+  local desc="$1" rc=0; shift
+  SKIP_REASON=""
+  "$@" || rc=$?
+  case "${rc}" in
+    0)            t_ok "${desc}" ;;
+    "${SKIP_RC}") t_skip "${desc} — NOT RUN: ${SKIP_REASON:-the gate gave no reason}" ;;
+    *)            t_fail "${desc}" ;;
+  esac
 }
 
 # WHERE THIS SUITE MAY RUN AS ROOT. Not on a machine this project is installed
@@ -3331,7 +3355,7 @@ backup_ownership_is_consistent() {
     return 1; }
   # ...and where the chown can actually take effect — only root may give a file
   # away — the outcome is checked too, not just the request.
-  [[ "${EUID}" -eq 0 ]] || return 0
+  [[ "${EUID}" -eq 0 ]] || { SKIP_REASON="handing a file to another account needs root"; return "${SKIP_RC}"; }
   dirowner="$(stat -c %U "${SANDBOX}/backup-plain/backups")"
   fileowner="$(stat -c %U "${tarball}")"
   [[ "${dirowner}" == "${BACKUP_OWNER}" ]] || {
@@ -3364,9 +3388,9 @@ echo "# .env keys must not collide with aider's own env vars (load_env exports t
 no_aider_collision() {
   local aider_bin_path key
   aider_bin_path="$(aider_bin)"
-  [[ -x "${aider_bin_path}" ]] || return 0   # aider not installed here: skip
+  [[ -x "${aider_bin_path}" ]] || { SKIP_REASON="aider is not installed here, so its env vars cannot be listed"; return "${SKIP_RC}"; }
   local envs; envs="$("${aider_bin_path}" --help 2>/dev/null | grep -oE 'env var: [A-Z_]+' | sed 's/env var: //' | sort -u)"
-  [[ -n "${envs}" ]] || return 0
+  [[ -n "${envs}" ]] || { SKIP_REASON="aider --help named no env vars, so there was nothing to compare against"; return "${SKIP_RC}"; }
   while read -r key; do
     [[ -n "${key}" ]] || continue
     # AIDER_VERSION is ours and predates this rule; it is not an aider env var.
@@ -4740,7 +4764,7 @@ ENABLE_AGENT=false
 ENABLE_AGENT=true
 " --dry-run
 else
-  echo "skip - could not read the ladder from tune.sh, so the tune paths were not driven"
+  t_skip "could not read the ladder from tune.sh, so the tune paths were not driven"
 fi
 # ...and it costs nothing when the model is already right: read from the model's
 # DECLARED parameters, not by loading it, which on a CPU box is minutes and
@@ -5065,7 +5089,7 @@ check "no rendered unit binds a wildcard address" \
 # this survive a reboot.
 relay_units_parse_as_systemd_units() {
   local dir="${SANDBOX}/relay-units" out src
-  have systemd-analyze || { echo "skip"; return 0; }
+  have systemd-analyze || { SKIP_REASON="systemd-analyze is not installed, so no unit was parsed"; return "${SKIP_RC}"; }
   rm -rf "${dir}"; mkdir -p "${dir}"
   src="$(sed -n '/^render_socket_unit()/,/^}/p;/^render_service_unit()/,/^}/p' \
            "${REPO}/scripts/ollama-relay.sh")"
@@ -5131,7 +5155,7 @@ render_unit_from() {   # SCRIPT FUNC SCRIPT_DIR VAR:PATH...
 }
 boot_units_parse_as_systemd_units() {
   local dir="${SANDBOX}/boot-units" out
-  have systemd-analyze || { echo "skip"; return 0; }
+  have systemd-analyze || { SKIP_REASON="systemd-analyze is not installed, so no unit was parsed"; return "${SKIP_RC}"; }
   rm -rf "${dir}"; mkdir -p "${dir}"
   render_unit_from scripts/tune.sh install_service "${REPO}/scripts" \
     "TUNE_SERVICE:${dir}/local-code-agent-tune.service" || return 1
@@ -11796,7 +11820,7 @@ lca backup'
     bench_matcher is_tutorial no '1. Open a terminal on the server
 2. Run: mkdir -p ~/my-project && cd ~/my-project && lca'
 else
-  echo "skip - curl/jq missing, cannot source prompt-bench.sh"
+  t_skip "curl/jq missing, cannot source prompt-bench.sh, so the bench matchers were not driven"
 fi
 # ...and it must ask the model the way the CHAT asks it.
 #
@@ -12178,7 +12202,7 @@ warm_is_detached() {
 if command -v jq >/dev/null 2>&1; then
   check "warm_model backgrounds the request" warm_is_detached
 else
-  echo "skip - no jq, so warm_model returns before it would reach curl"
+  t_skip "no jq, so warm_model returns before it would reach curl"
 fi
 
 echo "# a deliberately skipped component must not be reported as a problem"
@@ -14276,7 +14300,7 @@ if have jq; then
   check "...and an image that cannot be read is not silently agreed with" \
     grep -q WEBUI_IMAGE <<<"$(image_drift "")"
 else
-  echo "skip - jq not installed, cannot exercise the system prompt comparison"
+  t_skip "jq not installed, cannot exercise the system prompt comparison"
 fi
 
 echo "# reading the container's settings must never wait for ever on a wedged docker"
@@ -14328,7 +14352,7 @@ if have timeout; then
   check "webui_container_env gives up on a hung docker instead of waiting" \
     webui_env_is_bounded
 else
-  echo "skip - no 'timeout' command, cannot bound the docker read"
+  t_skip "no 'timeout' command, cannot bound the docker read"
 fi
 
 # --- running 'lca check' and reading its report -----------------------------
@@ -16205,7 +16229,7 @@ if have jq; then
   check "no warning when the chat app is disabled" \
     stale_is no    "$(printf 'you are a helpful assistant' | jq -Rsc '{system: .}')" false
 else
-  echo "skip - jq not installed, cannot exercise the banner's staleness warning"
+  t_skip "jq not installed, cannot exercise the banner's staleness warning"
 fi
 # ...and the ready banner has to draw it, or the probe is decoration — the same
 # trap as model_missing, which is why that check exists directly above.
@@ -23402,7 +23426,7 @@ if typed_surface_ready; then
   typed_surface_cleanup
 else
   typed_surface_cleanup
-  echo "  SKIPPED - driving the typed surface needs root, useradd and runuser to make a throwaway account; it was NOT checked on this run"
+  t_skip "every typed command returns if it reports, and waits if it acts — needs root, useradd and runuser to make a throwaway account"
 fi
 
 # Two places decide every default: .env.example ships one, and lib.sh resolves
@@ -24110,8 +24134,8 @@ bg_env_is_read_from_the_running_server() {
   # because it was finally run somewhere the thing it models actually exists.
   # Skipped loudly rather than silently, and never quietly passed.
   if pgrep -x ollama >/dev/null 2>&1; then
-    echo "  SKIPPED - a real ollama server is running here, and ollama_bg_env reads the first pgrep hit, so the stand-in cannot be told from it; NOT checked on this run" >&2
-    return 0
+    SKIP_REASON="a real ollama server is running here, and ollama_bg_env reads the first pgrep hit, so the stand-in cannot be told from it"
+    return "${SKIP_RC}"
   fi
   rm -rf "${bin}"; mkdir -p "${bin}"
   cp "$(command -v sleep)" "${bin}/ollama"
@@ -24774,7 +24798,7 @@ if git -C "${REPO}" rev-parse --verify -q HEAD^ >/dev/null 2>&1; then
   check "...and a message that miscounts them is caught" \
     commit_message_gate_can_fail
 else
-  echo "skip - no parent commit here, so a message cannot be compared with its diff"
+  t_skip "commit-message census claims — no parent commit here, so a message cannot be compared with its diff"
 fi
 
 # A gate that is defined and never run passes, having done nothing — the exact
@@ -25326,6 +25350,52 @@ every_clean_environment_moves_the_host() {
 check "...and every harness that clears the environment passes the host root on" \
   every_clean_environment_moves_the_host
 
+
+# ...and a skip may only be spelled one way. The class this closes: a gate that
+# announced "skip" with an echo and carried on, or returned 0 so 'check' printed
+# ok. Both left the verdict saying "all tests passed" about checks that never
+# ran. t_skip is counted; SKIP_RC from a gate is counted; nothing else is.
+# SOURCE-GREP: how a test file spells a skip is a property of its text. That the
+# counted spelling reaches the verdict is driven just below.
+uncounted_skips_in() {   # FILE -> LINE: text, for every skip announced outside t_skip
+  local sk="sk""ip" SK="SK""IP"
+  sed 's/#.*//' "$1" \
+    | grep -nE "(echo|printf) +[\"'] *(${sk}|${SK}|${SK}PED)( -|[\"'])|\\{ *echo [\"']${sk}[\"'] *; *return 0" \
+    || true
+}
+no_skip_goes_uncounted() {
+  local f bad=0 hits probe="${SANDBOX}/uncounted-skip-probe.sh" sk="sk""ip"
+  for f in "${TESTS_DIR}/test-lib.sh" "${TESTS_DIR}/test-netmode.sh" \
+           "${TESTS_DIR}/test-agent-watch.sh" "${TESTS_DIR}/live-verify.sh"; do
+    hits="$(uncounted_skips_in "${f}")"
+    [[ -z "${hits}" ]] || {
+      printf '%s announces a skip the verdict does not count — use t_skip, or return SKIP_RC from a gate:\n%s\n' \
+        "${f##*/}" "${hits}" >&2
+      bad=1; }
+  done
+  printf 'echo "%s - no tool"\nhave x || { echo "%s"; return 0; }\n' "${sk}" "${sk}" > "${probe}"
+  [[ "$(uncounted_skips_in "${probe}" | grep -c .)" == 2 ]] || {
+    echo 'the uncounted-skip scanner cannot see either spelling it exists for' >&2; bad=1; }
+  return "${bad}"
+}
+check "every skip is counted by the verdict, in every suite" \
+  no_skip_goes_uncounted
+# Driven: a gate returning SKIP_RC is a skip, not a pass and not a failure, and
+# the reason reaches the line. Run in a subshell so the probe's counts stay out
+# of this run's verdict.
+check_counts_a_skip_as_a_skip() {
+  local out
+  out="$( PASSED=0; FAILED=0; SKIPPED=0; SKIPPED_WHAT=""
+          probe_gate() { SKIP_REASON="no such tool here"; return "${SKIP_RC}"; }
+          check "a probe that cannot run" probe_gate
+          printf 'P=%s F=%s S=%s\n' "${PASSED}" "${FAILED}" "${SKIPPED}" )"
+  grep -qx 'P=0 F=0 S=1' <<<"${out}" && grep -q 'NOT RUN: no such tool here' <<<"${out}" || {
+    printf 'a gate that could not run was not counted as a skip:\n%s\n' "${out}" >&2
+    return 1; }
+}
+check "...and a gate that cannot run is counted as not run, with its reason" \
+  check_counts_a_skip_as_a_skip
+
 # 4. The fingerprint recorded at the top, read here, over every path on the
 # product's list. Last, so it covers every harness above it including ones
 # written after this line. It replaced a check on the login banner alone, which
@@ -25366,8 +25436,19 @@ SUITE_FINISHED=true
 # nothing. Everywhere else, a clone that skipped 'make hooks' is running this
 # because somebody remembered to, and that is worth saying out loud.
 [[ -n "${CI:-}" ]] || rail_notice "${REPO}"
+# The verdict counts all three outcomes, and says "all passed" only when that is
+# the whole truth: nothing failed, nothing was skipped, and something ran.
 if (( FAILED > 0 )); then
-  echo "RESULT: ${FAILED} test(s) FAILED"
+  echo "RESULT: ${FAILED} test(s) FAILED (${PASSED} passed, ${SKIPPED} NOT RUN)"
   exit 1
 fi
-echo "RESULT: all tests passed"
+if (( PASSED == 0 )); then
+  echo "RESULT: no check passed, because none ran — this is not a pass"
+  exit 1
+fi
+if (( SKIPPED > 0 )); then
+  printf 'Not run on this machine:\n%s' "${SKIPPED_WHAT}"
+  echo "RESULT: ${PASSED} passed, 0 failed, ${SKIPPED} NOT RUN — not a clean pass; the checks above were not attempted here"
+  exit 0
+fi
+echo "RESULT: all ${PASSED} tests passed, none skipped"

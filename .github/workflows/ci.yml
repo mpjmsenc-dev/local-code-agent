@@ -224,6 +224,13 @@ jobs:
           fi
           systemctl is-enabled local-code-agent-tune.service local-code-agent-netmode.service
           systemctl is-enabled local-code-agent-backup.timer
+      - name: The image the supervisor test builds its containers from
+        # Named, not inherited. tests/test-agent-watch.sh used to take the
+        # first local image and exit 0 with 'skip' when there was none; this
+        # job only ever had one because the guard step above pulls
+        # alpine:3.20 for its own reasons. A skip now exits 77 and fails
+        # the step below, so the dependency is stated here instead.
+        run: docker pull alpine:3.20
       - name: The supervisor stops a real container (all three limits)
         # 'lca agent watch' is what stops a runaway run while nobody is looking.
         # Its decisions were unit-tested and its loop had never been run to the

@@ -52,6 +52,13 @@ FAIL=0
 p_pass() { ok "$*";   PASS=$((PASS+1)); }
 p_warn() { warn "$*"; WARN=$((WARN+1)); }
 p_fail() { err "$*";  FAIL=$((FAIL+1)); }
+# p_skip — a check that could not be MADE. Counted and printed in the summary,
+# because the summary used to end "All checks passed." on a run that had just
+# said, two screens up, that the prompt comparison was "skipped, not passed".
+# Not for settings you turned off: ENABLE_WEBUI=false is a fact that was
+# checked. This is for "I tried to look and could not".
+UNCHECKED=0
+p_skip() { printf '%b[skip]%b %s\n' "${C_YELLOW:-}" "${C_RESET:-}" "$*"; UNCHECKED=$((UNCHECKED+1)); }
 
 # --- Settings that other checks assume are sane ------------------------------
 # Checked FIRST, because a bad value here surfaces further down as three
@@ -529,7 +536,7 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
     if [[ "${QUICK}" == "true" ]]; then
       # Reported as skipped, never counted as a pass: "downloaded" is not
       # "works", and this is the only check that proves inference at all.
-      info "--quick: skipping the real-generation probe (run 'lca check' without it to test inference)"
+      p_skip "--quick: the real-generation probe was not run, so 'downloaded' is all that is known — run 'lca check' without it to test inference"
     else
       info "asking '${MODEL_NAME}' for a real generation. If the model is not loaded yet this loads it first, which on a CPU-only box has taken up to 5 minutes here..."
       if model_responds "${MODEL_NAME}"; then
@@ -744,7 +751,7 @@ else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
       else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name)"
-        info "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable) — those were skipped, not passed"
+        p_skip "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable)"
       fi
     fi
   fi
@@ -768,9 +775,9 @@ if have tailscale; then
     # only way to find it was to be holding the phone.
     TSIP="$(tailscale_ip4 || true)"
     if [[ -z "${TSIP}" ]]; then
-      info "no Tailscale IPv4 address yet, so the addresses the docs point at could not be checked"
+      p_skip "no Tailscale IPv4 address yet, so the addresses the docs point at could not be checked"
     elif ! have ss; then
-      info "ss is not installed, so the addresses the docs point at could not be checked"
+      p_skip "ss is not installed, so the addresses the docs point at could not be checked"
     else
       GAPS="$(tailscale_promise_gaps "${TSIP}" "$(host_listeners || true)" || true)"
       if [[ -z "${GAPS}" ]]; then
@@ -1067,12 +1074,17 @@ fi
 
 # --- Summary ----------------------------------------------------------------
 printf '\n%b\n' "${C_BOLD}=================== SUMMARY ===================${C_RESET}"
-printf '%b\n' "  ${C_GREEN}PASS: ${PASS}${C_RESET}   ${C_YELLOW}WARN: ${WARN}${C_RESET}   ${C_RED}FAIL: ${FAIL}${C_RESET}"
+printf '%b\n' "  ${C_GREEN}PASS: ${PASS}${C_RESET}   ${C_YELLOW}WARN: ${WARN}${C_RESET}   ${C_RED}FAIL: ${FAIL}${C_RESET}   NOT CHECKED: ${UNCHECKED}"
 if (( FAIL > 0 )); then
   printf '%b\n' "${C_RED}${C_BOLD}Some checks FAILED — see above and docs/TROUBLESHOOTING.md${C_RESET}"
   exit 1
 fi
-if (( WARN > 0 )); then
+# "passed" is only said about what was checked. The [skip] lines are checks
+# this run could not make, and a line that says all is well above them is the
+# confident all-clear this file exists to avoid.
+if (( UNCHECKED > 0 )); then
+  printf '%b\n' "${C_YELLOW}Nothing failed, but ${UNCHECKED} check(s) could not be made — the [skip] lines above. This is not an all-clear.${C_RESET}"
+elif (( WARN > 0 )); then
   printf '%b\n' "${C_YELLOW}All hard checks passed, with warnings.${C_RESET}"
 else
   printf '%b\n' "${C_GREEN}${C_BOLD}All checks passed.${C_RESET}"

@@ -40,10 +40,20 @@ KEEP=false
 FAILED=0
 t_ok()   { printf 'ok   - %s\n' "$*"; }
 t_fail() { printf 'FAIL - %s\n' "$*"; FAILED=$((FAILED+1)); }
+# not_run WHY — nothing was exercised, and the exit status says so.
+#
+# This used to print "skip" and exit 0, which a CI step reads as a pass. On a
+# runner with no local image that is exactly what would have happened: the
+# supervisor step green, no limit exercised. CI only avoided it because an
+# earlier, unrelated step happened to pull alpine. 77 is the skip status; a
+# caller that wants to allow it has to say so.
+not_run() {
+  echo "RESULT: NOT RUN — $* No limit was exercised; this is not a pass."
+  exit 77
+}
 
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "skip - no reachable docker daemon, so the supervisor has nothing to supervise"
-  exit 0
+  not_run "no reachable docker daemon, so the supervisor has nothing to supervise."
 fi
 
 WORK="$(mktemp -d)"
@@ -59,12 +69,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A base image that is certainly present: the one this project already ships.
-# Pulling something new would make a supervisor test depend on a registry.
-BASE="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -vi '<none>' | head -1)"
+# The base image. alpine:3.20 when it is here — CI pulls it by name in the step
+# before this one, so the dependency is written down rather than inherited
+# from whatever an earlier step happened to pull. Otherwise any local image,
+# because pulling from here would make a supervisor test depend on a registry.
+BASE="alpine:3.20"
+docker image inspect "${BASE}" >/dev/null 2>&1 \
+  || BASE="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -vi '<none>' | head -1)"
 if [[ -z "${BASE}" ]]; then
-  echo "skip - no local image to build a container from"
-  exit 0
+  not_run "no local image to build a container from (CI pulls alpine:3.20 for this)."
 fi
 
 # start_box SHELL_SNIPPET — a container that produces the world we want.
@@ -140,7 +153,7 @@ echo "# the supervisor, against a real container, stopping real things"
 # A container that says nothing at all. This is the case the loop got wrong
 # once: judging only when a log line arrived meant a silent run was never
 # judged, and silence is exactly the shape of the hang the timeout exists for.
-start_box 'sleep 600' || { echo "skip - could not start a container"; exit 0; }
+start_box 'sleep 600' || not_run "could not start a container from ${BASE}."
 OUT="$(watch_with 'AGENT_TIMEOUT_MINUTES=1' 'AGENT_MAX_ITERATIONS=0' 'AGENT_STUCK_STRIKES=0' 'AGENT_STEP_SOURCE=log')"
 assert_reached_a_verdict "${OUT}"
 if grep -q 'wall-clock limit' <<<"${OUT}"; then

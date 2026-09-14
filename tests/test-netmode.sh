@@ -15,8 +15,12 @@ LCA_HOST_ROOT="$(mktemp -d)"
 export LCA_HOST_ROOT
 
 FAILED=0
-t_ok()   { printf '%s\n' "ok   - $*"; }
+PASSED=0
+SKIPPED=0
+t_ok()   { printf '%s\n' "ok   - $*"; PASSED=$((PASSED+1)); }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
+# Counted, and named in the verdict: see t_skip in tests/test-lib.sh.
+t_skip() { printf '%s\n' "SKIP - $*"; SKIPPED=$((SKIPPED+1)); }
 
 # Nothing here may call a command that does not exist — the same rule
 # tests/test-lib.sh carries, and for the same measured reason: a helper defined
@@ -434,7 +438,7 @@ nft_check() {  # desc file
   if "${NFT[@]}" --check -f "$2"; then t_ok "$1"; else t_fail "$1"; fi
 }
 if [[ "${#NFT[@]}" -eq 0 ]]; then
-  echo "skip - nft (as root) not available; content checks above still ran"
+  t_skip "nft --check of the offline and inbound rulesets — nft (as root) not available; the content checks above still ran"
 else
   nft_check "nft --check accepts the offline ruleset" "${RULES}"
   nft_check "nft --check accepts the inbound ruleset" "${INBOUND}"
@@ -701,7 +705,11 @@ fi
 
 echo
 if (( FAILED > 0 )); then
-  echo "RESULT: ${FAILED} test(s) FAILED"
+  echo "RESULT: ${FAILED} test(s) FAILED (${PASSED} passed, ${SKIPPED} NOT RUN)"
   exit 1
 fi
-echo "RESULT: all netmode tests passed"
+if (( SKIPPED > 0 )); then
+  echo "RESULT: ${PASSED} netmode checks passed, ${SKIPPED} NOT RUN — not a clean pass; the kernel never saw these rulesets"
+  exit 0
+fi
+echo "RESULT: all ${PASSED} netmode checks passed, none skipped"
