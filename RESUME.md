@@ -30,30 +30,33 @@ with `LCA_MOTD_FILE` redirected and nothing else, and setup.sh reaches
 literal) and tune's `install_service` (TUNE_SERVICE, a literal). Those paths
 have no seam, so no harness can contain them.
 
-Repaired: `/usr/local/bin/lca` points at this checkout again.
-**NOT repaired — needs a human, the session was not permitted to:**
+**Repaired** (verified afterwards): `/usr/local/bin/lca` points at this checkout;
+a human ran `netmode.sh harden` and fixed the tune unit — the guard is loaded
+with 3000, 3001, 11434 and 11435 and both units name `/opt/local-code-agent`.
 
-```bash
-sudo /opt/local-code-agent/netmode.sh harden     # reloads the guard, rewrites its boot unit
-sudo sed -i 's|^ExecStart=.*|ExecStart="/opt/local-code-agent/scripts/tune.sh"|' \
-  /etc/systemd/system/local-code-agent-tune.service
-sudo systemctl daemon-reload
-nft list table inet lca_inbound                  # must exist and list 3000, 11434, 11435, 3001
-```
+**Made impossible rather than repaired**, in commits on top of the merge (all
+local, not pushed — see below):
 
-Branches: `agent-live-verify` is the merge `7b023ea` (parents `ca3194b`, and
-`f8ce825` = PR #28's head), **committed locally, not pushed**. Gates have not
-reached a verdict on it. The one run so far found two defects: a harness one
-branch deleted and the other called (fixed in the merge), and
-`relay_is_reported_when_it_is_on` failing here because `check_report` reads the
-live `/etc/systemd/system` (not fixed). `pre-reconcile-2026-09-13` is this
-branch's tip before the merge.
+- `733b482` — `LCA_HOST_ROOT` prefixes every host path the product touches,
+  named once in lib.sh and listed by `lca_host_paths`; every harness moves it;
+  a gate rejects a literal host path outside lib.sh; the escape check
+  fingerprints the whole list, not the banner. `tests/test-lib.sh` refuses root
+  outside a container. **Run the gates with `make gates-container`.**
+- `9298e22` — `lca check`, the suite's RESULT, test-netmode, test-agent-watch
+  and live-verify all tell "verified" from "not attempted".
+- `06b282b` — a commit message's `Suite: N checks` line must name a run
+  recorded on the tree being committed (`.githooks/commit-msg`). Hooks are
+  armed in this clone.
 
-Next, in order: give every host path the product writes a seam (NETMODE_DIR,
-NETMODE_SERVICE, TUNE_SERVICE, BACKUP_SERVICE/TIMER, the lca link); point all of
-them into the sandbox from every harness; widen the tripwire from the motd link
-to every one of those paths; run the gates inside a container, not on this host,
-until that is done; then push.
+Branches: `agent-live-verify` = the merge `7b023ea` (parents `ca3194b`, and
+`f8ce825` = PR #28's head) plus the commits above. **Not pushed.** The merged
+tree has **not yet had a full run to a verdict**: the first container run was
+OOM-killed in shellcheck because an Ollama model was resident (unloaded with
+`keep_alive:0`, then rerun). `pre-reconcile-2026-09-13` is this branch's tip
+before the merge.
+
+Next: a full `make gates-container` verdict on HEAD, fix what it finds, then
+push (the armed pre-push hook runs the container gates itself).
 
 ---
 

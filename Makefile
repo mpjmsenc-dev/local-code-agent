@@ -78,7 +78,7 @@ bench: ## Measure the assistant's system prompt against the real model (minutes,
 
 hooks-status: ## Is the pre-push hook armed in this clone? (a report, not a gate)
 	@if [ "$$(git config --get core.hooksPath 2>/dev/null)" = ".githooks" ]; then \
-		echo "== pre-push hook armed: 'make gates' runs on every push =="; \
+		echo "== pre-push hook armed: the gates run on every push ('make gates', or 'make gates-container' as root outside a container) =="; \
 	else \
 		echo "== NOTE: the pre-push hook is NOT installed in this clone, so nothing runs these gates for you. Install it: make hooks =="; \
 	fi
@@ -86,7 +86,7 @@ hooks-status: ## Is the pre-push hook armed in this clone? (a report, not a gate
 hooks: ## Install the pre-push gate hook (git runs `make gates` before every push)
 	git config core.hooksPath .githooks
 	@chmod +x .githooks/* 2>/dev/null || true
-	@echo "== pre-push hook installed: pushes now run 'make gates' (bypass once with --no-verify) =="
+	@echo "== hooks installed: pushes now run the gates ('make gates', or 'make gates-container' as root outside a container), and a commit message's Suite: line must name a recorded run (bypass once with --no-verify) =="
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
