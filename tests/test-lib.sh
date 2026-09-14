@@ -24020,6 +24020,39 @@ no_tracked_path_is_hostile_to_a_glob() {
 }
 check "no tracked path starts with a dash or contains whitespace" \
   no_tracked_path_is_hostile_to_a_glob
+# ...and no tracked file may be EMPTY.
+#
+# Found by listing the repository root while waiting for a push: 'status', zero
+# bytes, tracked, added by the commit that brought in the agent tier and in
+# every commit since. Almost certainly a '> status' that was meant to be an
+# argument — the same accident as the '-1 <<<"${out}"' file the gate above
+# refuses. That one broke every 'cp "${REPO}"/*' glob and was found in minutes;
+# this one did nothing at all and lasted for weeks, which is the harder case
+# and the reason this gate is worth more than that one.
+#
+# An empty tracked file is never deliberate here: everything this project ships
+# is a script, a document or a config, and each of those has content. Nor is it
+# quite harmless — 'git ls-files' is how six harnesses build their sandboxes,
+# so it was faithfully copied into every one of them.
+#
+# SOURCE-GREP: the subject IS the set of tracked files and their sizes. There
+# is no behaviour to drive.
+no_tracked_file_is_empty() {
+  local f empty="" n=0
+  while IFS= read -r f; do
+    [[ -f "${REPO}/${f}" ]] || continue
+    n=$(( n + 1 ))
+    [[ -s "${REPO}/${f}" ]] || empty+="  ${f}"$'\n'
+  done < <(git -C "${REPO}" ls-files)
+  (( n >= 50 )) || {
+    printf 'only %s tracked files found — this gate stopped watching\n' "${n}" >&2
+    return 1; }
+  [[ -z "${empty}" ]] || {
+    printf 'these tracked files are empty, and nothing this project ships is empty:\n%sDelete them, or give them content.\n' \
+      "${empty}" >&2
+    return 1; }
+}
+check "...and no tracked file is empty" no_tracked_file_is_empty
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 

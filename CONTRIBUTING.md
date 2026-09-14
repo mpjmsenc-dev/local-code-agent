@@ -1240,6 +1240,14 @@ independent implementation until the two agreed byte for byte on every file:
 **33 mis-stripped lines in `scripts/lib.sh`, 543 in `tests/test-lib.sh`, and at
 least one in every shell file in the repository.**
 
+Worth being precise about *where*, because it is not where the droplet's was.
+The three awk scanners — `tests/reachable.awk`, `tests/duplicate-defs.awk`,
+`tests/long-wait.awk` — all use the whole-line rule `^[[:space:]]*#`, which is
+conservative and cannot truncate code mid-line; `tests/coverage.sh` does not
+strip comments at all. **The standalone tools on this side are fine.** The
+exposure is entirely in the 68 inline strips inside the suite, where the unsafe
+form is the house idiom.
+
 **And today it changes nothing.** Both strippers were run over the whole suite —
 two clones at the same commit, one patched at all 68 sites — and once the
 artefacts of the patch itself were accounted for, *no verdict differed*. The
