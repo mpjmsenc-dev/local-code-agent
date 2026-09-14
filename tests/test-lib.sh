@@ -24453,8 +24453,12 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # that names the fixture, and reading it would classify a gate by the path
     # of the file it writes.
     LEX_OPENS_HEREDOC { next }
-    !LEX_CODE { next }
-    /^[a-z_][a-z0-9_]*\(\) *\{/ {
+    # A line that starts in data but ENDS in code still carries code: the
+    # closing line of a multi-line awk program names the file it reads. Skipping
+    # every line that started in data hid forty-one source greps this way. A
+    # definition and its closing brace still have to start in code.
+    !LEX_CODE && !LEX_ENDS_IN_CODE { next }
+    LEX_CODE && /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn); src=0; tool=0
       # A one-line definition opens and closes on the same line. Without this
       # the scanner never saw its "}" and treated the ENTIRE REST OF THE FILE
@@ -24482,7 +24486,7 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     inb && /\$\{REPO\}\// { src=1 }
     inb && /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/ { src=1 }
     inb && /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
-    inb && /^\}/ { if (src && tool) print fn; inb=0 }
+    inb && LEX_CODE && /^\}/ { if (src && tool) print fn; inb=0 }
   ' "$1" | sort -u
 }
 # The marker must be a comment line that BEGINS with it. Anything looser counts
@@ -24551,6 +24555,10 @@ explains_the_rule_but_claims_nothing() {
 reads_the_source_and_says_why() {
   grep -q 'something' "${REPO}/scripts/lib.sh"
 }
+reads_the_source_on_a_closing_line() {
+  awk '/something/ { found = 1 }
+       END { exit !found }' "${REPO}/scripts/lib.sh"
+}
 SGFIX
 check "the classifier sees a gate that reads source" \
   grep -qx 'reads_the_source_with_no_excuse' <<<"$(source_grep_gates "${SG_FIXTURE}")"
@@ -24570,6 +24578,14 @@ one_liner_does_not_swallow_the_file() {
 }
 check "a one-line definition does not swallow the rest of the file" \
   one_liner_does_not_swallow_the_file
+# ...and a repo path on the line that CLOSES a quoted program is code. That line
+# starts inside the awk program's quotes, and a scanner that skipped every such
+# line could not see what file the program reads.
+closing_line_is_read_as_code() {
+  grep -qx 'reads_the_source_on_a_closing_line' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "...nor does a repo path on the closing line of a quoted program go unseen" \
+  closing_line_is_read_as_code
 prose_does_not_reclassify_a_driven_test() {
   ! grep -qx 'drives_the_behaviour' <<<"$(source_grep_gates "${SG_FIXTURE}")"
 }
@@ -25064,6 +25080,11 @@ wait_for_ollama 60'
 # An apostrophe inside a double-quoted string is not a quote to the shell.
 printf "the harness's own message\n"
 
+# A substitution inside double quotes re-enters an unquoted context, so the
+# quotes inside it nest. A lexer that stays double-quoted counts an odd number
+# on this line and reads what follows upside down: code as data, data as code.
+found="$(grep -n 'step "4/7' "${REPO}/scripts/agent-setup.sh")"
+
 # Nothing calls this one, and reachable.awk must still be able to say so.
 quoting_fixture_never_called() { :; }
 
@@ -25287,6 +25308,11 @@ check "...and the number of undriven configurations never gets bigger" \
 # 1. Every path lib.sh names for the host really moves with the root. Driven:
 # lib.sh is sourced with a root no real path starts with, and every answer must
 # start with it.
+# SOURCE-GREP: a false positive of the classifier, which could not see this body
+# until the lexer stopped misreading the multi-line child inside "$( )". It
+# SOURCES lib.sh and counts what the child printed; the only thing it takes from
+# ${REPO} is a file to source. What it cannot see is a host path lib.sh builds
+# without going through lca_host_paths.
 host_paths_all_move() {
   local out n bad=0 p
   # The probe root is set INSIDE the child: an assignment in this shell's own
