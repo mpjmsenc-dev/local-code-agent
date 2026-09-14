@@ -1395,6 +1395,64 @@ stale, and now known to be so rather than assumed.
 
 Before this, *none* of that file's rules were exercised by anything.
 
+### The absence-rule sweep, and the instrument that was wrong instead
+
+Generalising the long-wait find: **every absence rule in the suite — does
+anything prove it can still see a violation?** An absence rule passes when a
+search comes back empty, and on a clean tree that is indistinguishable from a
+search that looked at nothing.
+
+Two derivations of "which gates are absence rules" disagreed — 25 derived
+structurally from the code, 17 from the census prose, union 33, and each list
+contained rows the other missed. Neither was trusted. The test was behavioural:
+**plant a real violation for each rule and require it to fire.**
+
+The first harness said 11 of them were vacuous. Every one of those verdicts was
+wrong:
+
+- `no_unannounced_long_wait` takes its file list as *arguments*; the harness
+  called it with none, so awk read stdin and found nothing.
+- `no_pipe_into_grep_q_in_the_suite` needs a `${VAR}` before the pipe. The
+  planted `ss -ltn | grep -q` was not a violation of it.
+- `advice_paths_are_absolute` matches `./zz.sh`, not `./scripts/zz.sh`. Also
+  not a violation.
+- The remaining eight are presence rules, or rules for which no violation had
+  been planted at all. Green proves nothing there.
+
+So the harness was replaced by the only thing with no harness in it: **18
+violations planted across 13 files of a real clone, and that clone's own suite
+run against itself.** Real globals, real arguments, no runner in the path.
+
+**Result: all 18 were caught.** 30 failures in total — the 18 plants plus
+collateral from one plant (`LCA_MAY_PROMPT=true` appended to `lib.sh`) changing
+prompting behaviour for unrelated gates. *No absence rule in this suite is
+vacuous.* The sweep found the suite healthy and found the instrument broken,
+which is the outcome worth writing down, because a sweep that reports what you
+expected is the one to distrust.
+
+**What was real is a different failure mode.** "Can it see a violation" and
+"can it tell there was nothing to look at" are separate questions, and four
+rules failed the second: with `check-system.sh` and `scripts/` deleted from a
+throwaway clone, `one_copy_of_the_coverage_rule`, `no_tee_into_a_root_file`,
+`no_unbounded_listing_is_piped_into_grep_q` and
+`no_variable_is_piped_into_an_early_exiting_reader` all returned **PASS**.
+
+Deleting a script is loud — a dozen other gates fall over. *Renaming* one is
+silent: the gates that glob follow it to its new name, the gates that name it
+literally quietly stop covering it, and nothing goes red. All four now count
+what they actually read, against a floor of 30 (36 files match that list today;
+the first floor written was 40, which failed on an intact checkout — a floor
+nobody has counted is the same mistake the gate is about).
+
+And the general instrument: `every_path_the_suite_names_is_there`. 55 literal
+`${REPO}/…` paths in `tests/*.sh`, all of which must exist. One is deliberately
+absent — `moved-away/netmode.sh`, the fixture for "the unit file points at a
+program that has moved" — so its exemption is checked **in both directions**:
+if that path ever exists, the exemption is stale and says so, and that same
+check is what proves the gate can still detect an absent path. Driven three
+ways: silent on the real tree, catches `scripts/apply.sh` renamed, catches the
+exemption going stale.
+
 ### One workflow, two shells, and nothing saying which
 
 Asked of CI, while looking for things that do nothing: this one does something

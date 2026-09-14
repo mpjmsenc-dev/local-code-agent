@@ -606,3 +606,5 @@ FP	the_reachability_scanner_says_when_it_went_blind	blinds the reachability scan
 H	long_wait_case	writes one fixture per rule of the long-wait scanner
 H	long_wait_verdict	runs the long-wait scanner over one fixture and says reported or silent
 FP	long_wait_scanner_reports_what_it_must	drives the long-wait scanner over nine fixtures and reads each verdict
+H	named_repo_paths	lists every literal repo path the suite's own text names
+B	every_path_the_suite_names_is_there	the subject IS which paths the suite names; whether each exists is asked of the disk

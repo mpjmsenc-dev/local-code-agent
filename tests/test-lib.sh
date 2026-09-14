@@ -6781,6 +6781,25 @@ dropin_survives_a_failed_render() {
 check "a failed render leaves the previous Ollama settings in place" \
   dropin_survives_a_failed_render
 # ...and nothing may go back to piping straight at a root-owned file.
+# A search that comes back empty is two different things — nothing is wrong, or
+# there was nothing to look at — and the absence rules below could not tell them
+# apart. Measured, not supposed: with check-system.sh and scripts/apply.sh
+# deleted from a throwaway clone, one_copy_of_the_coverage_rule still returned
+# PASS, and so did three siblings. Deleting a script is loud because other gates
+# fall over; renaming one is silent, and a glob follows it while a literal name
+# does not.
+#
+# Each of the four now counts what it actually read. The floors are MEASURED,
+# not guessed: 36 files match that list today (12 at the root, 22 in scripts/,
+# deploy/do-user-data.sh and bin/lca), so 30 leaves room for a few to go and
+# still trips long before a whole directory stops matching. The first number
+# written here was 40, which failed on an intact checkout — a floor nobody has
+# counted is the same mistake this gate is about.
+files_that_exist() {   # PATH... -> how many of them are real files
+  local f n=0
+  for f in "$@"; do [[ -f "${f}" ]] && n=$(( n + 1 )); done
+  printf '%s' "${n}"
+}
 no_tee_into_a_root_file() {
   local hits
   hits="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
@@ -6795,6 +6814,11 @@ no_tee_into_a_root_file() {
   [[ -z "${hits}" ]] || {
     printf 'these truncate a root-owned file before knowing what to put in it:\n%s\n' \
       "${hits}" >&2
+    return 1
+  }
+  (( $(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca") >= 30 )) || {
+    printf 'no_tee_into_a_root_file: only %s files were there to search — this stopped watching\n' \
+      "$(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca")" >&2
     return 1
   }
 }
@@ -17383,6 +17407,11 @@ one_copy_of_the_coverage_rule() {
     printf 'a second copy of the guard-coverage rule:\n%s\n' "${hits}" >&2
     return 1
   }
+  (( $(files_that_exist "${REPO}/check-system.sh" "${REPO}/scripts/apply.sh") >= 2 )) || {
+    printf 'one_copy_of_the_coverage_rule: only %s files were there to search — this stopped watching\n' \
+      "$(files_that_exist "${REPO}/check-system.sh" "${REPO}/scripts/apply.sh")" >&2
+    return 1
+  }
 }
 check "the guard-coverage rule exists in exactly one place" \
   one_copy_of_the_coverage_rule
@@ -21834,6 +21863,11 @@ no_variable_is_piped_into_an_early_exiting_reader() {
     printf 'these write a variable into a reader that exits early (SIGPIPE at >64KiB):\n%s\n' "${hits}" >&2
     return 1
   }
+  (( $(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca") >= 30 )) || {
+    printf 'no_variable_is_piped_into_an_early_exiting_reader: only %s files were there to search — this stopped watching\n' \
+      "$(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca")" >&2
+    return 1
+  }
 }
 check "no script pipes a variable into a reader that exits early" \
   no_variable_is_piped_into_an_early_exiting_reader
@@ -21860,6 +21894,11 @@ no_unbounded_listing_is_piped_into_grep_q() {
   [[ -z "${hits}" ]] || {
     printf 'these pipe an unbounded listing into a grep that exits early (141 reads as not-found):\n%s\n' \
       "${hits}" >&2
+    return 1
+  }
+  (( $(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca") >= 30 )) || {
+    printf 'no_unbounded_listing_is_piped_into_grep_q: only %s files were there to search — this stopped watching\n' \
+      "$(files_that_exist "${REPO}"/*.sh "${REPO}"/scripts/*.sh "${REPO}"/deploy/*.sh "${REPO}/bin/lca")" >&2
     return 1
   }
 }
@@ -24167,6 +24206,60 @@ no_tracked_file_is_empty() {
     return 1; }
 }
 check "...and no tracked file is empty" no_tracked_file_is_empty
+
+# ...and every path this suite NAMES must be a path that is there.
+#
+# The rename hole, found by the absence-rule sweep. Several gates name a script
+# literally and swallow the error if it is gone: one_copy_of_the_coverage_rule
+# greps check-system.sh and scripts/apply.sh, and with both deleted from a
+# throwaway clone it still returned PASS. DELETING a script is loud, because a
+# dozen other gates fall over with it. RENAMING one is not: the gates that glob
+# follow it to its new name, the gates that name it literally quietly stop
+# covering it, and nothing anywhere goes red.
+#
+# 55 literal paths today, one of them deliberately absent. moved-away/netmode.sh
+# is the fixture for "the unit file points at a program that has moved", and it
+# only means anything while it stays absent. So the exemption is checked in both
+# directions: if that path ever exists, the exemption is stale and hiding a real
+# check, and that is also what proves this gate can still detect an absent path
+# at all.
+#
+# SOURCE-GREP: the subject IS which paths this suite's own text names. Whether
+# each one exists is then asked of the disk, not of the text.
+SUITE_PATH_MUST_BE_ABSENT='moved-away/netmode.sh'
+named_repo_paths() {   # -> every literal repo path tests/*.sh names
+  # '[$]' rather than a bare dollar: this is a regex, and written plainly it
+  # reads to the linter as an expansion that failed to expand. A comment may
+  # not open with the linter's own name either — that is a directive.
+  local pat='[$]\{REPO\}/[A-Za-z0-9_][A-Za-z0-9_./-]*'
+  grep -ohE "${pat}" "${TESTS_DIR}"/*.sh \
+    | sed -E 's#[$]\{REPO\}/##' | grep -vE '/$' | sort -u
+}
+every_path_the_suite_names_is_there() {
+  local p bad=0 n=0
+  while read -r p; do
+    [[ -n "${p}" ]] || continue
+    [[ "${p}" == "${SUITE_PATH_MUST_BE_ABSENT}" ]] && continue
+    n=$(( n + 1 ))
+    [[ -e "${REPO}/${p}" ]] || {
+      printf 'this suite names %s, which is not there — every gate that reads it now passes on nothing\n' \
+        "${p}" >&2
+      bad=1
+    }
+  done < <(named_repo_paths)
+  (( n >= 40 )) || {
+    printf 'only %s named paths were read — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  [[ ! -e "${REPO}/${SUITE_PATH_MUST_BE_ABSENT}" ]] || {
+    printf '%s exists now, so the exemption for it is stale and hiding a real check\n' \
+      "${SUITE_PATH_MUST_BE_ABSENT}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and every path the suite names is a path that is there" \
+  every_path_the_suite_names_is_there
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 
