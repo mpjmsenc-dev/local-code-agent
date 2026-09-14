@@ -43,6 +43,10 @@ gates-container: ## The CI gates, in a throwaway container (the way to run them 
 
 lint: ## ShellCheck, same invocation as CI
 	@command -v shellcheck >/dev/null || { echo "shellcheck not installed (apt-get install -y shellcheck)"; exit 1; }
+	@# Before ShellCheck, not after: it peaks near 3.8 GB on tests/test-lib.sh, and
+	@# a box that cannot hold that kills it twenty minutes into a run. Refuse at
+	@# the start, and name what to unload. tests/memory-preflight.sh says why.
+	@bash tests/memory-preflight.sh
 	shellcheck -x -P SCRIPTDIR $(SCRIPTS)
 	@echo "== shellcheck: zero findings =="
 

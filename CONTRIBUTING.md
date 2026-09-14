@@ -110,6 +110,15 @@ The container rule stays even with all of that in place. Those four are code,
 and this project's record on code that guards itself is the reason they exist.
 A container costs nothing to lose.
 
+**The gates refuse to start without the memory to finish.** ShellCheck over
+`tests/test-lib.sh` peaks near 3.8 GB. Two full runs on the 7.9 GB droplet were
+killed partway because an Ollama model was resident — each ended in `Killed`,
+exit 2, twenty minutes in, which reads like a failure of the code. `make lint`
+now runs `tests/memory-preflight.sh` first: with too little available it exits 3
+before anything runs, and lists the resident models with the command that
+unloads each, the containers, and the largest processes. Memory it cannot read
+is "could not tell", exit 2, never a pass.
+
 `tests/in-container.sh` copies the working tree as it is on disk — history
 included, uncommitted edits included — so what is tested is what you are about
 to commit. `LCA_GATES_MEMORY=4g` also sets the RAM the product detects inside it,
@@ -145,9 +154,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Nine shell traps that turn a gate into decoration
+## Ten shell traps that turn a gate into decoration
 
-All eight were shipped here at least once. They matter more in an assertion
+All ten were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 

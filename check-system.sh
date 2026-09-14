@@ -751,7 +751,7 @@ else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
       else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name)"
-        p_skip "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable)"
+        p_skip "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable) — skipped, not passed"
       fi
     fi
   fi

@@ -76,13 +76,17 @@ t_skip() { printf '%s\n' "SKIP - $*"; SKIPPED=$((SKIPPED+1)); SKIPPED_WHAT+="  -
 SKIP_RC=77
 SKIP_REASON=""
 check() {
-  local desc="$1" rc=0; shift
+  # Named so that no gate can reach them. bash scopes dynamically: a gate that
+  # assigns a bare 'rc' writes THIS function's local, and the day this started
+  # reading rc, gpu_ok's own 'rc=$?' (1, on every machine without a GPU)
+  # turned its pass into a FAIL.
+  local _check_desc="$1" _check_rc=0; shift
   SKIP_REASON=""
-  "$@" || rc=$?
-  case "${rc}" in
-    0)            t_ok "${desc}" ;;
-    "${SKIP_RC}") t_skip "${desc} — NOT RUN: ${SKIP_REASON:-the gate gave no reason}" ;;
-    *)            t_fail "${desc}" ;;
+  "$@" || _check_rc=$?
+  case "${_check_rc}" in
+    0)            t_ok "${_check_desc}" ;;
+    "${SKIP_RC}") t_skip "${_check_desc} — NOT RUN: ${SKIP_REASON:-the gate gave no reason}" ;;
+    *)            t_fail "${_check_desc}" ;;
   esac
 }
 
@@ -13320,6 +13324,7 @@ dry_run_guards_every_change() {
       DRY_RUN=true
       SKIP_DOCKER=false
       ENABLE_WEBUI=true
+      have() { true; }   # docker installed: a host with none stops before the drift
       docker_daemon_reachable() { true; }
       webui_container_exists() { true; }
       webui_drift() { printf "WEBUI_PORT\n"; }
@@ -13903,6 +13908,7 @@ drift_verdict() {
     p_pass() { printf "PASS %s\n" "$*"; }
     p_fail() { printf "FAIL %s\n" "$*"; }
     p_warn() { printf "WARN %s\n" "$*"; }
+    p_skip() { printf "SKIP %s\n" "$*"; }
     eval "$1"
   ' _ "${block}" "$1" "$2" "$3" "${REPO}/scripts/lib.sh" 2>&1
 }
@@ -16389,7 +16395,9 @@ log_path_agrees() {
   local from_lib from_userdata
   # Matched without a literal '${...}' in the pattern: ShellCheck reads that
   # inside single quotes as a variable someone forgot to expand (SC2016).
-  from_lib="$(sed -n 's|^SETUP_LOG=.*:-\(/[^}]*\)}"$|\1|p' "${REPO}/scripts/lib.sh")"
+  # lib.sh's copy sits under LCA_HOST_ROOT and do-user-data.sh's cannot (it runs
+  # before lib.sh exists), so an empty '${LCA_HOST_ROOT:-}' is allowed before it.
+  from_lib="$(sed -n 's|^SETUP_LOG=.*:-}\{0,1\}\(/[^}]*\)}"$|\1|p' "${REPO}/scripts/lib.sh")"
   from_userdata="$(sed -n 's|^LOG_FILE=.*:-\(/[^}]*\)}"$|\1|p' "${REPO}/deploy/do-user-data.sh")"
   [[ -n "${from_lib}" && -n "${from_userdata}" ]] || {
     echo "could not read the log path out of one of the two files" >&2; return 1
@@ -17205,6 +17213,7 @@ model_block_says() {   # QUICK -> what the block printed, with model_responds tr
     p_pass() { printf "PASS %s\n" "$*"; }
     p_warn() { printf "WARN %s\n" "$*"; }
     p_fail() { printf "FAIL %s\n" "$*"; }
+    p_skip() { printf "SKIP %s\n" "$*"; }
     info() { printf "INFO %s\n" "$*"; }
     step() { :; }
     eval "$1"' _ "${block}" "$1" "${REPO}/scripts/lib.sh" 2>&1
@@ -17218,8 +17227,8 @@ quick_guards_the_generation_probe() {
     echo "'lca check --quick' still runs the real-generation probe, which is the expensive thing --quick exists to skip" >&2
     return 1; }
   # ...and must say it skipped rather than counting a pass it did not earn.
-  grep -qiF 'skipping the real-generation probe' <<<"${q}" || {
-    printf "--quick skipped the probe without saying so: %s\n" "${q}" >&2
+  grep -qE '^SKIP .*real-generation probe was not run' <<<"${q}" || {
+    printf "--quick skipped the probe without reporting it as skipped: %s\n" "${q}" >&2
     return 1; }
   # ...while a full run still does it.
   grep -qF 'PROBE RAN' <<<"${n}" || {
@@ -23345,6 +23354,17 @@ sleep 25
 exit 1
 TYPEDSUDO
   chmod +x "${TYPED_SB}/stub/sudo"
+  # docker as this account meets it on an installed machine: present, and the
+  # daemon refusing somebody who is not in the docker group. Without it, a box
+  # with no docker at all -- the gates container -- stops 'webui start' and
+  # 'agent start/stop' at "Docker is not installed", before the sudo this gate
+  # exists to measure, and the gate reported that as the regression.
+  cat > "${TYPED_SB}/stub/docker" <<'TYPEDDOCKER'
+#!/bin/sh
+echo "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock" >&2
+exit 1
+TYPEDDOCKER
+  chmod +x "${TYPED_SB}/stub/docker"
   chmod -R a+rX "${TYPED_SB}"
   chmod 711 "${SANDBOX}"
 }
@@ -23405,6 +23425,14 @@ typed_surface_answers_or_waits() {
   # 4. Actions: still willing to wait. A command the user typed that refuses
   # where a password would have worked is the other half of the same defect.
   for cmd in "${TYPED_ACTIONS[@]}"; do
+    # 'relay install' refuses, rightly, where systemd is not running, and it does
+    # so before any password is asked for. That is the product being right about
+    # the machine, not the regression measured here -- so it is reported as not
+    # attempted, never as a wait that was seen.
+    if [[ "${cmd}" == "relay install" ]] && ! systemd_available; then
+      t_skip "'lca relay install' waits for a password when it acts — NOT RUN: systemd is not running here, and the command rightly refuses before it would ask"
+      continue
+    fi
     # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
     out="$(typed_run 4 ${cmd})"
     grep -qx 'RC=124' <<<"${out}" || {
@@ -23526,6 +23554,8 @@ check "...and the shipped keep-alive is the one 'lca tune' would choose" \
 # two lists agree about what the reader can set.
 INTERNAL_SETTINGS=(
   LCA_LIB_LOADED            # a source guard, not a setting
+  LCA_HOST_ROOT             # where the host is, for a harness; unset on a real machine
+  LCA_MOTD_FILE             # the banner's path, which the same harnesses move
   LCA_MAY_PROMPT            # the caller's declaration, set in code
   LCA_ENV_READONLY          # set by load_env_readonly for one call
   LCA_LOG                   # deploy/do-user-data.sh names its own log
@@ -25438,6 +25468,38 @@ commit_msg_hook_holds_suite_claims_to_a_run() {
 }
 check "a commit message's Suite: line must name a run recorded on the tree it commits" \
   commit_msg_hook_holds_suite_claims_to_a_run
+
+# ...and the gates refuse to START on a box that cannot hold them. ShellCheck
+# over this file peaks near 3.8 GB; two full runs on the development droplet
+# were killed partway with a model resident, each reading as "Killed", exit 2.
+# Driven through the script's seams: a fake meminfo and a fake Ollama answer.
+# SOURCE-GREP: a false positive of the classifier, the fourth of this shape. It
+# RUNS memory-preflight.sh and greps what it printed; the only thing it takes
+# from ${TESTS_DIR} is a path to execute. What it cannot check is a real
+# /proc/meminfo on a short machine or a real Ollama — the seams stand in for both.
+memory_preflight_refuses_and_says_what_to_unload() {
+  local d="${SANDBOX}/memprobe" pf="${TESTS_DIR}/memory-preflight.sh" out rc bad=0
+  rm -rf "${d}"; mkdir -p "${d}"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 3000000 kB\n' > "${d}/low"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 6000000 kB\n' > "${d}/high"
+  printf 'MemTotal: 8131748 kB\n' > "${d}/unreadable"
+  local model='{"models":[{"name":"probe-model:3b","size":2730921819}]}'
+  rc=0; out="$(LCA_MEMINFO="${d}/low" LCA_OLLAMA_PS_JSON="${model}" LCA_PREFLIGHT_NO_DOCKER=1 \
+               bash "${pf}" 4500 2>&1)" || rc=$?
+  (( rc == 3 )) || { printf 'too little memory did not refuse (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1; }
+  if ! grep -q 'REFUSED' <<<"${out}" || ! grep -qF '"model":"probe-model:3b","keep_alive":0' <<<"${out}"; then
+    printf 'the refusal did not name the resident model and how to unload it:\n%s\n' "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(LCA_MEMINFO="${d}/high" LCA_OLLAMA_PS_JSON="${model}" LCA_PREFLIGHT_NO_DOCKER=1 \
+               bash "${pf}" 4500 2>&1)" || rc=$?
+  (( rc == 0 )) || { printf 'enough memory was refused (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1; }
+  # Unreadable is not enough: "could not tell" must not start a run as if it could.
+  rc=0; out="$(LCA_MEMINFO="${d}/unreadable" LCA_PREFLIGHT_NO_DOCKER=1 bash "${pf}" 4500 2>&1)" || rc=$?
+  (( rc == 2 )) || { printf 'unreadable memory was answered with rc=%s, not "could not tell":\n%s\n' "${rc}" "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "the gates refuse to start without the memory to finish, and name what to unload" \
+  memory_preflight_refuses_and_says_what_to_unload
 
 # 4. The fingerprint recorded at the top, read here, over every path on the
 # product's list. Last, so it covers every harness above it including ones
