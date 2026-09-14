@@ -44,13 +44,31 @@
 #                           produced; the three together are what proves
 #                           'lca ask' computes a budget rather than holding a
 #                           constant
-#   OLLAMA_KEEP_ALIVE       shipped 30m; the -1 the agent tier wants is unrun
-#                           (tune's dry-run drives both, but no whole command
-#                            has been run at -1)
-#   AGENT_STEP_SOURCE       five comparisons in the watch/selftest path
-#   MODEL_NAME              CI's ollama job pins 3b; everything else is 7b
-#   AGENT_PORT              one comparison
-#   AGENT_TIMEOUT_MINUTES   one comparison
+#   OLLAMA_KEEP_ALIVE       DRIVEN. A whole 'scripts/tune.sh' runs at -1 in the
+#                           tune harness, and CI's ollama job installs at 17m.
+#   AGENT_STEP_SOURCE       DRIVEN at log, events and auto — tests/test-agent-
+#                           watch.sh runs the whole watcher at each.
+#   MODEL_NAME              DRIVEN. CI installs at 0.5b and 3b; every other
+#                           fixture is the shipped 7b.
+#   AGENT_PORT              DRIVEN at the shipped 3001 everywhere and at 22 by
+#                           tests/test-netmode.sh, which renders the real
+#                           ruleset. (AGENT_PORT=3999 is a unit probe on
+#                           agent_web_url and does NOT count here.)
+#   AGENT_TIMEOUT_MINUTES   DRIVEN at 0 and 1 by tests/test-agent-watch.sh.
+#
+# Those five notes are CORRECTED, not new work. Every one of them was written
+# as a projection — "one comparison", "the -1 is unrun" — and four of the five
+# understated what the fixtures already did; the -1 claim was simply false, and
+# had been since the tune harness was written. They were never re-derived,
+# which is the same failure as the "33 correctly narrow" rows in the other
+# census and the two "Cost: low" notes above: a guess that stops being read as
+# a guess.
+#
+# What is genuinely missing is not coverage but a LEDGER. The switches are
+# checked against the .env files the fixtures really built, so a BOTH row
+# cannot outlive what makes it true; these five are checked against nothing,
+# which is why their notes could rot for weeks without anyone noticing. The
+# next piece of work here is record_configuration for values, not more runs.
 #
 # WHERE THIS STANDS. Every switch in .env.example is now DRIVEN at both values
 # by a whole product command. Eight were SHIPPED-ONLY when this file was

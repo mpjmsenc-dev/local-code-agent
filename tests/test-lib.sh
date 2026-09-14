@@ -14938,6 +14938,76 @@ ready_banner_offers_the_coding_agent() {
 }
 check "...and the ready banner actually prints that row" \
   ready_banner_offers_the_coding_agent
+# ...and all four of those calls, driven rather than read.
+#
+# The four gates above are one claim repeated: banner_ready calls
+# model_missing, chat_down_row, chat_stale_row and coding_row. Each is an awk
+# that finds the call in the source, and there is a thing no awk over a
+# function body can see — banner_ready's FIRST statement is
+#
+#   if model_missing; then banner_no_model; return 0; fi
+#
+# so on a box with no model none of the other three rows print at all, and
+# every one of those greps still passes. The call being present in the text
+# and the row reaching the screen are different facts, and the difference is
+# exactly one early return.
+#
+# So: run it. Each row is replaced by a recorder that prints a marker only it
+# can print, which makes "was this called" observable without a docker, a
+# tailscale or a network. The real printers stay real.
+motd_ready_banner() {   # MODEL-MISSING -> the banner, with each row it called marked
+  # shellcheck disable=SC2016  # the recorders' own code, read when THEY run
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    MISSING="$2"
+    # Installed AFTER the source, or lib.sh and motd.sh would replace them.
+    model_missing()   { [ "${MISSING}" = "true" ]; }
+    banner_no_model() { printf "ROW-NO-MODEL\n"; }
+    chat_address()    { printf "http://example.invalid\t"; }
+    chat_down_row()   { printf "ROW-CHAT-DOWN\n"; }
+    chat_stale_row()  { printf "ROW-CHAT-STALE\n"; }
+    coding_row()      { printf "ROW-CODING\n"; }
+    offline_row()     { printf "ROW-OFFLINE\n"; }
+    banner_ready' _ "${MOTD}" "$1" 2>/dev/null
+}
+ready_banner_really_draws_every_row() {
+  local out r bad=0
+  out="$(motd_ready_banner false)"
+  [[ -n "${out}" ]] || { echo 'banner_ready printed nothing at all' >&2; return 1; }
+  for r in ROW-CHAT-DOWN ROW-CHAT-STALE ROW-CODING; do
+    grep -q "${r}" <<<"${out}" || {
+      printf 'the ready banner never reached %s:\n%s\n' "${r}" "${out}" >&2
+      bad=1; }
+  done
+  # ...and it is the READY banner, not one of the other states wearing the name.
+  grep -q 'ready' <<<"${out}" || {
+    printf 'banner_ready no longer says ready:\n%s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "the ready banner really draws every row it is read as drawing" \
+  ready_banner_really_draws_every_row
+# ...and the early return the greps cannot see: with no model, NONE of them do.
+# This is the half that makes the gate above mean something — without it a
+# banner_ready that printed all four rows unconditionally, model or no model,
+# would pass everything here and lie on every login of a box whose pull failed.
+ready_banner_stops_at_a_missing_model() {
+  local out r bad=0
+  out="$(motd_ready_banner true)"
+  grep -q 'ROW-NO-MODEL' <<<"${out}" || {
+    printf 'a box with no model did not get the no-model banner:\n%s\n' "${out}" >&2
+    bad=1; }
+  for r in ROW-CHAT-DOWN ROW-CHAT-STALE ROW-CODING; do
+    grep -q "${r}" <<<"${out}" && {
+      printf 'the no-model banner printed %s anyway, so the early return is gone:\n%s\n' \
+        "${r}" "${out}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "...and prints none of them when there is no model to be ready with" \
+  ready_banner_stops_at_a_missing_model
 # YOUR-TURN.md prints a sample of this banner, and someone deciding what this
 # box is for reads that sample long before they ever see the real one. It went
 # stale the instant motd.sh changed — a screenshot in a doc is drift waiting to
@@ -15123,6 +15193,54 @@ every_banner_state_gets_the_warning() {
 }
 check "...and every banner state inherits it, not just the ready one" \
   every_banner_state_gets_the_warning
+# ...and every one of those states, run.
+#
+# The gate above reads headline() for the call and takes the rest on trust:
+# that EVERY banner routes through headline. A seventh banner state that
+# printed its own headline and forgot it would satisfy that awk completely,
+# which is the whole claim — "every banner state inherits it" — going
+# unchecked. The list comes out of motd.sh rather than a literal here, so the
+# seventh is covered the day it is written.
+motd_banner_states() {   # -> every banner state motd.sh defines
+  sed -n 's/^\(banner_[a-z_]*\)() {$/\1/p' "${MOTD}"
+}
+motd_run_banner() {   # BANNER -> what it printed, with the lca row marked
+  # shellcheck disable=SC2016  # the stubs' own code, read when THEY run
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    load_env_readonly
+    # The recorder, and enough of the world for each state to render: what is
+    # under test is which rows a banner reaches, not what the box looks like.
+    missing_lca_row() { printf "LCA-ROW\n"; }
+    log_age_human()   { printf "a moment"; }
+    last_step()       { printf "Installing Docker"; }
+    current_run_log() { printf "SETUP FINISHED WITH ERRORS\n"; }
+    model_missing()   { return 1; }
+    chat_address()    { printf "http://example.invalid\t"; }
+    chat_down_row()   { :; }
+    chat_stale_row()  { :; }
+    coding_row()      { :; }
+    offline_row()     { :; }
+    "$2"' _ "${MOTD}" "$1" 2>/dev/null
+}
+every_banner_state_really_prints_the_warning() {
+  local b out n=0 bad=0
+  while read -r b; do
+    [[ -n "${b}" ]] || continue
+    n=$(( n + 1 ))
+    out="$(motd_run_banner "${b}")"
+    grep -q 'LCA-ROW' <<<"${out}" || {
+      printf '%s renders a whole banner without the row saying lca is not on PATH:\n%s\n' \
+        "${b}" "${out}" >&2
+      bad=1; }
+  done < <(motd_banner_states)
+  (( n >= 6 )) || {
+    printf 'only %s banner states found in motd.sh — this gate stopped watching\n' "${n}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "...and every banner state really prints it, not just the one that calls headline" \
+  every_banner_state_really_prints_the_warning
 # ...except the two banners that are already about setup not having finished,
 # where "run sudo setup.sh" is wrong (it is running) or duplicated (stalled
 # already prints that line).

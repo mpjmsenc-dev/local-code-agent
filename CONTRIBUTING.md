@@ -1214,6 +1214,53 @@ What is left is the value-settings tranche — `OLLAMA_KEEP_ALIVE`,
 are compared rather than interpolated and select a branch exactly like a switch
 does. That is where the next configuration blindness will be.
 
+### Three answers to "which bytes are a comment", and none of them checked
+
+The droplet session found four tools that parse the test suite, each having
+independently answered *which lines are code*, three of them wrong — one making
+a false accusation in the only scanner whose header promises it never does.
+They now share one lexer. The same question, asked of this side:
+
+`tests/test-lib.sh` contains **68** uses of `sed 's/#.*//'`, **9** of
+`sed 's/^[[:space:]]*#.*//'`, and **1** of a hybrid that also strips double
+quotes. Three different answers, in one file, to the same question.
+
+The dominant one is wrong for shell. `#` does not open a comment inside
+`${var#pattern}`, `${var##pattern}`, `$#`, `${x/#a/b}`, or any quoted string —
+and `sed 's/#.*//'` cuts at all of them:
+
+```
+  host="${host#http://}"       ->  host="${host
+  size="${model##*:}"          ->  size="${model
+  if (( ${#added[@]} )); then  ->  if (( ${
+```
+
+Measured with a shell-aware stripper, cross-checked against a second
+independent implementation until the two agreed byte for byte on every file:
+**33 mis-stripped lines in `scripts/lib.sh`, 543 in `tests/test-lib.sh`, and at
+least one in every shell file in the repository.**
+
+**And today it changes nothing.** Both strippers were run over the whole suite —
+two clones at the same commit, one patched at all 68 sites — and once the
+artefacts of the patch itself were accounted for, *no verdict differed*. The
+gate that reads a mis-stripped line never happens to search for a token sitting
+after the `#`. That is luck, not design, and it is the same luck the droplet's
+three wrong parsers had until one of them ran out of it. A landmine, not a fire:
+worth fixing at the source rather than at 68 call sites, which is what the
+single lexer is for.
+
+Two of the artefacts are worth recording, because each briefly looked like a
+finding:
+
+- The patched copy piped a file into `awk`, and the suite's own
+  `no unbounded listing is piped into a reader that exits early` gate caught
+  it. The gate was right and my patch was wrong.
+- The control run showed three failures the working tree does not have. All
+  three are about what a non-root account can see, and the clone sat under four
+  `drwx------` directories in the scratchpad, so uid 65534 could not traverse
+  to it at all. Nothing to do with the product. *Where you put a clone is part
+  of the fixture.*
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide

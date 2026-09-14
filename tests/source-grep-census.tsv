@@ -73,13 +73,13 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              75   of the 115 the projection was made from
-#   still worth driving     75
+#   A rows now              70   of the 115 the projection was made from
+#   still worth driving     70
 #   correctly narrow         0   every row a re-read has CONFIRMED as narrow is
 #                                already B with a pointer. Nothing is counted as
 #                                narrow on a projection any more — see below.
 #
-# THE ORDER FOR THE REMAINING 75, by what a silent failure would cost.
+# THE ORDER FOR THE REMAINING 70, by what a silent failure would cost.
 #
 # Re-derived rather than inherited. The earlier header split these into 52
 # worth driving and 33 correctly narrow; that 33 was a projection from one
@@ -175,19 +175,14 @@
 #     watch_reads_the_event_source
 #
 # -------------------------------------------------------------------------
-# TIER 4  THE READER IS MISINFORMED AND NOTHING BREAKS  (16)
+# TIER 4  THE READER IS MISINFORMED AND NOTHING BREAKS  (11)
 #   Banners, advice, wording. Worth driving, worth doing last.
 #
 #     apt_failure_checks_sudo_first
 #     both_commands_announce_a_model_load
 #     both_reporters_ask_lib
 #     both_surfaces_report_an_unknown_family
-#     every_banner_state_gets_the_warning
 #     lca_link_is_reported
-#     ready_banner_asks_about_the_model
-#     ready_banner_draws_the_chat_down_row
-#     ready_banner_offers_the_coding_agent
-#     ready_banner_warns_about_a_stale_chat
 #     restore_asks_for_the_advice
 #     run_agent_warns_on_an_odd_edit_format
 #     speed_classifies_the_placement
@@ -289,7 +284,7 @@ A	drift_says_something_specific	greps webui.sh for a warn line; reachability uno
 A	entry_points_forward_their_arguments	greps the last line for main "$@"
 A	errexit_survives_sourcing_tune	awk over check-system.sh for ordering
 A	every_baked_setting_is_compared	derived list, but the source side is a presence-grep for a call
-A	every_banner_state_gets_the_warning	awk inside headline() for one call
+B	every_banner_state_gets_the_warning	awk inside headline() for one call; the behaviour is driven by every_banner_state_really_prints_the_warning, which runs all six banner states with the row recorded — the awk assumes every banner routes through headline and a seventh that did not would satisfy it
 A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
 FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an argument no script can know and checks it arrived
 FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
@@ -332,10 +327,10 @@ FP	probes_use_the_stricter_test	runs each reporting command under a sudo that wa
 A	prompt_budget_overrun_is_reported	presence-greps in check-system.sh
 FP	prompt_check_is_not_claimed_when_skipped	runs 'lca check' and 'lca test' on a machine that cannot compare the prompt, and on one that can; greps only the file list of claimants
 FP	readability_still_wants_x_of_a_directory	calls readable_by_us as uid 65534 over four real directories and files
-A	ready_banner_asks_about_the_model	awk inside banner_ready for one call
-A	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call
-A	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call
-A	ready_banner_warns_about_a_stale_chat	awk inside banner_ready for one call
+B	ready_banner_asks_about_the_model	awk inside banner_ready for one call; the behaviour is driven by ready_banner_really_draws_every_row, which runs banner_ready with each row replaced by a recorder — and by its complement, which pins the early return no awk over the body can see
+B	ready_banner_draws_the_chat_down_row	awk inside banner_ready for one call; the behaviour is driven by ready_banner_really_draws_every_row, which runs banner_ready with each row replaced by a recorder — and by its complement, which pins the early return no awk over the body can see
+B	ready_banner_offers_the_coding_agent	awk inside banner_ready for one call; the behaviour is driven by ready_banner_really_draws_every_row, which runs banner_ready with each row replaced by a recorder — and by its complement, which pins the early return no awk over the body can see
+B	ready_banner_warns_about_a_stale_chat	awk inside banner_ready for one call; the behaviour is driven by ready_banner_really_draws_every_row, which runs banner_ready with each row replaced by a recorder — and by its complement, which pins the early return no awk over the body can see
 FP	recovery_scripts_survive_offline	runs a real backup with the kill switch ON: it must still write an archive, say why the volume is missing, KEEP older ones, and never reach the network
 H	remove_agent_sandboxes_run	runs uninstall.sh's sandbox removal against a stand-in docker, with two sandboxes, none, and one that will not die
 A	remove_old_failure_is_reported	greps the --remove-old block for a tested form
