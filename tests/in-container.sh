@@ -7,7 +7,7 @@
 # rest for real: /usr/local/bin/lca and both boot units, pointed into a mktemp
 # directory the suite then deleted. The netmode unit failed at the next boot, the
 # inbound guard was not loaded, and the chat app was on a public address for
-# four and a half hours while every report read green. LCA_HOST_ROOT now moves
+# fifty-five minutes while every report read green. LCA_HOST_ROOT now moves
 # every host path and the escape check watches all of them — but the rule that
 # came out of it does not depend on that work being perfect: gates run where a
 # mistake costs a container, not a machine. CONTRIBUTING, "Where the gates run".

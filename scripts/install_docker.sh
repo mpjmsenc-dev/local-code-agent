@@ -31,7 +31,7 @@ install_docker_repo_and_engine() {
     | write_root_file "${DOCKER_APT_KEY}" 0644
   as_root chmod a+r "${DOCKER_APT_KEY}"
 
-  echo "deb [arch=${arch} signed-by=${DOCKER_APT_KEY#"${LCA_HOST_ROOT}"}] https://download.docker.com/linux/${distro_id} ${codename} stable" \
+  echo "deb [arch=${arch} signed-by=${DOCKER_APT_KEY#"${LCA_HOST_ROOT:-}"}] https://download.docker.com/linux/${distro_id} ${codename} stable" \
     | write_root_file "${DOCKER_APT_LIST}" 0644
 
   apt_get update -y

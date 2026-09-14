@@ -82,7 +82,10 @@ real — `/usr/local/bin/lca`, and the netmode and tune boot units — pointing 
 a `mktemp` directory the suite deleted when it finished. An earlier run had done
 the same. At the next boot the netmode unit exited 203/EXEC, **the inbound guard
 was not loaded, and Open WebUI sat on `0.0.0.0:3000` on a public address for
-four and a half hours.** Every report read green: the escape check at the top of
+fifty-five minutes — 00:32 to 01:27 UTC — and one request from the internet
+reached it (`185.218.86.25`, `GET /`, 00:58:23 UTC). No account was created,
+the only account was last active weeks earlier, and Open WebUI logs too few of
+its requests to show that nothing else arrived.** Every report read green: the escape check at the top of
 the suite watched the login banner, and the banner had not moved.
 
 That check covered one instance of a class, which is the shape of most of what

@@ -49,14 +49,16 @@ ENV_EXAMPLE="${REPO_ROOT}/.env.example"
 # of the host for real: /usr/local/bin/lca and both boot units, pointed into
 # a mktemp directory the suite then deleted. The netmode unit failed at the
 # next boot with 203/EXEC, so the inbound guard was not loaded and the chat
-# app sat on a public address for four and a half hours while every report
+# app sat on a public address for fifty-five minutes while every report
 # read green. A seam per path is a guard per instance. A root is a guard for
 # the class, and lca_host_paths below is the list the escape check reads.
 #
 # Nothing reads it from .env: it is not a setting, and sync_env_keys works from
 # .env.example, which does not carry it.
-LCA_HOST_ROOT="${LCA_HOST_ROOT:-}"
-SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-${LCA_HOST_ROOT}/etc/systemd/system}"
+# Never assigned here, only read as ${LCA_HOST_ROOT:-}. Normalising it with an
+# assignment made every gate that sources this file in a subshell look, to
+# ShellCheck, like a subshell changing the root the rest of the suite relies on.
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-${LCA_HOST_ROOT:-}/etc/systemd/system}"
 # Overridable ONLY so a test can keep tune.sh out of the real /etc. The default
 # is the systemd location and nothing in the product ever sets these; a test
 # that did not have this was writing the machine's actual Ollama drop-in from a
@@ -64,9 +66,9 @@ SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-${LCA_HOST_ROOT}/etc/systemd/system}"
 # two gates came to pass on every developer box and fail on every CI run.
 # Nothing reads them from .env: sync_env_keys works from .env.example, and these
 # are not in it.
-OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-${LCA_HOST_ROOT}/etc/systemd/system/ollama.service.d}"
+OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-${LCA_HOST_ROOT:-}/etc/systemd/system/ollama.service.d}"
 OLLAMA_DROPIN="${OLLAMA_DROPIN:-${OLLAMA_DROPIN_DIR}/local-code-agent.conf}"
-NETMODE_DIR="${LCA_HOST_ROOT}/etc/local-code-agent"
+NETMODE_DIR="${LCA_HOST_ROOT:-}/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
 # The boot units this project installs, each named once. They were literals in
 # tune.sh, netmode.sh and backup.sh, which is why no harness could move them.
@@ -80,21 +82,21 @@ BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.service"
 BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.timer"
 # The 'lca' command setup.sh links onto PATH, and the directory it lives in.
 # shellcheck disable=SC2034
-LCA_LINK="${LCA_HOST_ROOT}/usr/local/bin/lca"
+LCA_LINK="${LCA_HOST_ROOT:-}/usr/local/bin/lca"
 # What Ollama's own installer puts on the machine, which uninstall.sh removes.
 # shellcheck disable=SC2034
 OLLAMA_UNIT_FILE="${SYSTEMD_UNIT_DIR}/ollama.service"
 # shellcheck disable=SC2034
-OLLAMA_BIN_FILE="${LCA_HOST_ROOT}/usr/local/bin/ollama"
+OLLAMA_BIN_FILE="${LCA_HOST_ROOT:-}/usr/local/bin/ollama"
 # shellcheck disable=SC2034
-OLLAMA_LIB_DIR="${LCA_HOST_ROOT}/usr/local/lib/ollama"
-OLLAMA_HOME_DIR="${LCA_HOST_ROOT}/usr/share/ollama"
+OLLAMA_LIB_DIR="${LCA_HOST_ROOT:-}/usr/local/lib/ollama"
+OLLAMA_HOME_DIR="${LCA_HOST_ROOT:-}/usr/share/ollama"
 OLLAMA_SYSTEM_MODELS_DIR="${OLLAMA_SYSTEM_MODELS_DIR:-${OLLAMA_HOME_DIR}/.ollama/models}"
 # Docker's apt repository, written by install_docker.sh.
 # shellcheck disable=SC2034
-DOCKER_APT_KEY="${LCA_HOST_ROOT}/etc/apt/keyrings/docker.asc"
+DOCKER_APT_KEY="${LCA_HOST_ROOT:-}/etc/apt/keyrings/docker.asc"
 # shellcheck disable=SC2034
-DOCKER_APT_LIST="${LCA_HOST_ROOT}/etc/apt/sources.list.d/docker.list"
+DOCKER_APT_LIST="${LCA_HOST_ROOT:-}/etc/apt/sources.list.d/docker.list"
 # Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs
 # setup' and the login banner read it to answer "is it still installing?".
 # do-user-data.sh cannot source this file — it runs before the clone exists —
@@ -102,7 +104,7 @@ DOCKER_APT_LIST="${LCA_HOST_ROOT}/etc/apt/sources.list.d/docker.list"
 # Read by scripts/logs.sh and scripts/motd.sh, not here — ShellCheck analyses
 # one file at a time and cannot see a sourcing consumer.
 # shellcheck disable=SC2034
-SETUP_LOG="${LCA_LOG:-${LCA_HOST_ROOT}/var/log/local-code-agent-setup.log}"
+SETUP_LOG="${LCA_LOG:-${LCA_HOST_ROOT:-}/var/log/local-code-agent-setup.log}"
 # Likewise: check-system.sh, uninstall.sh and scripts/motd.sh. The filename
 # must stay free of dots — run-parts --lsbsysinit, which is how pam_motd runs
 # these, skips any name containing one.
@@ -119,7 +121,7 @@ SETUP_LOG="${LCA_LOG:-${LCA_HOST_ROOT}/var/log/local-code-agent-setup.log}"
 # since has printed "run-parts: failed to stat component" and no banner at all,
 # which is the one screen this project's only real bug report was about. A test
 # reached out of its sandbox and broke the live box it was running on.
-MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT}/etc/update-motd.d/99-local-code-agent}"
+MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT:-}/etc/update-motd.d/99-local-code-agent}"
 
 # lca_host_paths — every path outside the checkout that this project writes,
 # one per line, under the current LCA_HOST_ROOT.

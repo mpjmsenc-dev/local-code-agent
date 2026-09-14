@@ -68,8 +68,7 @@ t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
 # the systemd parse of the firewall's boot unit, or the ollama stand-in printed
 # "RESULT: all tests passed" all the same. Two gates went further and returned
 # 0 after printing "skip", which 'check' reported as ok. A report that cannot
-# tell "verified" from "not attempted" is how a firewall went unloaded for four
-# and a half hours while everything read green.
+# tell "verified" from "not attempted" is how a firewall went unloaded for fifty-five minutes while everything read green.
 t_skip() { printf '%s\n' "SKIP - $*"; SKIPPED=$((SKIPPED+1)); SKIPPED_WHAT+="  - $*"$'\n'; }
 # What a gate returns to say "I could not run", as opposed to 0, "I ran and it
 # held". The reason goes in SKIP_REASON, which 'check' prints with the skip.
@@ -96,8 +95,7 @@ check() {
 # and the netmode and tune boot units, pointed into a mktemp directory this
 # suite then deleted. It had happened on at least one earlier run too. The
 # netmode unit failed at the next boot with 203/EXEC, so the inbound guard was
-# not loaded, and the chat app sat on a public address for four and a half
-# hours. The escape check below watched the login banner only.
+# not loaded, and the chat app sat on a public address for fifty-five minutes. The escape check below watched the login banner only.
 #
 # LCA_HOST_ROOT now moves every host path the product writes, and that check
 # now watches all of them. This refusal is there anyway, because both of those
@@ -178,6 +176,7 @@ host_fingerprint() {   # stdin: paths -> one line per path saying what is there
 }
 # The REAL machine's list: every override unset, so this is what lib.sh answers
 # on a box with nothing redirected — the box this run could damage.
+# shellcheck disable=SC2016  # the child shell's code, expanded there
 HOST_WATCHED="$(env -u LCA_HOST_ROOT -u SYSTEMD_UNIT_DIR -u OLLAMA_DROPIN_DIR -u OLLAMA_DROPIN \
                     -u LCA_MOTD_FILE -u LCA_LOG -u OLLAMA_SYSTEM_MODELS_DIR \
                     bash -c 'source "$1" >/dev/null 2>&1 && lca_host_paths' _ "${REPO}/scripts/lib.sh")"
@@ -25263,9 +25262,14 @@ check "...and the number of undriven configurations never gets bigger" \
 # start with it.
 host_paths_all_move() {
   local out n bad=0 p
+  # The probe root is set INSIDE the child: an assignment in this shell's own
+  # syntax, even an env prefix inside $( ), reads to ShellCheck as this suite
+  # changing LCA_HOST_ROOT in a subshell, and it then doubts every later use.
+  # shellcheck disable=SC2016  # the child shell's code, expanded there
   out="$(env -u SYSTEMD_UNIT_DIR -u OLLAMA_DROPIN_DIR -u OLLAMA_DROPIN -u LCA_MOTD_FILE \
-             -u LCA_LOG -u OLLAMA_SYSTEM_MODELS_DIR LCA_HOST_ROOT=/lca-host-root-probe \
-         bash -c 'source "$1" >/dev/null 2>&1 || exit 1
+             -u LCA_LOG -u OLLAMA_SYSTEM_MODELS_DIR \
+         bash -c 'export LCA_HOST_ROOT=/lca-host-root-probe
+                  source "$1" >/dev/null 2>&1 || exit 1
                   lca_host_paths
                   printf "%s\n" "${OLLAMA_SYSTEM_MODELS_DIR}" "${NETMODE_STATE_FILE}" "${OLLAMA_DROPIN}"' \
          _ "${REPO}/scripts/lib.sh")" || { echo 'lib.sh could not be sourced to ask it' >&2; return 1; }
@@ -25320,6 +25324,7 @@ no_host_path_outside_lib() {
   (( n >= 5 )) || { printf 'only %s literal paths seen across the product — the extractor stopped matching\n' "${n}" >&2; bad=1; }
   # Non-vacuity: a write to a new literal must be caught, including as a
   # ':-' default, which is how every earlier seam was spelled.
+  # shellcheck disable=SC2016  # the probe's source text, never expanded here
   printf 'X="${X:-/etc/new-thing}"\nprintf x > /usr/local/bin/new-thing\n' > "${probe}"
   [[ "$(literal_host_paths_in "${probe}" | grep -c .)" == 2 ]] || {
     echo 'the extractor cannot see a new host path, spelled either way' >&2; bad=1; }
@@ -25383,15 +25388,19 @@ check "every skip is counted by the verdict, in every suite" \
 # Driven: a gate returning SKIP_RC is a skip, not a pass and not a failure, and
 # the reason reaches the line. Run in a subshell so the probe's counts stay out
 # of this run's verdict.
+probe_gate_that_cannot_run() { SKIP_REASON="no such tool here"; return "${SKIP_RC}"; }
 check_counts_a_skip_as_a_skip() {
   local out
-  out="$( PASSED=0; FAILED=0; SKIPPED=0; SKIPPED_WHAT=""
-          probe_gate() { SKIP_REASON="no such tool here"; return "${SKIP_RC}"; }
-          check "a probe that cannot run" probe_gate
-          printf 'P=%s F=%s S=%s\n' "${PASSED}" "${FAILED}" "${SKIPPED}" )"
-  grep -qx 'P=0 F=0 S=1' <<<"${out}" && grep -q 'NOT RUN: no such tool here' <<<"${out}" || {
-    printf 'a gate that could not run was not counted as a skip:\n%s\n' "${out}" >&2
-    return 1; }
+  # What moved, not the totals: the subshell starts from this run's counts,
+  # and assigning to them there would read as an edit that gets lost.
+  out="$( p="${PASSED}"; f="${FAILED}"; s="${SKIPPED}"
+          check "a probe that cannot run" probe_gate_that_cannot_run
+          printf 'dP=%s dF=%s dS=%s\n' "$(( PASSED - p ))" "$(( FAILED - f ))" "$(( SKIPPED - s ))" )"
+  if grep -qx 'dP=0 dF=0 dS=1' <<<"${out}" && grep -q 'NOT RUN: no such tool here' <<<"${out}"; then
+    return 0
+  fi
+  printf 'a gate that could not run was not counted as a skip:\n%s\n' "${out}" >&2
+  return 1
 }
 check "...and a gate that cannot run is counted as not run, with its reason" \
   check_counts_a_skip_as_a_skip
