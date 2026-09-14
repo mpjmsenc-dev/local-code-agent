@@ -28,6 +28,21 @@ main() {
   # apt_get waits out the apt-daily/unattended-upgrades dpkg lock (common in
   # the first minutes of a fresh boot) instead of failing the whole install.
   if ! apt_get update -y; then
+    # The cause sudo already named, before the two this used to guess at.
+    # Measured as an ordinary user with no terminal, running the script
+    # netmode.sh names WITHOUT sudo:
+    #
+    #   sudo: a terminal is required to read the password ...
+    #   sudo: a password is required
+    #   [FAIL] apt update failed. Another apt/dpkg process held the lock past
+    #          the timeout (see docs/TROUBLESHOOTING.md) or the network is down.
+    #
+    # No lock was held and the network was fine. sudo had just said what was
+    # wrong and this talked over it, sending the reader to a troubleshooting
+    # page about a lock nobody was holding.
+    if sudo_would_block; then
+      die "apt update could not run at all: sudo needs a password and there is no terminal to type it into — its own message is above. Re-run as root, or from a terminal: sudo ${SCRIPT_DIR}/install_dependencies.sh"
+    fi
     die "apt update failed. Another apt/dpkg process held the lock past the timeout (see docs/TROUBLESHOOTING.md) or the network is down."
   fi
 

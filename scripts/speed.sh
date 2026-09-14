@@ -63,7 +63,7 @@ main() {
       # overwrites from .env — see the same note in ask.sh.
       -m|--model) [[ -n "${2:-}" ]] || die "-m needs a model name"; MODEL_NAME="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
-      *) arg="$1"; usage; die "Unknown option: ${arg}" ;;
+      *) arg="$1"; usage >&2; die "Unknown option: ${arg}" ;;
     esac
   done
 
@@ -72,7 +72,7 @@ main() {
   wait_for_ollama 5 >/dev/null 2>&1 \
     || die "Ollama is not answering at $(ollama_url). Try: lca check"
   model_present "${MODEL_NAME}" \
-    || die "Model '${MODEL_NAME}' is not downloaded. Pull it with: ollama pull ${MODEL_NAME}"
+    || die "Model '${MODEL_NAME}' is not downloaded. $(pull_advice "${MODEL_NAME}")"
 
   step "Measuring generation speed"
   info "Model:  ${MODEL_NAME}"
@@ -104,11 +104,32 @@ main() {
   response="$(measure "${tokens}")" \
     || die "The request to Ollama failed. Is the service healthy? Try: lca check"
 
-  local eval_count eval_ns prompt_count prompt_ns
+  # Reading speed gets its OWN request, with a big prompt that differs every
+  # run — see read_probe_prompt(). Taking it from the generation request above
+  # measured a cached 43-token prefix and reported 160-213 tokens/second on a
+  # machine that reads at 20.
+  #
+  # It costs about half a minute and it is the half of the answer that actually
+  # explains a slow code edit, so it is not optional. Announced, because a
+  # silent extra wait in a benchmark reads as a hang.
+  info "Reading a realistic prompt — this is what a code edit really waits on..."
+  local read_response read_count read_ns read_tps=""
+  read_response="$(read_probe_prompt | jq -Rs --arg m "${MODEL_NAME}" \
+      '{model:$m, prompt:., stream:false, options:{num_predict:1}}' \
+    | curl -sS --max-time 900 -X POST "$(ollama_url)/api/generate" \
+        -H 'Content-Type: application/json' -d @- || true)"
+  read_count="$(jq -r '.prompt_eval_count // 0' <<<"${read_response}" 2>/dev/null || echo 0)"
+  read_ns="$(jq -r '.prompt_eval_duration // 0' <<<"${read_response}" 2>/dev/null || echo 0)"
+
+  # Deliberately NOT reading prompt_eval_* off this response. That is where the
+  # 160-213 tokens/second came from: this request re-sends the same 43-token
+  # benchmark prompt every run, so Ollama answers its prefix from cache and the
+  # counters describe the cache, not the machine. The probe above is the only
+  # honest source, and leaving these here to be picked up again by accident is
+  # how the bug would come back.
+  local eval_count eval_ns
   eval_count="$(jq -r '.eval_count // empty' <<<"${response}")"
   eval_ns="$(jq -r '.eval_duration // empty' <<<"${response}")"
-  prompt_count="$(jq -r '.prompt_eval_count // 0' <<<"${response}")"
-  prompt_ns="$(jq -r '.prompt_eval_duration // 0' <<<"${response}")"
   [[ -n "${eval_count}" && -n "${eval_ns}" ]] \
     || die "Ollama did not return timing counters. Response: $(head -c 200 <<<"${response}")"
 
@@ -118,18 +139,54 @@ main() {
 
   # Placement is the single biggest determinant of what "normal" means here, so
   # everything below is interpreted through it.
+  # Classified against the hardware, not off the string. "It contains a slash,
+  # therefore split across CPU and GPU" is a statement about a card, and this
+  # asked no question about whether one exists — so on a CPU-only box, where
+  # Ollama 0.32.5 prints "13%/87% CPU/GPU", the verdict below told the reader
+  # their model was partly offloaded and offered to size one to their VRAM.
+  # Measured here at 5.3 tokens/second on 7b: plain CPU inference.
   local placement="" where="cpu"
   placement="$(ollama_processor "${MODEL_NAME}" 2>/dev/null || true)"
-  if [[ "${placement}" == *"/"* ]]; then
-    where="split"
-  elif [[ "${placement}" == *GPU* ]]; then
-    where="gpu"
-  fi
+  case "$(gpu_state_for_placement "${placement}")" in
+    split)  where="split" ;;
+    active) where="gpu" ;;
+    *)      where="cpu" ;;
+  esac
 
   step "Results"
   printf '  generation      %s tokens/second\n' "${tps}"
-  if [[ "${prompt_count}" =~ ^[0-9]+$ ]] && (( prompt_count > 0 )) && (( prompt_ns > 0 )); then
-    printf '  reading input   %s tokens/second\n' "$(tokens_per_second "${prompt_count}" "${prompt_ns}")"
+  if [[ "${read_count}" =~ ^[0-9]+$ ]] && (( read_count > 200 )) && (( read_ns > 0 )); then
+    read_tps="$(tokens_per_second "${read_count}" "${read_ns}")"
+    printf '  reading input   %s tokens/second (over %s tokens)\n' "${read_tps}" "${read_count}"
+  fi
+  # The two rates are inputs, not an answer. Somebody runs this because a code
+  # edit felt slow, and neither number tells them how slow an edit is — they
+  # would have to already know aider sends ~2.8k tokens, and the reason they
+  # are here is that they do not.
+  #
+  # Computed from the rates just measured, so it is this machine's number: the
+  # 3b rung on a base droplet is faster on both counts and says so.
+  #
+  # It prices the Ollama request and only that, so it is a floor and now says
+  # so. A real 'lca' run also starts Python, walks the repo for its map, and by
+  # default spends a second request writing the commit message.
+  #
+  # Deliberately no multiplier on that. Three real edits came in at 1.5x-1.8x
+  # of these rates, which looked like a constant worth printing until the rates
+  # themselves were measured twice: reading ran at ~19 tokens/second with the
+  # box busy and ~50 idle, at every prompt size. A ratio between a number
+  # measured under one load and a number measured under another is not a
+  # property of the machine, so the reader gets the direction and the reason
+  # instead of a figure that would be wrong whenever the two conditions differ.
+  local edit_s
+  if [[ -n "${read_tps}" ]] && edit_s="$(aider_edit_seconds "${read_tps}" "${tps}")"; then
+    printf '  one code edit   ~%s of model time  (aider sends ~%s tokens and gets ~%s back: %ss reading, %ss writing)\n' \
+      "$(human_duration "${edit_s}")" \
+      "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" 'BEGIN { printf "%.1fk", t / 1000 }')" \
+      "${LCA_EDIT_REPLY_TOKENS}" \
+      "$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" -v r="${read_tps}" 'BEGIN { printf "%d", t / r }')" \
+      "$(awk -v t="${LCA_EDIT_REPLY_TOKENS}" -v g="${tps}" 'BEGIN { printf "%d", t / g }')"
+    printf '                  a real run costs more — aider'"'"'s startup, the repo map and the commit message are on top\n'
   fi
   local load_s=""
   if [[ "${load_ns}" =~ ^[0-9]+$ ]] && (( load_ns > 1000000000 )); then
@@ -138,6 +195,12 @@ main() {
       "${load_s}" "${OLLAMA_KEEP_ALIVE:-30m}"
   fi
   printf '  running on      %s\n' "${placement:-unknown (model not resident — run again)}"
+  # Ollama's own words, quoted verbatim above — and on a machine with no card
+  # they name a device that is not there. Say so on the line below rather than
+  # leaving the reader to reconcile "87% GPU" with a CPU verdict further down.
+  if [[ "${where}" == "cpu" && "${placement}" == *GPU* ]]; then
+    printf '                  (no NVIDIA GPU on this machine — that is Ollama'"'"'s own memory split, not a card)\n'
+  fi
 
   # On CPU, generation is memory-bandwidth bound: every token reads the whole
   # model out of RAM. Reporting the implied bandwidth turns an abstract
@@ -157,22 +220,41 @@ main() {
     prev_model="$(awk -F= '/^model=/ {print $2}' "${BASELINE}")"
     prev_tps="$(awk -F= '/^tps=/ {print $2}' "${BASELINE}")"
     if [[ "${prev_model}" == "${MODEL_NAME}" && -n "${prev_tps}" ]]; then
-      # +/-10% is deliberately wide. Back-to-back runs on the same machine
-      # vary by a few percent (other processes, a shared-VM neighbour), and
-      # reporting that as "slower" would send someone hunting a regression
-      # that is really just noise.
+      # +/-10% rejects small wobble, and the band is kept — but it was justified
+      # here by "back-to-back runs vary by a few percent", and that is not what
+      # this machine does. Reading speed measured 20 tokens/second with the box
+      # busy and 50 idle, at every prompt size; generation moved 5.3 -> 4.5 (-15%)
+      # between two runs where the only thing that changed was what else was
+      # running. A 15% drop is inside the range ambient load produces on its own.
+      #
+      # No threshold separates those, because the difference is not in the
+      # number: two identical figures mean different things depending on how
+      # quiet the machine was, and this has no way to know. So the direction is
+      # still reported -- it is what the reader came for -- and it no longer
+      # claims the model got slower when the box may simply have got busier.
       awk -v now="${tps}" -v was="${prev_tps}" 'BEGIN {
         d = (was > 0) ? (now - was) / was * 100 : 0
-        if (d > 10)       printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — faster)\n", was, now, d
-        else if (d < -10) printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — slower)\n", was, now, d
+        if (d > 10)       printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — faster, or the machine was quieter this time)\n", was, now, d
+        else if (d < -10) printf "  vs last run:    %.1f -> %.1f tok/s (%+.0f%% — slower, or the machine was busier this time)\n", was, now, d
         else              printf "  vs last run:    %.1f -> %.1f tok/s (no real change)\n", was, now
       }'
     elif [[ -n "${prev_model}" ]]; then
       printf '  vs last run:    not comparable (last run used %s)\n' "${prev_model}"
     fi
   fi
-  mkdir -p "${STATE_DIR}"
-  printf 'model=%s\ntps=%s\nplacement=%s\n' "${MODEL_NAME}" "${tps}" "${placement}" > "${BASELINE}"
+  # Not bare under 'set -e'. ~/.cache/local-code-agent becomes root-owned the
+  # moment anything here is run once under sudo, and a failed write then killed
+  # this script between the numbers and the verdict — losing the one section
+  # that says what they mean. A baseline is a nicety; the explanation is the
+  # command.
+  # Subshell, not a group: a redirect that cannot open its target is reported
+  # by bash before a group's own '2>/dev/null' applies, so the raw error would
+  # print above the warning that explains it.
+  if ! ( mkdir -p "${STATE_DIR}" \
+         && printf 'model=%s\ntps=%s\nplacement=%s\n' \
+              "${MODEL_NAME}" "${tps}" "${placement}" > "${BASELINE}" ) 2>/dev/null; then
+    warn "Could not save this result to ${BASELINE}, so the next run has nothing to compare against. Check who owns it: ls -ld ${STATE_DIR}"
+  fi
 
   # ---- verdict -----------------------------------------------------------
   # Ordered by impact: report the thing that actually dominates, not a list.
@@ -187,8 +269,8 @@ main() {
   if [[ -n "${load_s}" ]] && awk -v s="${load_s}" 'BEGIN { exit !(s > 5) }' \
      && [[ "${OLLAMA_KEEP_ALIVE:-30m}" != -* ]]; then
     info "Every first message after ${OLLAMA_KEEP_ALIVE:-30m} idle waits ${load_s}s for this load."
-    info "To pay it once and never again, set OLLAMA_KEEP_ALIVE=-1 in .env and re-run"
-    info "scripts/install_ollama.sh — the model then stays in RAM permanently."
+    info "To pay it once and never again, set OLLAMA_KEEP_ALIVE=-1 in .env, then: sudo lca apply"
+    info "(the model then stays in RAM permanently)"
   fi
 
   if [[ "${swap_mb}" =~ ^[0-9]+$ ]] && (( swap_mb > 256 )); then
@@ -227,6 +309,19 @@ main() {
     if [[ -n "${params}" ]] && (( params > 3 )); then
       info "Want it faster today? A smaller model is the only big CPU-side lever:"
       info "  lca model --list-recommended"
+    fi
+    # Said here because the line above is the right answer for a CHAT reply and
+    # the wrong emphasis for a code edit. Most of an edit is Ollama reading
+    # aider's prompt, and that prompt is mostly aider's own scaffolding — so
+    # trimming what gets sent is a lever, and one nothing here ever mentioned.
+    #
+    # Deliberately not oversold: CONVENTIONS.md is 253 tokens of ~2,800
+    # (measured), so it is a tenth. Saying "a tenth" is worth more than
+    # implying a switch makes this fast.
+    if [[ -n "${read_tps}" ]]; then
+      info "Most of a code edit is Ollama READING aider's prompt, not writing the reply."
+      info "  Send less: a smaller repo map, or AIDER_CONVENTIONS=false in .env"
+      info "  (worth about a tenth of the prompt — a trim, not a fix)."
     fi
     case "$(gpu_state "${MODEL_NAME}")" in
       no-driver)

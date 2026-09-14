@@ -13,7 +13,8 @@
 #          Inference is unaffected — models are local.
 # online:  restore normal egress.
 # status:  print the persisted mode AND prove it with a live probe.
-# harden:  (re)apply the always-on INBOUND guard (see below).
+# harden:  (re)apply the always-on INBOUND guard (see below) AND install the
+#          boot service that puts it back after a reboot.
 #
 # Inbound guard (always on, independent of offline/online): a second nft
 # table drops NEW inbound connections to the Open WebUI and Ollama ports on
@@ -22,7 +23,8 @@
 # a droplet's public IP would expose them; the guard makes the private-only
 # guarantee real without touching SSH (port 22) or any other port, so it can
 # never lock you out. It is applied at setup, whenever WebUI is (re)created,
-# and re-applied on every boot.
+# by 'lca apply' when .env moves a port out from under it, and re-applied on
+# every boot.
 #
 # The mode persists across reboots (ruleset + state file in
 # /etc/local-code-agent, re-applied by a systemd oneshot).
@@ -107,7 +109,12 @@ render_rules() {
 
 write_rules_file() {
   as_root mkdir -p "${NETMODE_DIR}"
-  render_rules | as_root tee "${NFT_RULES_FILE}" >/dev/null
+  # Rendered first, so a failure inside render_rules cannot leave a fragment
+  # where the ruleset used to be — nft would refuse to load it at boot.
+  local rules
+  rules="$(render_rules)" || die "Could not render the offline ruleset — ${NFT_RULES_FILE} is unchanged."
+  printf '%s\n' "${rules}" | write_root_file "${NFT_RULES_FILE}" \
+    || die "Could not write ${NFT_RULES_FILE} (disk full? check 'df -h') — the previous ruleset is unchanged."
 }
 
 # --- Always-on inbound guard -----------------------------------------------
@@ -128,6 +135,62 @@ webui_port_from_env() {
   [[ "${port}" =~ ^[0-9]+$ ]] || port=3000
   printf '%s\n' "${port}"
 }
+# The agent's UI port, but ONLY when the tier is switched on — the same intent
+# arm guarded_ports uses, so the two lists agree and 'lca apply' can actually
+# close the gap it reports. Before this, guarded_ports asked for "Agent 3001"
+# and this renderer never emitted it: apply saw an uncovered port, re-applied a
+# ruleset that still did not cover it, and reported the same gap next run. That
+# is the unfixable loop this file already refuses to create elsewhere.
+agent_port_from_env() {
+  local enabled="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_AGENT:-false}" )"
+    # Defaulted to lib.sh's own 3001 for the reason spelled out in
+    # relay_port_from_env below: guarded_ports reads AGENT_PORT after load_env
+    # has defaulted it, so an .env with ENABLE_AGENT=true and no AGENT_PORT
+    # line left this reader silent while guarded_ports asked for 3001 — the
+    # same check-says-stale / apply-says-done loop, reachable by deleting a
+    # line rather than editing one. Not reachable from a stock .env, which
+    # writes the key; a hand-trimmed one gets there, and this file has now
+    # been the site of that loop twice.
+    # shellcheck disable=SC1090
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${AGENT_PORT:-3001}" )"
+  fi
+  [[ "${enabled}" == "true" ]] || return 0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${port}"
+}
+# ...and the relay, on exactly the same terms, for exactly the same reason.
+# guarded_ports has listed "Ollama relay ${OLLAMA_RELAY_PORT}" since the relay
+# existed and this renderer had never heard of it, so enabling the relay put
+# the pair straight back into the loop the comment above describes: 'lca check'
+# reported the guard stale, 'lca apply' re-applied a ruleset without 11435 and
+# reported success, and the next check said stale again. Measured on this box
+# before the fix — three runs, same FAIL, drop set { 3000, 3001, 11434 }.
+#
+# The relay binds only the docker bridge gateway, which is not routable from
+# off this machine, so this closes no hole on its own; the bridge is accepted
+# above the drop rule, so containers still reach it. It is rendered because a
+# port the guard has never heard of is one nobody notices when a later change
+# moves it somewhere routable — the reason guarded_ports asks for it.
+relay_port_from_env() {
+  local enabled="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_OLLAMA_RELAY:-false}" )"
+    # shellcheck disable=SC1090
+    # Defaulted to the same 11435 lib.sh's load_env defaults it to, because
+    # guarded_ports reads its value AFTER that default has been applied. With
+    # the relay on and the key simply absent from .env, an empty answer here
+    # would ask the guard for nothing while guarded_ports asked for 11435 —
+    # the same disagreement this helper exists to end, one config over.
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${OLLAMA_RELAY_PORT:-11435}" )"
+  fi
+  [[ "${enabled}" == "true" ]] || return 0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${port}"
+}
 ollama_port_from_env() {
   local url="" port=""
   if [[ -f "${ENV_FILE}" ]]; then
@@ -146,10 +209,13 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port p q seen port_list=""
+  local webui_port ollama_port agent_port relay_port bridge_if p q seen port_list=""
   local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
+  agent_port="$(agent_port_from_env)"
+  relay_port="$(relay_port_from_env)"
+  bridge_if="$(docker_bridge_interface)"
   # ENFORCE the "can never lock you out" invariant below instead of merely
   # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
   # or someone fronting a service on the SSH port), the drop rule would
@@ -157,7 +223,7 @@ render_inbound_rules() {
   # the guard after each reboot: the box would then be reachable only from the
   # provider's recovery console. Refuse to guard 22, and say so on stderr so
   # the ruleset on stdout stays byte-clean for nft.
-  for p in "${webui_port}" "${ollama_port}"; do
+  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"} ${relay_port:+"${relay_port}"}; do
     [[ "${p}" =~ ^[0-9]+$ ]] || continue
     if (( p == 22 )); then
       warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
@@ -187,6 +253,15 @@ render_inbound_rules() {
     echo "    # tailscale0."
     echo "    iifname \"lo\" accept"
     echo "    iifname \"tailscale0\" accept"
+    echo "    # ...and the docker bridge, which is local traffic for the same"
+    echo "    # reason lo is. A container reaches this machine as the bridge"
+    echo "    # gateway, never as 127.0.0.1, so without this line the guard"
+    echo "    # drops the stack's own containers: measured, the agent's sandbox"
+    echo "    # could not reach Ollama (all 626 packets dropped here) and, once"
+    echo "    # AGENT_PORT joined the set below, could not reach the agent app"
+    echo "    # it must call back into either. This widens nothing that faces"
+    echo "    # the network — the bridge is routable only from this host."
+    echo "    iifname \"${bridge_if}\" accept"
     echo "    ct state established,related accept"
     echo ""
     echo "    # Drop NEW inbound to the private-only services on any OTHER"
@@ -207,32 +282,103 @@ render_inbound_rules() {
 # without nftables.
 apply_inbound_guard() {
   if ! have nft; then
-    warn "nft is not installed — cannot apply the inbound guard. Install nftables (scripts/install_dependencies.sh) so the WebUI/Ollama ports are not publicly reachable."
+    warn "nft is not installed — cannot apply the inbound guard. Install nftables (sudo ${SCRIPT_DIR}/scripts/install_dependencies.sh) so the WebUI/Ollama ports are not publicly reachable."
     return 0
   fi
   as_root mkdir -p "${NETMODE_DIR}"
-  render_inbound_rules | as_root tee "${INBOUND_RULES_FILE}" >/dev/null
+  # This is the file the boot service feeds to nft. A truncated one does not
+  # load, and not loading means the WebUI and Ollama ports are public.
+  local inbound
+  inbound="$(render_inbound_rules)" || die "Could not render the inbound guard — ${INBOUND_RULES_FILE} is unchanged."
+  printf '%s\n' "${inbound}" | write_root_file "${INBOUND_RULES_FILE}" \
+    || die "Could not write ${INBOUND_RULES_FILE} (disk full? check 'df -h') — the previous guard ruleset is unchanged."
   as_root nft -f "${INBOUND_RULES_FILE}"
-  ok "Inbound guard active: WebUI (port $(webui_port_from_env)) and Ollama (port $(ollama_port_from_env)) reachable only via loopback and Tailscale."
+  # Name what was actually put in the drop set — READ BACK from the ruleset
+  # just written, rather than rebuilt from a second list of ports.
+  #
+  # It must not over-claim: render_inbound_rules REFUSES port 22, and a
+  # WEBUI_PORT of 22 once produced "WebUI (port 22) ... reachable only via
+  # loopback and Tailscale" about a port deliberately left wide open. That was
+  # fixed by hand-checking != "22" here, which left the mirror-image fault
+  # standing: this sentence knew about WebUI and Ollama only, so once the agent
+  # and the relay joined the drop set it guarded four ports and named two.
+  #
+  # That is not cosmetic. It is how the relay bug survived. 'lca check' said
+  # the guard did not cover 11435; 'lca apply' ran, printed
+  # "Inbound guard active: WebUI:3000:Ollama:11434", and that line reads as
+  # agreement — so the natural next move is to re-run check and believe the
+  # loop is closing, when the two commands were never talking about the same
+  # set of ports. A sentence derived from the ruleset can be neither wrong in
+  # the way it was fixed for nor silent in the way it stayed.
+  local guard_dropped pair guard_label guard_port guarded=()
+  # The drop set of the ruleset on its way to nft, spaces around every port so
+  # a substring cannot match: " 3000 11434 " must not contain "343".
+  guard_dropped=" $(sed -n 's/.*tcp dport {\([^}]*\)}.*/\1/p' <<<"${inbound}" \
+    | tr ',' ' ' | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//') "
+  for pair in \
+    "WebUI:$(webui_port_from_env)" \
+    "Ollama:$(ollama_port_from_env)" \
+    "Agent:$(agent_port_from_env)" \
+    "Ollama relay:$(relay_port_from_env)"; do
+    guard_label="${pair%:*}"
+    guard_port="${pair##*:}"
+    [[ -n "${guard_port}" ]] || continue
+    # In the ruleset or not named. Port 22 fails this test for free, because
+    # the renderer never let it in — one rule, checked where it is decided.
+    [[ "${guard_dropped}" == *" ${guard_port} "* ]] || continue
+    guarded+=("${guard_label} ${guard_port}")
+  done
+  if (( ${#guarded[@]} )); then
+    local joined
+    printf -v joined '%s + ' "${guarded[@]}"
+    ok "Inbound guard active: ${joined% + } — reachable only via loopback and Tailscale."
+  else
+    warn "Inbound guard loaded but it drops nothing: every configured port is 22, which is never guarded so SSH can never be locked out. Change WEBUI_PORT / OLLAMA_HOST in .env, then: sudo lca harden"
+  fi
 }
 
 # Returns 0 loaded, 1 not loaded, 2 cannot tell (no root/sudo). as_root would
 # die() and abort `status` mid-run, leaving the operator with no answer at all
 # about whether their ports are guarded — worse than an explicit "unknown".
 inbound_loaded() {
-  can_root || return 2
+  # can_root_now, not can_root: the latter is true whenever the sudo binary
+  # exists, so a user who cannot actually escalate fell through to the nft
+  # call, got nothing, and was told the guard is NOT loaded rather than that
+  # nobody could look.
+  can_root_now || return 2
   as_root nft list table inet "${INBOUND_TABLE}" >/dev/null 2>&1
 }
 
 save_state() {
   as_root mkdir -p "${NETMODE_DIR}"
-  printf '%s\n' "$1" | as_root tee "${NETMODE_STATE_FILE}" >/dev/null
+  printf '%s\n' "$1" | write_root_file "${NETMODE_STATE_FILE}" \
+    || die "Could not record the netmode state in ${NETMODE_STATE_FILE} (disk full? check 'df -h'). The mode on disk is unchanged, so a reboot would restore the old one."
 }
 
+# Tri-state, the same contract as inbound_loaded below: 0 loaded, 1 not
+# loaded, 2 nobody could look.
+#
+# This was a bare as_root, which is the worst of the three shapes: with sudo
+# but no passwordless access 'lca status' STOPPED on "[sudo] password for ..."
+# — measured, two lines in and waiting indefinitely — and with neither root
+# nor sudo as_root die()s, killing the status report outright. Both happen
+# before the "cannot inspect nftables" branch that exists to report exactly
+# this, five lines further down.
 table_loaded() {
+  can_root_now || return 2
   as_root nft list table inet "${NFT_TABLE}" >/dev/null 2>&1
 }
 
+# install_service — write and enable the boot unit. Returns non-zero on
+# failure instead of die()ing, so each caller can pick the severity: for
+# setup.sh and offline/online this IS the job and failing it is fatal, but
+# do_harden reaches here with the ports already closed, and exiting non-zero
+# there would make both installers print "Could not apply the inbound guard"
+# about a guard that is up — they turn any non-zero exit from 'harden' into
+# exactly that sentence. Every step is checked explicitly rather than left to
+# errexit, because errexit is suppressed for any command whose status is
+# tested — including inside a subshell — and a silently swallowed tee is how
+# a boot service ends up "installed" from a file that was never written.
 install_service() {
   if ! systemd_available; then
     warn "systemd is not available — netmode will not persist across reboots on this machine."
@@ -253,11 +399,43 @@ install_service() {
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
-  } | as_root tee "${NETMODE_SERVICE}" >/dev/null
-  as_root systemctl daemon-reload
-  as_root systemctl enable local-code-agent-netmode.service >/dev/null 2>&1 \
-    || die "Could not enable local-code-agent-netmode.service — check: systemctl status local-code-agent-netmode"
+  } | write_root_file "${NETMODE_SERVICE}" || return 1
+  as_root systemctl daemon-reload || return 1
+  as_root systemctl enable local-code-agent-netmode.service >/dev/null 2>&1 || return 1
   ok "Netmode now persists across reboots."
+}
+
+# require_service — install_service where failing is the end of the road.
+require_service() {
+  install_service \
+    || die "Could not enable local-code-agent-netmode.service — check: systemctl status local-code-agent-netmode"
+}
+
+# do_harden — the user-facing "put the inbound guard back" command.
+#
+# Eight messages across this repo send people here when the guard is missing:
+# 'netmode status', 'lca check' twice, both installers, TROUBLESHOOTING.md,
+# DO.md and the SSH-port refusal above. The usage text at the bottom of this
+# file then tells them "the inbound guard persist[s] across reboots" — which
+# was only true if you arrived by setup.sh, offline or online, the three paths
+# that also install the boot unit. Reached the documented way, harden loaded
+# the ruleset for THIS boot and nothing else, so the ports that had just been
+# closed went public again at the next reboot.
+#
+# 'lca check' did catch that, but only on the NEXT run, and it then named
+# --install-service — an internal flag this script's own usage does not list.
+# One command that finishes the job beats a two-round recovery through a flag
+# the user cannot look up.
+#
+# The guard goes on FIRST, and a systemd problem is only ever a warning here:
+# closing the ports is what was actually asked for, a machine with a broken
+# systemd still deserves it, and both installers turn ANY non-zero exit from
+# 'harden' into "Could not apply the inbound guard — the port may be publicly
+# reachable", which would be a false alarm about a guard that is up.
+do_harden() {
+  apply_inbound_guard
+  install_service \
+    || warn "The inbound guard is applied, but its boot service could not be installed — it will NOT be re-applied after a reboot, and the ports become public then. Check: systemctl status local-code-agent-netmode"
 }
 
 go_offline() {
@@ -271,7 +449,7 @@ go_offline() {
   write_rules_file
   as_root nft -f "${NFT_RULES_FILE}"
   apply_inbound_guard
-  install_service
+  require_service
   ok "OFFLINE: new outbound connections are dropped; Tailscale + loopback stay open."
   info "Your phone still reaches WebUI/SSH over Tailscale. Toggle back with: sudo ${SCRIPT_DIR}/netmode.sh online"
 }
@@ -286,7 +464,7 @@ go_online() {
     as_root nft delete table inet "${NFT_TABLE}"
   fi
   apply_inbound_guard   # the inbound guard is always on, regardless of mode
-  install_service
+  require_service
   ok "ONLINE: normal egress restored."
 }
 
@@ -312,19 +490,34 @@ apply_saved() {
 
 show_status() {
   step "Netmode status"
-  local state inbound_rc
+  local state inbound_rc egress_rc
   state="$(netmode_state)"
   info "Persisted mode: ${state}"
   if have nft; then
-    if table_loaded; then
-      info "nftables: egress lockdown table 'inet ${NFT_TABLE}' is LOADED (egress restricted)."
-    else
-      info "nftables: no egress lockdown table loaded (egress unrestricted)."
-    fi
-    inbound_loaded; inbound_rc=$?
+    # '|| egress_rc=$?' for the same reason spelled out under inbound_rc below,
+    # and a third answer for the same reason again: "could not look" is not
+    # "not loaded". Reporting an unreadable ruleset as "egress unrestricted"
+    # is the reassuring direction to be wrong in, which is the worse one.
+    egress_rc=0
+    table_loaded || egress_rc=$?
+    case "${egress_rc}" in
+      0) info "nftables: egress lockdown table 'inet ${NFT_TABLE}' is LOADED (egress restricted)." ;;
+      2) warn "Cannot inspect nftables from this account — the egress lockdown state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      *) info "nftables: no egress lockdown table loaded (egress unrestricted)." ;;
+    esac
+    # '|| inbound_rc=$?', not 'inbound_loaded; inbound_rc=$?'. The second form
+    # leaves inbound_loaded as an untested command, so under 'set -e' a
+    # non-zero return kills the script HERE — before the case below that exists
+    # to report it, and before the live probe. inbound_loaded returns 1 for
+    # "not loaded" and 2 for "cannot tell", which means 'netmode.sh status'
+    # printed three lines and stopped, with exit 1 and no explanation, in
+    # exactly the two situations anyone runs it for. Observed on a box with no
+    # guard loaded: the "inbound guard NOT loaded" warning never appeared.
+    inbound_rc=0
+    inbound_loaded || inbound_rc=$?
     case "${inbound_rc}" in
       0) info "nftables: inbound guard 'inet ${INBOUND_TABLE}' is LOADED (WebUI/Ollama ports private-only)." ;;
-      2) warn "Cannot inspect nftables without root or sudo — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
+      2) warn "Cannot inspect nftables from this account — the inbound guard state is UNKNOWN. Re-run as root: sudo ${SCRIPT_DIR}/netmode.sh status" ;;
       *) warn "inbound guard NOT loaded — WebUI/Ollama ports may be publicly reachable. Apply it with: sudo ${SCRIPT_DIR}/netmode.sh harden" ;;
     esac
   else
@@ -348,19 +541,13 @@ show_status() {
   fi
 }
 
-main() {
-  case "${1:-}" in
-    offline)          go_offline ;;
-    online)           go_online ;;
-    status)           show_status ;;
-    harden)           apply_inbound_guard ;;
-    apply-saved)      apply_saved ;;
-    render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
-    render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
-    --install-service) install_service ;;
-    *)
-      cat <<EOF
-Usage: sudo netmode.sh <offline|online|status|harden>
+# usage — printed for --help on stdout (exit 0), and to stderr beside a named
+# error for anything unrecognised (exit 1). One copy, because the two used to
+# be the same branch: asking a command that edits the firewall what it does
+# came back as an error.
+usage() {
+  cat <<EOF
+Usage: sudo lca <offline|online|status|harden>       (or netmode.sh directly)
 
   offline   Kill-switch ON:  the AI stack loses ALL internet access, but your
             phone keeps reaching WebUI/SSH over Tailscale. Inference still
@@ -368,13 +555,55 @@ Usage: sudo netmode.sh <offline|online|status|harden>
   online    Kill-switch OFF: normal internet access restored.
   status    Show the persisted mode and prove it with a live probe.
   harden    (Re)apply the always-on inbound guard so the WebUI/Ollama ports
-            are reachable only over loopback and Tailscale, never publicly.
+            are reachable only over loopback and Tailscale, never publicly —
+            now, and again after every reboot.
 
 The chosen mode and the inbound guard persist across reboots.
 EOF
-      exit 1
-      ;;
+}
+
+main() {
+  # Everything after the subcommand used to be ignored, and bin/lca forwards
+  # trailing arguments verbatim — so 'lca harden --help' reached
+  # 'netmode.sh harden --help' and APPLIED THE FIREWALL, which is the one
+  # answer a question must never get. 'lca offline --typo' went the same way.
+  # No subcommand here takes an argument, so a second one is always a mistake.
+  case "${2:-}" in
+    "") ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "Unknown extra argument: ${2}" ;;
+  esac
+  case "${1:-}" in
+    offline)          go_offline ;;
+    online)           go_online ;;
+    status)           show_status ;;
+    harden)           do_harden ;;
+    apply-saved)      apply_saved ;;
+    render-rules)     render_rules ;;          # print the offline egress ruleset (tests)
+    render-inbound)   render_inbound_rules ;;  # print the inbound guard ruleset (tests)
+    --install-service) require_service ;;
+    -h|--help)       usage; exit 0 ;;
+    # Named, and on stderr — the same shape as the extra-argument guard six
+    # lines above, which this did not match. Measured before:
+    #
+    #   $ netmode.sh nosuchmode 2>/dev/null   -> the whole usage page
+    #   $ netmode.sh nosuchmode >/dev/null    -> nothing at all
+    #
+    # A typo produced a usage page indistinguishable from --help except by exit
+    # code, with an empty error stream — so anything capturing stderr to report
+    # why this failed had nothing to report.
+    "")              usage >&2; die "No mode given." ;;
+    *)               usage >&2; die "Unknown mode: ${1}" ;;
   esac
 }
 
-main "$@"
+# Sourceable, the same as restore.sh, apply.sh and uninstall.sh, so the two
+# functions that WRITE this file's security-critical files can be executed by a
+# test. tests/test-netmode.sh runs 'netmode.sh render-rules' as a subprocess,
+# which exercises the renderers and nothing else — write_rules_file and
+# apply_inbound_guard had no test that ran them at all, only greps. The one
+# reliable way to reach them before was 'netmode.sh offline' or 'harden', which
+# a test suite must never do.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

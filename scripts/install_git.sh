@@ -18,21 +18,20 @@ main() {
   require_cmd git
   ok "git $(git --version | awk '{print $3}') installed."
 
-  # When run via sudo, check the real user's global config, not root's.
-  local check_user name email
-  check_user="${SUDO_USER:-$(id -un)}"
-  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]] && have sudo; then
-    name="$(sudo -u "${check_user}" git config --global user.name 2>/dev/null || true)"
-    email="$(sudo -u "${check_user}" git config --global user.email 2>/dev/null || true)"
+  # Asked through lib.sh, which also knows to look at the real user's config
+  # rather than root's under sudo — 'lca check' asks the same question, and two
+  # copies is how one of them ends up reporting on the wrong account.
+  local check_user identity
+  check_user="$(git_identity_user)"
+  if identity="$(git_identity)"; then
+    ok "git identity: ${identity}"
   else
-    name="$(git config --global user.name 2>/dev/null || true)"
-    email="$(git config --global user.email 2>/dev/null || true)"
-  fi
-  if [[ -z "${name}" || -z "${email}" ]]; then
-    warn "No global git identity set for '${check_user}'. Aider's auto-commits will use a default identity."
-    warn "Set one with:  git config --global user.name 'Your Name' && git config --global user.email 'you@example.com'"
-  else
-    ok "git identity: ${name} <${email}>"
+    # Measured rather than assumed: aider does commit without one, using the
+    # placeholder 'Your Name <you@example.com>' — but a 'git commit' the user
+    # runs themselves in that project fails outright, because a hostname with
+    # no domain (every fresh droplet) is not something git will guess from.
+    warn "No global git identity set for '${check_user}'. Aider will still commit, stamping your work 'Your Name <you@example.com>' — and your own 'git commit' in that project will refuse to run at all."
+    warn "Set one with:  git config --global user.name 'Ada Lovelace' && git config --global user.email 'ada@example.com'"
   fi
 }
 

@@ -9,15 +9,19 @@ passed the exact checks CI runs.
 ## The loop
 
 ```
-  agent edits  ──▶  make gates  ──▶  git push  ──▶  CI (6 jobs)  ──▶  you review the PR  ──▶  merge
+  agent edits  ──▶  make gates  ──▶  git push  ──▶  CI (7 jobs)  ──▶  you review the PR  ──▶  merge
   (aider / CC)      (local, fast)     (pre-push        (real installs      (diff + green ticks)
                                        hook reruns      on clean VMs)
                                        gates)
 ```
 
-`make gates` runs the same three checks as CI's `lint`/`test` jobs, so a green
-local run means a green PR — no round-trips waiting on the runner to tell you
-about a missing semicolon.
+`make gates` runs the same three checks as CI's `lint`/`test` jobs. That is two
+of CI's seven, and the other five need a clean machine: system artifacts, a
+fresh install through `setup.sh`, the minimal-base dependency check, a real
+Ollama install and generation, and the chat app's container. So a green local
+run is a fast way to catch a missing semicolon, **not** a promise of a green PR
+— `.githooks/pre-push` says the same thing, and a gate in the suite keeps both
+of them honest about it.
 
 ## One-time setup
 
@@ -35,6 +39,23 @@ You also need ShellCheck locally, because the lint gate is non-negotiable:
 sudo apt-get install -y shellcheck   # Ubuntu/Debian
 ```
 
+## Run `make hooks` first — this is not optional advice
+
+`.githooks/pre-push` runs `make gates` before anything reaches GitHub, and it
+does nothing until `make hooks` points git at it. A fresh clone does not have
+it enabled.
+
+This is worth stating plainly because it has already cost a red build. A commit
+went out with a ShellCheck failure in it, from a session where every other
+commit had been linted by hand: the check was chained with `;` instead of
+`&&`, so `make lint` printed `Error 1` immediately above a successful push. The
+hook would have refused that push. Hand-running the gates works right up until
+the one time the shell does not do what you read.
+
+If you are driving this repo with an agent, enable it on the agent's checkout
+too. The loop is *edit → gates → push*, and the hook is what makes the middle
+step non-optional rather than remembered.
+
 ## Local gates
 
 | Command | What it does |
@@ -43,6 +64,7 @@ sudo apt-get install -y shellcheck   # Ubuntu/Debian
 | `make lint` | `shellcheck -x -P SCRIPTDIR` on every script (zero findings required) |
 | `make syntax` | `bash -n` on every script |
 | `make test` | both unit suites (library helpers + netmode ruleset) |
+| `make coverage` | which `lib.sh` functions no test touches — a report, not a gate |
 | `make dry-run` | preview the auto-tune decision without changing anything |
 | `make check` | full `check-system.sh` health check (degrades gracefully) |
 
@@ -76,26 +98,84 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Four shell traps that turn a gate into decoration
+## Nine shell traps that turn a gate into decoration
 
-All four were shipped here at least once. They matter more in an assertion
+All nine were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
+
+That framing was itself a trap. This section said "more than in ordinary code"
+for months while trap #1 sat in `scripts/ask.sh`, killing
+`lca logs | lca ask` — the first command TROUBLESHOOTING.md recommends —
+with exit 141 and no output at all, on every input over 64 KiB. Read these as
+rules about bash, not as rules about tests.
 
 **1. `cmd | grep -q PATTERN` under `set -o pipefail`.** `grep -q` exits the
 instant it matches, closing the pipe; the writer is killed by SIGPIPE and the
 pipeline reports 141. So the check fails *because* the pattern was found —
-but only once the output is big enough to still be writing, which makes it
-look intermittent. Capture first, then match a herestring:
+whenever the writer still has a write in flight, which makes it look
+intermittent. Do not reason about whether the output "fits": this suite lost a
+run to `sed uninstall.sh | grep -q` on a **9.5 KiB** file, comfortably inside
+the 64 KiB pipe buffer, then passed five times on byte-identical code. `sed`
+writes in blocks, so the race needs an unlucky schedule, not a big file. Size
+only changes the odds. Capture first, then match a herestring:
 
 ```bash
 out="$(some_command 2>&1)"
 grep -q 'expected' <<<"${out}" || { echo "FAIL: ..."; exit 1; }
 ```
 
+The same shape with `head -c` instead of `grep -q` is how `lca ask` lost its
+piped input: `printf '%s' "${var}" | head -c 12000` returns 141 as soon as
+`${var}` outgrows the pipe buffer, and errexit exits mid-assignment. To take a
+prefix of a variable, slice it — `"${var:0:12000}"` — and never build a pipe
+you only intend to half-read.
+
+**`awk` with an `exit` is the same reader, and it is the one that keeps getting
+written anyway.** `sed file | awk '/start/ { inb = 1 } inb && /^}/ { exit }'` is
+the standard way this suite reads one function out of a script, and every one of
+them is the trap above wearing a different hat: awk stops reading at the closing
+brace, `sed` is still writing, SIGPIPE, 141. It turned CI red on
+`ollama_models_dir`, which sits halfway up `lib.sh` — the largest file here, so
+~600 lines were still queued. The identical checks against `motd.sh` have never
+failed because that file fits inside the buffer, which is luck, not design. If
+you need a function's body, read the whole file first:
+
+```bash
+body="$(sed -n '/^the_function() {/,/^}/p' "${REPO}/scripts/lib.sh")"
+awk '...' <<<"${body}"
+```
+
+A `sed` range reads to the end and exits early nowhere. All ten call sites in
+`tests/test-lib.sh` have been converted and a gate now forbids the shape
+outright — blanket, not scoped to awk programs that visibly `exit`, because the
+safe ones are safe only until someone adds an `exit` to them.
+
+Converting them is mechanical but not scriptable: a first attempt in bulk broke
+two gates by mis-detecting where an awk program ended (the line closed `' || {`),
+and it left them running awk with **no input at all** — still exiting 0, still
+reported as passing. If you ever redo this kind of sweep, change one call site
+at a time, and prove each converted gate still fails when you break the thing it
+watches. An unchanged assertion count proves nothing: a vacuous gate counts too.
+
 **2. `grep -q PATTERN && { echo FAIL; exit 1; }` under `set -e`.** Here a
 *non*-matching grep is the passing case, and the AND-list's non-zero status
 aborts the step anyway. Use `if`/`fi` for negative assertions.
+
+Be precise about *why*, because the obvious explanation is wrong and it has
+been written into this repo incorrectly at least once. `set -e` **exempts**
+every command in an `&&` list except the last, so a false left side does not
+abort anything:
+
+```bash
+f() { local x=1; (( x > 9 )) && x=2; }   # f returns 1 — the trap
+g() { local x=1; (( x > 9 )) && x=2; echo hi; }   # g returns 0 — harmless
+```
+
+The damage is confined to the **last statement of a function**, where the
+list's status silently becomes the function's exit status — which in a `check`
+is the difference between pass and fail. Mid-function it is merely untidy.
+Verified by running both, not by reasoning about the manual.
 
 **3. `bash -c '! some_function'` in `tests/`.** A child shell has never
 sourced `lib.sh`, so the function is "command not found" (exit 127) and `!`
@@ -114,6 +194,81 @@ condition before pushing:
 mv .env /tmp/ && make lint; mv /tmp/.env .
 ```
 
+**5. A whole-file scan that finds its own explanatory comment.** The most
+repeated mistake in this repository, by a distance. You
+write a check that greps for `webui_prompt_comparable`, and directly above it
+you write a comment explaining that the fix was to call
+`webui_prompt_comparable`. The grep finds the comment. The gate now passes on
+code that has none of the thing it is checking for, and it will pass forever.
+
+It is invisible in review because both halves are correct on their own, and it
+survives mutation testing unless the mutation happens to remove the comment
+too. Strip comments before scanning:
+
+```bash
+code="$(sed 's/#.*//' "${file}")"
+grep -q 'the_helper' <<<"${code}"
+```
+
+Where a scan must run over the whole file, spell the needle so it cannot match
+itself — `'/bin/pyth[o]n'`, `'[$]{...}'` — and say in a comment that that is
+why it is written oddly, or the next person will "fix" it.
+
+**6. A multi-byte character in a regex, under a locale you did not choose.**
+`grep`'s `.` matches a *byte* under the POSIX/C locale, and these docs are full
+of en and em dashes at three bytes each. `[0-9]{4,5}.[0-9]{4,5}` matched
+`4096–16384` in an interactive shell and matched nothing inside the suite,
+where `LC_CTYPE=POSIX`. Use a range wide enough for the encoding — `.{1,3}` —
+or match on the digits alone and never on what sits between them. A bracket
+expression containing a multi-byte character is worse still: `[–-]` is three
+bytes inside `[]`, not one character.
+
+**7. `exec {FD}>file 2>/dev/null` — the `2>/dev/null` is not part of the
+open.** `exec` with redirections and *no command* applies every one of them to
+the running shell. That trailing muffle silenced stderr for the whole rest of
+`backup.sh`: on a filesystem with no space left, the tar failure's own
+`die()` — "Could not write … (disk full? check: `df -h`)" — went to
+`/dev/null`, and a nightly backup failed with exit 1 and a completely blank
+stderr. Measured, before and after. Nothing needs muffling here anyway: a
+failing `exec` redirect returns non-zero and prints its own diagnostic rather
+than killing the shell, so `exec {FD}>lock || { warn …; return 0; }` is both
+safe and quiet enough. `exec somecmd 2>/dev/null` is fine — with a command,
+the redirection goes to the command.
+
+And one that is not a trap in the code but in the *coverage*: a function can be
+thoroughly gated and never once executed. Two of the functions that write this
+project's firewall ruleset were guarded only by greps for their source text —
+the only ways to run them are `netmode.sh offline` and `harden`, which a suite
+must not do, so nothing ever did. `make coverage` answers "what does no test
+touch?" in one command. Read its own caveats first: it measures functions run
+in the suite's shell, and the house style for a behavioural test is a child
+`bash -c`, which it cannot see.
+
+**8. `awk '/x/ { exit 0 } END { exit 1 }'` — the rule-level `exit` runs `END`
+too.** `exit` in an awk rule sets the status and *then* executes the `END`
+block, so an `END { exit 1 }` underneath silently overwrites it and the check
+fails on code that is correct. Both times this was hit here, the gate reported
+a real ordering as wrong. Let `END` decide alone:
+
+```awk
+/opens/  { seen = 1 }
+/uses/   { if (!done) { done = 1; in_order = seen } }
+END      { exit (done && in_order) ? 0 : 1 }
+```
+
+**9. Editing a script while `bash` is running it.** `bash` reads a script
+incrementally, by byte offset, as it goes. Rewrite the file under it and every
+offset past the edit shifts, so the interpreter resumes mid-token, tries to run
+the remainder of the file as one command, and reports **`File name too long`**
+— at a line number in a part of the suite that has nothing to do with the edit.
+A full run of `tests/test-lib.sh` ended early inside a gate about the tune
+ladder for exactly this, quoting mangled source back at me. Nothing was wrong
+with the file: `bash -n` and ShellCheck both passed on it a second later. Let
+the run finish, or edit a copy. It is the same mistake as pushing in the
+background while still editing — the pre-push hook runs this suite, on the file
+your editor is halfway through writing. Two things holding one file, and only
+one of them knows it.
+
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
 The habit that catches the fourth: **ask what CI has that you don't, and what
@@ -125,19 +280,149 @@ matched nothing was read as "the test didn't catch it" and nearly cost a good
 assertion. **Print proof the mutation landed** (`grep -c`) before believing
 what the test says about it.
 
+## A sweep that confirms what you expected is the one to distrust
+
+Every trap above fails silently in the passing direction. So does every
+*instrument you point at them*, and that is the harder half: a broken gate
+reports green, and a broken measurement reports whatever you went looking for.
+
+**Worked example, and the best result this project has produced.** The question
+was whether every absence rule in the suite could still see a violation. The
+first harness said **eleven were vacuous**. Every one of those verdicts was
+wrong:
+
+- `no_unannounced_long_wait` takes its file list as *arguments*; the harness
+  passed none, so awk read stdin and found nothing.
+- `no_pipe_into_grep_q_in_the_suite` needs a `${VAR}` before the pipe; the
+  planted `ss -ltn | grep -q` was not a violation of it.
+- `advice_paths_are_absolute` matches `./zz.sh`, not the `./scripts/zz.sh`
+  that was planted.
+- The other eight were presence rules, or had no violation planted at all.
+  Green proves nothing there.
+
+Had that run been believed, it would have produced a confident report of eleven
+defects that do not exist, and eleven "fixes" to gates that were working.
+
+The instrument was thrown away rather than patched. What replaced it is below.
+**The suite was healthy and the instrument was broken** — which is the outcome
+to expect whenever a sweep tells you what you set out to find.
+
+Five more self-corrections came out of the same week, each one a first answer
+produced by an untested instrument: a BRE pattern measured against an ERE
+scanner; a floor detector that missed `(( seen == 4 ))`; `${SCRIPT_DIR}`
+resolved at the repo root when it is per-file; a loop that stopped after three
+iterations because the inner `bash -c` ate the rest of its stdin; and generated
+code where `\\n` printed a literal backslash-n while `bash -n` called it valid.
+Every one would have been reported as fact.
+
+*Measure your own first answer before you report it.* The cost of checking is
+minutes; the cost of not checking is a confident false statement that somebody
+then acts on.
+
+### The guard that caught the patch that was enforcing guards
+
+Worth recording in its own right. The commit that added the empty-world
+property — a gate whose entire purpose is that a rule may not fail silently —
+placed its helper `searched_at_least` at line 6801 and its earliest caller at
+line 1488. Trap #6: a helper defined below its caller in a linear script. Ten
+gates called a function that did not exist yet.
+
+What made it visible was `command_not_found_handle`, sitting at the top of the
+suite since an earlier session, printing *"test suite called a command that
+does not exist"*. Without it, ten gates would have quietly taken whatever bash
+returns for an unknown command and carried on.
+
+Every guard in this project was built after something silent got through. That
+one caught a silent failure **inside the patch that was enforcing non-silence**,
+written by someone who had spent the week thinking about exactly this. It is a
+better argument for building them than any paragraph here.
+
+The same run produced the matching lesson about instruments: the empty-world
+gate failed on `new_source_greps_are_justified`, which my own standalone driver
+had cleared. In isolation it died on an unbound global and the driver scored
+that as "refuses"; with the suite's real globals set, it passes on nothing. The
+product's own run is the one that counts, and that is the third time this week
+it has disagreed with a harness of mine.
+
+## Plant the violation in a clone and let its own suite find it
+
+The standard technique for answering "does the suite actually catch X". Not a
+one-off — **this is how that question gets answered here.**
+
+```
+git clone --local . /tmp/probe     # a real clone: git ls-files and HEAD work
+# ...plant real violations in it...
+cd /tmp/probe && git add -A && git commit -qm planted
+cd /tmp/probe && bash tests/test-lib.sh
+```
+
+The point is the last line. The clone runs **its own** suite against **itself**:
+real globals, real arguments, real fixtures, and none of your machinery
+anywhere in the path. Every artefact listed above came from a driver that
+extracted gate bodies and ran them by hand; none of them could have survived
+this.
+
+Applied once already: 18 violations across 13 files, **all 18 caught**, 30
+failures in total — the 18 plus collateral from one plant
+(`LCA_MAY_PROMPT=true` in `lib.sh`) changing prompting behaviour elsewhere.
+Plant many violations in one clone rather than one per run: a gate that stays
+green while its own violation is present is the finding, and extra failures
+from interference cannot hide it, because interference makes gates fail, not
+pass.
+
+Two rules for it:
+
+- **Print proof the mutation landed.** A probe that hardcoded `REPO` once
+  reported all three mutants passing, because the mutations never applied. Then
+  it happened again: `sed 's/name //'` removed nothing, because the name sat at
+  the end of a line and had no trailing space. Both times the verdict looked
+  like good news.
+- **Conclusions from a harness are provisional.** If a claim in this document
+  rests on an extracted-function driver rather than on the product's own run,
+  it says so.
+
+## A scalar flag named like an array elsewhere fails ShellCheck
+
+`shellcheck -x` follows `source`, and it tracks a variable's *type* across
+everything it has read — the file under test and every file that file sources.
+So a local scalar in `tests/test-lib.sh`:
+
+```bash
+local drifted=0            # SC2178: "used as an array but now assigned a string"
+```
+
+trips on `scripts/lib.sh` declaring `local drifted=()` inside an unrelated
+function. The scopes are genuinely separate and the code is correct; ShellCheck
+is not scope-aware here, and the repo lints clean, so the warning has to go.
+
+This cost three separate cycles in one day — `bad`, `stale`, `drifted` — each
+found only at `make lint` after the tests were already green. Give error flags
+and accumulators a name specific to what they count: `recipe_mismatch`,
+`recipe_drift`, `accepts`/`rejects`. It reads better anyway, and the generic
+names are exactly the ones already taken.
+
 ## Settings that are *applied* are a bug factory
 
 Most of `.env` is read fresh on every run. A few settings are **applied** to
-something long-lived — a systemd drop-in, a docker container, a systemd timer —
-at the moment that thing is created. Editing `.env` afterwards changes nothing
-until it is rebuilt, and nothing about that is visible: no error, no log line,
-just the old behaviour continuing.
+something long-lived — a systemd drop-in, a docker container, a systemd timer,
+an nftables ruleset — at the moment that thing is created. Editing `.env`
+afterwards changes nothing until it is rebuilt, and nothing about that is
+visible: no error, no log line, just the old behaviour continuing.
 
-Four separate bugs in this repository came from exactly that, and each was
+Five separate bugs in this repository came from exactly that, and each was
 silent in a different way: a keep-alive that never took effect, a chat app
 still accepting signups after its owner closed them, backups on a cadence
-nobody chose, and a chat app pointed at an Ollama port nothing listened on.
-Three of them had documentation telling users to edit the key.
+nobody chose, a chat app pointed at an Ollama port nothing listened on, and an
+inbound guard still dropping the port a service had moved off — leaving the
+unauthenticated Ollama API answering on the new one, publicly, while
+`lca apply` said everything matched. Four of them had documentation telling
+users to edit the key.
+
+The guard is the one to learn from, because it had a comparison *and* a fix
+command and was still wrong: the fix only ever ran as a side effect of
+re-creating the chat app container, so with the chat app switched off nothing
+re-applied it. Being reachable from `lca apply` is not the same as being
+converged by it.
 
 So, when you add a setting that gets baked into something:
 
@@ -152,6 +437,58 @@ So, when you add a setting that gets baked into something:
 `install_webui.sh` bakes into the container must be compared somewhere, so the
 next one is caught without anyone noticing it. Prefer that shape of test — one
 that fails for a class — over one more hand-written case.
+
+## Advice is part of the product, and it is tested like it
+
+Half of what this project does is tell someone what to type next. A sentence
+that names the wrong command is a defect in the same way a wrong exit code is,
+and it is worse in one respect: the reader follows it, gets a second failure on
+top of the first, and has no way to tell which of the two was our fault. Five
+gates in `tests/test-lib.sh` enforce that, all of them written after shipping
+the thing they now catch.
+
+**1. Every flag we name must be one that script documents.** Every
+`some-script.sh --flag` in the README, in `docs/`, in `lca check`'s output or
+in `bin/lca` has to appear in that script's header, `usage()` or help text, or
+CI fails naming the pair. `lca check` spent a while recommending
+`netmode.sh --install-service`: it works, and it appears in no usage text
+anywhere, so a reader who tried to look it up before running it as root found
+nothing. A script advertising `[... args...]` is exempt because it forwards
+what it does not recognise — `run-agent.sh` hands everything to aider — and it
+is exempt for that reason, not by name.
+
+**2. Every path we name must resolve from anywhere.** `bin/lca` never `cd`s,
+deliberately: aider has to see *your* project. So the normal way to run any of
+this is `lca check` from `~/my-project`, and the health check answered
+`(./webui.sh start)`. Build paths from `${SCRIPT_DIR}` or `${REPO_ROOT}`. The
+gate erases both before matching, so anything relative still standing is real,
+and it covers `usage()` bodies as well as message helpers — `webui.sh`'s usage
+was where the last one hid.
+
+**3. Docs use the `lca` form, or say where to stand.** `lca backup` works from
+anywhere; `./backup.sh` in a block with no `cd` does not. `./setup.sh` is the
+exception that proves it — there is no `lca setup` and cannot be one before the
+install — so any fenced block running a `./script.sh` must contain a `cd`.
+
+**4. `--help` explains, and does nothing else.** `lca test --help` used to run
+the whole acceptance suite, minutes of real generation, because `selftest.sh`
+never looked at `"$@"`. `lca restore --help` answered "Backup file not found:
+--help" from the command that wipes a docker volume. `lca harden --help`
+applied the firewall, because `netmode.sh` ignored everything after its
+subcommand and `bin/lca` forwards trailing arguments verbatim. Every script
+`bin/lca` dispatches to is now *run* with `--help` in CI and must exit 0 with
+usage inside a timeout — the timeout is part of the assertion, since a script
+that ignores the flag and does its job is the failure being caught.
+
+**5. That list has to stay complete.** A second gate reads `bin/lca`'s dispatch
+table and fails if it names a script the `--help` list does not cover, so a new
+subcommand cannot arrive untested.
+
+When a check like #4 could fail destructively, exercise it through the harmless
+sibling: the `--help` test drives `netmode.sh status`, not `harden`, because a
+test that proved `harden --help` is safe by running `harden` would be its own
+worst outcome. Pair it with a structural check — that the argument validation
+sits *above* the dispatch — to cover what the safe path cannot reach.
 
 ## The system prompt is code, and it has to be measured
 
@@ -187,13 +524,69 @@ that argument every time. Naming the user's own verbs removes the
 classification step, and saying *where the answer goes* beats saying what it
 should contain.
 
-So: keep a couple of real prompts in a scratch file, run each candidate
-several times (they are sampled, so one generation proves nothing), count
-outcomes, and put the counts in the commit message. Also check the change does
+**There is a bench for this — use it.** `scripts/prompt-bench.sh` asks the real
+model the three questions that matter and counts the outcomes:
+
+```bash
+scripts/prompt-bench.sh -n 6                 # the prompt as it stands
+scripts/prompt-bench.sh -n 6 -f candidate.txt   # a change, same -n
+scripts/prompt-bench.sh -n 6 -m qwen2.5-coder:3b   # pin the smallest rung
+```
+
+Three questions must hand over (`build me an app`, the same with a feature
+list, and the starter question the chat's own empty screen offers) and two must
+**not** (`how do I take a backup`, `explain list vs tuple` — the second is what
+the chat is *for*).
+A change has to hold all three columns at once, which is the difficulty: the
+guard that fixed the backup hijack had to be checked against the build case,
+and the line that made answers say *where* had to be checked against both.
+
+It is deliberately outside `make test` and CI — it needs a running model and
+minutes of CPU, and CI has neither. Its **classifiers** are unit-tested there,
+because a wrong matcher makes every future measurement wrong in a way nobody
+would notice; two already did.
+
+So: run each candidate several times (they are sampled, so one generation
+proves nothing), count outcomes, and put the counts in the commit message.
+**Use `-n 20`, and the same seeds either side.** Six is not enough — not just
+wide, but wrong: one change read 5/6 then 2/6 at `-n 6` (a regression) and
+12/20 then 16/20 at matched seeds (an improvement). The same prompt pair read
+2/6 and 3/6 at one seed range and 8/10 and 2/10 at another. Also check the change does
 not fire on questions it should not — a handover rule strong enough to beat
 the tutorial reflex can easily hijack "what does this error mean?", and a chat
 that answers everything with `cd ~/my-project && lca` has been made useless in
 the course of making it honest.
+
+**Do not name the wrong answer, even to rule it out.** Measured on the 3b
+rung, n=10 each, against the starter question that asks for "the exact command
+for the terminal case":
+
+| Wording | Names the bare command |
+|---|---|
+| `the bare word 'lca' — not 'lca ask'` (shipped) | 6/10 |
+| adding `with nothing after it` | **9/10** |
+| `every 'lca <word>' is a server command… 'lca apply' changes settings` | **1/10** |
+
+The last row is the lesson: mentioning `lca apply` as a counter-example taught
+the model to answer `lca apply`. State what the command **is**; do not
+enumerate what it is not. The winning change was one clause, and the other
+bench questions were re-run to prove it cost nothing elsewhere.
+
+**Describing an argument slot invites the model to fill it.** The same lesson
+from the other side, measured at `-n 20` on the same seeds. The prompt's
+command table says `lca logs   recent logs from Ollama, the chat app and the
+installer` and never mentions that it takes one of four fixed sources, so
+naming them looked like plain accuracy:
+
+| | invented an `lca` command |
+|---|---|
+| shipped wording | 2/20 |
+| naming the log sources | **9/20** |
+
+It started passing a source and guessing it wrong — `lca logs systemd`. The
+handover metrics did not move either way. Two experiments now point the same
+direction: more detail about how a command *can* be used costs more than it
+buys, while an example of the right answer is safe.
 
 **A command you put in the prompt is a command you are shipping — run it.**
 Once the handover fired reliably, it was reliably handing out
@@ -205,6 +598,45 @@ prompt. Run the literal line in a throwaway `HOME`, and check the model
 reproduces it *whole*: a longer recipe is only a fix if it survives the copy
 (this one did, 6/6 verbatim — but that was worth measuring, not assuming).
 
+**A comment on its own line survives the copy; a trailing one does not.** The
+answers are read on a phone, so the recipe has to say where it runs. Three
+forms, same information, measured the same way:
+
+| Where the "where" lives | says where |
+|---|---|
+| an instruction — "Add one line: that goes in a terminal…" | 1/6 |
+| `#` comment on its **own line** above the command | **5/6** |
+| the same words trailing the command line itself | **0/5** |
+
+The instruction fails because a 3b model will not narrate context on request.
+The trailing comment fails for a different and more useful reason: the model
+reproduces a block line by line and drops what hangs off the end of a line. So
+"put it in what gets copied" is not enough — it has to be its own line to get
+copied.
+
+That last row also nearly cost a gate. Accepting it would have meant relaxing
+the pattern that requires the recipe line to end at `lca`, which is the gate
+that catches the `lca ask` misdirection. Loosening a gate to fit a new shape is
+how gates stop gating; it was worth measuring before touching it, and the
+measurement said don't.
+
+**Read a real answer before you trust a threshold.** Every proxy metric here
+has been wrong at least once, always in a way that looked like a product
+defect:
+
+| The metric said | The truth was |
+|---|---|
+| "handed over 1/6" | the pattern missed "run `lca` in your project directory" |
+| "tutorial 1/3 on 7b" | the detector counted our *own* recipe's `mkdir` |
+| "truncated 2/4" | the harness capped generation at 400 tokens |
+| "complete file 1/4" | a correct `config.py` is 3 lines; the threshold wanted 5 |
+
+Each cost a round trip, and two of them nearly went into a commit message as
+findings. When a number moves in the direction you expected, that is when to
+be most suspicious of it — dump one raw generation and read it before drawing
+any conclusion. The fourth row was found that way after the third had already
+been found that way.
+
 **Count the failure, not the success.** Scoring "did it say the right thing?"
 means writing a regex for every phrasing of right, and the one used here quietly
 missed "run `lca` in your project directory" — so every reported success rate
@@ -215,6 +647,1019 @@ worth chasing. Prefer the metric that cannot flatter you.
 And prompt length is a real cost: it is spent on every message, out of a 4096
 token context on the 3b rung. Cut what measurement shows does not work rather
 than layering more words on top.
+
+## Drive the behaviour. Reading the source for evidence of it is not a check
+
+This is the single most common way a gate here has turned out to be
+decoration, and it has now happened four times in two days:
+
+| The gate | What it read | Why it could not fail |
+|---|---|---|
+| the conventions keyed-phrase gate | `config/CONVENTIONS.md`, raw | the editor note at the top lists every keyed phrase, so the grep always matched — for two sessions |
+| `webui.sh` drift reporting | seven hand-written `check` lines naming seven keys | `webui_drift` grew an eighth; nothing noticed, and `WEBUI_BANNERS` drift printed nothing under a green health line |
+| `every_installed_unit_is_removed` | `uninstall.sh`, for each unit's *name* | a file that merely mentions a unit passes; removal was never attempted |
+| `net_guard_still_dies` | `net_guard`'s own body, for the string `die ` | stubbing the function to `return 0` leaves the body, and that string, exactly where they were |
+
+Every one of them read source text as evidence that a behaviour happens, and
+every one of them stayed green while the behaviour was gone. The last was
+found by mutation sweep: stub each function in `scripts/lib.sh` to `return 0`,
+run the suite, and see what still passes. **Forty-four functions survived.**
+(Most have since been driven; the section below on what a real machine can
+settle carries the current count and how the rest were dealt with.)
+
+**So: drive the thing.** Call the function, with the world stubbed around it,
+and assert on what it returns, prints or leaves behind. Nearly everything is
+drivable with less setup than the grep took to write — the survivor section at
+the end of `tests/test-lib.sh` drives a Tailscale address off a stubbed
+`tailscale`, a relay address off a real unit file in the sandbox, and
+`confirm`'s refusal through a real terminal via `script`.
+
+**Where driving is genuinely impossible** — a real GPU, a real sudo refusal on
+a suite that runs as root, a live container, a package install — a source grep
+is allowed, and it must say so:
+
+```bash
+# SOURCE-GREP: this needs an NVIDIA card, which no runner here has. What it
+# cannot check is that the parse is right for a real nvidia-smi.
+gpu_probe_reads_the_largest_card() { ... }
+```
+
+**Extract-to-drive is not a source grep**, and it is the shape to reach for
+when a script cannot be sourced (`agent.sh` and `check-system.sh` both run
+`main` at the bottom). Pull the block out with `awk`, `eval` it with the world
+stubbed, and assert on what it *did* — `numeric_complaints`,
+`seeded_settings_payload` and `drift_case_block` all work this way. It still
+reads source, so it still carries a `SOURCE-GREP:` marker, and the marker says
+the one thing such a helper genuinely cannot check: that the extraction still
+finds the right block. Every one of them fails loudly on an empty block, which
+is what stops it asserting over nothing.
+
+**A known false positive, so nobody thinks they have done something wrong.**
+The classifier asks whether a function mentions a `${REPO}/` path *and* uses a
+text tool. A gate that **runs** a repo script and greps its **output** does
+both, and is the opposite of a source grep — `uninstall_says`,
+`tune_dry_run_in` and `big_unknown_is_elided` are all in that position. They
+carry a marker saying so. That is deliberate: a tighter rule would have to
+guess which tool touched which path, and a classifier that guesses is the thing
+this section exists to stop. A handful of false positives with an honest
+sentence each is a better trade than one clever rule nobody can audit — and the
+count only grows as gates are converted, because a driver is exactly the shape
+the classifier mistakes for a source grep.
+
+`new_source_greps_are_justified` enforces it: a function in `tests/test-lib.sh`
+that reads repo source with a text tool, is not in
+`tests/source-grep-census.tsv`, and carries no `SOURCE-GREP:` line, fails the
+suite. The census is a record of debt, not permission.
+
+### What the census found, from reading all 278 of them
+
+The list started as 286 grandfathered names with no reason beside any of them.
+Two samples of a dozen each disagreed about how much of it was real debt — four
+of twelve, then eight of twelve — so the whole population was read one gate at a
+time instead. That read is `tests/source-grep-census.tsv`, and it is checked in
+because a number nobody can re-derive is a number nobody should trust.
+
+| | count | share | what it is |
+|---|---|---|---|
+| **A** | **153** | 55% | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
+| B | 97 | 35% | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
+| FP | 28 | 10% | not debt: the gate drives its subject and greps the *result* |
+
+153 of the suite's 1,239 checks, then — about one in eight — assert a runtime
+behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
+converting a gate moves its row from A to FP rather than deleting it, so the
+count is a ratchet and not a promise.
+
+That table is the measurement as taken. The population has grown since, because
+the classifier was widened twice (see the blind spots below), and the A count
+has come down as gates were converted; `tests/source-grep-census.tsv` is always
+the current answer, and the ratchet in `group_a_debt_has_not_grown` moves with
+it. What must never happen is the A count going up.
+
+Two counting errors surfaced in the same read, and both flattered the old
+number:
+
+- **28 of the 296 names the scanner flags are helpers, not gates.**
+  `probe_region`, `baked_keys`, `drift_case_block` and the rest extract source
+  for a gate to judge. Their debt, if any, belongs to the gate that calls them,
+  and counting them twice made the population look bigger than it was.
+- **Ten gates read repo source only through one of those helpers, and the
+  scanner cannot see them at all.** `every_drift_key_is_reported` compares two
+  lists that `drift_keys` and `drift_arms` pulled out of the source; the
+  `${REPO}/` path is in the helper, so the classifier's rule — *mentions a
+  `${REPO}/` path **and** uses a text tool* — never fires on the gate. Moving a
+  read into a helper is therefore a way to silence the meta-gate without
+  changing anything, which is the same shape as everything else in this
+  document: a thing that reports success having done nothing.
+
+The census carries those ten anyway. They are labelled by what they do, not by
+what the scanner can see.
+
+**And a third route past the classifier, found later: a repo path held in a
+variable.** `${APPLY}`, `${TESTS_DIR}`, `${CENSUS}` and `${DOC_SURFACES[@]}`
+all hold paths inside the checkout, and the rule looked for the literal
+`${REPO}/`. Seventeen more gates read source through one of them — including
+three checks that grepped `apply.sh` for the *name* of an applier, which is the
+weakest shape this document describes, sitting unclassified. The classifier
+knows those four variables now. The lesson is not the variable list: it is that
+a rule written as "the body contains this literal" will keep meeting shapes it
+was not written for, and each one is invisible in exactly the way that matters.
+
+The meta-gate is itself the kind of thing that becomes decoration, so it is
+driven too: its classifier is run over a fixture holding one offending function
+and one justified one, and asserted to tell them apart. Without that, a
+classifier that silently matched nothing would be the same bug, one level up.
+
+### An aggregate nobody could check, replaced by a per-row fact
+
+The census header carried a split: of the A rows left, *52 worth driving and 33
+correctly narrow*. The 33 was a projection from a single reading pass and was
+never checked row by row — which makes it the same shape as everything else in
+this document, sitting in the ledger that exists to record removing that shape.
+
+Re-reading the likeliest candidates confirmed **seven**, and they are B now,
+each with a pointer to what actually drives the behaviour: `honours_skip` to
+`tests/test-fresh-install.sh`, `sources_the_real_ladder` to
+`ladder_agrees_with_tune`, `uninstall_answers_help_first` to
+`installers_answer_help_before_acting`,
+`guard_message_names_only_guarded_ports` to `apply_inbound_guard` in
+`tests/test-netmode.sh`, `every_surface_reads_one_instructions_source` to the
+pair that drives `lca_user_instructions` at both values. The other two are
+honestly text: `ci_compares_the_whole_prompt`, whose subject is the shell inside
+`ci.yml`, and `uninstall_removals_can_reach_root`, an exhaustive absence rule
+over the source with a counted floor.
+
+An eighth candidate did not survive the re-read.
+`watch_log_arm_cannot_feed_an_armed_ceiling` looks like a uniqueness rule — one
+`iters` increment, on the `step_source` line — and `tests/test-agent-watch.sh`
+does drive the step ceiling. It drives the *events* arm with the ceiling armed
+and the *log* arm with it disarmed, which is not the combination this row is
+about. It went back into the debt, and into a tier. Reading a row is not the
+same as classifying it from the sentence you wrote about it last month.
+
+So the aggregate is withdrawn. Every remaining A row is now placed in one of
+four cost tiers in the census header — exposure and data first, false all-clears
+second, silently-wrong work third, misinformed readers last — and
+`census_order_covers_every_a_row` requires the published order to name every A
+row exactly once. A row dropped from the order is a row nobody will ever reach;
+a name in the order that is no longer A makes the tiers look fuller than they
+are. Both now fail the suite.
+
+The debt count went **up**, from 52 to 78, and that is the honest direction: the
+33 was never a measurement. What replaced it is a per-row assignment anybody can
+re-derive.
+
+## A gate that is never run is worse than no gate
+
+`tests/test-lib.sh` is a linear script: a function is a gate only because a
+`check` line names it. Converting `install_is_truncation_safe` from a source
+grep to a driven test replaced the body *and* the `check` line that ran it. The
+suite stayed green, the census still counted the gate, `make gates` passed, and
+the gate was dead — noticed only because a mutation of `install.sh` came back
+killed by three *other* gates and not by that one.
+
+Nothing in 19,000 lines could see it, so now something can. `tests/reachable.awk`
+builds a test file's call graph — roots are `check` invocations and top-level
+calls, edges are names mentioned inside a function body — and
+`no_test_function_is_defined_and_never_run` fails on anything the graph cannot
+reach, across every `tests/*.sh`.
+
+It over-approximates deliberately: a name inside a string counts as a call, so
+it errs towards silence rather than towards accusing live code. Two things it
+found on its first run:
+
+- `command_not_found_handle`, which bash calls itself. Exempt by name, with its
+  reason, in `reachable.awk`'s own `exempt` list — and not in a shell array
+  beside the gate, because an array naming it would be a top-level mention, so
+  the exemption would root the name and the exemption machinery would be doing
+  nothing.
+- a whole verdict category in `tests/live-verify.sh` — WRONG, documented at the
+  top of that file, counted, printed in the summary and included in the exit
+  condition — whose reporting function no line ever called, so the column could
+  only ever read zero. A column that always reads zero looks like a check being
+  made. It was removed.
+
+Its non-vacuity check is worth reading before you copy it: the probe file is a
+*copy of `test-lib.sh` itself*, so the deliberately-dead function's name has to
+be assembled from pieces. Written as one literal, the name appears in the copy
+as a mention inside a live function — an edge — and the dead function comes
+back reachable. That is the fourth time a scanner here has been fooled by text
+about itself, and the first where the text was the fixture.
+
+The other half of the same trap is a function defined **twice**. A test suite
+here is a linear script, so the second definition silently replaces the first:
+every call above it gets one implementation and every call below gets another,
+with nothing said. `url_for` was defined twice eleven thousand lines apart —
+once over `OLLAMA_HOST`, once over `WEBUI_PORT` — and the only thing keeping
+that from being a wrong answer was that no caller happened to sit on the wrong
+side of the second one. `tests/duplicate-defs.awk` and
+`no_test_function_is_defined_twice` now refuse it.
+
+Both scanners have to skip the same two kinds of data, because this suite is
+full of both and each contains real function definitions on purpose: quoted
+heredocs (the fixtures, which exist to be scanned) and single-quoted strings
+spanning several lines (the shims handed to `restore_sandbox`, which are code
+for *another* shell). A naive grep reports ten duplicates here; nine of them
+are fixtures, and the tenth is the real one.
+
+### ...and the rail that was never run at all
+
+The same rule, turned on the thing that runs everything else. `.githooks/pre-push`
+is this project's stated safety rail for the AI-assisted loop: an agent edits,
+the hook runs ShellCheck, `bash -n` and both suites, and a push that fails them
+never leaves the machine. **Nothing had ever run it.** The only gate on it,
+`hook_does_not_promise_more_than_it_runs`, reads its *prose* — that it does not
+over-promise a green CI — and stops there.
+
+Asking what would have to be true for it to be broken with nobody noticing gave
+two answers, and the second one was already true:
+
+1. the hook runs and swallows `make`'s status, so a red push goes out reported
+   as gated;
+2. **git never invokes it at all**, because `make hooks` is opt-in and a clone
+   that skipped it says nothing, ever.
+
+This clone had skipped it. `core.hooksPath` was unset and `.git/hooks/pre-push`
+did not exist, so every push made from here went out with the rail unarmed. The
+only reason that cost nothing is that the suite was run by hand each time — the
+rail was a habit, not a mechanism, and a habit is exactly what a rail is for
+replacing. *A safety mechanism whose absence is silent is indistinguishable
+from one that is present and broken.*
+
+Both answers are now driven, against a real sandbox repository with a real bare
+remote:
+
+| | driven by |
+|---|---|
+| `make hooks` actually sets `core.hooksPath` and leaves the hook executable | the recipe run for real — nothing had executed it before |
+| a failing gate stops a real `git push` reaching a real remote | a stub `make` that exits 1; the remote head must not move, and the hook must have asked for `gates` and not for something else that happens to exit non-zero |
+| a passing gate lets the same push through | the same stub at 0 — without this, a hook that refused everything would pass the row above |
+| a clone with no hook is told so, and a clone with one is not nagged | `make hooks-status`, both ways |
+| ...and this suite's own verdict says it too | `rail_notice`, both ways |
+
+The stub `make` is the point, not a shortcut: what is under test is the **rail**,
+not the gates it runs. Does git invoke this hook, does it ask for `make gates`,
+and does a non-zero answer stop the commit reaching the remote.
+
+`make gates` and the suite's own verdict now both say when the rail is not
+armed, because those are the two things somebody actually runs in a fresh
+clone — `make gates` if they read CONTRIBUTING, the suite directly if they are
+an agent who did not. It is a note, not a failure, and it disappears the moment
+the hook is installed. CI is told nothing: it has no hook to install and no
+push to make.
+
+One more thing worth recording, because it nearly buried all of the above. The
+first mutation run reported all three mutants passing — a perfect "these gates
+are decoration" result. The mutations had not applied: the probe hardcoded
+`REPO` and never read the mutated copies. This document already warns about
+exactly that ("a mutation that does not apply looks exactly like a test that
+cannot fail"), and it still took a second look. Print proof the mutation landed.
+
+The same sweep asked the other half of the question — *which files can nothing
+reach?* — and got one answer. `tests/live-verify.sh` had no `make` target, no CI
+job, no `bin/lca` subcommand and no caller anywhere: 487 lines that are the
+other half of the unit suite, same subjects with no stubs at all, against a real
+docker and a real agent. The only record that it could be run was one sentence
+in `docs/PROMPT-WINDOW.md`. It is now `make live-verify`, beside `make coverage`
+and `make smoke`, and `every_test_script_has_a_way_in` refuses the next one.
+
+Run here, on a box with no docker, it exits 2 with *"The docker daemon is not
+reachable as root; nothing here can be driven"* — refusing wholesale rather than
+printing forty skips that would look like coverage. The instrument was fine. The
+only thing wrong with it was that nobody could get to it, which is a defect you
+find on the day you need it and not before.
+
+
+## A tool that parses source must tell code from commentary about code
+
+Three times in one session the tooling was fooled by text *about itself*, and
+all three were the same mistake wearing different clothes:
+
+| What happened | Why |
+|---|---|
+| A gate's `SOURCE-GREP:` marker was matched anywhere in the comment block above it — so the section's own prose *explaining what a marker is for* justified the function underneath it. Deleting that function's real marker changed nothing. | the scanner did not require the marker to *begin* a comment line, so an explanation counted as an excuse |
+| A scanner treated a one-line `f() { …; }` as an unterminated body and attributed **the entire rest of the file** to it. The baseline generated from it was wrong by ~90 entries. | the scanner handled one shape of the thing it parses and met another |
+| A driven test was reclassified as a source grep because a comment in it ends *"and this still passed."* — which contains `sed`. | the scanner matched substrings, in comments, and drew a conclusion about code from prose |
+
+The rule that falls out:
+
+- **Strip or skip comments before drawing a conclusion about code.** A comment
+  mentioning `grep` is not a grep; a comment naming a function is not a call.
+  Several gates here already do `sed 's/#.*//'` first and say why — that is the
+  habit, not a flourish.
+- **Match tokens as tokens.** `sed` inside "passed" is not a call to `sed`.
+- **Handle every shape of the construct you parse,** especially the one-liner.
+  If your scanner finds function bodies by looking for a line that is `}`, a
+  `f() { …; }` will silently swallow the file.
+- **Drive the scanner over a fixture containing the shapes that would fool it.**
+  This is the only one of the four that catches the case you did not think of,
+  and it is why `source_grep_gates` and `justified_gates` are run over
+  `SG_FIXTURE` — which now holds a one-liner, a prose mention of `sed`, and a
+  comment explaining the marker, because those are the three that got through.
+
+The same applies to anything that *edits* source. The mutation harness patches
+function bodies by regex, and `ok()   { … }` — three spaces before the brace —
+did not match the fixed-string shapes it started with. It reported
+`UNPATCHABLE` rather than lying, which is the difference between a harness that
+can be trusted and one that cannot; but the list of functions it sweeps is now
+derived from the same pattern that patches them, so the two cannot disagree
+about what a definition looks like.
+
+And it takes a lock. Two sweeps once ran at the same time — a relaunch whose
+predecessor's `xargs` had been reparented to `init` rather than killed with its
+parent — both appending to one results file and copying trees into the same
+directories. 123 result lines over 73 functions, every tree liable to be
+overwritten mid-run by the other sweep. It looked exactly like a result, which
+is the whole theme: **anything that writes verdicts to a shared place needs to
+be the only thing writing there, and needs to say so rather than assume it.**
+When you kill a background pipeline, kill the process *group* — a bare `kill`
+on the parent leaves the `xargs` running and adopted by `init`.
+
+## What only a real machine can settle, and how to settle it
+
+A mutation sweep stubs every function in `scripts/lib.sh` to `return 0` and
+runs the suite. Forty-four survived the first round. Most were then driven, and
+the twenty-nine that were left were listed here — grouped by tier, with a
+command and a pass condition for each — as work that needed a droplet.
+
+**Most of that list was an excuse.** Twenty-six of the twenty-nine are parsers
+over the output of one command: `docker container inspect`, `docker container
+port`, `docker ps`, `ollama list`, `curl …/api/ps`. A recorded sample of that
+output settles each of them here, in a second, with **both** answers — so a
+probe that always says yes and one that always says no each fail. They are
+driven in `tests/test-lib.sh` under *"the probes a mutation sweep could not
+kill"*, and the stubs are shell **functions**, because `have docker` asks
+`command -v`, which finds a function.
+
+They were then mutation-checked rather than assumed: each target stubbed to
+`return 0` in a complete copy of the repo, the suite run, the gate expected to
+fail. **Twenty-six of twenty-seven killed, control passing.** The one survivor
+was a gate that stubbed the very function it was meant to be testing, which is
+the failure this whole document is about arriving from the inside; it now
+drives the real one with `curl` stubbed instead.
+
+Two of the twenty-six cannot be stubbed and are not:
+
+- `ollama_bg_env` reads `/proc/<pid>/environ`, so its gate launches a **real**
+  process named `ollama` — a copy of `sleep` — with the environment under test.
+- `start_ollama_bg` launches through `nohup env … ollama serve`, and `env(1)`
+  cannot run a shell function, so its gate puts a real file on `PATH` (through
+  `make_stub_dir`/`stub_path`, because a stub directory `sudo` cannot see is
+  how a test passes here and fails on a runner that escalates).
+
+Driving `start_ollama_bg` is also what found the command-less `exec` that
+silenced stderr for the rest of every `lca` command on a host without systemd.
+Nothing in a source grep of that function looks wrong.
+
+### What is actually left
+
+| What | Where | Pass condition |
+|---|---|---|
+| `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
+| the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
+| whether `WEBUI_IMAGE` can be drift-checked | a box with a **real docker daemon** and the chat app running | see the three commands below. The answer decides between two implementations, and guessing wrong makes `lca apply` re-create the chat container on every run |
+
+#### The `WEBUI_IMAGE` question, written out
+
+`WEBUI_IMAGE` is honoured by `lib.sh` and four scripts, its own comment
+anticipates somebody pinning the tag, and `webui_drift` has no key for it.
+Measured against a stubbed docker: with the container on `v0.3.0` and `.env`
+asking for `v9.9.9`, drift reported `[]`. `lca apply` says "already matches
+.env" and the chat app runs the old image for ever — the shape
+`aider_pin_is_watched` records, one setting further on.
+
+It was not fixed here because the fix depends on one fact a stub cannot
+supply. Run this on a machine with a real daemon and the chat app up:
+
+```bash
+docker container inspect -f '{{.Config.Image}}' open-webui   # (1) what was PASSED
+docker container inspect -f '{{.Image}}'        open-webui   # (2) the resolved ID
+docker image     inspect -f '{{.Id}}' "$(. scripts/lib.sh; load_env; echo "${WEBUI_IMAGE}")"
+```
+
+**If (1) prints the tag** — `ghcr.io/open-webui/open-webui:main` — then a plain
+string comparison against `${WEBUI_IMAGE}` is stable, and the implementation is
+four lines in `webui_drift`, in the same shape as the six keys already there:
+
+```bash
+live="$(webui_container_image || true)"
+[[ "${live}" == "${WEBUI_IMAGE}" ]] || drifted+=("WEBUI_IMAGE")
+```
+
+A stock install compares equal, so `lca apply` re-creates the container exactly
+once — when the pin actually changes. What this does **not** catch is the tag
+moving under you: `.Config.Image` is fixed at creation, so a `:main` that
+advanced upstream still reads equal. Say so in the comment rather than implying
+otherwise.
+
+**If (1) prints a digest** — `sha256:…`, or `…@sha256:…` — a plain comparison
+reports drift on every run for every stock install, and `lca apply` re-creates
+the chat container each time. The implementation then has to compare (2)
+against (3): the container's resolved image ID against the ID the configured
+tag resolves to locally. That is strictly better — it catches the moved tag as
+well — but it needs the image present to resolve, so it must degrade to "no
+drift" rather than "drifted" when `docker image inspect` fails, or an offline
+box reports a pin problem it does not have.
+
+Either way the gate is the same: create a container from one tag, point `.env`
+at another, and require `webui_drift` to name `WEBUI_IMAGE`; then leave `.env`
+alone and require it not to. The second half is the one that matters, because
+the failure mode of guessing wrong is a chat container re-created on every
+`lca apply`.
+
+`setpriv` narrowed the second row rather than removing it. Running as somebody
+who is not root needs no real account, no sudo and no droplet:
+
+```bash
+setpriv --reuid=65534 --regid=65534 --clear-groups bash -c '...'
+```
+
+So every *permission* arm in `scripts/lib.sh` — the family root can never
+reach, because root reads and writes everything — is drivable here now.
+`readability_still_wants_x_of_a_directory` was the first to move: it used to
+assert that `readable_by_us` still contains `-x `, with a comment saying the
+directory half was "the code, because no account here can exercise it". It now
+calls the function as uid 65534 over a directory with r and no x, one with x
+and no r, an ordinary one, and a 0600 file the caller owns. Two more things it
+has to check first, and they are the ones worth copying: that the probe really
+dropped (a run as root looks exactly like a run that passed), and that the two
+directories it expects a **yes** for still get one, or "unreadable" would be
+the answer to everything.
+
+What the row still means is the other half. `sudo -n` and an interactive sudo
+behave completely differently, and setpriv gives you an unprivileged uid, not a
+password prompt. A prompt does not fail, it **waits** — so the failure mode is
+a command that never returns, and that still needs a box with a sudoers entry.
+
+The privilege probes it replaced are worth reading as a cautionary tale, not
+just as dead code. They made a throwaway account with `useradd`, ran through
+`runuser`, and skipped — *loudly*, said the comment — where they could not:
+
+> Skipped loudly rather than silently when the account cannot be made — a
+> conditional gate that vanishes on CI is a gate that reads as coverage while
+> protecting nothing.
+
+They never skipped loudly anywhere. The cleanup ran `userdel` on a user it had
+just declined to create; `userdel` exits **6** for "no such user"; and under
+`errexit` a failing command ends the *function*, so the `return 0` written at
+the bottom to make it safe was never reached. The suite died at that line. No
+SKIPPED message, no verdict, no FAIL — a bare exit 6 — and the several hundred
+checks below it had not run. Every CI run of `tests/test-lib.sh` had been
+ending there, on every machine that is not root, which is every runner.
+
+Two things came out of it:
+
+- `tests/test-lib.sh` now sets `SUITE_FINISHED=true` before its verdict, and
+  its `EXIT` trap prints **"the suite ENDED EARLY"** otherwise. A check that
+  fails prints FAIL and the run continues; anything else stops the process
+  where it stands, and the difference between those two has to be legible from
+  the outside.
+- The probes themselves no longer need an account, so nothing is skipped:
+  `as_nobody` drops to 65534 when the suite is root, and runs directly when it
+  is not — because then it already *is* the account the questions are about.
+  Which answer `can_root_now` must give depends on whether sudo lets that
+  account through without asking, so that is measured first and both
+  directions are asserted. Six checks, on every machine, where CI had zero.
+
+`systemd_available` is half-settled and honestly so: a host with no `systemctl`
+cannot have systemd, and the suite asserts that anywhere. Which of the two
+answers a given machine gives is that machine's business, not a gate's.
+`apt_get` is covered by CI's `minimal-base` job, on a bare `ubuntu:24.04`.
+
+Everything else that used to be on this list — `confirm`'s refusing branch,
+`netmode_state`, `tailscale_ip4`, `host_listeners`, `ollama_relay_unit_address`,
+`agent_workspace_dir`, `venv_python`, `load_env_readonly`, `model_load_notice`,
+`root_for_probe`, and the twenty-six above — is driven in the suite now.
+
+The rule that came out of it, and it is the useful part:
+
+> **Assume it does not need a real machine until you have tried to settle it
+> here.** A function that only parses one command's output needs a sample of
+> that output, not the machine that produces it. Writing "needs a droplet"
+> beside it costs nothing today and buys a list nobody works through.
+
+
+### The fifth stall, and the probe that was written out three times
+
+Tier 1 of the census order is the hang class: four live stalls have shipped from
+it and every one was found by hand. The two gates covering the *network* side of
+it read source for a `--max-time` flag — which survives being passed to a call
+that is never made, sitting on the wrong one of four probes, or being large
+enough not to matter, and says nothing at all about the `docker` reads beside it.
+
+So: the same sandbox shape as the sudo-stall gate, with the **world** replaced
+instead of the escalation. `curl` and `docker` accept and never answer, every
+reporting command is run against it, bounded, and has to come back. Five did
+not, in the shipped configuration:
+
+| | |
+|---|---|
+| `lca check` | printed its Docker heading and nothing under it |
+| `lca webui status` | never returned |
+| `lca logs` | never returned |
+| `lca agent logs` | never returned |
+| `lca agent status` | never returned |
+
+The first look found one probe written out by hand three times, unbounded in all
+three: `docker_daemon_reachable` in `scripts/lib.sh` (thirteen callers, one of
+them the login banner), `select_docker` in `webui.sh` (which runs for every
+`webui.sh` subcommand), and an inline pair in `check-system.sh`. `docker info`
+against a daemon that accepts its socket and never answers has no client-side
+deadline: the call does not run slowly, it never returns.
+
+Bounding those three moved the hang rather than removing it — `lca check` then
+reached its inbound-guard step and stopped there instead. Counting properly:
+**`scripts/lib.sh` has eleven read-only docker probes and exactly one of them
+was bounded.** Container inspects, `docker ps`, `docker network inspect`, the
+volume inspect: all unbounded, all reachable from a report.
+
+*That number was nine when this section was first written, and the commit that
+fixed the code said nine as well* — an undercount of my own diff, in a commit
+whose subject is claims matching diffs. The correction is the smaller half. The
+useful half is that nothing was counting, so a twelfth probe added without a
+bound would have been exactly as invisible as the ten were:
+`every_docker_question_is_bounded` counts them now, across `lib.sh`, `webui.sh`
+and `check-system.sh`, and refuses any docker *question* — `info`, `ps`,
+`inspect`, `port` — that carries no bound. Actions stay exempt by name.
+
+The sharpest part is that the argument was already written down. The one bounded
+probe, `webui_container_env_list`, sits six lines above `docker_daemon_reachable`
+and carries a comment explaining exactly why *its* `docker inspect` is wrapped in
+`timeout` — "a reporter that hangs is strictly worse than one that says cannot
+tell, and the banner runs on every SSH login". `scripts/install_docker.sh`
+carries another, written when a local copy of the daemon probe was removed,
+saying that local copies are the problem. Every one of the eight unbounded
+probes was written after both comments existed. **A rule that lives in a comment
+protects the function the comment is attached to, and nothing else — which is
+why it is now one shared `LCA_DOCKER_RUNNER` array rather than eight correct
+decisions.**
+
+An array, not a wrapper function, because half of these run through `as_root`
+and sudo cannot execute a shell function. `tests/test-lib.sh`'s `lib_probe`
+already stands in for `timeout` for exactly that reason, so the in-process
+stubs still reach the code they stub.
+
+Actions are deliberately left unbounded: `docker run`, `docker pull` and
+`docker rm` are things the reader asked for and may legitimately take minutes.
+This is for questions. The bound is `LCA_DOCKER_PROBE_TIMEOUT`, default five
+seconds — not one: the cost of being too tight is not a slow report but a wrong
+one, a false "cannot reach the daemon" that refuses to start the agent, and this
+project has already shipped the mirror-image bug.
+
+`lca check` against a wedged daemon now takes about forty seconds, because it
+asks in three steps and the inbound guard asks twice more. That is a broken
+machine being reported slowly, and the gate's bound is loose enough to allow it.
+Slow is not the defect. Never arriving is.
+
+**An instrument artefact, recorded because it nearly became a finding.** The
+first sweep also reported `lca status` hanging — inside its own printed line
+`Live probe: curl --max-time 5 https://example.com`. The stub `curl` was
+sleeping regardless of `--max-time`, which no real curl does, so a correctly
+bounded call scored as a hang. The stub now honours `--max-time` and exits 28;
+`docker`, which has no such flag and can only be bounded by a `timeout` around
+it, simply stops answering. That asymmetry *is* the gate: the question is
+whether the call is bounded, not whether the command can be made to sit there.
+A stub encodes a belief about the world, and a wrong belief in a stub produces a
+confident wrong answer about the product — which is the same failure this whole
+document is about, one level down.
+
+Two more came out of running the sweep again after each fix, which is the only
+way this kind of thing is ever finished — every repair moves the hang rather
+than removing it, and the next one is only visible from where you now are.
+
+- `run_reader` takes a **probe** and a **real** command: "can this be read?",
+  then the reader's output. The probe was unbounded, so `lca agent logs` asked
+  `docker container inspect` of a wedged daemon and sat there having printed
+  nothing — the exact failure `run_reader` was written one layer up to remove.
+  The probe is bounded now and the real command deliberately is not: a log
+  stream may run as long as it likes. That distinction is the whole helper.
+- The gate itself had to stop testing the size of the bound. At the shipped
+  five seconds, `lca check` spends about forty seconds asking a wedged daemon
+  in five separate places, and a gate that waits that out twice is slower than
+  the rest of the suite. It now runs the product at a one-second bound and
+  leaves the stub silent for two minutes, so what it measures is whether the
+  call is bounded at all — which is the claim — and not how generously.
+
+### The one sentence that tells you how to get your machine back
+
+Tier 1 of the census order is what a silent failure costs, and `update.sh`'s
+recovery advice is the sharpest instance in it. If `lca update` applies new code
+and then setup fails, one line tells the reader they have a restore point taken
+minutes earlier. `update_mentions_restore_on_failure` asserted that line by
+reading `update.sh` for the word `restore.sh` inside the setup step.
+
+**It had never run.** It fires only when a backup was really taken *and* new code
+was really applied, and the harness drove neither: every case passed
+`--no-backup` against a checkout zero commits behind its remote. All three cases
+that did run take the other branch — "there is nothing to roll back".
+
+`drive_update` now takes a backup status and a commits-behind count, and makes
+the checkout genuinely behind by committing forward, pushing, and stepping back.
+Two branches that had never executed now do:
+
+- setup fails after a real backup and a real pull → the roll-back advice, naming
+  `restore.sh`, and a non-zero exit;
+- the backup itself fails → the update refuses to run unattended and never
+  reaches setup, so there is nothing to roll back *from*. Unattended is
+  unattended however it got that way: `confirm()` auto-answers yes with no
+  terminal, which is right for an install prompt and exactly wrong here.
+
+And a lesson about the first of those, because **the first draft of it passed on
+mutated code.** It asserted `restore.sh` anywhere in the output — but `update.sh`
+names `restore.sh` in its *successful backup* message too ("restore with … if
+this update goes wrong"), so with the recovery branch disabled the check was
+contentedly measuring the backup. Mutating the branch away is what found it.
+The assertion is one line now: the roll-back sentence and the script name
+together, on the same line, which is the only place they mean what the gate
+claims.
+
+### Every switch, and the two cost notes that were wrong
+
+`tests/config-coverage.tsv` began with eight switches nothing drove the other
+side of. It now has none. The last four went together because they are one
+decision seen from four sides: `AIDER_CONVENTIONS` is the master switch,
+`CONVENTIONS_AIDER` and `CONVENTIONS_AGENT` are the per-surface overrides, and
+`AIDER_NO_AUTO_COMMIT` is the flag the third of them ends up beside in aider's
+argv.
+
+Two of the four carried "Cost: low", and both notes were wrong in the same way.
+
+- **`AIDER_CONVENTIONS` said `check_report` reaches it.** At the shipped
+  defaults it does not: `CONVENTIONS_CHAT` is false, so the chat prompt carries
+  no appendix and turning the master switch off changes nothing a report can
+  see. Measured — identical output, ~577 tokens either way. The other side is
+  only reachable with the chat surface switched on too: 1224 tokens against 577.
+- **`AIDER_NO_AUTO_COMMIT` said the argv probe drives both values.** It does.
+  The probe extracts one block out of `run-agent.sh` and evaluates it, and what
+  it cannot see is any of the forty lines above that block deciding never to
+  reach it — a missing aider, an undownloaded model, a metadata file that cannot
+  be written, a question asked of a terminal that is not there. **`lca` is this
+  project's headline command and nothing had ever run it.** It has a
+  whole-command harness now, and the flag is read off the argv a stub aider
+  really received.
+
+*A cost written down without being paid is a guess wearing a number.* Both of
+these had been read as settled facts for weeks.
+
+The third and fourth are the settings `.env.example` only *suggests*, in a
+comment. `CONVENTIONS_AIDER=yes` now runs through a whole `lca check` and is
+reported — that is the value which reads as OFF, because every switch here is
+compared against the word `true`, and the only difference between the two
+settings was which side of a `#` they were written on. And setting
+`CONVENTIONS_AGENT` at all takes the switch count from 12 to 13, either way
+round: what changes the count is being *set*, not what it is set to, which is
+the observable difference between a suggestion and a decision.
+
+What is left is the value-settings tranche — `OLLAMA_KEEP_ALIVE`,
+`AGENT_STEP_SOURCE`, `MODEL_NAME`, `AGENT_PORT`, `AGENT_TIMEOUT_MINUTES` — which
+are compared rather than interpolated and select a branch exactly like a switch
+does. That is where the next configuration blindness will be.
+
+### Three answers to "which bytes are a comment", and none of them checked
+
+The droplet session found four tools that parse the test suite, each having
+independently answered *which lines are code*, three of them wrong — one making
+a false accusation in the only scanner whose header promises it never does.
+They now share one lexer. The same question, asked of this side:
+
+`tests/test-lib.sh` contains **68** uses of `sed 's/#.*//'`, **9** of
+`sed 's/^[[:space:]]*#.*//'`, and **1** of a hybrid that also strips double
+quotes. Three different answers, in one file, to the same question.
+
+The dominant one is wrong for shell. `#` does not open a comment inside
+`${var#pattern}`, `${var##pattern}`, `$#`, `${x/#a/b}`, or any quoted string —
+and `sed 's/#.*//'` cuts at all of them:
+
+```
+  host="${host#http://}"       ->  host="${host
+  size="${model##*:}"          ->  size="${model
+  if (( ${#added[@]} )); then  ->  if (( ${
+```
+
+Measured with a shell-aware stripper, cross-checked against a second
+independent implementation until the two agreed byte for byte on every file:
+**33 mis-stripped lines in `scripts/lib.sh`, 543 in `tests/test-lib.sh`, and at
+least one in every shell file in the repository.**
+
+Worth being precise about *where*, because it is not where the droplet's was.
+The three awk scanners — `tests/reachable.awk`, `tests/duplicate-defs.awk`,
+`tests/long-wait.awk` — all use the whole-line rule `^[[:space:]]*#`, which is
+conservative and cannot truncate code mid-line; `tests/coverage.sh` does not
+strip comments at all. **The standalone tools on this side are fine.** The
+exposure is entirely in the 68 inline strips inside the suite, where the unsafe
+form is the house idiom.
+
+**And today it changes nothing.** Both strippers were run over the whole suite —
+two clones at the same commit, one patched at all 68 sites — and once the
+artefacts of the patch itself were accounted for, *no verdict differed*. The
+gate that reads a mis-stripped line never happens to search for a token sitting
+after the `#`. That is luck, not design, and it is the same luck the droplet's
+three wrong parsers had until one of them ran out of it. A landmine, not a fire:
+worth fixing at the source rather than at 68 call sites, which is what the
+single lexer is for.
+
+Two of the artefacts are worth recording, because each briefly looked like a
+finding:
+
+- The patched copy piped a file into `awk`, and the suite's own
+  `no unbounded listing is piped into a reader that exits early` gate caught
+  it. The gate was right and my patch was wrong.
+- The control run showed three failures the working tree does not have. All
+  three are about what a non-root account can see, and the clone sat under four
+  `drwx------` directories in the scratchpad, so uid 65534 could not traverse
+  to it at all. Nothing to do with the product. *Where you put a clone is part
+  of the fixture.*
+
+### The fourth answer, and what a wrong lexer actually does
+
+The section above says the three awk scanners on this side are fine, because
+none of them can truncate code mid-line. That is true and it was the wrong
+question. `tests/duplicate-defs.awk` does not only decide which lines are
+comments — it also decides which lines are *string data*, and it does that by
+counting apostrophes: an odd number on a line opens or closes a multi-line
+single-quoted shim. It is a fourth answer to *which lines are code*, and it is
+wrong in the way that matters most.
+
+A helper added to the suite contained this, in a grep pattern:
+
+```
+grep -ohE "$1=[^[:space:]\"'\$#]+" ...
+```
+
+One apostrophe, inside double quotes, where it is an ordinary character. The
+scanner counted it, believed a literal had opened, and read **every line after
+it as string data**. It did not accuse anything. It did not truncate anything.
+It went quiet — which reads exactly like a clean file.
+
+*This is the difference between a wrong lexer and a wrong lexer you notice.*
+A parser that mis-strips a comment produces a false accusation, and somebody
+argues with it. A parser that mis-detects a quote produces **silence**, and
+silence is the same shape as success.
+
+The only thing that caught it was the non-vacuity probe at the end of
+`no_test_function_is_defined_twice`, which appends a duplicate pair to a copy
+of the file and requires the scanner to see it. It caught this because the
+blindness ran to the end of the file. **Blindness that closes again a hundred
+lines later would have passed that probe**, and the middle of the file would
+have been unscanned with nothing to say so.
+
+Three things came out of it:
+
+- The scanner now reports reaching the end still inside a heredoc or a literal,
+  naming the line that opened it. Silent blindness is now a loud failure, and
+  `...and says so when an unclosed quote stopped it looking` drives it: blind
+  the scanner on purpose and require it to say so, *and* require the duplicate
+  below the apostrophe to be missed, so the warning cannot come from a scanner
+  that was reading fine.
+- One pre-existing instance, in `tests/live-verify.sh`. `t_ok "the agent's
+  port …"` at line 454 of 487: the last **33 lines of that file have never been
+  scanned**, since the commit that added it. Reworded.
+- The same question asked of the product scripts, which this gate does not
+  cover: **eleven of them trip the new warning** — `agent.sh`,
+  `check-system.sh`, `scripts/ask.sh`, `scripts/speed.sh`, `scripts/selftest.sh`
+  and the six agent-tier scripts — all on ordinary English apostrophes in
+  user-facing messages.
+
+That last point is where this stops and waits. Extending the gate to the
+product scripts means either rewriting user-visible prose to avoid apostrophes,
+which is a bad trade, or having a real lexer. A text-only scan of every shell
+file in the repository — no comment skipping, no quote tracking, every
+`name() {` at column zero — finds **no duplicate definition in any product
+script**, so the eleven blind spots are hiding nothing today. That is the
+measured cost of the missing lexer: not a bug, a gate that cannot be widened.
+
+Then the same question asked of the other scanner that skips data.
+`tests/reachable.awk` does not count apostrophes, so it cannot be blinded that
+way — but it skips quoted heredocs, and a heredoc whose terminator never
+appears at column zero leaves it reading the rest of the file as fixture text.
+Every function defined below that point stops existing, and an empty report
+reads as *everything here is reached*. It is not blind on anything today,
+measured; it now says so if it ever is, and
+`...and says so when an unclosed heredoc stopped it looking` drives it the same
+way — blind it on purpose, require the warning, and require the dead function
+below the opener to be missed.
+
+The general rule, worth keeping: **a scanner that skips data must report
+reaching the end still skipping.** The non-vacuity probes both scanners already
+had ask *can you still see something obvious at the end of the file* — and a
+scanner that stopped reading at line 200 answers that question by being handed
+a file it never got to. The state at EOF is the cheap half nobody had asked for.
+
+### The third scanner, which nothing was driving at all
+
+The two blindness fixes above came from asking *what happens when a scanner
+stops reading*. The obvious next question is *what was exercising these
+scanners in the first place*, and for the third one the answer was **nothing**.
+
+`tests/long-wait.awk` had exactly one caller: `no_unannounced_long_wait`, run
+once, over the real tree. The real tree has no offending line — so the gate
+passed identically whether the scanner worked or not. Every other scanner here
+has a non-vacuity probe. This one had none, and its own header said otherwise:
+
+> The mutation that exposed that is in tests/test-lib.sh.
+
+There was no such mutation. It had been run by hand once, years of commits ago,
+and never became a test. **A note claiming coverage is worse than no note** —
+the next person reads it and stops asking.
+
+It cost something. An unanchored `/nohup ollama serve/` allow rule sat in that
+file, left behind when `start_ollama_bg` changed shape to
+`nohup env \ … \ ollama serve >LOG 2>&1 &` and a second, anchored rule was
+added beside it. Measured: deleting the old rule changed no verdict on the
+tree, which is exactly why it survived. But it excused **any line containing
+those words** — including:
+
+```
+warn "Not running. Start it with: nohup ollama serve >/tmp/o.log 2>&1"
+wait_for_ollama 60
+```
+
+The comment four lines below that rule says, in as many words, that a `warn()`
+merely telling the reader to run `ollama serve` *still counts as silence*. The
+file had contradicted its own stated intent for as long as the second rule had
+existed, inertly, where nothing could see it.
+
+**A rule that never fires is not a rule that does nothing — it is a rule nobody
+has checked.** That is the sharper form of the question this document keeps
+coming back to, and it is why "delete what looks inert" is the wrong move: the
+inert rule here was not dead weight, it was a live hole waiting for its case.
+
+What replaced it: nine fixtures, one per rule, driving the scanner over files
+built for the purpose — the bare wait, the single-digit poll, the commented-out
+wait, each of the three ways a start can be spelled, the prose-only case above,
+a comment *naming* the starter (comments are not evidence), and a real start
+placed further above than the five-line window reaches. Then the measurement
+that matters: **delete each rule in turn and the gate must fail.** Six of seven
+are load-bearing. The survivor is `if (i < 1) continue`, a bounds guard that is
+redundant in awk because an unset `hist[i]` matches nothing — defensive, not
+stale, and now known to be so rather than assumed.
+
+Before this, *none* of that file's rules were exercised by anything.
+
+### The absence-rule sweep, and the instrument that was wrong instead
+
+Generalising the long-wait find: **every absence rule in the suite — does
+anything prove it can still see a violation?** An absence rule passes when a
+search comes back empty, and on a clean tree that is indistinguishable from a
+search that looked at nothing.
+
+Two derivations of "which gates are absence rules" disagreed — 25 derived
+structurally from the code, 17 from the census prose, union 33, and each list
+contained rows the other missed. Neither was trusted. The test was behavioural:
+**plant a real violation for each rule and require it to fire.**
+
+The first harness said 11 of them were vacuous. Every one of those verdicts was
+wrong:
+
+- `no_unannounced_long_wait` takes its file list as *arguments*; the harness
+  called it with none, so awk read stdin and found nothing.
+- `no_pipe_into_grep_q_in_the_suite` needs a `${VAR}` before the pipe. The
+  planted `ss -ltn | grep -q` was not a violation of it.
+- `advice_paths_are_absolute` matches `./zz.sh`, not `./scripts/zz.sh`. Also
+  not a violation.
+- The remaining eight are presence rules, or rules for which no violation had
+  been planted at all. Green proves nothing there.
+
+So the harness was replaced by the only thing with no harness in it: **18
+violations planted across 13 files of a real clone, and that clone's own suite
+run against itself.** Real globals, real arguments, no runner in the path.
+
+**Result: all 18 were caught.** 30 failures in total — the 18 plants plus
+collateral from one plant (`LCA_MAY_PROMPT=true` appended to `lib.sh`) changing
+prompting behaviour for unrelated gates. *No absence rule in this suite is
+vacuous.* The sweep found the suite healthy and found the instrument broken,
+which is the outcome worth writing down, because a sweep that reports what you
+expected is the one to distrust.
+
+**What was real is a different failure mode.** "Can it see a violation" and
+"can it tell there was nothing to look at" are separate questions, and four
+rules failed the second: with `check-system.sh` and `scripts/` deleted from a
+throwaway clone, `one_copy_of_the_coverage_rule`, `no_tee_into_a_root_file`,
+`no_unbounded_listing_is_piped_into_grep_q` and
+`no_variable_is_piped_into_an_early_exiting_reader` all returned **PASS**.
+
+Deleting a script is loud — a dozen other gates fall over. *Renaming* one is
+silent: the gates that glob follow it to its new name, the gates that name it
+literally quietly stop covering it, and nothing goes red. All four now count
+what they actually read, against a floor of 30 (36 files match that list today;
+the first floor written was 40, which failed on an intact checkout — a floor
+nobody has counted is the same mistake the gate is about).
+
+And the general instrument: `every_path_the_suite_names_is_there`. 55 literal
+`${REPO}/…` paths in `tests/*.sh`, all of which must exist. One is deliberately
+absent — `moved-away/netmode.sh`, the fixture for "the unit file points at a
+program that has moved" — so its exemption is checked **in both directions**:
+if that path ever exists, the exemption is stale and says so, and that same
+check is what proves the gate can still detect an absent path. Driven three
+ways: silent on the real tree, catches `scripts/apply.sh` renamed, catches the
+exemption going stale.
+
+### One workflow, two shells, and nothing saying which
+
+Asked of CI, while looking for things that do nothing: this one does something
+*invisible* instead.
+
+GitHub runs a bare `run:` step under `bash -e {0}` — errexit on, **pipefail
+off**. An explicit `shell: bash` gets `bash --noprofile --norc -eo pipefail
+{0}`. Measured on this workflow: **52 run-steps, 15 with pipefail and 37
+without**, and nothing anywhere marks the difference.
+
+That matters more here than in most projects, because trap #1 at the top of
+this document is `cmd | grep -q` under pipefail — `grep -q` exits the moment it
+matches, the writer takes SIGPIPE, and the pipeline reports 141, so the check
+fails *because* the pattern was found. Six CI steps pipe into `grep -q`: four
+in the no-pipefail group where that cannot happen, two in the group where it
+can. **A line moved from one step to another changes meaning, with no diff to
+show for it.**
+
+The suite already refuses that shape in `*.sh`, `scripts/`, `deploy/` and
+`bin/lca`. It has never looked at the workflow — the one place the two shells
+coexist.
+
+No gate was added, deliberately. The obvious one — *every step declares its
+shell* — fails on 37 steps today, and the fix is not mechanical: adding
+`shell: bash` everywhere turns pipefail **on** for steps that were written
+without it, including `nft list … | tee /dev/stderr | grep -q`, which is
+exactly the shape trap #1 is about. Choosing uniform pipefail is a decision
+about what CI should do, not a bookkeeping correction, and it wants making
+deliberately rather than as a side effect of a gate.
+
+Neither of the two pipefail steps is at risk today: both pipe a single line of
+`systemctl show` output, far under the 64 KiB pipe buffer that makes SIGPIPE
+reachable. This is a legibility defect, not a live one — recorded so the choice
+gets made on purpose.
+
+## The census, checked a second way: break the behaviour, keep the text
+
+Every label in `tests/source-grep-census.tsv` was assigned by reading gates one
+at a time. That is one measurement by one instrument. Here is a second, with no
+instrument in the path at all.
+
+**The method.** Clone the repo. In the clone, insert `return 0 2>/dev/null;
+exit 0` into each product script, *after* its header comment block. Every byte
+of the original text survives; nothing the scripts do survives. Then run the
+clone's own suite. A gate that still passes got its verdict from the text; a
+gate that now fails got it from the behaviour. That is exactly the A/FP
+distinction, decided by the product's own run.
+
+**The result, and it is the strongest statement anyone has made about this
+census: A is 70 out of 70.** Every gate labelled "its only evidence is that the
+source still contains a token" kept passing when the behaviour was gone. The
+inert world was not inert to the suite — 236 checks failed — so this is
+agreement, not insensitivity. B is 139 of 140, the one exception being a gate
+fixed in the same commit and absent from the clone.
+
+**FP splits in half, and that half is the finding.** 50 of the 100 FP gates
+failed, which confirms them in the strongest way available: remove the
+behaviour and they notice. Of the 50 that passed,
+
+- **28** have a subject in `scripts/lib.sh`, `backup.sh` or `scripts/tune.sh`.
+  Those three are left working on purpose — **the suite sources them to build
+  its own fixtures**, so making them inert removes the instrument along with
+  the subject. A stated limit of the probe, not a finding.
+- **a handful** have no product script as a subject at all: the scanner gates,
+  and gates over `lib.sh` functions.
+- **the rest execute a block lifted out of a product script rather than running
+  the script.** `agent_docker_argv` awks the container-start block out of
+  `agent.sh` and runs *that* under stubs; `aider_argv_with`,
+  `seeded_settings_payload` and `settings_verdict` do the same to
+  `run-agent.sh`, `agent.sh` and `check-system.sh`. Making the file inert
+  cannot touch them, because they never run the file.
+
+**That third group is a category the A/B/FP taxonomy does not name.** It is
+much stronger than a source-grep — the real lines really execute, with real
+values — and weaker than driving the command, in one specific way:
+**executing an extracted block proves the lines do what they claim, and proves
+nothing about whether anything reaches them.**
+
+This project has already been bitten by exactly that, once, and did not
+generalise it: `banner_ready` returns early when the model is missing, so a
+check on the rows below that return was checking code that never ran in the
+configuration under test. Same defect, and there are roughly seventeen gates
+shaped to permit it. Their FP label is not *wrong* — they do drive their
+subject — but FP covers two different strengths of evidence and nothing said
+so. It says so now, and the inert clone is how you tell them apart.
+
+**Two probe artefacts, both worth keeping**, because each one nearly became a
+finding:
+
+- The first two clones inserted the inert line at line 2, and
+  `every_advised_flag_is_real` failed. It looked like a mislabelled B row. It
+  was not: `script_help_text` awks a script's **header comment block**, and a
+  non-comment line at position 2 ends that block immediately. *The probe had
+  corrupted the text it promised to preserve.* Moving the insertion below the
+  header block fixed it, and the row is correctly B.
+- Three clones died at check 128 before one completed. `exit 1` and `exit 0`
+  both killed the suite itself, because `tests/test-lib.sh` **sources**
+  `backup.sh`; the suite's exit status matched whichever code had been
+  inserted, which is what identified the cause. `return 0 2>/dev/null; exit 0`
+  fixed the sourcing but left the suite calling functions that no longer
+  existed. Only sparing the three sourced scripts produced a complete run.
+
+Both were caught by the suite's own *"ENDED EARLY … every check below the last
+line printed above did NOT run"* guard. A run that stops at check 128 with 116
+passes and exit status 0 is otherwise indistinguishable from a clean run of a
+much smaller suite.
 
 ## Run it broken, not working
 
@@ -247,11 +1692,385 @@ and "cannot reach the daemon" are different facts, and every docker probe
 collapses them into the same non-zero exit. A confident wrong line is worse
 than an admitted unknown.
 
+## Run it as somebody else, on a real terminal
+
+The account is a state like any other, and it is the one nobody tests: this
+project is developed as root, so every path that needs root simply worked.
+Create a throwaway user, give it no sudo rights, and run the command under a
+**pty** — `sudo -n` behaves completely differently from an interactive sudo,
+and a pipe hides the difference:
+
+```bash
+sudo useradd -m lcaprobe          # no groups, no sudo, no password
+# python3 -c 'import pty; pty.spawn(...)' as that uid, with a time limit
+```
+
+The bound is the point. An interactive sudo on a real terminal does not fail,
+it **waits**, so the failure mode is a command that never returns — which no
+`|| true`, no `2>/dev/null` and no exit-status assertion will ever notice. One
+afternoon of this found five, all invisible as root:
+
+| Command | As root | As a user who is not a passwordless sudoer |
+|---|---|---|
+| the login banner (every SSH login) | 0.10s | two lines, then waits for ever |
+| `lca check` | full report | stalls twice; then "docker daemon not responding" and chat app "does not exist", both false |
+| `lca status` | full report | two lines, then waits for ever |
+| `lca webui status` | full report | *nothing at all*, then waits for ever |
+| `lca logs` | full output | ollama section, then waits for ever |
+
+The rule that came out of it, gated in `tests/test-lib.sh`:
+
+- **An action the user asked for** → `can_root`. A password prompt is fair;
+  they typed `lca apply`, `webui.sh start`. Refusing where it used to work
+  would be the worse trade.
+- **A probe that only reports** → `can_root_now` (root, or `sudo -n` works).
+  A prompt here is a stall in something nobody asked to run.
+- **Either way, never ask silently.** If a typed command is about to escalate,
+  print the reason first. A bare `[sudo] password for ...` under a command
+  that has produced no output reads as a hang, not as a question.
+
+Two traps in gating this:
+
+- `can_root_now` **contains** `can_root`, so "the fix is present" greps clean
+  while a leftover bare call sits three lines below it. That is exactly how
+  four of the five above survived a fix to the fifth. Match `can_root([^_]|$)`
+  and require *both* directions: the strict call present, no loose call left.
+- A `timeout` wrapper does not bound a password prompt. `sudo timeout 15 cmd`
+  bounds `cmd`; the prompt happens before `timeout` is ever exec'd. If the
+  point is "this must not hang", the order has to be `timeout sudo`, or the
+  escalation must not be interactive at all.
+
+### ...and one of the five was still hanging
+
+The rule above was gated by reading five regions of source for a bare
+`can_root`. Every one of them read clean, and `lca webui status` still waited
+for ever — measured again, months later, under a stand-in `sudo` that refuses
+`-n` and otherwise prints the prompt and sleeps:
+
+```
+webui.sh status              took=8s rc=124 lines=1 <-- HUNG on: sudo docker info
+   output was: [warn] Docker is not reachable as 'nobody' — retrying with sudo,
+                      which may ask for your password.
+```
+
+The announcement added when this was first found made the stall *explicable*
+without making it *stop*. Both `select_docker` in `webui.sh` and `run_reader`
+in `scripts/lib.sh` hand-rolled a `can_root_now` / `elif can_root` pair —
+deciding inside the function what the comment above `root_for_probe` says is a
+property of the **caller**, and deciding it "may prompt" for every caller.
+`select_docker` runs for every `webui.sh` subcommand, `status` included.
+
+Both now call `root_for_probe`, and `webui.sh` sets `LCA_MAY_PROMPT=true` only
+in the arms that act (`start`, `stop`, `restart`). `lca webui status` on an
+account that is not a passwordless sudoer now refuses in a tenth of a second,
+naming the three ways out, instead of printing one line and never returning.
+
+`probes_use_the_stricter_test` is the gate, and it no longer reads source: it
+runs all five commands under that stand-in sudo, bounded, as an account that
+is not root. Its first assertion is the one worth copying — an **action** must
+still be willing to wait, so `webui.sh start` has to block on the same stub.
+If it does not, the stub is not blocking and every "it did not hang" below it
+would mean nothing.
+
+### ...and a sixth, behind a setting the sandbox never turned on
+
+Three more, found by asking the reverse question of `lca logs`: not "does it
+tell an unreadable log from a missing one", which is what four gates already
+watched, but **which of this project's own logs does it not offer at all?**
+The agent tier's. That led to `agent.sh`, and to three measurements:
+
+| Command | What it did | Why |
+|---|---|---|
+| `lca agent logs` | `rc=124`, nothing on screen but the prompt | bare `as_root docker logs`: no unprivileged attempt, no `root_for_probe`, and `-f` unconditionally so it never returned even when it worked |
+| `lca agent start` | refused: "Cannot reach the Docker daemon as ..." | `agent.sh` never set `LCA_MAY_PROMPT`, so an **action** used the strict probe — the other of the two mistakes, and the one that made `lca backup` skip the chat history on a healthy box |
+| `lca agent stop` | `rc=124`, **no output whatsoever** | `as_root docker stop ... >/dev/null 2>&1` sends sudo's own prompt to the same `/dev/null` as docker's noise |
+
+And then the one that matters most, because a gate was already watching it:
+
+```
+check-system.sh   ENABLE_AGENT=false  rc=1    55 lines   full report
+check-system.sh   ENABLE_AGENT=true   rc=124   7 lines   <-- HUNG
+```
+
+`lca check` — the health command, first in `REPORTING_COMMANDS`, run under the
+blocking sudo stub on every CI run — stalled for ever on any machine with the
+agent tier switched on. The gate held. The **sandbox** always got
+`.env.example`, where `ENABLE_AGENT=false`, so the entire agent half of
+`check-system.sh` was unreachable and `agent_live_sandboxes` — a bare
+`as_root docker ps` with `2>/dev/null` over the prompt — was never called.
+
+Two lessons, and the second is the general one:
+
+- The `no_helper_decides_for_its_caller` gate scans `lib.sh` for `can_root`.
+  `agent_live_sandboxes` named `as_root` directly, so the rule's own gate could
+  not see the rule being broken. A gate that matches the *spelling* of the last
+  instance is a gate for that instance.
+- **A gate that drives its subject still only drives the configuration you gave
+  it.** `probes_use_the_stricter_test` now runs every command under two
+  `.env`s — the shipped default and the agent tier on — and asserts that an
+  acting command which waits has printed something first, with sudo's own
+  prompt subtracted from "printed something". Without that subtraction the
+  hanging `lca agent logs`, whose only output *was* the prompt, counts as
+  having spoken.
+
+### The reverse question, third instance
+
+The pattern that produced the last three findings, stated so it can be reused:
+take whatever you are looking at and ask it backwards.
+
+| Forward | Reverse | What it found |
+|---|---|---|
+| does `.env.example` document every setting the code reads? | is there a setting the code honours that `.env.example` never mentions? | fifteen candidates, one real |
+| does `lca logs` tell an unreadable log from a missing one? | which of this project's own logs does it not offer at all? | the agent tier — and four stalls behind it |
+| does the switch validator catch a mistyped switch? | which switches does the validator not see? | the two `.env.example` suggests in a comment |
+| does `uninstall` remove what it says it removes? | what does it leave behind that it never mentions? | every `oh-agent-server-*` sandbox, left running |
+| does `lca apply` survive a sub-script that fails? | what does it not apply that it claims to? | the Ollama relay — the word did not appear in `apply.sh` at all |
+
+The fifth is the same shape as the fourth. `lca apply` printed
+`[ ok ] Applied 1 change(s). Verify with: lca check` on a machine with
+`ENABLE_OLLAMA_RELAY=true` and the relay's units absent — a clean bill about a
+switch the reader set that was doing nothing. `lca check` warns about exactly
+that state, so the two commands disagreed, and this project already refuses to
+let them disagree about the ports. `apply_relay` reports the missing units and
+counts them, and re-installs when the bridge address has drifted — the guard's
+shape, not the timer's.
+
+The fourth is the sharpest. `uninstall.sh` removed the agent's
+app container and left every sandbox it had spawned **running**, under a
+closing line that said "Uninstall complete". A sandbox belongs to a
+conversation inside the app container, so once that container is gone nothing
+can reach them — and step 6 of the same run removes `lca`, taking with it the
+only two commands (`lca agent stop`, `lca agent gc`) that could have collected
+them. Nothing was left on the machine that could ever clean up. It is now a
+step of its own, with its own line in the verdict.
+
+## Configuration blindness
+
+A gate that reads source is dishonest: it claims a runtime behaviour and offers
+text as evidence. This is a different failure, and in one way a worse one. The
+gate is **honest** — it drives its subject — and its coverage is **partial**,
+and *nothing about the gate says which*. A source grep at least looks
+suspicious when you read it.
+
+The instance that named it:
+
+```
+check-system.sh   ENABLE_AGENT=false  rc=1    55 lines   full report
+check-system.sh   ENABLE_AGENT=true   rc=124   7 lines   <-- HUNG
+```
+
+`lca check` is the first entry in `REPORTING_COMMANDS`. It had been run under
+the blocking-sudo stub on **every CI run** since that gate was written, and it
+stalled for ever on any machine with the agent tier switched on. The gate held.
+Its *fixture* was `.env.example`, where the agent tier is off, so the whole
+agent half of `check-system.sh` was unreachable and the bare
+`as_root docker ps` inside `agent_live_sandboxes` was never called.
+
+### The sweep
+
+Measured, not guessed. **34 places in this repo build an `.env` for a product
+script to be run against. 31 of them are `.env.example` verbatim.** The shipped
+defaults are not merely the common case here — they are very nearly the only
+case. The three exceptions are CI's Ollama E2E job (`AUTO_TUNE=false`,
+`ENABLE_WEBUI=false`), `tests/test-fresh-install.sh` (`SKIP_DOCKER=true`,
+`SKIP_TAILSCALE=true`), and one tune fixture (`ENABLE_AGENT=true`).
+
+`tests/config-coverage.tsv` is the census: every switch in `.env.example`,
+whether anything runs a product script at **both** of its values, and — where
+nothing does — what the other side's branches are and what it would cost to
+reach them. Three gates hold it:
+
+1. every switch `.env.example` ships has a row, so a new one cannot be
+   forgotten (the list comes from the product's own `boolean_settings`);
+2. what the file claims is checked against the `.env` files the fixtures
+   really built, so a row saying `BOTH` cannot outlive the fixture that made it
+   true;
+3. a ratchet on the number of switches nothing drives the other side of.
+
+A row is about **whole-command** coverage. A probe that sets a switch and calls
+one function is not the same thing: `ENABLE_AGENT=true` appeared nineteen times
+in the suite, all of them narrow, while the whole-command path stalled for
+ever.
+
+Harnesses that vary their `.env` overwrite it per case, so the file left at the
+end of a run shows only the last one. Those call `record_configuration` as they
+go. An unparameterised harness needs nothing — its one `.env` is still on disk
+to be read, which is the point: **the census measures the fixtures, not the
+code that builds them.**
+
+### Two things the sweep settled
+
+**The developer's own `.env` is not a hidden fixture — today.** `ENV_FILE` is
+computed from `REPO_ROOT` and cannot be overridden, so any gate that runs a
+product script straight out of `${REPO}` reads whatever the developer has on
+disk; CI has none, so `load_env` writes `.env.example` there. That is a real
+asymmetry. Measured by putting six flipped switches into the repo's own `.env`
+and re-running: **1281 checks, all pass, identical verdict.** So no gate depends
+on it now. The only way to pin a configuration is a sandbox copy of the tree,
+which the harnesses that matter already build.
+
+**The switch validator could not see the switches `.env.example` suggests.**
+The same question, asked of the thing that validates switches: which settings
+does *it* not see? `.env.example` does not only ship switches — under "leaving
+these alone changes nothing" it offers `CONVENTIONS_AIDER` and
+`CONVENTIONS_AGENT` as commented lines a reader is invited to uncomment, and
+`boolean_settings` read live lines only:
+
+```
+AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+```
+
+`lca_user_instructions` compares it against the word `true` exactly like every
+other switch — measured, 2,527 characters of appendix at `true`, 0 at `yes`.
+The only difference between the two settings was which side of a `#` they were
+written on. `boolean_settings` now reads commented suggestions too, and
+`check-system.sh` skips any name the reader has not set, so a shipped machine
+still counts 12.
+
+### What it cost to matrix, and what was left
+
+Cheap, and done: three cells of the census, all through `check_report`, which
+already takes the `.env` lines as a parameter. The agent tier's own section
+(four things it must say, and none of them said with the tier off); the relay's;
+and the chat prompt's context budget with the conventions appendix on. That
+last one produced **a warning nothing in this repo had ever produced** — at the
+4096-token window of the 3b rung, the smallest model this project ships, the
+prompt is double its budget and `lca check` says so. Both switches sit at their
+shipped values in every fixture, so that arm had never run.
+
+Not done, and why: `ENABLE_OLLAMA_RELAY=true` through `setup.sh` and
+`netmode.sh` needs real units and a real bridge; `AGENT_NATIVE_TOOL_CALLING`'s
+selftest arm needs a live agent. Those are genuinely expensive, and the census
+says so in the row rather than leaving the next person to find out.
+
+**Don't matrix everything.** Some subjects genuinely have one configuration,
+and a fixture built for a machine nobody has is its own kind of lie. The
+question to ask of a driven gate is not "is it matrixed" but: *what does its
+fixture actually produce, and which branches of its subject can therefore never
+run?*
+
+### The fourth excuse, and the command nobody had ever run
+
+`AGENT_NATIVE_TOOL_CALLING` is the setting this tier's own documentation calls
+the difference between a run that works and one that ends instantly with an
+empty workspace and no error. `tests/config-coverage.tsv` had it SHIPPED-ONLY,
+with a cost note: *"low for the payload (the agent settings harness already
+stubs the API), high for the selftest arm, which needs a live agent."*
+
+The payload half turned out to be driven at both values already —
+`seeds_a_real_boolean` loops over `true` and `false` and reads the JSON back.
+The selftest half was driven at neither, because **nothing in this repo had ever
+run `scripts/agent-selftest.sh` at all.** Not "only in the shipped
+configuration": never, in any, while every other `lca` command has a harness.
+A whole product command — the one this project hands a user when the tier does
+not work — with no coverage of any kind.
+
+And the cost note was wrong, which makes it the fourth written excuse here to be
+re-read against the tools that now exist, and the fourth to fall. Every link in
+that script reaches its world through `curl`, `docker` and `ollama`, and this
+suite has been standing in for all three for months. The whole chain now runs
+against stand-ins — relay, model, container, settings, channel, task, and the
+speed report — in four configurations:
+
+| `.env` says | the agent stored | the model returns | must |
+|---|---|---|---|
+| `true` | `true` | 0 native calls | stop at 5/6, name `AGENT_NATIVE_TOOL_CALLING=false`, and not say the tier works |
+| `true` | `true` | 1 native call | run to the end and say the tier works |
+| `false` | `false` | 0 native calls | treat zero as the expected answer, not a failure |
+| `true` | `false` | — | stop at 4/6, quote what the agent actually holds, and not go on to probe the channel |
+
+The second row is not padding. Without it the first would pass a selftest that
+refused every machine, which is the same shape as a gate that greps for a
+warning without ever checking the quiet case.
+
+The last row is the sharpest. The settings endpoint declares
+`additionalProperties: true`, so it answers 200 to a body it stores none of —
+this project shipped a "settings seeded" message about exactly that once. What
+`.env` asks for and what the agent actually holds are two different facts, and
+only the second decides whether the run works.
+
+Two mutations, each shown to land: `link_channel` stops asking whether the
+channel is dead, and `link_settings` compares the stored value with itself. Each
+turns exactly one row red, with the unmutated run green as the control.
+
+## The bookkeeping is a claim too, and nothing was driving it
+
+Everything above is about a statement of a behaviour that nothing checks. The
+ledgers that record *this* work are statements as well, and for a while nothing
+checked those either. Three had drifted, all the same way: a number was lowered
+where it is gated and left standing in the prose beside it.
+
+| where | said | actually | why nobody noticed |
+|---|---|---|---|
+| the census header | `87` A rows, `54` worth driving | 85 and 52 | `group_a_debt_has_not_grown` reads the rows; the header is prose sitting on top of them |
+| `Makefile`'s `gates:` help | `2 of CI's 6 jobs` | 7 | the gate that watches that line greps it for the words *everything* and *all of* — never for the number |
+| `CONTRIBUTING.md`, "Reviewing a PR" | `all six jobs` | 7 | a fourth site for a claim the gate knew lived in three |
+
+The third is the instructive one. `hook_does_not_promise_more_than_it_runs` was
+written for exactly this drift, and its own comment reads *"a gate that watches
+one file while the same claim lives in three is a gate with a blind spot"*. It
+watched all three files. It still missed two claims, because it looked for **one
+phrasing per file** — `CI has N jobs` in the hook, `CI (N jobs)` in the document
+— and a claim written any other way was invisible to it. The blind spot was
+never the file. It was the sentence the author of the gate happened to have in
+front of them, which is the same failure as a fixture that produces one
+configuration: honest, partial, and silent about which.
+
+`every_job_count_claim_is_the_real_one` replaces the guess with a sweep. Every
+number immediately in front of the word *jobs*, and every number after *of
+CI's*, in the CI-facing files, has to be the count of jobs in the workflow; and
+where a sentence splits the set — "runs two of them, the other five need a fresh
+machine" — the halves have to add up to it. It reads each file as one blob
+rather than line by line, because "That is two / of CI's seven" is one claim
+wrapped over two lines and a line-at-a-time reader sees two unrelated numbers.
+Adding an eighth CI job now fails with a line per stale site, naming each
+file: eight of them, across three files, on the run that proved it.
+
+Two deliberate limits, stated because a limit nobody writes down is a blind
+spot: fenced blocks and backticked spans are stripped first, since this document
+teaches its own rules by quoting the wrong version — the table above contains
+the literal strings the gate is there to prevent — so a real claim written
+inside backticks would escape; and the file list is the CI-facing four, because
+`docs/AGENT.md` says "two different jobs" about the supervisor and always will.
+A floor on how many claims the sweep must find is what stops either limit from
+quietly emptying it.
+
+### ...and the same question, asked of the commit messages
+
+Twenty-four messages on this branch state a census transition —
+`Census: A 102 -> 100, FP 79 -> 81`. Compared against the diffs they describe,
+**twenty-two were right, and one commit's two were both wrong**: it claimed
+`A 112 -> 109, FP 68 -> 71` where its parent held A=113 and FP=67, because it
+carried a fourth conversion from an earlier working tree that the message never
+counted. The rows in the file were right the whole time. Only the story about
+them was wrong, and nothing anywhere could have told you.
+
+`commit_message_claims_match_its_diff` reads HEAD's message and checks every
+such claim against what HEAD's diff did to the two `.tsv` files. HEAD's message
+only, deliberately: a gate over all of history cannot be satisfied without
+rewriting history, and a gate nobody can satisfy gets deleted. The pre-push
+hook runs this suite, so a wrong claim fails before it is pushed, and `git
+commit --amend` fixes it.
+
+The judge takes the revision and the message as arguments instead of reading
+`HEAD` itself, so `commit_message_gate_can_fail` can hand it two invented claims
+and require both to be rejected, and a message with no claim at all and require
+it to pass. **A gate nobody has watched fail is decoration** — this document's
+oldest rule, and it applies to the gates about the bookkeeping exactly as much
+as to the gates about the product.
+
+A third audit ran and produced nothing: every message that names a file, checked
+against `git show --stat` for that commit. Almost every hit was a false
+positive, because a message legitimately names the subject under test and not
+only the paths it touched. No gate came out of it. Recorded because it was
+asked, and because "we looked and there was nothing" is a result.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
 
-1. **The green ticks** — all six jobs, not just `lint`. `e2e`/`webui` are where
+1. **The green ticks** — all seven jobs, not just `lint`. `e2e`/`webui` are where
    real breakage shows up.
 2. **Idempotency and the no-systemd / offline paths** — the fragile parts of a
    provisioning stack are the second run and the degraded environment, not the
