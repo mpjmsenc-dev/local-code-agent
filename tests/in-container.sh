@@ -79,7 +79,11 @@ started="$(date +%s)"
 echo "Running 'make ${TARGET}' in ${IMAGE}; log: ${OUT}/gates.log"
 rc=0
 # shellcheck disable=SC2016  # the container's script, expanded in the container
-docker run --rm --cidfile "${cidfile}" "${limit[@]}" \
+# NET_ADMIN for the netmode suite's 'nft --check', which needs a netlink socket
+# even to validate a ruleset and is refused without it — three FAILs that were
+# the container, not the rules. It reaches only this container's own network
+# namespace (no --network host here), which the container throws away.
+docker run --rm --cidfile "${cidfile}" --cap-add NET_ADMIN "${limit[@]}" \
   -v "${REPO}:/src:ro" -v "${OUT}:/out" "${IMAGE}" bash -c '
     set -uo pipefail
     git config --global --add safe.directory "*"

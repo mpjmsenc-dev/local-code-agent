@@ -435,7 +435,23 @@ if command -v nft >/dev/null 2>&1; then
   fi
 fi
 nft_check() {  # desc file
-  if "${NFT[@]}" --check -f "$2"; then t_ok "$1"; else t_fail "$1"; fi
+  local err
+  if err="$("${NFT[@]}" --check -f "$2" 2>&1)"; then t_ok "$1"; return; fi
+  # A kernel that refuses nft a netlink socket never evaluated the ruleset, so
+  # this was not attempted, not failed: a container without NET_ADMIN answers
+  # every check this way, and three FAILs there were the container, not the
+  # rules. Anything else nft says — a syntax error, an unknown keyword — is the
+  # ruleset, and fails.
+  # NOT RUN only when EVERY line of what nft said is that refusal. nft parses
+  # before it asks for the socket, so a syntax error arrives first and the
+  # refusal after it — matched on the refusal alone, a broken ruleset in a
+  # container without the capability was called not attempted.
+  if [[ -n "${err}" ]] && ! grep -qv 'Operation not permitted' <<<"${err}"; then
+    t_skip "$1 — NOT RUN: the kernel refused nft here (${err%%$'\n'*}), so it never saw the ruleset"
+  else
+    printf '%s\n' "${err}" >&2
+    t_fail "$1"
+  fi
 }
 if [[ "${#NFT[@]}" -eq 0 ]]; then
   t_skip "nft --check of the offline and inbound rulesets — nft (as root) not available; the content checks above still ran"
