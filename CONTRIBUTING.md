@@ -1589,6 +1589,78 @@ Neither of the two pipefail steps is at risk today: both pipe a single line of
 reachable. This is a legibility defect, not a live one — recorded so the choice
 gets made on purpose.
 
+## The census, checked a second way: break the behaviour, keep the text
+
+Every label in `tests/source-grep-census.tsv` was assigned by reading gates one
+at a time. That is one measurement by one instrument. Here is a second, with no
+instrument in the path at all.
+
+**The method.** Clone the repo. In the clone, insert `return 0 2>/dev/null;
+exit 0` into each product script, *after* its header comment block. Every byte
+of the original text survives; nothing the scripts do survives. Then run the
+clone's own suite. A gate that still passes got its verdict from the text; a
+gate that now fails got it from the behaviour. That is exactly the A/FP
+distinction, decided by the product's own run.
+
+**The result, and it is the strongest statement anyone has made about this
+census: A is 70 out of 70.** Every gate labelled "its only evidence is that the
+source still contains a token" kept passing when the behaviour was gone. The
+inert world was not inert to the suite — 236 checks failed — so this is
+agreement, not insensitivity. B is 139 of 140, the one exception being a gate
+fixed in the same commit and absent from the clone.
+
+**FP splits in half, and that half is the finding.** 50 of the 100 FP gates
+failed, which confirms them in the strongest way available: remove the
+behaviour and they notice. Of the 50 that passed,
+
+- **28** have a subject in `scripts/lib.sh`, `backup.sh` or `scripts/tune.sh`.
+  Those three are left working on purpose — **the suite sources them to build
+  its own fixtures**, so making them inert removes the instrument along with
+  the subject. A stated limit of the probe, not a finding.
+- **a handful** have no product script as a subject at all: the scanner gates,
+  and gates over `lib.sh` functions.
+- **the rest execute a block lifted out of a product script rather than running
+  the script.** `agent_docker_argv` awks the container-start block out of
+  `agent.sh` and runs *that* under stubs; `aider_argv_with`,
+  `seeded_settings_payload` and `settings_verdict` do the same to
+  `run-agent.sh`, `agent.sh` and `check-system.sh`. Making the file inert
+  cannot touch them, because they never run the file.
+
+**That third group is a category the A/B/FP taxonomy does not name.** It is
+much stronger than a source-grep — the real lines really execute, with real
+values — and weaker than driving the command, in one specific way:
+**executing an extracted block proves the lines do what they claim, and proves
+nothing about whether anything reaches them.**
+
+This project has already been bitten by exactly that, once, and did not
+generalise it: `banner_ready` returns early when the model is missing, so a
+check on the rows below that return was checking code that never ran in the
+configuration under test. Same defect, and there are roughly seventeen gates
+shaped to permit it. Their FP label is not *wrong* — they do drive their
+subject — but FP covers two different strengths of evidence and nothing said
+so. It says so now, and the inert clone is how you tell them apart.
+
+**Two probe artefacts, both worth keeping**, because each one nearly became a
+finding:
+
+- The first two clones inserted the inert line at line 2, and
+  `every_advised_flag_is_real` failed. It looked like a mislabelled B row. It
+  was not: `script_help_text` awks a script's **header comment block**, and a
+  non-comment line at position 2 ends that block immediately. *The probe had
+  corrupted the text it promised to preserve.* Moving the insertion below the
+  header block fixed it, and the row is correctly B.
+- Three clones died at check 128 before one completed. `exit 1` and `exit 0`
+  both killed the suite itself, because `tests/test-lib.sh` **sources**
+  `backup.sh`; the suite's exit status matched whichever code had been
+  inserted, which is what identified the cause. `return 0 2>/dev/null; exit 0`
+  fixed the sourcing but left the suite calling functions that no longer
+  existed. Only sparing the three sourced scripts produced a complete run.
+
+Both were caught by the suite's own *"ENDED EARLY … every check below the last
+line printed above did NOT run"* guard. A run that stops at check 128 with 116
+passes and exit status 0 is otherwise indistinguishable from a clean run of a
+much smaller suite.
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide

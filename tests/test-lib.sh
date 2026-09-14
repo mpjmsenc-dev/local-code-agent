@@ -20442,6 +20442,10 @@ check "CONTRIBUTING's counted headings match their lists" \
 # narrow form catches the instance that actually occurred.
 counted_sections_do_not_contradict_themselves() {
   local out seen
+  # Its subject is a document, so that is the file it must have. Required by
+  # every_absence_rule_notices_an_empty_world, which caught this gate the
+  # commit it was written in.
+  searched_at_least 1 "${REPO}/CONTRIBUTING.md" || return 1
   out="$(awk '
     function num(w) {
       split("one two three four five six seven eight nine ten", a, " ")
@@ -24365,8 +24369,8 @@ echo "# ...and every rule that passes on an empty search can tell WHY it was emp
 ABSENCE_RULES='advice_names_only_documented_commands advice_paths_are_absolute
 announcement_avoids_stdout boot_units_parse_as_systemd_units
 cache_writes_cannot_abort counted_headings_match_their_lists
-env_keys_and_defaults_agree every_test_script_has_a_way_in
-example_env_is_valid guard_round_trip
+counted_sections_do_not_contradict_themselves env_keys_and_defaults_agree
+every_test_script_has_a_way_in example_env_is_valid guard_round_trip
 guard_ruleset_covers_a_disabled_but_live_chat_app install_is_truncation_safe
 makefile_header_matches_targets new_source_greps_are_justified
 no_bare_set_env_var no_file_read_piped_into_awk
