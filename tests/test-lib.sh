@@ -24388,10 +24388,18 @@ view_cannot_touch_the_run'
 # SOURCE-GREP: the subject IS which functions in this file have that shape,
 # which is a property of this file's text.
 absence_shaped_functions() {   # -> every function that passes on an empty search of repo source
-  # Two conditions, not one. The pass-on-empty shape alone matches 58 functions
-  # here, most of which search a captured string or a command's output, where
-  # "an empty world" means nothing. The ones this property is about also name a
-  # repo path as the thing they search.
+  # Two conditions, not one. The pass-on-empty shape ALONE matched 58 functions
+  # when this was written, against 35 for the rule below — most of the extra
+  # search a captured string or a command's output, where "an empty world"
+  # means nothing. The ones this property is about also name a repo path as the
+  # thing they search.
+  #
+  # Both numbers are stated as of the commit that added them, deliberately. The
+  # first version wrote them bare, and one commit later they were 59 and 36,
+  # because a gate added in between had the shape. Fifth instance in this
+  # project of a count in prose that nothing derives, and the first one found
+  # in a comment its own author had written the week before. A number that is
+  # not derived belongs to the day it was measured, and should say so.
   awk '
     /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $0; sub(/\(\).*/, "", fn); body = ""; inb = 1; next }
     inb && /^\}$/ {

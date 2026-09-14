@@ -319,6 +319,15 @@ Every one would have been reported as fact.
 minutes; the cost of not checking is a confident false statement that somebody
 then acts on.
 
+And the counts you write down are first answers too. The comment introducing
+`absence_shaped_functions` said the loose rule "matches 58 functions here"
+against 35 for the narrow one. One commit later they were 59 and 36, because a
+gate added in between had the shape — **the fifth instance in this project of a
+stated count that nothing derives, found this time in a comment its own author
+had written the week before.** The fix is the one the census header already
+uses: a number nobody derives belongs to the day it was measured, and should
+say so. Derive it, gate it, or date it.
+
 ### The guard that caught the patch that was enforcing guards
 
 Worth recording in its own right. The commit that added the empty-world
@@ -343,6 +352,32 @@ had cleared. In isolation it died on an unbound global and the driver scored
 that as "refuses"; with the suite's real globals set, it passes on nothing. The
 product's own run is the one that counts, and that is the third time this week
 it has disagreed with a harness of mine.
+
+### Which harnesses to distrust, and which are fine
+
+"Distrust your own instruments" is too broad to act on. A week of being wrong
+gives a sharper rule, and the evidence is a claim that *survived*.
+
+The long-wait mutation matrix — delete each rule from `tests/long-wait.awk` in
+turn, require the gate to fail — was measured with an extracted-function driver
+and flagged provisional along with everything else. Re-established the honest
+way, seven clones each with one line deleted and each running its **own** suite,
+it reproduced exactly: lines 29 and 31 killed, line 32 survived.
+
+Set that against six drivers that were wrong: which gates are absence rules
+(two derivations, 25 and 17, both incomplete); which gates drive rather than
+read (three generations, each wrong differently); which absence rules were
+vacuous (eleven false verdicts). The difference is not care, it is **what the
+harness had to model**:
+
+- A **mutation** probe runs the real code over real fixtures and reads a real
+  exit status. There is almost nothing in it to get wrong.
+- A **classifier** has to decide what a gate *means* from its text. Every one
+  of the wrong answers came from there.
+
+So: *distrust a harness that has to interpret; a harness that only has to
+execute and compare is usually fine.* And when you do need to interpret, the
+clone-and-run method below replaces the interpretation with an observation.
 
 ## Plant the violation in a clone and let its own suite find it
 
