@@ -889,9 +889,12 @@ verdict that rests on one detector gets the shape the absence rules now have: a
 census made by reading and checked in; the detector demoted to a tripwire that
 refuses what nobody listed; and the detector's recall measured against a reading
 made without it, written where the detector is. The source-grep census has the
-first two. It does not yet have the third — nobody has measured what
-`source_grep_gates` misses — and until it does, its totals are the
-classifier's opinion.
+first two, and now a measurement of the third: against the absence-rule
+readings, which read bodies without it, `source_grep_gates` sees 116 of 147
+gates that read repository text. 25 of the 31 it misses have no census row
+and no marker, so the meta-gate never knew they read source. The shapes are
+written above the classifier, and widening it — which turns each of those into
+an unjustified source grep until it is read — is the next batch.
 
 ### An aggregate nobody could check, replaced by a per-row fact
 

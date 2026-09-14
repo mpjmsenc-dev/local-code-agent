@@ -24436,6 +24436,20 @@ check "a restart re-reads the unit first, and refuses to go on when it cannot" \
 
 
 echo "# ...and the rule that stops the list growing back"
+# RECALL, measured against a reading made without it (CONTRIBUTING, "The
+# standard this leaves"). Every one of the 147 absence rules in
+# tests/absence-rule-census.tsv reads repository text, and they were classified
+# by reading bodies, not by this. It sees 116. The 31 it misses, by shape:
+#   13  read through a quoted glob, "${REPO}"/scripts/*.sh — the rule wants ${REPO}/
+#    5  name no repository path in the body: the read is in a helper, or the
+#       file arrives as an argument
+#    4  read through a path variable it does not know, CONFIG_CENSUS among them
+#    2  list the tree with git ls-files
+#    1  has no text-tool word in its body
+#    6  not yet characterised
+# 25 of the 31 have no census row and no SOURCE-GREP marker: the meta-gate has
+# never known they read source. Widening the rule is the next step, and each of
+# them reads as unjustified until somebody reads it.
 # Four gates in two days read source text as evidence of a behaviour, and all
 # four stayed green while the behaviour was gone. The rule is in
 # CONTRIBUTING.md: drive it, or say in a SOURCE-GREP: comment what you cannot
