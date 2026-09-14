@@ -114,12 +114,40 @@ env_switch_value() {   # ENV-FILE SETTING -> true|false, or nothing
 # unparameterised harness needs nothing, because its one .env is still on disk.
 CONFIG_LEDGER="${SANDBOX}/.configurations"
 : > "${CONFIG_LEDGER}"
+# ...and the settings that are COMPARED rather than switched. A switch has two
+# values and the census can ask for both by name; these have many, and what
+# matters is whether a product command has ever run at more than one of them.
+#
+# They needed a ledger for the same reason the switches did, and the cost of
+# not having one is measured: these were carried in a header comment as "the
+# next tranche", and when that comment was finally checked against the fixtures
+# four of them understated what already ran and one was simply false. A note
+# nothing derives is a note that rots, and nobody sees it rot.
+#
+# Six, not the five that note discussed. Its own prose said "six other settings
+# are compared", listed six, and then corrected "those five" — a header
+# disagreeing with the rows under it, which is the third time that shape has
+# turned up in this project's own bookkeeping. OLLAMA_CONTEXT_LENGTH is the one
+# the sentence dropped.
+CONFIG_VALUES='OLLAMA_CONTEXT_LENGTH OLLAMA_KEEP_ALIVE AGENT_STEP_SOURCE MODEL_NAME AGENT_PORT AGENT_TIMEOUT_MINUTES'
+config_values() { printf '%s\n' "${CONFIG_VALUES}"; }
+# The LAST assignment, like env_switch_value, and for the same reason: a
+# fixture that appends an override leaves .env.example's line above it. Any
+# value, not just true|false, with surrounding quotes taken off.
+env_value_of() {   # ENV-FILE SETTING -> its value, or nothing
+  sed -n "s/^[[:space:]]*\(export \)\?$2=\(.*\)\$/\2/p" "$1" \
+    | tail -1 | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/'
+}
 record_configuration() {   # ENV-FILE -> note what a product script is about to read
   local f="$1" s
   [[ -r "${f}" ]] || return 0
-  for s in ${CONFIG_SWITCHES}; do
-    printf '%s=%s\n' "${s}" "$(env_switch_value "${f}" "${s}")"
-  done >> "${CONFIG_LEDGER}"
+  { for s in ${CONFIG_SWITCHES}; do
+      printf '%s=%s\n' "${s}" "$(env_switch_value "${f}" "${s}")"
+    done
+    for s in ${CONFIG_VALUES}; do
+      printf '%s=%s\n' "${s}" "$(env_value_of "${f}" "${s}")"
+    done
+  } >> "${CONFIG_LEDGER}"
 }
 # ...and the same note where the value does not come from an .env at all.
 #
@@ -24056,6 +24084,39 @@ check "...and no tracked file is empty" no_tracked_file_is_empty
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 
+# ...and the same non-vacuity question asked one level down, which is where the
+# duplicate scanner was actually caught. The probe above proves the scanner can
+# see a dead function appended to the END of a file. It cannot tell you the
+# scanner was still reading when it got there: both scanners skip data, and a
+# skip that never turns off is silent, not noisy. reachable.awk stops looking
+# if a quoted heredoc's terminator never appears at column zero — every line
+# after it becomes fixture text, every function defined there stops existing,
+# and the report comes back empty, which reads as "everything is reached".
+#
+# SOURCE-GREP: no. It runs the scanner over a file built to blind it.
+the_reachability_scanner_says_when_it_went_blind() {
+  local reach_blind="${SANDBOX}/reach-blind.sh" probe_fn="a_function"'_nothing_calls' out
+  cp "${TESTS_DIR}/test-lib.sh" "${reach_blind}"
+  # A quoted heredoc whose terminator never comes, then a plainly dead
+  # function underneath it.
+  printf 'cat <<%sNEVER_CLOSED%s
+' "'" "'" >> "${reach_blind}"
+  printf '%s() { :; }\n' "${probe_fn}" >> "${reach_blind}"
+  out="$(unreached_functions "${reach_blind}")"
+  grep -q 'UNSCANNED' <<<"${out}" || {
+    echo 'the reachability scanner ran off the end inside a heredoc and said nothing about it' >&2
+    return 1
+  }
+  # ...and the proof it really had stopped: the dead function below the opener
+  # is not reported, so the warning cannot come from a scanner still reading.
+  ! grep -qxF "${probe_fn}" <<<"${out}" || {
+    echo 'the probe did not blind the reachability scanner, so its warning proves nothing' >&2
+    return 1
+  }
+}
+check "...and says so when an unclosed heredoc stopped it looking" \
+  the_reachability_scanner_says_when_it_went_blind
+
 # ...and the other half of the same trap. A second definition of a function in
 # a linear script silently replaces the first: every call above it gets one
 # implementation and every call below gets another, with nothing said. url_for
@@ -24098,6 +24159,42 @@ no_test_function_is_defined_twice() {
 }
 check "...and none defines the same function twice" \
   no_test_function_is_defined_twice
+
+# The half of that scanner that was missing, and the reason this gate exists at
+# all. Both of its skips are heuristics, and when a heuristic guesses wrong
+# here it does not accuse anything — it falls silent, which is indistinguishable
+# from a clean file. One apostrophe in a double-quoted grep pattern, written a
+# few hundred lines above, opened a literal that never closed; the scanner read
+# every line after it as string data and reported nothing. The only thing that
+# caught it was the end-of-file probe above, and that probe only catches
+# blindness that reaches the end. An unclosed opener is now reported in its own
+# right, and this drives that: blind the scanner on purpose and require it to
+# say so.
+#
+# SOURCE-GREP: no. The subject is the scanner, this runs it over a file built
+# for the purpose, and the assertion is on what it printed.
+the_duplicate_scanner_says_when_it_went_blind() {
+  local blind_probe="${SANDBOX}/blind-probe.sh" dup_fn="a_function"'_defined_twice' out
+  cp "${TESTS_DIR}/test-lib.sh" "${blind_probe}"
+  # One apostrophe, in code, in the shape the real instance had: inside a
+  # double-quoted pattern, where it is an ordinary character and not a quote.
+  printf 'grep -qE "[^%s]" /dev/null || true\n' "$(printf '\47')" >> "${blind_probe}"
+  printf '%s() { :; }\n%s() { :; }\n' "${dup_fn}" "${dup_fn}" >> "${blind_probe}"
+  out="$(duplicate_definitions "${blind_probe}")"
+  grep -qF 'UNSCANNED' <<<"${out}" || {
+    echo 'the scanner stopped looking after an odd apostrophe and said nothing about it' >&2
+    return 1
+  }
+  # ...and the proof that it really had stopped looking: the duplicate pair
+  # below the apostrophe is missed. Without this the warning could be printed
+  # by a scanner that was reading fine.
+  ! grep -qF "${dup_fn}" <<<"${out}" || {
+    echo 'the probe did not blind the scanner, so its warning proves nothing' >&2
+    return 1
+  }
+}
+check "...and says so when an unclosed quote stopped it looking" \
+  the_duplicate_scanner_says_when_it_went_blind
 
 echo "# ...and the configuration those gates were driven IN"
 # A different failure from a gate that reads source, and named separately:
@@ -24206,6 +24303,131 @@ config_blindness_has_not_grown() {
 }
 check "...and the number of undriven configurations never gets bigger" \
   config_blindness_has_not_grown
+
+echo "# ...and the settings that are compared rather than switched"
+# The other half of the configuration census, and the half that had no ledger.
+#
+# A switch has two values and the census names both. These five have many, and
+# the only question worth asking is whether a whole product command has ever
+# run at more than one — because a setting every fixture leaves at its shipped
+# value is a branch nobody reaches, which is exactly what SHIPPED-ONLY meant
+# for the switches.
+#
+# Until now they were carried as prose in that file's header. Checked against
+# the fixtures for the first time, four of the five notes understated what
+# already ran and one was false outright: a whole scripts/tune.sh has run at
+# OLLAMA_KEEP_ALIVE=-1 since the tune harness was written, which is precisely
+# what the note said had never happened. That is the same failure as a census
+# header disagreeing with the rows beneath it, and it is the second time this
+# project has found it in its own bookkeeping.
+value_fixture_values() {   # SETTING -> the distinct values a product script really ran at
+  local f
+  { while IFS= read -r f; do
+      [[ -n "${f}" ]] || continue
+      env_value_of "${f}" "$1"
+    done < <(find "${SANDBOX}" -name '.env' -type f 2>/dev/null)
+    sed -n "s/^$1=\(..*\)\$/\1/p" "${CONFIG_LEDGER}" 2>/dev/null
+  } | sed '/^$/d' | sort -u
+}
+# ...and the fixtures this process cannot see.
+#
+# Three sources, and leaving any of them out makes the ledger lie in the safe
+# direction: it under-reports, and a MANY row then looks false when it is true.
+# Not hypothetical — the first run of these gates reported AGENT_STEP_SOURCE,
+# AGENT_PORT and AGENT_TIMEOUT_MINUTES as driven at nothing at all, because
+# every value they are driven at lives in a SIBLING suite.
+# tests/test-agent-watch.sh runs the whole watcher at three step sources and
+# two timeouts, tests/test-netmode.sh renders the real ruleset at port 22, and
+# CI installs at three model names. None of that happens inside this process
+# and all of it is a product command run at that value.
+#
+# Two shapes, because fixtures set these two ways: a plain or quoted
+# assignment, and a sed that rewrites .env.example in place. Everything from
+# the first character that cannot appear in a value is cut off, which removes
+# the printf escapes, regex fragments and sed delimiters the raw grep drags in
+# — without that the count is inflated by junk and MANY passes for the wrong
+# reason.
+#
+# This half is WEAKER than the ledger half and the difference is worth stating.
+# record_configuration is called by whole-command harnesses, so what it records
+# really is a command run at that value. This function reads other files' text:
+# it proves the value appears in a fixture, not that the command which used it
+# was a whole one. AGENT_PORT is the live example — it finds 3999, which is a
+# unit probe on agent_web_url, alongside the 22 and 3001 that are real runs.
+foreign_fixture_values() {   # SETTING -> values used by fixtures outside this process
+  # The apostrophe reaches the bracket expression through a variable rather
+  # than as a literal. Written literally it is one apostrophe on the line, and
+  # tests/duplicate-defs.awk tracks multi-line single-quoted shims by counting
+  # them: an odd count opened a literal that never closed, and the scanner went
+  # silently blind for every line after this one. It now says so out loud.
+  local q; q="$(printf "\47")"
+  { grep -ohE "s/\^$1=[^/]*/$1=[^/]*/" \
+      "${REPO}/.github/workflows/ci.yml" "${REPO}"/tests/*.sh 2>/dev/null \
+      | sed -E "s#.*/$1=##; s#/.*\$##"
+    grep -ohE "$1=[^[:space:]\"${q}\$#]+" \
+      "${REPO}/.github/workflows/ci.yml" "${REPO}"/tests/*.sh 2>/dev/null \
+      | sed -E "s#^.*$1=##"
+  } | sed -E '/^$/d; s/[^A-Za-z0-9._:+-].*$//; /^$/d' | sort -u
+}
+values_driven_for() {   # SETTING -> every value anything ran it at, comma-joined
+  { value_fixture_values "$1"; foreign_fixture_values "$1"; } | sort -u | paste -sd, -
+}
+# 1. Every compared setting has a row, derived from the list above, so a sixth
+#    cannot be added to the code and forgotten here.
+every_value_setting_is_classified() {
+  local s bad=0 n=0
+  for s in $(config_values); do
+    n=$(( n + 1 ))
+    grep -qE "^(MANY|ONE-VALUE)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" || {
+      printf '%s is compared by the product and has no row in the configuration census\n' "${s}" >&2
+      bad=1; }
+  done
+  (( n >= 5 )) || { printf 'only %s compared settings listed — this gate stopped watching\n' "${n}" >&2; return 1; }
+  return "${bad}"
+}
+check "every compared setting is classified in the configuration census" \
+  every_value_setting_is_classified
+# 2. ...and what the row claims is what the fixtures actually did. This is the
+#    gate whose absence let five notes rot: MANY has to be two values or more,
+#    and ONE-VALUE has to be exactly one, measured rather than asserted.
+value_census_matches_the_fixtures() {
+  local s label driven count bad=0
+  for s in $(config_values); do
+    label="$(grep -E "^(MANY|ONE-VALUE)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" | cut -f1 | head -1)"
+    [[ -n "${label}" ]] || continue          # gate 1 reports the missing row
+    driven="$(values_driven_for "${s}")"
+    count="$(awk -F, '{print NF}' <<<"${driven}")"
+    [[ -n "${driven}" ]] || count=0
+    case "${label}" in
+      MANY)
+        (( count >= 2 )) || {
+          printf '%s is recorded as driven at several values, and every fixture ran it at: %s\n' \
+            "${s}" "${driven:-nothing at all}" >&2
+          bad=1; } ;;
+      ONE-VALUE)
+        (( count <= 1 )) || {
+          printf '%s is now driven at %s values (%s) — move its row to MANY and say what drives it\n' \
+            "${s}" "${count}" "${driven}" >&2
+          bad=1; } ;;
+    esac
+  done
+  return "${bad}"
+}
+check "...and what it claims agrees with the values the fixtures really used" \
+  value_census_matches_the_fixtures
+# 3. The ratchet, the same shape as the other two: the number of compared
+#    settings nothing varies may only go down.
+value_blindness_has_not_grown() {
+  local n
+  n="$(grep -cE '^ONE-VALUE'$'\t' "${CONFIG_CENSUS}")"
+  (( n <= 0 )) || {
+    printf 'the number of compared settings no fixture varies has grown to %s — every one of the five was already driven when this ledger was built, and the only honest direction is down\n' \
+      "${n}" >&2
+    return 1
+  }
+}
+check "...and the number of unvaried settings never gets bigger" \
+  value_blindness_has_not_grown
 
 echo
 SUITE_FINISHED=true

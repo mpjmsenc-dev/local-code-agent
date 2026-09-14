@@ -451,7 +451,7 @@ GUARDED="$(guarded_ports 2>/dev/null || true)"
 note "guarded_ports says: $(tr '\n' '|' <<<"${GUARDED}")"
 if [[ "${ENABLE_AGENT}" == "true" ]]; then
   if grep -qE "(^|[^0-9])${AGENT_PORT}([^0-9]|$)" <<<"${GUARDED}"; then
-    t_ok "the agent's port ${AGENT_PORT} is in the guard list, computed from real container state"
+    t_ok "the agent port ${AGENT_PORT} is in the guard list, computed from real container state"
   else
     t_fail "the agent is on but port ${AGENT_PORT} is not in the guard list"
   fi

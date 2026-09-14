@@ -33,59 +33,18 @@
 # appeared nineteen times in this suite, all of them narrow, while the
 # whole-command path stalled for ever.
 #
-# WHAT THIS FILE DOES NOT COVER, stated so the next person does not have to
-# rediscover it. The rows below are the SWITCHES, because those can be derived
-# from .env.example mechanically and so a new one cannot be forgotten. Six
-# other settings are compared rather than interpolated — they select a branch
-# exactly like a switch does — and they are the next tranche:
+# THE COMPARED SETTINGS have rows of their own below, labelled MANY or
+# ONE-VALUE. They used to live here as prose, and that is exactly how four of
+# those notes came to understate what already ran while a fifth was simply
+# false. A claim in a comment derives from nothing; a row is checked against
+# the .env files the fixtures really built, by the same three gates the
+# switches get.
 #
-#   OLLAMA_CONTEXT_LENGTH   DRIVEN at 4096, 8192 and 32768. The 4096 cell
-#                           produced a warning nothing in this repo had ever
-#                           produced; the three together are what proves
-#                           'lca ask' computes a budget rather than holding a
-#                           constant
-#   OLLAMA_KEEP_ALIVE       DRIVEN. A whole 'scripts/tune.sh' runs at -1 in the
-#                           tune harness, and CI's ollama job installs at 17m.
-#   AGENT_STEP_SOURCE       DRIVEN at log, events and auto — tests/test-agent-
-#                           watch.sh runs the whole watcher at each.
-#   MODEL_NAME              DRIVEN. CI installs at 0.5b and 3b; every other
-#                           fixture is the shipped 7b.
-#   AGENT_PORT              DRIVEN at the shipped 3001 everywhere and at 22 by
-#                           tests/test-netmode.sh, which renders the real
-#                           ruleset. (AGENT_PORT=3999 is a unit probe on
-#                           agent_web_url and does NOT count here.)
-#   AGENT_TIMEOUT_MINUTES   DRIVEN at 0 and 1 by tests/test-agent-watch.sh.
-#
-# Those five notes are CORRECTED, not new work. Every one of them was written
-# as a projection — "one comparison", "the -1 is unrun" — and four of the five
-# understated what the fixtures already did; the -1 claim was simply false, and
-# had been since the tune harness was written. They were never re-derived,
-# which is the same failure as the "33 correctly narrow" rows in the other
-# census and the two "Cost: low" notes above: a guess that stops being read as
-# a guess.
-#
-# What is genuinely missing is not coverage but a LEDGER. The switches are
-# checked against the .env files the fixtures really built, so a BOTH row
-# cannot outlive what makes it true; these five are checked against nothing,
-# which is why their notes could rot for weeks without anyone noticing. The
-# next piece of work here is record_configuration for values, not more runs.
-#
-# WHERE THIS STANDS. Every switch in .env.example is now DRIVEN at both values
-# by a whole product command. Eight were SHIPPED-ONLY when this file was
-# written; the last four went together, because they are one decision seen from
-# four sides — a master switch, two per-surface overrides, and the aider argv
-# the third of them ends up in.
-#
-# Two of those four had 'Cost: low' beside them and the note was wrong in the
-# same way twice. AIDER_CONVENTIONS said check_report reaches it: at the shipped
-# defaults it does not, because CONVENTIONS_CHAT is false and the master switch
-# then changes nothing a report can see. AIDER_NO_AUTO_COMMIT said the argv
-# probe drives both values: it does, and the probe evaluates one extracted block
-# while forty lines above it decide whether that block is ever reached. A cost
-# written down without being paid is a guess wearing a number.
-#
-# What is left is the value-settings tranche listed above, which is where the
-# next configuration blindness will be.
+# There are six. The prose said "six other settings are compared", listed six,
+# and then corrected "those five" — a header disagreeing with the rows under
+# it, the third time that shape has appeared in this project's own
+# bookkeeping. OLLAMA_CONTEXT_LENGTH is the one the sentence dropped, and it
+# would have been dropped for good when the prose was replaced by rows.
 #
 # Format: LABEL <TAB> setting <TAB> shipped <TAB> what the other side is, and what reaches it.
 # ---------------------------------------------------------------------------
@@ -103,3 +62,9 @@ BOTH	ENABLE_WEBUI	true	false skips the chat-app section and, until it was fixed,
 BOTH	SKIP_DOCKER	false	true skips the docker, chat-app and agent sections. Driven by tests/test-fresh-install.sh, which CI runs on a clean machine, and by check_report
 BOTH	SKIP_TAILSCALE	false	true skips the Tailscale install and changes what setup, motd, webui and lca check say about reachability. Driven by tests/test-fresh-install.sh; the motd and webui arms at true are still unreached
 BOTH	WEBUI_ENABLE_SIGNUP	true	false closes registration. Driven by check_report both ways and by CI's webui job, which closes signups against a real container
+MANY	OLLAMA_CONTEXT_LENGTH	8192	DRIVEN at 4096, 8192 and 32768. The 4096 cell produced a budget warning nothing else in this suite produces, and the three together are what shows lca ask computes a window rather than holding a constant
+MANY	OLLAMA_KEEP_ALIVE	30m	DRIVEN at 30m, at -1 and at 17m. The tune harness writes -1 into a real .env and runs the whole of scripts/tune.sh; CI's ollama job installs at 17m. The old note said no whole command had ever run at -1, which had been untrue since that harness was written
+MANY	AGENT_STEP_SOURCE	auto	DRIVEN at auto, log and events — tests/test-agent-watch.sh runs the whole watcher at each, against a real event endpoint for the last of them
+MANY	MODEL_NAME	qwen2.5-coder:7b	DRIVEN at the shipped 7b by every fixture here, and at 3b and 0.5b by CI's real installs
+MANY	AGENT_PORT	3001	DRIVEN at the shipped 3001 everywhere and at 22 by tests/test-netmode.sh, which renders the real ruleset. The ledger also sees 3999, which is a unit probe on agent_web_url and is NOT a whole-command run — the text scan cannot tell them apart, so the evidence for this row is 22 and 3001
+MANY	AGENT_TIMEOUT_MINUTES	180	DRIVEN at 0 and at 1 by tests/test-agent-watch.sh, which is the difference between a watcher that gives up and one that never does

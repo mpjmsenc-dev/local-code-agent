@@ -20,7 +20,7 @@
 # since an apostrophe in prose is not a quote.
 
 !inhd && !insq && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/) {
-  hd = substr($0, RSTART + 3, RLENGTH - 4); inhd = 1; next
+  hd = substr($0, RSTART + 3, RLENGTH - 4); inhd = 1; hdline = FNR; next
 }
 inhd && $0 == hd { inhd = 0; next }
 inhd { next }
@@ -30,7 +30,7 @@ inhd { next }
   if (!insq && line ~ /^[[:space:]]*#/) next
   n = gsub(/\x27/, "\x27", line)
   was = insq
-  if (n % 2) insq = !insq
+  if (n % 2) { insq = !insq; if (insq) sqline = FNR }
   if (was) next
 }
 
@@ -40,6 +40,14 @@ match($0, /^[a-z_][a-z0-9_]*\(\) *\{/) {
   where[fn] = where[fn] " " FNR
 }
 
+# Both skips above are heuristics, and a heuristic that guesses wrong here does
+# not produce a false accusation — it produces SILENCE, which reads exactly
+# like a clean file. One apostrophe in a double-quoted grep pattern opened a
+# literal that never closed, and every line after it went unscanned. Reaching
+# the end still inside either state is therefore reported as loudly as a
+# duplicate: what follows an unclosed opener was never looked at.
 END {
+  if (inhd) printf "UNSCANNED: the quoted heredoc opened at line %s never closed, so every line after it was skipped\n", hdline
+  if (insq) printf "UNSCANNED: the odd apostrophe at line %s left this scanner inside a literal, so every line after it was skipped\n", sqline
   for (f in count) if (count[f] > 1) printf "%s defined %s times, at lines:%s\n", f, count[f], where[f]
 }

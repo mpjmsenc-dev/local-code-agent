@@ -1269,6 +1269,116 @@ finding:
   to it at all. Nothing to do with the product. *Where you put a clone is part
   of the fixture.*
 
+### The fourth answer, and what a wrong lexer actually does
+
+The section above says the three awk scanners on this side are fine, because
+none of them can truncate code mid-line. That is true and it was the wrong
+question. `tests/duplicate-defs.awk` does not only decide which lines are
+comments — it also decides which lines are *string data*, and it does that by
+counting apostrophes: an odd number on a line opens or closes a multi-line
+single-quoted shim. It is a fourth answer to *which lines are code*, and it is
+wrong in the way that matters most.
+
+A helper added to the suite contained this, in a grep pattern:
+
+```
+grep -ohE "$1=[^[:space:]\"'\$#]+" ...
+```
+
+One apostrophe, inside double quotes, where it is an ordinary character. The
+scanner counted it, believed a literal had opened, and read **every line after
+it as string data**. It did not accuse anything. It did not truncate anything.
+It went quiet — which reads exactly like a clean file.
+
+*This is the difference between a wrong lexer and a wrong lexer you notice.*
+A parser that mis-strips a comment produces a false accusation, and somebody
+argues with it. A parser that mis-detects a quote produces **silence**, and
+silence is the same shape as success.
+
+The only thing that caught it was the non-vacuity probe at the end of
+`no_test_function_is_defined_twice`, which appends a duplicate pair to a copy
+of the file and requires the scanner to see it. It caught this because the
+blindness ran to the end of the file. **Blindness that closes again a hundred
+lines later would have passed that probe**, and the middle of the file would
+have been unscanned with nothing to say so.
+
+Three things came out of it:
+
+- The scanner now reports reaching the end still inside a heredoc or a literal,
+  naming the line that opened it. Silent blindness is now a loud failure, and
+  `...and says so when an unclosed quote stopped it looking` drives it: blind
+  the scanner on purpose and require it to say so, *and* require the duplicate
+  below the apostrophe to be missed, so the warning cannot come from a scanner
+  that was reading fine.
+- One pre-existing instance, in `tests/live-verify.sh`. `t_ok "the agent's
+  port …"` at line 454 of 487: the last **33 lines of that file have never been
+  scanned**, since the commit that added it. Reworded.
+- The same question asked of the product scripts, which this gate does not
+  cover: **eleven of them trip the new warning** — `agent.sh`,
+  `check-system.sh`, `scripts/ask.sh`, `scripts/speed.sh`, `scripts/selftest.sh`
+  and the six agent-tier scripts — all on ordinary English apostrophes in
+  user-facing messages.
+
+That last point is where this stops and waits. Extending the gate to the
+product scripts means either rewriting user-visible prose to avoid apostrophes,
+which is a bad trade, or having a real lexer. A text-only scan of every shell
+file in the repository — no comment skipping, no quote tracking, every
+`name() {` at column zero — finds **no duplicate definition in any product
+script**, so the eleven blind spots are hiding nothing today. That is the
+measured cost of the missing lexer: not a bug, a gate that cannot be widened.
+
+Then the same question asked of the other scanner that skips data.
+`tests/reachable.awk` does not count apostrophes, so it cannot be blinded that
+way — but it skips quoted heredocs, and a heredoc whose terminator never
+appears at column zero leaves it reading the rest of the file as fixture text.
+Every function defined below that point stops existing, and an empty report
+reads as *everything here is reached*. It is not blind on anything today,
+measured; it now says so if it ever is, and
+`...and says so when an unclosed heredoc stopped it looking` drives it the same
+way — blind it on purpose, require the warning, and require the dead function
+below the opener to be missed.
+
+The general rule, worth keeping: **a scanner that skips data must report
+reaching the end still skipping.** The non-vacuity probes both scanners already
+had ask *can you still see something obvious at the end of the file* — and a
+scanner that stopped reading at line 200 answers that question by being handed
+a file it never got to. The state at EOF is the cheap half nobody had asked for.
+
+### One workflow, two shells, and nothing saying which
+
+Asked of CI, while looking for things that do nothing: this one does something
+*invisible* instead.
+
+GitHub runs a bare `run:` step under `bash -e {0}` — errexit on, **pipefail
+off**. An explicit `shell: bash` gets `bash --noprofile --norc -eo pipefail
+{0}`. Measured on this workflow: **52 run-steps, 15 with pipefail and 37
+without**, and nothing anywhere marks the difference.
+
+That matters more here than in most projects, because trap #1 at the top of
+this document is `cmd | grep -q` under pipefail — `grep -q` exits the moment it
+matches, the writer takes SIGPIPE, and the pipeline reports 141, so the check
+fails *because* the pattern was found. Six CI steps pipe into `grep -q`: four
+in the no-pipefail group where that cannot happen, two in the group where it
+can. **A line moved from one step to another changes meaning, with no diff to
+show for it.**
+
+The suite already refuses that shape in `*.sh`, `scripts/`, `deploy/` and
+`bin/lca`. It has never looked at the workflow — the one place the two shells
+coexist.
+
+No gate was added, deliberately. The obvious one — *every step declares its
+shell* — fails on 37 steps today, and the fix is not mechanical: adding
+`shell: bash` everywhere turns pipefail **on** for steps that were written
+without it, including `nft list … | tee /dev/stderr | grep -q`, which is
+exactly the shape trap #1 is about. Choosing uniform pipefail is a decision
+about what CI should do, not a bookkeeping correction, and it wants making
+deliberately rather than as a side effect of a gate.
+
+Neither of the two pipefail steps is at risk today: both pipe a single line of
+`systemctl show` output, far under the 64 KiB pipe buffer that makes SIGPIPE
+reachable. This is a legibility defect, not a live one — recorded so the choice
+gets made on purpose.
+
 ## Run it broken, not working
 
 The happy path is the least informative state to test here, and by a wide

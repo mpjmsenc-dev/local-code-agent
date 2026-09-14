@@ -599,3 +599,7 @@ B	no_unannounced_long_wait	exhaustive absence rule for a silent wait
 B	root_docs_are_swept_or_exempt	coverage bookkeeping over the root documents
 H	census_rows	counts the rows of this table
 H	census_names	lists the names in this table
+H	foreign_fixture_values	reads the values sibling suites and CI set a compared setting to, which this process cannot observe
+B	every_value_setting_is_classified	the subject IS whether each compared setting has a row in the configuration census
+FP	the_duplicate_scanner_says_when_it_went_blind	blinds the duplicate scanner on purpose and reads what it printed
+FP	the_reachability_scanner_says_when_it_went_blind	blinds the reachability scanner with an unclosed heredoc and reads what it printed

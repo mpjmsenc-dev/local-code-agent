@@ -29,7 +29,7 @@ FNR == NR {
   # contain function definitions, and counting those as real ones would make
   # every fixture look like dead code.
   if (!inhd && match($0, /<<\x27[A-Za-z_][A-Za-z0-9_]*\x27/)) {
-    hd = substr($0, RSTART + 3, RLENGTH - 4); inhd = 1; next
+    hd = substr($0, RSTART + 3, RLENGTH - 4); inhd = 1; hdline = FNR; next
   }
   if (inhd && $0 == hd) { inhd = 0; next }
   if (inhd) next
@@ -45,7 +45,7 @@ FNR == NR {
     # The line that OPENS a heredoc is still code, and in this suite it is
     # routinely the check line naming the gate whose fixture follows. Scan it,
     # then skip the data underneath.
-    hd2 = substr($0, RSTART + 3, RLENGTH - 4); inhd2 = 1
+    hd2 = substr($0, RSTART + 3, RLENGTH - 4); inhd2 = 1; hd2line = FNR
     scan($0, ($0 ~ /^check[[:space:]]/) ? "" : cur)
     next
   }
@@ -78,7 +78,14 @@ function scan(line, owner,   n, i, parts, w) {
   }
 }
 
+# The same silent failure duplicate-defs.awk had, in the other scanner that
+# skips data: if a quoted heredoc's terminator never appears at column zero,
+# inhd stays set and every line after it is read as fixture text. Nothing is
+# accused, nothing is truncated — the file simply looks clean. Reaching the end
+# still inside a heredoc is therefore reported as loudly as a dead function.
 END {
+  if (inhd)  print "UNSCANNED: pass 1 ended inside the quoted heredoc <<" hd " opened at line " hdline ", so every line after it was read as data"
+  if (inhd2) print "UNSCANNED: pass 2 ended inside the quoted heredoc <<" hd2 " opened at line " hd2line ", so every line after it was read as data"
   for (r in root) live[r] = 1
   changed = 1
   while (changed) {
