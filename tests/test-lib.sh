@@ -12439,6 +12439,92 @@ no_unannounced_long_wait() {
 check "no long wait for an Ollama nobody started or announced" \
   no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh
 
+# ...and the half that did not exist. The gate above is the ONLY caller of
+# tests/long-wait.awk, it runs once, over the real tree, and the real tree has
+# no offending line — so it passed identically whether the scanner worked or
+# not. An audit asking what exercised this file found the answer was nothing,
+# and the file header claimed the opposite: "the mutation that exposed that is
+# in tests/test-lib.sh" pointed at a mutation that had been run by hand once
+# and never became a test.
+#
+# It cost something real. An unanchored /nohup ollama serve/ allow rule sat in
+# that file, left behind when start_ollama_bg changed shape. It matched nothing
+# the scanner visits, which is why nobody noticed — and it excused any line
+# merely CONTAINING those words, including the warn() that tells a reader how
+# to start the server by hand. The comment four lines below it said that case
+# must still count as silence. The file contradicted itself, inertly, for as
+# long as it has existed. 'prose_only' below is that case.
+#
+# One fixture per rule, so every surviving line is driven and a sixth cannot be
+# added without one.
+#
+# SOURCE-GREP: no. It runs the scanner over files built for it and reads the
+# verdict.
+LONGWAIT_SB="${SANDBOX}/longwait"
+long_wait_case() {   # NAME -> writes that fixture and prints its path
+  mkdir -p "${LONGWAIT_SB}"
+  local f="${LONGWAIT_SB}/$1.sh"
+  case "$1" in
+    # nothing above it at all: the non-vacuity case
+    bare)             printf 'go() {\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    # a single digit is a short poll, not a stall
+    short)            printf 'go() {\n  wait_for_ollama 6\n}\n' > "${f}" ;;
+    # a wait that is itself commented out is not a wait
+    commented)        printf 'go() {\n  # wait_for_ollama 60\n  :\n}\n' > "${f}" ;;
+    systemd_start)    printf 'go() {\n  as_root systemctl restart ollama\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    # the multi-line form start_ollama_bg actually uses. No brace expansions in
+    # the fixture text: the rule matches on the shape and the trailing '&', so
+    # spelling the values out keeps this from reading as an expansion that
+    # failed to expand.
+    background_start) printf 'go() {\n  nohup env OLLAMA_HOST=127.0.0.1 \\\n    ollama serve >/tmp/o.log 2>&1 &\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    ensure_helper)    printf 'go() {\n  ensure_ollama_up\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    # telling the reader how to start it is not starting it
+    prose_only)       printf 'go() {\n  warn "Not running. Start it with: nohup ollama serve >/tmp/o.log 2>&1"\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    # a comment NAMING the starter is prose about a start, not a start
+    comment_evidence) printf 'go() {\n  # ensure_ollama_up has already started the server\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    # a real start, but further above than the window reaches
+    out_of_window)    printf 'go() {\n  ensure_ollama_up\n  a=1\n  b=2\n  c=3\n  d=4\n  e=5\n  f=6\n  wait_for_ollama 60\n}\n' > "${f}" ;;
+    *)                printf 'no such long-wait fixture: %s\n' "$1" >&2; return 1 ;;
+  esac
+  printf '%s' "${f}"
+}
+long_wait_verdict() {   # NAME -> reported | silent
+  local f out
+  f="$(long_wait_case "$1")" || return 1
+  out="$(awk -f "${TESTS_DIR}/long-wait.awk" "${f}")"
+  if [[ -n "${out}" ]]; then printf 'reported'; else printf 'silent'; fi
+}
+long_wait_scanner_reports_what_it_must() {
+  local name want got bad=0 n=0
+  while read -r name want; do
+    [[ -n "${name}" ]] || continue
+    n=$(( n + 1 ))
+    got="$(long_wait_verdict "${name}")"
+    [[ "${got}" == "${want}" ]] || {
+      printf 'the long-wait scanner called the %s case %s, and it is %s\n' \
+        "${name}" "${got}" "${want}" >&2
+      bad=1
+    }
+  done <<'LONGWAIT_CASES'
+bare              reported
+short             silent
+commented         silent
+systemd_start     silent
+background_start  silent
+ensure_helper     silent
+prose_only        reported
+comment_evidence  reported
+out_of_window     reported
+LONGWAIT_CASES
+  (( n == 9 )) || {
+    printf 'only %s long-wait fixtures were read — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the long-wait scanner reports what it must and excuses what it must" \
+  long_wait_scanner_reports_what_it_must
+
 echo "# a model pull must survive a transient registry failure"
 # CI hit the real thing: the registry answered 503 at 396 MB of a 397 MB
 # download, and the whole pull was thrown away. On a droplet that is gigabytes

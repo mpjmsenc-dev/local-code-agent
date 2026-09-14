@@ -1344,6 +1344,57 @@ had ask *can you still see something obvious at the end of the file* — and a
 scanner that stopped reading at line 200 answers that question by being handed
 a file it never got to. The state at EOF is the cheap half nobody had asked for.
 
+### The third scanner, which nothing was driving at all
+
+The two blindness fixes above came from asking *what happens when a scanner
+stops reading*. The obvious next question is *what was exercising these
+scanners in the first place*, and for the third one the answer was **nothing**.
+
+`tests/long-wait.awk` had exactly one caller: `no_unannounced_long_wait`, run
+once, over the real tree. The real tree has no offending line — so the gate
+passed identically whether the scanner worked or not. Every other scanner here
+has a non-vacuity probe. This one had none, and its own header said otherwise:
+
+> The mutation that exposed that is in tests/test-lib.sh.
+
+There was no such mutation. It had been run by hand once, years of commits ago,
+and never became a test. **A note claiming coverage is worse than no note** —
+the next person reads it and stops asking.
+
+It cost something. An unanchored `/nohup ollama serve/` allow rule sat in that
+file, left behind when `start_ollama_bg` changed shape to
+`nohup env \ … \ ollama serve >LOG 2>&1 &` and a second, anchored rule was
+added beside it. Measured: deleting the old rule changed no verdict on the
+tree, which is exactly why it survived. But it excused **any line containing
+those words** — including:
+
+```
+warn "Not running. Start it with: nohup ollama serve >/tmp/o.log 2>&1"
+wait_for_ollama 60
+```
+
+The comment four lines below that rule says, in as many words, that a `warn()`
+merely telling the reader to run `ollama serve` *still counts as silence*. The
+file had contradicted its own stated intent for as long as the second rule had
+existed, inertly, where nothing could see it.
+
+**A rule that never fires is not a rule that does nothing — it is a rule nobody
+has checked.** That is the sharper form of the question this document keeps
+coming back to, and it is why "delete what looks inert" is the wrong move: the
+inert rule here was not dead weight, it was a live hole waiting for its case.
+
+What replaced it: nine fixtures, one per rule, driving the scanner over files
+built for the purpose — the bare wait, the single-digit poll, the commented-out
+wait, each of the three ways a start can be spelled, the prose-only case above,
+a comment *naming* the starter (comments are not evidence), and a real start
+placed further above than the five-line window reaches. Then the measurement
+that matters: **delete each rule in turn and the gate must fail.** Six of seven
+are load-bearing. The survivor is `if (i < 1) continue`, a bounds guard that is
+redundant in awk because an unset `hist[i]` matches nothing — defensive, not
+stale, and now known to be so rather than assumed.
+
+Before this, *none* of that file's rules were exercised by anything.
+
 ### One workflow, two shells, and nothing saying which
 
 Asked of CI, while looking for things that do nothing: this one does something

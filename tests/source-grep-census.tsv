@@ -603,3 +603,6 @@ H	foreign_fixture_values	reads the values sibling suites and CI set a compared s
 B	every_value_setting_is_classified	the subject IS whether each compared setting has a row in the configuration census
 FP	the_duplicate_scanner_says_when_it_went_blind	blinds the duplicate scanner on purpose and reads what it printed
 FP	the_reachability_scanner_says_when_it_went_blind	blinds the reachability scanner with an unclosed heredoc and reads what it printed
+H	long_wait_case	writes one fixture per rule of the long-wait scanner
+H	long_wait_verdict	runs the long-wait scanner over one fixture and says reported or silent
+FP	long_wait_scanner_reports_what_it_must	drives the long-wait scanner over nine fixtures and reads each verdict
