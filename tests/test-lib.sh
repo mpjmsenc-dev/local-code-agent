@@ -113,6 +113,47 @@ cp "${REPO}/.env.example" "${SANDBOX}/"
 # three surfaces share one file would pass on an empty string.
 mkdir -p "${SANDBOX}/config"
 cp "${REPO}/config/CONVENTIONS.md" "${SANDBOX}/config/"
+# --- what configuration a fixture puts a product script in --------------------
+#
+# Up here rather than beside the census gates at the bottom of this file: the
+# suite is a linear script, and the first recorder call is four hundred lines
+# below this point. A helper defined after its caller is a command that does
+# not exist, which this file has now learned twice.
+#
+# The switch list comes from the product's own extractor, so a switch added to
+# .env.example is in the census the day it ships and cannot be forgotten. Read
+# once — it costs a subshell and nothing in it changes during a run.
+CONFIG_SWITCHES="$(bash -c 'source "$1" >/dev/null 2>&1; boolean_settings' _ "${REPO}/scripts/lib.sh")"
+config_switches() { printf '%s\n' "${CONFIG_SWITCHES}"; }
+# The LAST assignment, because a fixture that appends an override leaves the
+# .env.example line above it — and the last one is the one load_env ends on.
+env_switch_value() {   # ENV-FILE SETTING -> true|false, or nothing
+  sed -n "s/^[[:space:]]*\(export \)\?$2=\(true\|false\)[[:space:]]*\$/\2/p" "$1" | tail -1
+}
+# Harnesses that VARY their .env overwrite it per case, so the file left at the
+# end of the run shows only the last one. Those record here as they go; an
+# unparameterised harness needs nothing, because its one .env is still on disk.
+CONFIG_LEDGER="${SANDBOX}/.configurations"
+: > "${CONFIG_LEDGER}"
+record_configuration() {   # ENV-FILE -> note what a product script is about to read
+  local f="$1" s
+  [[ -r "${f}" ]] || return 0
+  for s in ${CONFIG_SWITCHES}; do
+    printf '%s=%s\n' "${s}" "$(env_switch_value "${f}" "${s}")"
+  done >> "${CONFIG_LEDGER}"
+}
+# ...and the same note where the value does not come from an .env at all.
+#
+# Some harnesses hand the product script its settings another way. backup_run_in
+# sources backup.sh out of ${REPO}, so lib.sh computes REPO_ROOT there and
+# load_env reads the REPO's .env — which is why that harness overrides what it
+# needs in a shim rather than in a file. The run is still a run at that value,
+# and the census measures what product scripts were run with, so the shim says
+# so here rather than leaving the census to read a file that was never used.
+record_configuration_value() {   # SETTING VALUE
+  printf '%s=%s\n' "$1" "$2" >> "${CONFIG_LEDGER}"
+}
+
 # ...and the starter questions, for a reason found by a mutant surviving: the
 # drift check treats "this repo has no suggestions file" as "nothing to
 # compare", so without this copy the sandbox's REPO_ROOT had no file, `want`
@@ -563,11 +604,53 @@ REPORTING_COMMANDS=(
   "webui.sh status"
   "scripts/logs.sh"
   "scripts/motd.sh"
+  # ...and the three that reach Ollama through ensure_ollama_up, which chose
+  # the interactive answer on behalf of all seven of its callers.
+  "scripts/speed.sh"
+  "scripts/ask.sh why"
+  "scripts/selftest.sh"
+  # ...and the agent tier, which nothing here watched. 'lca agent logs' went
+  # straight to 'as_root docker logs' with no unprivileged attempt and no
+  # root_for_probe: measured, RC=124 with nothing on screen but the prompt.
+  "agent.sh logs"
+  "agent.sh status"
 )
-sudo_waits_sandbox() {
+# The other side of the same rule, and the reason it is not simply "never
+# escalate". lib.sh records both mistakes: can_root everywhere stopped 'lca
+# check' and the banner dead on a password prompt; can_root_now everywhere made
+# 'lca backup' skip the chat history and call a healthy daemon unusable. A
+# command the reader typed to CHANGE something may ask them for a password, and
+# a gate that only checks the first half would be satisfied by making
+# everything strict — which is the worse of the two.
+ACTING_COMMANDS=(
+  "update-model.sh --list"
+  "scripts/apply.sh --dry-run"
+  # Its escalation is 'as_root docker stop ... >/dev/null 2>&1', which takes
+  # sudo's own prompt with docker's noise. It is allowed to wait. It is not
+  # allowed to wait with nothing on screen, which is what it did.
+  "agent.sh stop"
+)
+# ...and the configurations to ask all of that in. The .env the sandbox got was
+# always .env.example, where ENABLE_AGENT=false — so the entire agent half of
+# check-system.sh was unreachable, and the bare 'as_root docker ps' inside
+# agent_live_sandboxes stalled 'lca check' for ever on any box with the tier
+# switched on. Every assertion below passed throughout. The gate held for one
+# configuration, which is the same shape as everything else this week.
+#
+# Second element of each row: an acting command that only exists in that
+# configuration, or empty.
+WAITS_CONFIGS=(
+  "false|"
+  "true|agent.sh start"
+)
+sudo_waits_sandbox() {   # [ENABLE_AGENT]
   rm -rf "${WAITS_SB}"; mkdir -p "${WAITS_SB}" "${WAITS_SB}/bin" "${WAITS_SB}/home"
   ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${WAITS_SB}" )
   cp "${REPO}/.env.example" "${WAITS_SB}/.env"
+  # The tier switch decides which half of check-system.sh is even reached, so
+  # it is a parameter of the sandbox and not a constant in it.
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=${1:-false}/" "${WAITS_SB}/.env"
+  record_configuration "${WAITS_SB}/.env"
   # Sleeps rather than reading: a real sudo reads the password from the
   # terminal, and with stdin at /dev/null a read returns EOF at once — which
   # is the one thing that does NOT reproduce the stall. Twelve seconds, so an
@@ -581,8 +664,24 @@ printf '[sudo] password for %s: ' "$(id -un)" >&2
 sleep 12
 exit 1
 STUB
+  # Everything the stack shells out to, answering "no" at once. Without them
+  # the real docker client is in the sandbox, and against an unreachable daemon
+  # it blocks for seconds on its own — which reads exactly like the hang this
+  # gate is looking for. Nearly reported one as the other.
+  local c
+  for c in docker nft tailscale ollama systemctl; do
+    printf '#!/bin/sh\nexit 1\n' > "${WAITS_SB}/bin/${c}"
+  done
+  printf '#!/bin/sh\nexit 7\n' > "${WAITS_SB}/bin/curl"
+  # ...and the two facts a droplet has that this container does not. Without
+  # systemd, ensure_ollama_up never reaches its escalation at all, so the arm
+  # that hung for seven callers is unreachable here; without a refusing
+  # wait_for_ollama, the commands that start Ollama sit in their own announced
+  # 60-second wait instead of reaching the question under test.
+  printf '\nsystemd_available() { return 0; }\nwait_for_ollama() { return 1; }\n' \
+    >> "${WAITS_SB}/scripts/lib.sh"
   chmod -R a+rX "${WAITS_SB}"
-  chmod +x "${WAITS_SB}/bin/sudo"
+  chmod +x "${WAITS_SB}/bin/"*
   chmod 711 "${SANDBOX}"
 }
 reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
@@ -596,43 +695,318 @@ reporting_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
         "${as_who[@]}" timeout "${secs}" bash "${WAITS_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
   printf 'RC=%s\n%s\n' "${rc}" "${out}"
 }
+# What the run printed, minus sudo's own prompt. Without that subtraction a
+# command whose ONLY output is "[sudo] password for ..." counts as having said
+# something — which is precisely how 'lca agent logs' presented, and precisely
+# the case this is trying to catch.
+said_something() {   # WHAT-THE-RUN-PRINTED
+  (( $(grep -v '^RC=' <<<"$1" | grep -v '\[sudo\] password for' | grep -c .) > 0 ))
+}
 probes_use_the_stricter_test() {
-  local cmd out bad=0
-  sudo_waits_sandbox
-  # First, the harness has to be able to SEE a wait. An ACTION is allowed to
-  # ask for a password — the user typed it — so 'webui.sh start' must block on
-  # this sudo. If it does not, the stub is not blocking and every "it did not
-  # hang" below means nothing at all.
-  out="$(reporting_run 6 webui.sh start)"
-  grep -qx 'RC=124' <<<"${out}" || {
-    printf 'the stand-in sudo did not make an ACTION wait, so nothing below was measured:\n%s\n' \
-      "${out}" >&2
-    return 1
-  }
-  for cmd in "${REPORTING_COMMANDS[@]}"; do
-    # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
-    out="$(reporting_run 8 ${cmd})"
-    ! grep -qx 'RC=124' <<<"${out}" || {
-      printf "'%s' only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
-        "${cmd}" "${out}" >&2
-      bad=1
-      continue
-    }
-    # ...and it has to SAY something. "nothing at all, then waits for ever" is
-    # how the worst of the five presented, and half of that is the silence.
-    (( $(grep -c . <<<"${out}") > 1 )) || {
-      printf "'%s' returned without printing anything at all:\n%s\n" "${cmd}" "${out}" >&2
-      bad=1
-    }
+  local cmd out spec tier extra bad=0
+  for spec in "${WAITS_CONFIGS[@]}"; do
+    IFS='|' read -r tier extra <<<"${spec}"
+    sudo_waits_sandbox "${tier}"
+    # First, the harness has to be able to SEE a wait, and every command that
+    # ACTS has to still be willing to. If none of them blocks, the stub is not
+    # blocking and every "it did not hang" below means nothing at all — and if
+    # one of them stops blocking later, somebody has made the whole stack strict,
+    # which is the worse of the two mistakes lib.sh records.
+    for cmd in "webui.sh start" "${ACTING_COMMANDS[@]}" ${extra:+"${extra}"}; do
+      # shellcheck disable=SC2086  # the command and its argument, deliberately split
+      out="$(reporting_run 5 ${cmd})"
+      grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) changes this machine and it is no longer willing to wait for a password — the reader typed it, and refusing where it used to work is the worse trade:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+        continue
+      }
+      # ...and it may not wait in silence. A command that is allowed to ask is
+      # still not allowed to ask with nothing on screen: 'lca agent stop' sent
+      # sudo's prompt to the same /dev/null as docker's noise and sat there
+      # having printed literally nothing.
+      said_something "${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) waited for a password with nothing on screen:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+      }
+    done
+    (( bad == 0 )) || return 1
+    for cmd in "${REPORTING_COMMANDS[@]}"; do
+      # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+      out="$(reporting_run 8 ${cmd})"
+      ! grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) only reports, and it waited for a password — nobody asked it to run, and it never returns:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+        continue
+      }
+      # ...and it has to SAY something. "nothing at all, then waits for ever" is
+      # how the worst of the five presented, and half of that is the silence.
+      said_something "${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) returned without printing anything at all:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1
+      }
+    done
   done
   (( ${#REPORTING_COMMANDS[@]} >= 5 )) || {
     echo 'the reporting-command list has shrunk — this gate has stopped watching' >&2
+    bad=1
+  }
+  # ...and the configurations themselves, because one of them is the whole
+  # reason this gate caught anything: with ENABLE_AGENT=false the agent half of
+  # check-system.sh is never reached.
+  (( ${#WAITS_CONFIGS[@]} >= 2 )) || {
+    echo 'the stall gate is back to asking about one configuration only' >&2
     bad=1
   }
   return "${bad}"
 }
 check "no command that only reports ever waits for a password" \
   probes_use_the_stricter_test
+
+echo "# ...and a world that accepts and never answers must not hang a report either"
+# Tier 1 of the census order, and the class that has already shipped four live
+# stalls in this project. The two gates covering the NETWORK side of it read
+# source for a --max-time flag. A flag in the source survives being passed to a
+# call that is never made, sitting on the wrong one of four probes, or being
+# large enough not to matter — and it says nothing at all about the docker
+# reads beside it.
+#
+# Same sandbox shape as the sudo stall above, with the WORLD replaced instead
+# of the escalation: curl and docker accept and never answer, which is what an
+# unreachable coordination server, a wedged daemon and a half-open socket all
+# look like from inside a login banner. Every reporting command is run against
+# it, bounded, and has to come back.
+HANG_SB="${SANDBOX}/hangworld"
+hanging_world_sandbox() {   # ENABLE_AGENT
+  rm -rf "${HANG_SB}"; mkdir -p "${HANG_SB}" "${HANG_SB}/bin" "${HANG_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${HANG_SB}" )
+  cp "${REPO}/.env.example" "${HANG_SB}/.env"
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=${1:-false}/" "${HANG_SB}/.env"
+  record_configuration "${HANG_SB}/.env"
+  # A pass-through sudo, not a blocking one: the question here is the world,
+  # not the escalation, and a sudo that blocks would answer every command with
+  # the wrong hang.
+  make_stub_dir "${HANG_SB}/bin"
+  # A curl that is as slow as the caller allows, and a docker that never
+  # answers at all. The asymmetry is the point and it cost a false finding to
+  # learn: a real curl HONOURS --max-time, so a stub that ignores it reports
+  # every bounded call as a hang — 'netmode.sh status' printed its own
+  # "curl --max-time 5" and was scored as hanging. What this asks is whether
+  # the CALL is bounded, not whether curl can be made to sit there. docker has
+  # no such flag: the only bound is a timeout around it, so the stub simply
+  # stops answering, which is what a wedged daemon does.
+  # shellcheck disable=SC2016  # the stub's own variables, read when IT runs
+  { printf '#!/bin/sh\nt=""; prev=""\n'
+    printf 'for a in "$@"; do\n'
+    printf '  case "${prev}" in --max-time|-m) t="$a" ;; esac\n'
+    printf '  prev="$a"\ndone\n'
+    printf 'if [ -n "${t}" ]; then sleep "${t}"; exit 28; fi\n'
+    printf 'sleep 120\nexit 0\n'
+  } > "${HANG_SB}/bin/curl"
+  # Two minutes, not twenty seconds: a report may ask a dozen bounded
+  # questions and the bound below has to leave room for all of them, so the
+  # stub's silence has to be unmistakably longer than that.
+  printf '#!/bin/sh\nsleep 120\nexit 0\n' > "${HANG_SB}/bin/docker"
+  local c
+  for c in nft tailscale ollama systemctl; do
+    printf '#!/bin/sh\nexit 1\n' > "${HANG_SB}/bin/${c}"
+  done
+  printf '\nsystemd_available() { return 0; }\nwait_for_ollama() { return 1; }\n' \
+    >> "${HANG_SB}/scripts/lib.sh"
+  printf '#!/usr/bin/env bash\ncurl -sS http://127.0.0.1:1/ >/dev/null 2>&1\n' \
+    > "${HANG_SB}/hangprobe.sh"
+  chmod -R a+rX "${HANG_SB}"; chmod +x "${HANG_SB}/bin/"*
+}
+hanging_run() {   # SECONDS CMD... -> "RC=n" then whatever it printed
+  local secs="$1"; shift
+  local out rc=0
+  # The product's own bounds are turned down to a second for the run. What is
+  # under test is that the call IS bounded, not the size of the bound, and at
+  # the shipped five seconds a report that asks the wedged daemon five separate
+  # questions costs forty — twenty of those and this gate is slower than the
+  # rest of the suite together. The stub still sleeps twenty, so an UNBOUNDED
+  # call is as unmistakable as it ever was.
+  out="$( cd "${HANG_SB}" && env -i \
+        "PATH=$(stub_path "${HANG_SB}/bin" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')" \
+        "HOME=${HANG_SB}/home" TERM=dumb \
+        LCA_DOCKER_PROBE_TIMEOUT=1 LCA_INSPECT_TIMEOUT=1 \
+        timeout "${secs}" bash "${HANG_SB}/$1" "${@:2}" </dev/null 2>&1 )" || rc=$?
+  printf 'RC=%s\n%s\n' "${rc}" "${out}"
+}
+reports_survive_a_world_that_never_answers() {
+  local cmd out tier bad=0 seen=0
+  for tier in false true; do
+    hanging_world_sandbox "${tier}"
+    # The harness has to be able to SEE a hang, or every "it came back" below
+    # means only that the stub is not blocking.
+    out="$(hanging_run 5 hangprobe.sh)"
+    grep -qx 'RC=124' <<<"${out}" || {
+      echo 'a deliberately unbounded curl returned inside the bound — the hanging stub is not hanging, so nothing here was tested' >&2
+      return 1; }
+    for cmd in "${REPORTING_COMMANDS[@]}"; do
+      seen=$(( seen + 1 ))
+      # shellcheck disable=SC2086  # the command and its subcommand, deliberately split
+      # 40s against one-second bounds. 'lca check' alone asks the wedged
+      # daemon in three steps, the inbound guard asks twice more, and it still
+      # runs a five-second live network probe on top — bounded, and not fast.
+      # A single UNBOUNDED call sits for the stub's full two minutes and goes
+      # straight through this, which is the only thing being measured.
+      out="$(hanging_run 40 ${cmd})"
+      ! grep -qx 'RC=124' <<<"${out}" || {
+        printf "'%s' (ENABLE_AGENT=%s) never came back from a curl and a docker that accept and never answer:\n%s\n" \
+          "${cmd}" "${tier}" "${out}" >&2
+        bad=1; }
+    done
+  done
+  (( seen >= 10 )) || {
+    echo 'the reporting-command list has shrunk — this gate stopped watching' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "every report comes back from a world that accepts and never answers" \
+  reports_survive_a_world_that_never_answers
+
+echo "# ...and every docker QUESTION in this project has to carry a bound"
+# The belt under the run above, and the answer to a number I got wrong.
+#
+# The commit that bounded these said "scripts/lib.sh has nine read-only docker
+# probes and exactly one was bounded". Counted properly there are ELEVEN, and
+# exactly one was bounded — a claim about my own diff, in a commit whose subject
+# is claims matching diffs. Correcting the sentence is the smaller half; the
+# useful half is that nothing was counting, so the next probe added without a
+# bound would be as invisible as the ten were.
+#
+# A question, not an action: 'docker run', 'pull', 'rm', 'stop' and 'logs' are
+# things the reader asked for and may take minutes. info, ps, inspect and port
+# are questions, and a question that cannot time out is how a report never
+# returns.
+#
+# SOURCE-GREP: the subject is an exhaustive absence rule over the source — no
+# unbounded docker QUESTION anywhere in these three files. The behaviour it
+# protects is driven by reports_survive_a_world_that_never_answers above; this
+# is what stops the twelfth probe being written without one.
+DOCKER_QUESTION_FILES=( scripts/lib.sh webui.sh check-system.sh )
+every_docker_question_is_bounded() {
+  local f line unbounded="" n=0
+  for f in "${DOCKER_QUESTION_FILES[@]}"; do
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      n=$(( n + 1 ))
+      grep -qE 'timeout|LCA_DOCKER_RUNNER|DOCKER_PROBE|runner\[@\]' <<<"${line}" \
+        || unbounded+="  ${f}:${line}"$'\n'
+    done < <(sed 's/#.*//' "${REPO}/${f}" \
+             | grep -nE '(^|[^_[:alnum:]])docker +(info|ps|inspect|container inspect|container port|network inspect|volume inspect)' \
+             || true)
+  done
+  # Eleven in lib.sh alone when this was written, plus the hand-written copies.
+  (( n >= 10 )) || {
+    printf 'only %s docker questions found across %s files — this gate stopped watching\n' \
+      "${n}" "${#DOCKER_QUESTION_FILES[@]}" >&2
+    return 1; }
+  [[ -z "${unbounded}" ]] || {
+    printf 'these docker questions carry no bound, so a daemon that accepts and never answers stops the command that asks them:\n%sUse LCA_DOCKER_RUNNER (lib.sh) or the file its own probe array.\n' \
+      "${unbounded}" >&2
+    return 1; }
+}
+check "...and no docker question anywhere is asked without a bound" \
+  every_docker_question_is_bounded
+
+# ...and the shape underneath both of the above, stated once.
+#
+# select_docker, run_reader and ensure_ollama_up each decided, inside the
+# helper, something the comment above root_for_probe says is a property of the
+# CALLER: whether this command may wait for a password. That is a distinct
+# defect from a gate that cannot fail — it is a function taking a decision that
+# belongs to whoever called it, and no gate written about the caller can see
+# it, because the caller never asks.
+#
+# The rule that falls out is asymmetric, and that is the whole of why it is
+# checkable: choosing the STRICT answer can only under-escalate, which is a
+# reporting error somebody notices. Choosing the INTERACTIVE one can WAIT, and
+# a wait is invisible — no exit status, no output, no timeout catches it. So
+# can_root_now may be called anywhere; a bare can_root may not.
+#
+# Three functions are exempt because the distinction IS their subject: the two
+# answers themselves, the switch that picks between them, and sudo_would_block,
+# whose entire job is to say whether the interactive one would stall.
+# SOURCE-GREP: which function names which helper is a property of lib.sh's
+# text. The consequence — that nothing which only reports ever waits — is
+# driven, above. What this adds is that the shape cannot come back by a route
+# the eight commands up there do not happen to walk.
+MAY_DECIDE_ESCALATION=( can_root root_for_probe sudo_would_block )
+no_helper_decides_for_its_caller() {
+  local fn e skip bad=0 seen=0
+  while IFS=$'\t' read -r fn _; do
+    [[ -n "${fn}" ]] || continue
+    seen=$(( seen + 1 ))
+    skip=false
+    for e in "${MAY_DECIDE_ESCALATION[@]}"; do
+      [[ "${fn}" == "${e}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    printf '%s picks the interactive answer itself, so every caller of it may wait for a password — ask root_for_probe instead\n' \
+      "${fn}" >&2
+    bad=1
+  done < <(sed 's/#.*//' "${REPO}/scripts/lib.sh" | awk '
+      /^[a-z_][a-z0-9_]*\(\) *\{/ { fn = $0; sub(/\(\).*/, "", fn); inb = 1; hit = 0 }
+      inb && /(^|[^a-z_])can_root([^_a-z]|$)/ { hit = 1 }
+      inb && /^\}/ { if (hit) printf "%s\t\n", fn; inb = 0 }')
+  # Non-vacuity: the three exempt ones must still be found, or the scanner has
+  # stopped matching and every helper reads as clean.
+  (( seen >= 3 )) || {
+    printf 'the escalation scanner found only %s functions naming can_root — it has stopped matching lib.sh\n' \
+      "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no lib.sh helper decides for its caller whether to wait for a password" \
+  no_helper_decides_for_its_caller
+
+# ...and the same decision must not arrive through the back door. A script that
+# another script SOURCES runs its top-level lines in the CALLER's shell, so a
+# declaration meant for its own run lands in theirs. check-system.sh and
+# update-model.sh both source tune.sh for its ladder; 'LCA_MAY_PROMPT=true'
+# written beside tune.sh's source line — where every other acting script
+# correctly puts it — turned 'lca check' into a command that stops for a
+# password. Measured, and caught by the gate above before it shipped. The same
+# file already carries a gate for the same leak in the other direction: its
+# top-level 'set -euo pipefail' lands in check-system's shell too.
+# SOURCE-GREP: which lines a sourced file executes at top level is a property
+# of that file's text; what the leak DOES is what the driven gate above sees.
+sourced_scripts() {   # -> the product scripts another product script sources
+  grep -rhoE '^[[:space:]]*source "\$\{SCRIPT_DIR\}/[a-z/._-]+\.sh"' \
+      "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+    | sed 's|.*/||; s|"$||' | grep -vx 'lib.sh' | sort -u
+}
+no_sourced_script_declares_for_its_caller() {
+  local name path body bad=0 seen=0
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    path="${REPO}/scripts/${name}"
+    [[ -f "${path}" ]] || path="${REPO}/${name}"
+    [[ -f "${path}" ]] || continue
+    seen=$(( seen + 1 ))
+    # Top level only: an assignment inside a function runs when that function
+    # is called, which a sourcing caller does not do.
+    body="$(sed 's/#.*//' "${path}" | grep -n '^LCA_MAY_PROMPT=' || true)"
+    [[ -z "${body}" ]] || {
+      printf '%s is sourced by another script, and sets LCA_MAY_PROMPT at top level — that assignment runs in the SOURCING shell:\n  %s\n' \
+        "${name}" "${body}" >&2
+      bad=1
+    }
+  done < <(sourced_scripts)
+  (( seen >= 1 )) || {
+    echo 'no product script sources another any more — this gate has stopped watching' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and a script that is sourced does not declare it in its caller's shell" \
+  no_sourced_script_declares_for_its_caller
 
 # The shared docker helpers are the other case: the SAME function is a
 # reporter's question inside the login banner and an action's question inside
@@ -926,7 +1300,13 @@ sudo_probes_are_guarded() {
   # out later left the guard counting them: the first version of this passed
   # while every real call site had been renamed away, which is precisely the
   # vacuous pass it is supposed to prevent.
-  hits="$(grep -rn --include='*.sh' 'as_root docker info' "${REPO}" \
+  # 'as_root .* docker info', not the bare literal: the three copies of this
+  # probe now put a bound between the two words — 'as_root "${runner[@]}"
+  # docker info' — and the literal pattern matched none of them. It failed
+  # loudly rather than passing, which is what the emptiness guard below is for,
+  # but a gate that has to be rewritten every time its subject gains a word is
+  # a gate that will one day be deleted instead.
+  hits="$(grep -rnE --include='*.sh' 'as_root ([^;&|]* )?docker info' "${REPO}" \
     | grep -v '/tests/' \
     | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
   [[ -n "${hits}" ]] || {
@@ -1263,18 +1643,6 @@ check "a pipeline is refused"                 ei_reject pipe
 check "a redirect is refused"                 ei_reject redirect
 check "a continued line is refused"           ei_reject cont
 check "a missing file is refused"             ei_reject no-such-file
-# ...and restore.sh must actually consult it, BEFORE the load_env that would
-# run the file. Order is the whole point: validating afterwards validates
-# something that has already executed.
-restore_validates_env_first() {
-  # '[^#]*' so a future comment naming the helper cannot satisfy this the way
-  # three earlier scanners in this file were satisfied by their own prose.
-  awk '/^[[:space:]]*[^#]*env_file_is_inert/ { checked = NR }
-       /^[[:space:]]*load_env[[:space:]]*$/ { loaded = NR; exit }
-       END { exit !(checked > 0 && loaded > checked) }' "${REPO}/restore.sh"
-}
-check "restore.sh validates the backed-up .env before sourcing it" \
-  restore_validates_env_first
 
 # ...and the whole thing driven once, end to end, on a hostile archive. The
 # checks above prove the validator and the call order separately; this proves
@@ -1365,6 +1733,76 @@ ensure_ollama_up_announced() { return 1; }'
   grep -q 'Restore complete' <<<"$(restore_run)"
 }
 check "the restore harness restores a minimal backup" restore_harness_works
+
+# Driven. The awk this replaces asked that env_file_is_inert appears before
+# load_env. What is at stake is code execution as root: load_env SOURCES .env,
+# a restore recreates docker volumes so it runs as root, and docs/MIGRATE.md is
+# built on carrying that tarball between machines — so "it is your own backup"
+# is an assumption about a file that has been off-box and back. An ordering
+# grep cannot tell a check that runs from one that has been stubbed to true.
+#
+# So the archive carries an env that WOULD do something, and the test is
+# whether it did.
+restore_env_is_not_run() {
+  local marker="${RESTORE_SB}/THIS-RAN"
+  local out
+  # Rejected by env_file_is_inert (a command substitution), and observable if
+  # anything sources it.
+  # shellcheck disable=SC2016  # the literal text is the trap; expanding it here would spring it
+  printf 'MODEL_NAME=$(touch %q)\n' "${marker}" > "${RESTORE_STAGE}/env"
+  out="$(restore_run)"
+  printf '%s\n' "${out}"
+  [[ -e "${marker}" ]] && printf 'IT-RAN\n'
+  return 0
+}
+restore_validates_env_first() {
+  local out bad=0
+  restore_sandbox envtrap 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  out="$(restore_env_is_not_run)"
+  # 1. Nothing in that file executed. This is the whole gate.
+  ! grep -qx 'IT-RAN' <<<"${out}" || {
+    printf 'a line inside the backup ran as root during the restore:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 2. ...and it was not installed either, so the NEXT command does not run it.
+  # shellcheck disable=SC2016  # likewise: this searches for those characters
+  grep -q 'MODEL_NAME=\$(touch' "${RESTORE_SB}/.env" 2>/dev/null && {
+    echo 'the rejected .env was installed anyway — load_env would run it on the next command' >&2
+    bad=1
+  }
+  # 3. ...and the reader is told, and kept the file, rather than it vanishing.
+  # A conservative validator can refuse a legitimate but unusual file.
+  [[ -f "${RESTORE_SB}/.env.rejected" ]] || {
+    echo 'the refused .env was dropped rather than kept for the reader to look at' >&2
+    bad=1
+  }
+  grep -qi 'NOT installed' <<<"${out}" || {
+    printf 'the refusal is silent — nothing says the .env in the backup was not restored:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. ...and the restore CONTINUED. Refusing an .env must not throw away the
+  # volume and the model list too.
+  grep -qi 'Restore complete' <<<"${out}" || {
+    printf 'refusing the .env ended the whole restore:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 5. Non-vacuity: an ordinary .env in an archive IS installed. Without this,
+  # a restore that refused every .env would satisfy all four above.
+  restore_sandbox envok 'have() { return 1; }
+ensure_ollama_up_announced() { return 1; }'
+  printf 'MODEL_NAME=restored:7b\n' > "${RESTORE_STAGE}/env"
+  out="$(restore_run)"
+  grep -q '^MODEL_NAME=restored:7b$' "${RESTORE_SB}/.env" || {
+    printf 'a perfectly ordinary .env was not restored, so the refusal above proves nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "an .env inside a backup is read before it is installed, never run" \
+  restore_validates_env_first
 
 # Driven. The awk version looked for 'scripts/apply.sh' appearing somewhere
 # after a comment marker in restore.sh. What is at stake is that a restored
@@ -1762,21 +2200,10 @@ readme_supply_chain_matches_the_code() {
 }
 check "the README's supply-chain claims still match the install" \
   readme_supply_chain_matches_the_code
-# ...and neither script may reach 'docker run <image>' without having checked
-# the image is there. Docker pulls a missing one silently: several gigabytes,
-# and in backup.sh's case with the chat app frozen, during a command the user
-# expects to take seconds.
-image_pulls_are_never_implicit() {
-  local f bad=0
-  for f in backup.sh restore.sh; do
-    grep -qF -- 'docker image inspect' "${REPO}/${f}" || {
-      printf '%s runs the image without checking it is cached first\n' "${f}" >&2
-      bad=1
-    }
-  done
-  return "${bad}"
-}
-check "no script pulls gigabytes by accident" image_pulls_are_never_implicit
+# A backup or a restore that meets a missing image must notice it rather than
+# let docker pull several gigabytes by accident. Driven, down beside the
+# harness that can watch a real run: "a missing image is noticed before it is
+# used, never pulled by accident".
 
 echo "# every archive must be owner-only, not just the directory holding it"
 # The umask around tar makes NEW archives 0600. Ones written before that
@@ -1836,13 +2263,9 @@ check "...and still cannot tell even if a stale flag says a volume was there" \
 # disk, which is the opposite failure and just as real.
 check "no docker on the machine -> nothing to lose" \
   data_state_is none    false false false
-# And the decision must not consult .env's chat-app switch again.
-retention_ignores_enable_webui() {
-  awk '/^webui_data_state\(\) \{/ { inb = 1 }
-       inb && /ENABLE_WEBUI/ { bad = 1 }
-       inb && /^\}/ { exit }
-       END { exit bad }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
-}
+# ...and the retention decision must never read ENABLE_WEBUI. Driven, down
+# beside the backup harness: "a chat app switched off in .env still has its
+# data backed up".
 echo "# a backup that missed the chat data must not prune the ones that have it"
 # The note above prune_old_backups says this exists so "an unattended timer run
 # with docker down would not, over BACKUP_KEEP nights, silently delete every
@@ -1860,8 +2283,8 @@ echo "# a backup that missed the chat data must not prune the ones that have it"
 #
 # Driven rather than grepped: the property is "the old files still exist
 # afterwards", and no amount of reading the source proves that.
-backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran>"
-  local b="${SANDBOX}/retention-$1"
+backup_retention_case() {  # ENABLE_WEBUI [DAEMON] -> "<surviving-old-count> <partial|complete>"
+  local b="${SANDBOX}/retention-$1${2:+-$2}"
   # make_stub_dir, not mkdir: backup.sh reaches docker through 'as_root docker
   # volume inspect', and a plain directory of fakes is invisible to sudo, which
   # replaces PATH with sudoers' secure_path. Measured on this box:
@@ -1876,10 +2299,14 @@ backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran
   cp "${REPO}/backup.sh" "${b}/"; cp "${REPO}/scripts/lib.sh" "${b}/scripts/"
   cp "${REPO}/.env.example" "${b}/.env"
   sed -i "s/^BACKUP_KEEP=.*/BACKUP_KEEP=1/; s/^ENABLE_WEBUI=.*/ENABLE_WEBUI=$1/" "${b}/.env"
-  # docker present and its daemon fine; the volume is what is missing.
+  # docker present; the volume is what is missing. DAEMON=down makes the
+  # daemon unreachable instead, which is the third state and the only one where
+  # NOBODY LOOKED — the middle answer webui_data_state exists to give.
+  local info_rc=0
+  [[ "${2:-up}" == "down" ]] && info_rc=1
   # shellcheck disable=SC2016  # $1/$2 belong to the fake docker, not to us
-  printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit 0; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
-    > "${b}/stub/docker"
+  printf '#!/bin/sh\nif [ "$1" = "info" ]; then exit %s; fi\nif [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit 1; fi\nexit 0\n' \
+    "${info_rc}" > "${b}/stub/docker"
   chmod +x "${b}/stub/docker"
   local d
   for d in 20260101-000000 20260102-000000; do
@@ -1888,7 +2315,7 @@ backup_retention_case() {  # ENABLE_WEBUI -> "<surviving-old-count> <skipped|ran
   local out old
   out="$(PATH="$(stub_path "${b}/stub")" bash "${b}/backup.sh" 2>&1 || true)"
   # Kept for the verdict check below, so this runs once rather than twice.
-  printf '%s' "${out}" > "${SANDBOX}/backup-out-$1.txt"
+  printf '%s' "${out}" > "${SANDBOX}/backup-out-$1${2:+-$2}.txt"
   old="$(find "${b}/backups" -name 'local-code-agent-backup-2026010*.tar.gz' | wc -l)"
   # The VERDICT, not the retention sentence. It used to match "skipping
   # retention", which is the same fact stated a second time and moved the
@@ -1936,18 +2363,44 @@ check "an incomplete backup is not reported as a good one" \
   partial_backup_is_not_reported_as_a_good_one
 check "...and a complete one still is" \
   complete_backup_still_reports_success
-
-check "the retention decision never reads ENABLE_WEBUI" \
-  retention_ignores_enable_webui
 # ...and do_backup must actually branch on the answer. A pure helper that
 # nothing consults is decoration, and the five checks above would all still
 # pass while backup.sh went on deciding for itself.
+#
+# Driven. The awk this replaces read do_backup for the string webui_data_state
+# and for a comparison against "present". Both survive the call sitting in a
+# branch nothing reaches, and neither says what the backup DOES with the
+# answer. What is at stake is the middle state: docker installed, daemon not
+# answering, so nothing looked. Get that wrong and BACKUP_KEEP unattended
+# nights delete every backup still holding the accounts and chat history, each
+# run reporting success.
+#
+# The case is built to be the one a hand-written condition gets wrong: the chat
+# app is switched OFF in .env as well, so a do_backup deciding for itself has
+# every excuse to prune.
 backup_asks_the_state_helper() {
-  awk '/^do_backup\(\) \{/ { inb = 1 }
-       inb && /webui_data_state/       { called = 1 }
-       inb && /data_state.*"present"/  { branched = 1 }
-       inb && /^\}/ { exit }
-       END { exit !(called && branched) }' <<<"$(sed 's/#.*//' "${REPO}/backup.sh")"
+  local out bad=0
+  out="$(backup_retention_case false down)"
+  [[ "${out}" == "2 partial" ]] || {
+    printf 'with docker installed, its daemon not answering and the chat app off in .env, the backup reported "%s" — nothing had LOOKED at the volume, and "%s" is what a run that pruned the last complete backups looks like\n' \
+      "${out}" "${out}" >&2
+    bad=1
+  }
+  # ...and it says so, rather than pruning quietly and calling the run good.
+  grep -qF 'WITHOUT the WebUI data' "${SANDBOX}/backup-out-false-down.txt" || {
+    printf 'the archive is missing the chat data and the run did not say so:\n%s\n' \
+      "$(cat "${SANDBOX}/backup-out-false-down.txt")" >&2
+    bad=1
+  }
+  # Non-vacuity, and the opposite failure: with the daemon UP and genuinely no
+  # volume there is nothing to lose, so retention must still run — otherwise
+  # the fix above is "never prune", which fills the disk instead. That is the
+  # "0 complete" case checked above, asserted here as the contrast.
+  [[ "$(backup_retention_case false)" == "0 complete" ]] || {
+    echo 'a machine with no volume at all no longer prunes, so "kept" above proves nothing' >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "backup.sh decides retention through that helper, not its own reading" \
   backup_asks_the_state_helper
@@ -2456,33 +2909,96 @@ check "an unreadable backups directory is reported as unknown, not as empty" \
 # owned by root — so this was the ordinary state of any box that had ever taken
 # a backup, and every OLDER backup is owned the same way. Following that advice
 # gives the same verdict for all of them, during a restore.
+#
+# Driven. The greps this replaces read restore.sh for the ORDER of two calls
+# and for two sentences. Order survives the check being unreachable; a sentence
+# survives being in a branch nothing takes. What is at stake is which of two
+# verdicts a reader gets about a good archive, so both verdicts are produced.
+RESTORE_ARCH_SB="${SANDBOX}/restore-archives"
+restore_archive_sandbox() {
+  local sb="${RESTORE_ARCH_SB}"
+  [[ -e "${sb}/restore.sh" ]] && return 0
+  mkdir -p "${sb}/scripts" "${sb}/config" "${sb}/backups"
+  cp "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+  cp "${REPO}/restore.sh"     "${sb}/"
+  cp "${REPO}/.env.example"   "${sb}/.env.example"
+  cp "${REPO}/.env.example"   "${sb}/.env"
+  cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/"
+  # A REAL archive, so "it cannot be read" is a statement about permissions and
+  # not about the file being rubbish. Verified while it is still readable —
+  # afterwards nobody can open it, which is the whole point.
+  ( cd "${sb}" && printf 'MODEL_NAME=qwen2.5-coder:7b\n' > .in-archive \
+    && tar czf backups/good.tar.gz .in-archive && rm -f .in-archive )
+  tar tzf "${sb}/backups/good.tar.gz" >/dev/null 2>&1 \
+    && : > "${sb}/.good-is-really-good"
+  printf 'this is not a gzip and never was\n' > "${sb}/backups/corrupt.tar.gz"
+  chmod -R a+rX "${sb}"
+  # 0000, not owned-by-somebody-else: a file with no permission bits is
+  # unreadable to its own owner too, so this arm is reachable whether the suite
+  # is root and drops to 65534 or is already an ordinary account.
+  chmod 000 "${sb}/backups/good.tar.gz"
+  chmod 644 "${sb}/backups/corrupt.tar.gz"
+  chmod 711 "${SANDBOX}"
+}
+restore_verdict_on() {   # good|corrupt -> what a real restore said, as not-root
+  restore_archive_sandbox
+  # A sandbox copy, not "${REPO}/restore.sh": if either guard under test were
+  # gone, restore.sh would carry on past it — and the machine it would carry on
+  # onto must not be this one.
+  # shellcheck disable=SC2016  # code for the dropped shell, not a string to expand here
+  as_nobody "${RESTORE_ARCH_SB}/scripts/lib.sh" 'timeout 20 bash "$1" "$2" </dev/null 2>&1' \
+    "${RESTORE_ARCH_SB}/restore.sh" "${RESTORE_ARCH_SB}/backups/$1.tar.gz"
+}
 restore_tells_unreadable_from_corrupt() {
-  local body first second
-  body="$(sed 's/^[[:space:]]*#.*//' "${REPO}/restore.sh")"
-  # Asked BEFORE the archive is opened, or the message is about a result that
-  # already means nothing.
-  # Both anchored on the tarball itself. A bare 'tar tzf' also appears inside
-  # the container script restore_webui_volume feeds to docker, far above this,
-  # and matching that one made the gate report the check as coming too late.
-  first="$(grep -n "readable_by_us \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
-  second="$(grep -n "tar tzf \"\${tarball}\"" <<<"${body}" | head -1 | cut -d: -f1)"
-  [[ -n "${first}" && -n "${second}" ]] || {
-    echo 'restore.sh no longer checks the tarball for readability before opening it' >&2
-    return 1; }
-  (( first < second )) || {
-    echo 'restore.sh opens the tarball before asking whether it can read it' >&2
-    return 1; }
-  # ...and the two must not say the same thing.
-  grep -q 'cannot be read by' <<<"${body}" || {
-    echo 'restore.sh does not name a permission problem as one' >&2; return 1; }
-  # The corrupt message sends people to an older backup; the permission one
-  # must not, because every older backup is owned the same way.
-  # A flag, not 'exit 1' inside the rule: awk runs END even after exit, so an
-  # 'END { exit 0 }' there overrides it and the gate passes. Written that way
-  # first, and the mutation said so.
-  awk '/cannot be read by/ && /Try an older backup/ { bad = 1 } END { exit bad }' <<<"${body}" || {
-    echo 'the permission message sends the reader to an older backup, which is owned the same way' >&2
-    return 1; }
+  local out bad=0
+  restore_archive_sandbox
+  # Non-vacuity first: the archive the permission arm uses has to be a real
+  # one, or "it was not called corrupt" is true for the wrong reason.
+  [[ -e "${RESTORE_ARCH_SB}/.good-is-really-good" ]] || {
+    echo 'the fixture archive is not a valid gzip, so this gate cannot tell the two verdicts apart' >&2
+    return 1
+  }
+  out="$(restore_verdict_on good)"
+  grep -q 'cannot be read by' <<<"${out}" || {
+    printf 'a good archive this account cannot open was not reported as a permission problem:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qi 'corrupt or truncated' <<<"${out}" && {
+    printf 'a perfectly good archive was called corrupt because this account could not open it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # The sentence that costs the most. Every older backup is owned the same way,
+  # so following this advice gives the same verdict for all of them and the
+  # reader concludes they have no usable backups at all.
+  grep -qi 'Try an older backup' <<<"${out}" && {
+    printf 'the permission verdict sent the reader to older backups, which are owned the same way:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and it stopped there, rather than going on to touch anything.
+  grep -qi 'Restore complete' <<<"${out}" && {
+    printf 'a restore it could not even read the archive for reported success:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # The complement, and the reason the first arm is not satisfied by deleting
+  # the corrupt message altogether: a file that really is damaged must still be
+  # called damaged, and an older backup really is the right advice for it.
+  out="$(restore_verdict_on corrupt)"
+  grep -qi 'corrupt or truncated' <<<"${out}" || {
+    printf 'a file that is not a gzip at all was not reported as corrupt:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'Try an older backup' <<<"${out}" || {
+    printf 'a genuinely corrupt archive did not send the reader to an older one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'cannot be read by' <<<"${out}" && {
+    printf 'a readable but damaged archive was reported as a permission problem:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "an archive it cannot open is not called corrupt" \
   restore_tells_unreadable_from_corrupt
@@ -2562,7 +3078,7 @@ BACKUP_OWNER=nobody
 # function names a ${REPO}/ path and uses a text tool. This one SOURCES that
 # path and calls the real function; the text tool is the cat that replays the
 # cached output. Same position as uninstall_says and tune_dry_run_in.
-backup_run_in() {
+backup_run_in() {   # MODE [SHIM] -> what a real backup into a sandbox printed
   local mode="$1"
   BACKUP_SB="${SANDBOX}/backup-${mode}"
   local outfile="${BACKUP_SB}.out"
@@ -2598,9 +3114,14 @@ backup_run_in() {
         # A file created and then abandoned, which is what a full disk leaves.
         tar() { case "${1:-}" in czf) : > "$2"; return 1 ;; *) command tar "$@" ;; esac; }
       fi
+      # The shim from the caller, last, so it wins over the stubs above. MODE
+      # names the sandbox and the cache file, so two shims need two mode names.
+      # No apostrophes in here: this comment lives INSIDE a single-quoted
+      # bash -c block, where one would end the string. Second time today.
+      eval "$5"
       do_backup
       printf "RC=%s\n" "$?"
-    ' _ "${REPO}/backup.sh" "${BACKUP_SB}" "${mode}" "${BACKUP_OWNER}" > "${outfile}" 2>&1
+    ' _ "${REPO}/backup.sh" "${BACKUP_SB}" "${mode}" "${BACKUP_OWNER}" "${2:-}" > "${outfile}" 2>&1
   fi
   cat "${outfile}"
 }
@@ -2620,6 +3141,90 @@ backup_archive_in() {
 backup_wrote_an_archive() { backup_archive_in plain >/dev/null; }
 check "a backup with no docker and no ollama still writes an archive" \
   backup_wrote_an_archive
+# ...and what a backup CONTAINS when the agent's workspace is switched on.
+#
+# BACKUP_AGENT_WORKSPACE is one of the switches tests/config-coverage.tsv
+# recorded as SHIPPED-ONLY: agent_backup_decision has unit tests at both
+# values, but no backup had ever been RUN with it on, so what ends up inside
+# the archive at that setting was unmeasured. The decision helper answering
+# "include" is not the same as a workspace being in the tarball, and this file
+# has taken that distinction out of five other places.
+AGENT_WS_FIXTURE="${SANDBOX}/agentws"
+agent_ws_shim() {   # ENABLED [MAX_MB] -> a shim putting a real workspace in view
+  record_configuration_value BACKUP_AGENT_WORKSPACE "$1"
+  printf 'BACKUP_AGENT_WORKSPACE=%s\nBACKUP_AGENT_MAX_MB=%s\nagent_workspace_dir() { printf "%%s" "%s"; }\n' \
+    "$1" "${2:-2048}" "${AGENT_WS_FIXTURE}"
+}
+agent_ws_fixture() {
+  [[ -e "${AGENT_WS_FIXTURE}/notes.txt" ]] && return 0
+  mkdir -p "${AGENT_WS_FIXTURE}"
+  # Two megabytes of real content, because du -sm on a nearly-empty tree
+  # answers 0 and this gate would then be about a workspace with nothing in it.
+  head -c 2200000 /dev/zero | tr '\0' 'w' > "${AGENT_WS_FIXTURE}/notes.txt"
+}
+backup_includes_the_agent_workspace() {
+  local out tarball bad=0
+  agent_ws_fixture
+  # ON, and under the ceiling: it goes in, and the archive really carries it.
+  out="$(backup_run_in wson "$(agent_ws_shim true 2048)")"
+  grep -q 'Agent workspace captured' <<<"${out}" || {
+    printf 'BACKUP_AGENT_WORKSPACE=true and the workspace was not captured:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  tarball="$(backup_archive_in wson)" || {
+    echo 'the run with the workspace switched on wrote no archive at all' >&2
+    return 1
+  }
+  # Captured, never 'tar tzf | grep -q': grep leaves on its first match, tar
+  # takes SIGPIPE, and 141 under pipefail reads as "not found" precisely when
+  # it WAS found. This file gates against that and caught this line.
+  local listing
+  listing="$(tar tzf "${tarball}" 2>/dev/null || true)"
+  grep -q 'agent-workspace.tar.gz' <<<"${listing}" || {
+    printf 'the run said it captured the workspace and the archive does not contain it:\n%s\n' \
+      "${listing}" >&2
+    bad=1
+  }
+  # OFF — the shipped default, and the one every other backup gate runs at.
+  # The workspace must be left out, and the reader told it exists so the
+  # setting is a choice rather than a surprise.
+  out="$(backup_run_in wsoff "$(agent_ws_shim false 2048)")"
+  grep -q 'Agent workspace not included' <<<"${out}" || {
+    printf 'a backup with the workspace switched off said nothing about the workspace it skipped:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  tarball="$(backup_archive_in wsoff)" || {
+    echo 'the run with the workspace switched off wrote no archive at all' >&2
+    return 1
+  }
+  listing="$(tar tzf "${tarball}" 2>/dev/null || true)"
+  grep -q 'agent-workspace.tar.gz' <<<"${listing}" && {
+    printf 'BACKUP_AGENT_WORKSPACE=false and the workspace is in the archive anyway:\n%s\n' \
+      "${listing}" >&2
+    bad=1
+  }
+  # ON, over the ceiling: left out, said so with both numbers, and the rest of
+  # the backup unaffected — a workspace that is too big must not cost the
+  # reader their .env and model list.
+  out="$(backup_run_in wsbig "$(agent_ws_shim true 1)")"
+  grep -q 'Agent workspace NOT included' <<<"${out}" || {
+    printf 'a workspace over the ceiling was not reported as excluded:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Everything else in this backup is unaffected' <<<"${out}" || {
+    printf 'it excluded the workspace without saying the rest of the backup is fine:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -q 'Backup written and verified' <<<"${out}" || {
+    printf 'a workspace over the ceiling cost the whole backup:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a backup includes the agent's workspace only when .env asks for it" \
+  backup_includes_the_agent_workspace
 # ...and the archive must end up owned by the same person as the directory.
 # Driven, not read: the old gate counted 'chown "$(invoking_user)"' lines and
 # looked for 'chown "$(id -un)"'. Both survive the chown never running, and
@@ -3079,22 +3684,77 @@ check "...and Ollama is given longer to load than the probe waits" \
 # The startup lines are gone, the file opens with an error from the process
 # that died, and a text log has NUL bytes in it — and that file is what
 # 'lca logs ollama' prints.
+#
+# Driven, because the subject is a RACE and no reading of the source settles
+# one. The greps this replaces asked that the body contains 'flock' and that a
+# wait_for_ollama appears between the flock and the nohup. Both survive a lock
+# taken on the wrong file, a lock never released, and a re-check that reads a
+# stale answer. Three commands are started at once against a stand-in server
+# that takes two seconds to come up, and the spawns are counted.
+BG_RACE_SB="${SANDBOX}/bgrace"
+bg_race_spawns() {   # RACERS -> how many servers actually started
+  local sb="${BG_RACE_SB}"
+  if [[ ! -e "${sb}/lib.sh" ]]; then
+    # make_stub_dir, not mkdir: a directory of fakes with no sudo beside it is
+    # invisible to as_root, which replaces PATH with sudoers' secure_path — the
+    # trap the retention harness records, and which this file gates against.
+    make_stub_dir "${sb}/stub"
+    cp "${REPO}/scripts/lib.sh" "${sb}/lib.sh"
+    # A server that records itself, takes two seconds to answer, and then stays
+    # up. The delay is the window: without the lock both racers are inside it.
+    # shellcheck disable=SC2016  # the stub's own variables, read when it runs
+    { printf '#!/bin/sh\n'
+      printf 'if [ "${1:-}" = "serve" ]; then\n'
+      printf '  printf "SPAWN %%s\\\\n" "$$" >> "${LCA_SPAWN_LOG}"\n'
+      printf '  sleep 2\n  : > "${LCA_UP_MARKER}"\n  sleep 5\nfi\nexit 0\n'; } > "${sb}/stub/ollama"
+    chmod +x "${sb}/stub/ollama"
+    # Appended, because lib.sh is sourced whole and there is no seam after it.
+    # wait_for_ollama polls like the real one, so the winner holds the lock
+    # until its server answers rather than releasing it immediately.
+    # shellcheck disable=SC2016  # the stubs' own variables, read when THEY run
+    { printf '\nhave() { command -v "$1" >/dev/null 2>&1; }\n'
+      printf 'ollama_extra_env() { :; }\nwarn() { :; }\n'
+      printf 'wait_for_ollama() { local i; for i in $(seq 1 "${1:-2}"); do'
+      printf ' [[ -e "${LCA_UP_MARKER}" ]] && return 0; sleep 1; done; return 1; }\n'
+    } >> "${sb}/lib.sh"
+  fi
+  : > "${sb}/spawns"; rm -f "${sb}/up" "${sb}/log.lock" "${sb}/log"
+  local i
+  for (( i = 0; i < $1; i++ )); do
+    # shellcheck disable=SC2016  # code for the racer's shell, not a string to expand here
+    ( PATH="$(stub_path "${sb}/stub")" LCA_SPAWN_LOG="${sb}/spawns" LCA_UP_MARKER="${sb}/up" \
+      timeout 60 bash -c 'set -uo pipefail
+        source "$1" >/dev/null 2>&1
+        OLLAMA_BG_LOG="$2/log"
+        start_ollama_bg >/dev/null 2>&1' _ "${sb}/lib.sh" "${sb}" ) &
+  done
+  wait
+  grep -c . "${sb}/spawns" || true
+}
 start_bg_serialises_against_itself() {
-  local body
-  body="$(sed -n '/^start_ollama_bg() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || { echo 'could not find start_ollama_bg' >&2; return 1; }
-  grep -q 'flock' <<<"${body}" || {
-    echo 'start_ollama_bg does not serialise, so two lca commands can both start a server and truncate each other'"'"'s log' >&2
-    return 1; }
-  # The lock is worthless without a re-check inside it: the winner has usually
-  # finished starting by the time the loser is admitted, and starting a second
-  # server then is the very thing being prevented.
-  awk '/flock -w/                { locked = 1 }
-       locked && /wait_for_ollama/ { rechecked = 1 }
-       /nohup/                   { if (!spawned) { spawned = 1; ok = rechecked } }
-       END { exit (spawned && ok) ? 0 : 1 }' <<<"${body}" || {
-    echo 'start_ollama_bg takes the lock but never re-checks inside it, so the loser still starts a second server' >&2
-    return 1; }
+  local n bad=0
+  # Non-vacuity first: on a box where nothing is running, ONE command has to
+  # start a server. A function that never spawns would pass every count below.
+  n="$(bg_race_spawns 1)"
+  [[ "${n}" == "1" ]] || {
+    printf 'a single command on a box with no server started %s of them\n' "${n}" >&2
+    return 1
+  }
+  # ...and three at once must still produce exactly one. flock removed, this
+  # is 3.
+  n="$(bg_race_spawns 3)"
+  [[ "${n}" == "1" ]] || {
+    printf 'three commands raced to start Ollama and %s servers were spawned — the losers cannot bind, but they truncate the log first, which is the file lca logs ollama prints\n' \
+      "${n}" >&2
+    bad=1
+  }
+  # ...and the log the survivor wrote is intact: one writer, no NUL bytes. That
+  # is the damage the race does, stated as the thing the reader would see.
+  if [[ -e "${BG_RACE_SB}/log" ]] && LC_ALL=C grep -qU $'\0' "${BG_RACE_SB}/log"; then
+    echo "the background log has NUL bytes in it — two processes wrote to it at once" >&2
+    bad=1
+  fi
+  return "${bad}"
 }
 check "...and only one command at a time starts the server" \
   start_bg_serialises_against_itself
@@ -4082,14 +4742,69 @@ check "...and a model that declares none is unknown, not zero" \
   declared_ctx_is_unknown_without_one
 check "'lca check' names all three states of it" \
   test "$(grep -cE 'absent\)|context\)' "${REPO}/check-system.sh")" -ge 2
-# Restore must REBUILD, never pull: a derived model was never in a registry, so
-# a restore that pulls it fails on that model on every restore, for ever.
-restore_rebuilds_derived() {
-  local body; body="$(cat "${REPO}/restore.sh")"
-  grep -q 'agent_model_is_derived' <<<"${body}" || return 1
-  grep -q 'ensure_agent_model' <<<"${body}"
+# Driven. The greps this replaces asked that restore.sh mentions
+# agent_model_is_derived and ensure_agent_model. Both survive the branch never
+# being taken, and what is at stake is a restore that fails on the same model
+# every time, for ever: a derived model was never in a registry, so pulling it
+# by name cannot work. The archive is what decides which branch runs, so the
+# archive is what this hands it.
+restore_models_run() {   # MODELS... -> what the restore did about them
+  local m
+  printf 'MODEL_NAME=x:7b\n' > "${RESTORE_STAGE}/env"
+  { printf 'NAME\tID\tSIZE\tMODIFIED\n'
+    for m in "$@"; do printf '%s\tabc\t1 GB\tnow\n' "${m}"; done
+  } > "${RESTORE_STAGE}/models.txt"
+  restore_run
 }
-check "restore rebuilds a derived model instead of pulling it" restore_rebuilds_derived
+restore_rebuilds_derived() {
+  local out bad=0
+  # The base is here, the derived one is not — which is exactly the state a
+  # restore onto a fresh machine reaches after the base has been pulled.
+  #
+  # Both recorders print to STDERR. restore.sh calls the rebuild as
+  # 'ensure_agent_model "${derived_base}" >/dev/null', so a stub that printed
+  # to stdout recorded into the same /dev/null and this gate failed against
+  # code that was doing exactly the right thing.
+  # shellcheck disable=SC2016  # the shim is code appended to the sandbox's lib.sh
+  restore_sandbox derived 'have() { [[ "$1" == ollama ]]; }
+ensure_ollama_up_announced() { return 0; }
+model_present() { [[ "$1" == "qwen2.5-coder:7b" ]]; }
+agent_model_is_derived() { [[ "$1" == *-agent ]]; }
+ensure_agent_model() { printf "REBUILT %s\n" "$1" >&2; }
+agent_model_context() { printf 16384; }
+net_blocked() { return 1; }
+pull_model() { printf "PULLED %s\n" "$1" >&2; }'
+  out="$(restore_models_run qwen2.5-coder:7b-agent)"
+  grep -q '^REBUILT qwen2.5-coder:7b$' <<<"${out}" || {
+    printf 'the derived agent model was not rebuilt from its base:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and never pulled. That is the failure this exists to prevent, and it is
+  # the one that repeats on every restore for ever.
+  ! grep -q '^PULLED qwen2.5-coder:7b-agent$' <<<"${out}" || {
+    printf 'the derived model was pulled by name — it was never in a registry, so that fails on every restore:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and an ORDINARY missing model is still pulled, or "never pulls" would be
+  # satisfied by a restore that pulls nothing at all.
+  out="$(restore_models_run some-other:3b)"
+  grep -q '^PULLED some-other:3b$' <<<"${out}" || {
+    printf 'an ordinary missing model was not re-pulled either:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a derived model whose BASE is absent says so rather than failing
+  # silently: rebuilding needs the weights the base owns.
+  out="$(restore_models_run other-base:3b-agent)"
+  grep -qi 'not rebuilt' <<<"${out}" || {
+    printf 'a derived model with no base on this machine was neither rebuilt nor reported:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a restored derived model is rebuilt from its base, never pulled by name" \
+  restore_rebuilds_derived
 # ...and uninstall takes this project's models away without touching the
 # gigabytes the user chose to pull.
 # Driven. This greped remove_agent_models' body for '-agent$' and 'ollama rm',
@@ -4761,6 +5476,218 @@ seeds_a_real_boolean() {
 }
 check "native_tool_calling is seeded as a real boolean, tracking the setting" \
   seeds_a_real_boolean
+
+echo "# the agent tier's own selftest, run — including the channel nobody drove"
+# scripts/agent-selftest.sh is the command this project hands a user when the
+# agent tier does not work. Nothing in this repo had ever run it. Not "run it
+# in one configuration" — never run at all, in any configuration, while every
+# other lca command has a harness.
+#
+# The configuration census carried the reason: "high for the selftest arm,
+# which needs a live agent". That is the fourth written excuse in this project
+# to be re-read against the tools that exist now, and the fourth to be wrong.
+# Every link in this script reaches its world through curl, docker and ollama,
+# and this file has been standing in for all three for months.
+#
+# What it costs to leave undriven is the whole tier. With native tool calling
+# ON, qwen2.5-coder writes its tool calls into the message body, Ollama finds
+# no <tool_call> tags and reports zero, and OpenHands reads zero as "the
+# assistant has finished": the run ends at once, marked finished, with an empty
+# workspace and no error anywhere to find. link_channel is the one thing that
+# catches that before half an hour is spent discovering it from the other end
+# — and its catching branch is reached only when AGENT_NATIVE_TOOL_CALLING is
+# true, which is not the shipped value, which is why it had never executed.
+AGENT_ST_SB="${SANDBOX}/agentselftest"
+write_agent_selftest_stubs() {  # DIR
+  make_stub_dir "$1"
+  # Matched on the URL, not on argument position: the links call curl with
+  # different flag orders, and one of them sends the body before the URL.
+  cat > "$1/curl" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    */api/version)
+      [ "${LCA_ST_RELAY_RC:-0}" = 0 ] || exit "${LCA_ST_RELAY_RC}"
+      printf '{"version":"0.32.5"}'; exit 0 ;;
+    */api/v1/settings)
+      printf '{"agent_settings":{"llm":{"model":"%s","native_tool_calling":%s}}}' \
+        "${LCA_ST_MODEL:-}" "${LCA_ST_NATIVE:-false}"; exit 0 ;;
+    */v1/chat/completions)
+      # Two callers, one endpoint: agent_model_loaded_context only wants a
+      # status, link_channel wants the tool_calls field. Both are served.
+      if [ "${LCA_ST_TOOL_CALLS:-0}" = 0 ]; then
+        printf '{"choices":[{"message":{"content":"here is the call"}}]}'
+      else
+        printf '{"choices":[{"message":{"tool_calls":[{"function":{"name":"file_editor"}}]}}]}'
+      fi
+      exit 0 ;;
+    */api/ps)
+      printf '{"models":[{"name":"%s","context_length":%s}]}' \
+        "${LCA_ST_OLLAMA_MODEL:-}" "${LCA_ST_LOADED_CTX:-16384}"; exit 0 ;;
+    */api/generate)
+      printf '{"prompt_eval_count":120,"prompt_eval_duration":2000000000,"eval_count":40,"eval_duration":4000000000}'
+      exit 0 ;;
+    */api/v1/app-conversations*)
+      [ "${LCA_ST_CONV_RC:-0}" = 0 ] || exit "${LCA_ST_CONV_RC}"
+      printf '{"results":[{"conversation_id":"c1"}]}'; exit 0 ;;
+  esac
+done
+printf '{}'
+STUB
+  # Only the five docker questions this script's chain asks. 'ps' naming a
+  # sandbox is what makes link_task's wait end on its first pass, so no case
+  # here ever sleeps.
+  cat > "$1/docker" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "container inspect") printf '%s\n' "${LCA_ST_RUNNING:-true}"; exit 0 ;;
+  "container port")    printf '0.0.0.0:%s\n' "${LCA_ST_LIVE_PORT:-3001}"; exit 0 ;;
+  "network inspect")   printf '172.17.0.1\n'; exit 0 ;;
+esac
+case "$1" in
+  ps)   printf 'oh-agent-server-abc\n'; exit 0 ;;
+  exec) exit "${LCA_ST_FILE_RC:-0}" ;;
+esac
+exit 0
+STUB
+  cat > "$1/ollama" <<'STUB'
+#!/bin/sh
+# model_present is the only thing asked of the CLI here.
+case "${1:-}" in
+  show) exit "${LCA_ST_MODEL_RC:-0}" ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$1/curl" "$1/docker" "$1/ollama"
+}
+agent_selftest_sandbox() {
+  [[ -e "${AGENT_ST_SB}/scripts/agent-selftest.sh" ]] && return 0
+  mkdir -p "${AGENT_ST_SB}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${AGENT_ST_SB}" )
+  write_agent_selftest_stubs "${AGENT_ST_SB}/stub"
+  chmod -R a+rX "${AGENT_ST_SB}"
+}
+AGENT_ST_OUT=""; AGENT_ST_RC=0
+# agent_selftest_run NATIVE STORED-NATIVE TOOL-CALLS [KEY=VALUE ...]
+#   NATIVE         what .env says AGENT_NATIVE_TOOL_CALLING is
+#   STORED-NATIVE  what the running agent's settings API reports back
+#   TOOL-CALLS     how many native tool calls the model returns to the probe
+agent_selftest_run() {
+  local native="$1" stored="$2" calls="$3"; shift 3
+  agent_selftest_sandbox
+  local env_file="${AGENT_ST_SB}/.env" model
+  cp "${REPO}/.env.example" "${env_file}"
+  # The tier ON, the relay ON: neither is the shipped value, and with the
+  # shipped values this script refuses at its first two lines — which is
+  # exactly the configuration blindness that hid check-system.sh's hang.
+  sed -i "s/^ENABLE_AGENT=.*/ENABLE_AGENT=true/; \
+          s/^ENABLE_OLLAMA_RELAY=.*/ENABLE_OLLAMA_RELAY=true/; \
+          s/^AGENT_NATIVE_TOOL_CALLING=.*/AGENT_NATIVE_TOOL_CALLING=${native}/" "${env_file}"
+  record_configuration "${env_file}"
+  model="$(sed -n 's/^MODEL_NAME=//p' "${env_file}" | head -1)"
+  AGENT_ST_RC=0
+  AGENT_ST_OUT="$( cd "${AGENT_ST_SB}" \
+    && PATH="$(stub_path "${AGENT_ST_SB}/stub")" \
+       LCA_ST_MODEL="openai/${model}-agent" \
+       LCA_ST_OLLAMA_MODEL="${model}-agent" \
+       LCA_ST_NATIVE="${stored}" \
+       LCA_ST_TOOL_CALLS="${calls}" \
+       env "$@" timeout 120 bash scripts/agent-selftest.sh 2>&1 )" || AGENT_ST_RC=$?
+}
+# The branch the docs call the difference between a working run and an instant
+# empty workspace. Native tool calling ON, and a model that answers the probe
+# with prose instead of a tool call: the selftest must stop here, name the
+# setting, and not go on to say the tier works.
+selftest_catches_a_dead_tool_call_channel() {
+  local bad=0
+  agent_selftest_run true true 0
+  (( AGENT_ST_RC != 0 )) || {
+    printf 'the selftest passed a tier whose tool-call channel returns nothing:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'ZERO native tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the tool-call channel failed and the report does not say so:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  # The remedy, because "the channel is dead" sends people to the model.
+  grep -q 'AGENT_NATIVE_TOOL_CALLING=false' <<<"${AGENT_ST_OUT}" || {
+    printf 'the failure does not name the setting that fixes it:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'works on this machine' <<<"${AGENT_ST_OUT}" && {
+    echo 'the selftest reported the tier working after the channel check failed' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "the agent selftest stops on a tool-call channel that returns nothing" \
+  selftest_catches_a_dead_tool_call_channel
+# ...and the same configuration with a model that DOES answer natively runs to
+# the end. Without this the gate above would pass on a selftest that refuses
+# every machine.
+selftest_accepts_a_live_native_channel() {
+  local bad=0
+  agent_selftest_run true true 1
+  (( AGENT_ST_RC == 0 )) || {
+    printf 'a tier with a working native channel was refused (rc=%s):\n%s\n' \
+      "${AGENT_ST_RC}" "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'returns native tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the native channel worked and the report does not say so:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'works on this machine' <<<"${AGENT_ST_OUT}" || {
+    printf 'every link passed and the selftest did not say the tier works:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and accepts one that answers the probe natively" \
+  selftest_accepts_a_live_native_channel
+# The shipped configuration, which had also never been run: zero native tool
+# calls is the EXPECTED answer here and must not be reported as a failure.
+selftest_expects_no_native_calls_when_it_is_off() {
+  local bad=0
+  agent_selftest_run false false 0
+  (( AGENT_ST_RC == 0 )) || {
+    printf 'the shipped configuration was refused (rc=%s):\n%s\n' \
+      "${AGENT_ST_RC}" "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -qi 'prompt-parsed tool calls' <<<"${AGENT_ST_OUT}" || {
+    printf 'the shipped tool-call mode is not named in the report:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q 'ZERO native tool calls' <<<"${AGENT_ST_OUT}" && {
+    echo 'zero native calls was reported as a failure with native tool calling off' >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and does not call zero native calls a failure when it is off" \
+  selftest_expects_no_native_calls_when_it_is_off
+# The other half of the same setting: what the agent STORED, which is a
+# different fact from what .env asks for. The settings endpoint declares
+# additionalProperties true, so it answers 200 to a body it keeps none of —
+# this project shipped a "settings seeded" message about exactly that once.
+selftest_catches_settings_that_did_not_take() {
+  local bad=0
+  agent_selftest_run true false 1
+  (( AGENT_ST_RC != 0 )) || {
+    printf 'the agent stored the wrong tool-call mode and the selftest passed it:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  grep -q "native_tool_calling='false'" <<<"${AGENT_ST_OUT}" || {
+    printf 'the report does not say what the agent actually holds:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  # ...and it stops AT the settings, not three links later: the channel probe
+  # costs a real generation on a CPU box.
+  grep -q 'The tool-call channel' <<<"${AGENT_ST_OUT}" && {
+    printf 'the selftest went on to probe the channel after the settings were wrong:\n%s\n' \
+      "${AGENT_ST_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and stops when the agent stored a different mode than .env asks for" \
+  selftest_catches_settings_that_did_not_take
 # Which sandboxes may be collected while the app is UP — the question nothing
 # asked, so nothing was ever collected until the tier was stopped.
 reclaimable_sandboxes_reads_the_conversation() {
@@ -5750,6 +6677,30 @@ check "the settings seeder proves the write landed instead of trusting a 200" \
 # on a network call writes no log at all. A loop that judges once per log line
 # never judges such a run. Both of these were found by watching a real
 # container, not by reading the loop.
+#
+# NOT converted, and that is the finding. Read as one of the highest-cost gates
+# still reading source, this turned out not to be debt: the behaviour is
+# already DRIVEN, in another file. tests/test-agent-watch.sh starts a real
+# container running 'sleep 600' — a process that says nothing at all — points
+# the real scripts/agent-watch.sh at it with AGENT_TIMEOUT_MINUTES=1, and
+# asserts both halves of what this reads for:
+#
+#   the wall clock fires on a container that never says a word
+#   ...and the container was really stopped, not just reported
+#
+# The negated-read half is covered by the same assertion: a loop that read $?
+# after '! read' would break on the first tick and announce "the agent stopped
+# on its own", so 'wall-clock limit' would not appear. CI runs that file in the
+# system-artefacts job, against a real docker daemon.
+#
+# What is kept here is a cheap structural belt, and it earns its place for one
+# reason: that file SKIPS itself where there is no reachable daemon, and these
+# two shapes are the ones whose absence is silent. A belt that costs a
+# millisecond next to a five-minute test that can skip is worth the line.
+#
+# SOURCE-GREP: driven by tests/test-agent-watch.sh, which needs a docker daemon
+# and skips without one. This is the belt for that skip, and its subject is
+# deliberately the shape of the loop rather than its behaviour.
 watch_judges_on_time_not_only_on_output() {
   local body
   body="$(sed 's/#.*//' "${REPO}/scripts/agent-watch.sh")"
@@ -5802,25 +6753,6 @@ start_seeds_the_settings() {
 }
 check "'lca agent start' seeds the settings a task cannot run without" \
   start_seeds_the_settings
-# An uninstall that leaves the agent behind is this file's own worst failure
-# shape repeated: it once printed "Uninstall complete" while the chat app's
-# container and every account in it were still on the machine. The agent is the
-# more serious version — it holds the docker socket and serves a session that
-# runs commands.
-uninstall_removes_the_agent() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
-  grep -q 'AGENT_CONTAINER' <<<"${body}" || {
-    echo 'uninstall.sh leaves the agent container running and still reports the stack removed' >&2
-    return 1; }
-  # Removed, not merely mentioned — and through as_root, like every other
-  # removal here.
-  grep -qE 'as_root docker rm -f "\$\{AGENT_CONTAINER\}"' <<<"${body}" || {
-    echo 'uninstall.sh names the agent container but never removes it with as_root' >&2
-    return 1; }
-}
-check "uninstall removes the agent container too" \
-  uninstall_removes_the_agent
 # ...and 'lca check' has to report it, or a health check stays silent about a
 # service its owner switched on and which never came up.
 check_reports_the_agent() {
@@ -6770,6 +7702,7 @@ printf "STILL-RUNNING\n"'
 check "load_env warns and keeps going when it cannot write .env, asked as somebody who cannot" \
   load_env_survives_an_uncreatable_env
 
+
 echo "# the shared system prompt (phone chat + 'lca ask' must agree)"
 check "system prompt is non-empty" test -n "$(lca_system_prompt)"
 # Run greps through a helper: 'bash -c' would start a child shell that has
@@ -7299,23 +8232,136 @@ cache_writes_cannot_abort() {
 }
 check "cached state is written without risking the run" cache_writes_cannot_abort
 
-# "Not readable" is not "not there", and the two need opposite advice. 'lca
-# logs' tested -r on the install log and then called the absence normal — so on
-# a box where that root-written log is not world-readable it announced that a
-# file sitting right there did not exist, and the reader stopped looking. The
-# other two sources have always escalated through run_reader.
+# 'lca logs' has to tell a log it cannot READ from one that is not THERE, and
+# the two need opposite advice. All four gates below used to read logs.sh for
+# the test forms it contains — '-e' good, '-r' bad — which is evidence about
+# the source and not about what a reader sees. They now run the real readers,
+# as somebody who is not root, over a log that is absent, one that is there
+# and unopenable, and one that is there and fine.
+#
+# The bug they exist for: '-r' collapsed "there is no log" into the same branch
+# as "there is a log and this account cannot open it". The install log is
+# written by root through tee on a droplet, and the background Ollama log by
+# 'nohup ollama serve >LOG' under whatever umask started it — so both are
+# routinely 0600 root-owned, and both told the reader the file did not exist
+# while it sat at the path they were being shown.
+LOG_MARKER="A-LINE-FROM-THE-LOG-ITSELF"
+LOGS_FIXTURES="${SANDBOX}/logfix"
+LOGS_ESCALATIONS="${LOGS_FIXTURES}/escalations"
+# logs.sh ends in a bare 'main "$@"' with no BASH_SOURCE guard, so sourcing it
+# runs it. The copy is the file minus that one line — function definitions,
+# with SCRIPT_DIR resolving to a sandbox holding a copy of lib.sh beside them.
+# The same cut netmode's harden probe makes, for the same reason.
+logs_checkout() {   # -> a checkout whose logs.sh can be sourced without running
+  local sb="${SANDBOX}/logsroot"
+  if [[ ! -e "${sb}/scripts/logs.sh" ]]; then
+    mkdir -p "${sb}/scripts" "${sb}/config"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/lib.sh"
+    grep -v '^main "\$@"$' "${REPO}/scripts/logs.sh" > "${sb}/scripts/logs.sh"
+    cp "${REPO}/.env.example" "${sb}/.env.example"
+    # A .env already in place: logs.sh calls load_env as it loads, and the
+    # dropped probe cannot write this directory. Without it every arm below
+    # would also be measuring load_env's fallback.
+    cp "${REPO}/.env.example" "${sb}/.env"
+    cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/CONVENTIONS.md"
+    chmod -R a+rX "${sb}"
+    chmod 711 "${SANDBOX}"
+  fi
+  printf '%s' "${sb}"
+}
+logs_fixture() {   # absent|unreadable|readable -> a log path in that state
+  mkdir -p "${LOGS_FIXTURES}"; chmod 755 "${LOGS_FIXTURES}"
+  local f="${LOGS_FIXTURES}/$1.log"
+  case "$1" in
+    absent) rm -f "${f}" ;;
+    # 0000 rather than 0600-owned-by-somebody-else: a file with no permission
+    # bits at all is unreadable to its own owner too, so this arm is reachable
+    # whether the suite is root and drops to 65534, or is already an ordinary
+    # account and stays there. Nothing here needs an account to exist.
+    unreadable) printf '%s\n' "${LOG_MARKER}" > "${f}"; chmod 000 "${f}" ;;
+    readable)   printf '%s\n' "${LOG_MARKER}" > "${f}"; chmod 644 "${f}" ;;
+  esac
+  printf '%s' "${f}"
+}
+lca_logs_says() {   # ollama|setup  STATE -> what the real reader printed, as not-root
+  local sb path
+  sb="$(logs_checkout)"
+  path="$(logs_fixture "$2")"
+  : > "${LOGS_ESCALATIONS}"; chmod 666 "${LOGS_ESCALATIONS}"
+  # shellcheck disable=SC2016  # code for the dropped shell, not a string to expand here
+  local code='LOG_PATH="$1"; ESC="$2"
+    # timeout(1) is a real program and cannot run a shell function, and
+    # run_reader now bounds its probe. Standing in for it keeps the real code
+    # path and lets these stubs answer — the same reason lib_probe does it.
+    timeout() { shift; "$@"; }
+    # Both captured up front. run_reader calls as_root as "as_root test -r
+    # PATH", so inside the stub "$2" is the word -r and not the recorder.
+    can_root_now() { return 0; }
+    as_root() { printf "ESCALATED %s\n" "$*" >> "${ESC}"; return 1; }
+    # The no-service-manager host: containers and WSL, which is where
+    # start_ollama_bg writes the log this reads. On a systemd box the ollama
+    # reader takes the journal branch instead, which is not what these gates
+    # are about.
+    systemd_available() { return 1; }
+    case "$3" in
+      setup)  SETUP_LOG="${LOG_PATH}";     logs_setup  50 false ;;
+      ollama) OLLAMA_BG_LOG="${LOG_PATH}"; logs_ollama 50 false ;;
+    esac'
+  as_nobody "${sb}/scripts/logs.sh" "${code}" "${path}" "${LOGS_ESCALATIONS}" "$1"
+}
+# Did the run just made try root? The probe's own output cannot say: run_reader
+# discards the probe call's output, which is where the attempt happens.
+# The bound is part of the argv now: run_reader wraps its PROBE in
+# 'timeout N' because an unbounded question is how 'lca agent logs' sat for
+# ever on a wedged daemon. The escalation is the same escalation.
+logs_escalated() {
+  grep -qE 'ESCALATED (timeout [0-9]+ )?test -r' "${LOGS_ESCALATIONS}" 2>/dev/null
+}
 logs_setup_tells_the_two_apart() {
-  local body
-  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  grep -q 'run_reader' <<<"${body}" || {
-    echo 'logs.sh reads the install log without escalating, unlike its two siblings' >&2
-    return 1; }
-  # The "normal, nothing to see" message belongs to absence alone.
-  grep -qE '\[\[ ! -e ' <<<"${body}" || {
-    echo 'logs.sh still decides "no install log" from readability rather than existence' >&2
-    return 1; }
-  ! grep -qE '\[\[ ! -r ' <<<"${body}"
+  local out bad=0
+  # 1. Nothing there. "Normal unless this machine was built from
+  # do-user-data.sh" is the correct answer here and the wrong answer anywhere
+  # else.
+  out="$(lca_logs_says setup absent)"
+  grep -q 'No install log at' <<<"${out}" || {
+    printf 'a machine with no install log was not told so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  logs_escalated && {
+    echo 'it asked for root over a file that is not there' >&2
+    bad=1
+  }
+  # 2. There, and this account cannot open it. This is the regression: '-r'
+  # sent it to branch 1, and the reader stopped looking at a file sitting at
+  # the path they had just been shown.
+  out="$(lca_logs_says setup unreadable)"
+  grep -q 'No install log at' <<<"${out}" && {
+    printf 'an install log that is right there was reported as missing:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'could not be read' <<<"${out}" || {
+    printf 'an unopenable install log produced no explanation:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and it escalated first, like the other two sources here always have.
+  # The message says "even as root", which is only true if root was tried.
+  logs_escalated || {
+    echo 'it gave up on the install log without asking root, while telling the reader it had' >&2
+    bad=1
+  }
+  # 3. There and readable: the log, and none of the advice. Without this the
+  # two arms above are satisfied by a reader that never reads anything.
+  out="$(lca_logs_says setup readable)"
+  grep -qF "${LOG_MARKER}" <<<"${out}" || {
+    printf 'a readable install log was not read out, so the two arms above prove nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qE 'No install log at|could not be read' <<<"${out}" && {
+    printf 'a log that was read out was also called missing or unreadable:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca logs' separates an unreadable install log from a missing one" \
   logs_setup_tells_the_two_apart
@@ -7325,18 +8371,31 @@ check "'lca logs' separates an unreadable install log from a missing one" \
 # an install eight days earlier, sitting directly under Ollama requests from
 # seconds ago. It reads as something that just happened; it takes a trip to
 # .env to learn it never did.
+#
+# Driven against the file's real mtime rather than grepped for 'date -r': the
+# grep could not tell the heading from a comment, and says nothing about
+# whether the date shown is the log's.
 logs_setup_dates_the_install_log() {
-  local body
-  body="$(awk '/^logs_setup\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  grep -q 'date -r' <<<"${body}" || {
-    echo 'the install log is shown undated, beside per-request timestamps, so old lines read as current' >&2
-    return 1; }
-  # From the file, not from its contents: nothing in that log is reliably
-  # stamped, so a parse would go stale the first time a message changed.
-  grep -qE 'date -r "\$\{SETUP_LOG\}"' <<<"${body}" || {
-    echo 'the install log heading is dated from something other than the file itself' >&2
-    return 1; }
+  local out want bad=0
+  want="$(date -r "$(logs_fixture readable)" +'%Y-%m-%d %H:%M' 2>/dev/null || true)"
+  [[ -n "${want}" ]] || {
+    echo 'the fixture has no mtime to compare the heading against' >&2
+    return 1
+  }
+  out="$(lca_logs_says setup readable)"
+  grep -qF "last written ${want}" <<<"${out}" || {
+    printf 'the install log is shown undated beside per-request timestamps, so old lines read as current (wanted %s):\n%s\n' \
+      "${want}" "${out}" >&2
+    bad=1
+  }
+  # ...and a log that is not there is not given a date, which would be a date
+  # for nothing.
+  out="$(lca_logs_says setup absent)"
+  grep -q 'last written' <<<"${out}" && {
+    printf 'a log that does not exist was dated:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and says when it was last written" \
   logs_setup_dates_the_install_log
@@ -7351,18 +8410,25 @@ echo "# ...and on a host with no systemd it must read the log THIS project wrote
 # TROUBLESHOOTING.md both point at when Ollama misbehaves, so the one host type
 # without a journal is the one that most needs an answer.
 logs_ollama_reads_the_background_log() {
-  local body
-  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
-  grep -q 'OLLAMA_BG_LOG' <<<"${body}" || {
-    echo "'lca logs ollama' never looks at the background log this project writes" >&2
-    return 1; }
-  # ...and actually prints it, rather than only naming it in a hint.
-  grep -qE 'tail .*OLLAMA_BG_LOG' <<<"${body}" || {
-    echo "'lca logs ollama' names the background log but never reads it out" >&2
-    return 1; }
+  local out bad=0
+  out="$(lca_logs_says ollama readable)"
+  grep -qF "${LOG_MARKER}" <<<"${out}" || {
+    printf "'lca logs ollama' did not read out the background log this project writes:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  # ...and says which file it read, because nothing else on the machine points
+  # at that path.
+  grep -qF "$(logs_fixture readable)" <<<"${out}" || {
+    printf 'it printed the log without ever naming it:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the sentence written for having no log at all is gone from this arm.
+  grep -q 'check that terminal' <<<"${out}" && {
+    printf 'it read the log and still sent the reader to a terminal that does not exist:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca logs ollama' reads the background log where there is no journal" \
   logs_ollama_reads_the_background_log
@@ -7381,33 +8447,125 @@ check "'lca logs ollama' reads the background log where there is no journal" \
 # The last line names the log in the subjunctive while the log exists. And the
 # first is the sentence this whole branch was written to remove.
 logs_ollama_separates_absent_from_unreadable() {
-  local body
-  body="$(awk '/^logs_ollama\(\) \{/ { inb = 1; next } inb && /^\}/ { exit } inb' \
-            "${REPO}/scripts/logs.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo 'could not find logs_ollama — this gate stopped watching' >&2; return 1; }
-  # Existence, not readability, decides which branch you land in.
-  grep -qE '\[\[ -e "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" || {
-    echo 'logs_ollama still branches on whether it can READ the log, so an unreadable one is treated as an absent one' >&2
-    return 1; }
-  grep -qE '\[\[ -r "\$\{OLLAMA_BG_LOG\}" \]\]' <<<"${body}" && {
-    echo 'logs_ollama is back to deciding the branch on readability' >&2
-    return 1; }
-  # ...and the read escalates, the same way the journal branch below it does,
-  # so somebody who can sudo gets their log rather than an explanation.
-  # 'run_reader test -r', not bare 'run_reader': the journal branch at the
-  # bottom of this same function uses run_reader too, and matching that one let
-  # the background-log read lose its escalation entirely while the gate passed.
-  grep -qE 'run_reader test -r "\$\{OLLAMA_BG_LOG\}"' <<<"${body}" || {
+  local out bad=0
+  # No log: the three lines about there being no journal and no log are right.
+  out="$(lca_logs_says ollama absent)"
+  grep -q 'check that terminal' <<<"${out}" || {
+    printf 'a host with no journal and no background log was told nothing useful:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'cannot read it' <<<"${out}" && {
+    printf 'a log that does not exist was called unreadable:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # A log that is there and unopenable: the opposite advice, and none of the
+  # sentences above.
+  out="$(lca_logs_says ollama unreadable)"
+  grep -qi 'cannot read it' <<<"${out}" || {
+    printf 'an unopenable background log was not reported as a permission problem:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'check that terminal' <<<"${out}" && {
+    printf 'a log sitting right there produced the sentence written for having none:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'would be at' <<<"${out}" && {
+    printf 'it named the log in the subjunctive while the log was there:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and it escalated, the same way the journal branch below it does, so a
+  # reader who can sudo gets their log rather than an explanation.
+  logs_escalated || {
     echo 'the background log is read without the escalation the journal gets' >&2
-    return 1; }
-  # ...and if it still cannot be read, that is said as a permission problem.
-  grep -qi 'cannot read it' <<<"${body}" || {
-    echo 'an unreadable background log is not reported as a permission problem' >&2
-    return 1; }
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and an unreadable log is not reported as a missing one" \
   logs_ollama_separates_absent_from_unreadable
+
+echo "# ...and 'everything' has to mean everything"
+# The reverse question, asked of the four gates above. They all ask whether
+# 'lca logs' tells an unreadable log from a missing one. The reverse is: WHICH
+# of this project's own logs does it not offer at all? The agent tier's. The
+# command is documented as "recent logs from everything" and pitched as
+# 'lca logs | lca ask "why did this fail?"', so on a machine with the tier
+# switched on it handed the model every tier except the one that was failing.
+# 'lca agent logs' existed; nobody reaching for the general command finds it.
+lca_logs_all_with() {   # ENABLE_AGENT  CONTAINER-EXISTS  SOURCE -> what it printed
+  local sb; sb="$(logs_checkout)"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  local code='ENABLE_AGENT="$1"; AGENT_EXISTS="$2"
+    # run_reader bounds its probe, and timeout(1) cannot run the docker shell
+    # function below. Standing in for it keeps the stub reachable.
+    timeout() { shift; "$@"; }
+    # Neither of this box facts, so the two log readers above take their
+    # no-journal and no-file branches and stay out of the way.
+    systemd_available() { return 1; }
+    SETUP_LOG="/nonexistent"; OLLAMA_BG_LOG="/nonexistent"
+    have() { case "$1" in docker) return 0 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+    docker_daemon_reachable() { return 0; }
+    agent_container_exists() { [[ "${AGENT_EXISTS}" == "true" ]]; }
+    docker() {
+      case "$*" in
+        *"container inspect"*)
+          case "$*" in *openhands-app*) [[ "${AGENT_EXISTS}" == "true" ]] ;; *) return 0 ;; esac ;;
+        *logs*) printf "LOG-OF %s\n" "$*" ;;
+        *) return 1 ;;
+      esac
+    }
+    main "$3"'
+  as_nobody "${sb}/scripts/logs.sh" "${code}" "$1" "$2" "$3"
+}
+logs_offers_the_agent_tier() {
+  local out bad=0
+  # 1. The shipped machine: tier off, no container. Quiet — a section saying
+  # so on every 'lca logs' is noise about something that was never created.
+  out="$(lca_logs_all_with false false all)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" && {
+    printf 'a machine with no agent gets a section about one on every lca logs:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the two tiers it has always read are still read, or the arms below
+  # are measuring a command that prints nothing.
+  grep -q 'open webui (the chat app)' <<<"${out}" || {
+    printf "'lca logs' no longer reads the chat app at all:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  # 2. Tier on: the section is there and the agent's own container was read.
+  out="$(lca_logs_all_with true true all)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" || {
+    printf "'lca logs' still hands the model every tier except the agent:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  grep -q 'LOG-OF logs --tail 50 openhands-app' <<<"${out}" || {
+    printf 'the agent section was printed without the agent container being read:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 3. The switch is off and the container exists anyway. The container
+  # outlives the switch — the same reason retention does not read
+  # ENABLE_WEBUI, and the same reason it was a security hole for the chat app.
+  out="$(lca_logs_all_with false true all)"
+  grep -q 'LOG-OF logs --tail 50 openhands-app' <<<"${out}" || {
+    printf 'a running agent container is skipped because a switch in .env says the tier is off:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. Asked for by name it always answers, tier off or not — otherwise the
+  # quiet in arm 1 would be a source nobody can reach.
+  out="$(lca_logs_all_with false false agent)"
+  grep -q 'agent (the autonomous tier)' <<<"${out}" || {
+    printf "'lca logs agent' does not exist as a source:\n%s\n" "${out}" >&2
+    bad=1
+  }
+  grep -qE 'never been started|not running here|not read' <<<"${out}" || {
+    printf 'it printed a heading and then said nothing about what it found:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca logs' reads the agent tier too, where there is one" \
+  logs_offers_the_agent_tier
 # ...and the path itself must exist in exactly one place. It was written as a
 # literal inside start_ollama_bg while logs.sh knew nothing about it, which is
 # precisely how the two drifted.
@@ -7422,20 +8580,159 @@ ollama_bg_log_path_is_named_once() {
 check "...and that path is spelled out in exactly one place" \
   ollama_bg_log_path_is_named_once
 
+# 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
+# body with a zero exit status. Measured against a model that is not installed:
+#
+#   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
+#   {"error":"model 'no-such-model:1b' not found"}      (curl rc=0)
+#
+# piped through jq '.response // empty' that yields nothing, the pipeline
+# exits 0, and the only check afterwards was on the pipeline's status. So the
+# command printed nothing, warned about nothing and exited 0, throwing away the
+# one sentence that named the problem. Seen live as well: a cold 'lca ask -c'
+# printed "continuing from your last question", no answer, status 0.
+#
+# Driven end to end against ask.sh with curl stubbed, because the shape that
+# matters is the whole pipeline — capture, extraction and the check after it.
+# One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
+# it are the generated script's, not this one's — and the body it answers with
+# comes through the environment rather than being interpolated in.
+#
+# 'ollama' is stubbed as well as curl, and that is not belt-and-braces: ask.sh
+# checks model_present (which runs 'ollama show') before it generates anything,
+# and CI's unit job has neither the binary nor the model. Without this the
+# three gates below passed here and failed there with
+#
+#   [FAIL] Model 'qwen2.5-coder:7b' is not downloaded.
+#
+# which is ask.sh being right and the test being environment-dependent — the
+# exact class this file carries systemic guards for, introduced by me.
+write_ask_stubs() {  # DIR
+  make_stub_dir "$1"
+  cat > "$1/curl" <<'STUB'
+#!/bin/sh
+# With LCA_CAPTURE set, keep the request body: some gates need to see the
+# prompt that would have reached the model, not just the reply.
+if [ -n "${LCA_CAPTURE:-}" ]; then
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "-d" ] && printf '%s' "$a" > "${LCA_CAPTURE}"
+    prev="$a"
+  done
+fi
+for a in "$@"; do
+  case "$a" in
+    # LCA_FAKE_GENERATE_RC is how a request that DIED mid-answer is produced:
+    # curl printing part of a stream and then exiting non-zero is exactly the
+    # 10-minute cap, a restart, or the model being killed for memory.
+    */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit "${LCA_FAKE_GENERATE_RC:-0}" ;;
+  esac
+done
+printf '%s' '{"version":"0.32.5"}'
+STUB
+  cat > "$1/ollama" <<'STUB'
+#!/bin/sh
+# Only what ask.sh asks: 'ollama show MODEL' decides model_present, and
+# 'ollama ps' decides whether the model is already resident — which is what
+# model_load_notice branches on. Empty output is "not loaded", which is what
+# this stub said before LCA_FAKE_PS existed and still says by default.
+case "${1:-}" in
+  show) exit 0 ;;
+  ps)   printf '%s' "${LCA_FAKE_PS:-}"; exit 0 ;;
+  *)    exit 0 ;;
+esac
+STUB
+  chmod +x "$1/curl" "$1/ollama"
+}
+
+# --- running 'lca ask' against a stand-in model server -----------------------
+#
+# ask.sh reads OLLAMA_CONTEXT_LENGTH and LCA_ASK_TOKENS out of .env, and .env
+# wins over the environment — load_env sources the file after the shell has
+# been set up. So a case that needs a different window needs a different .env,
+# which needs a checkout of its own. That is the whole reason this harness
+# copies the tree instead of running "${REPO}/scripts/ask.sh" like the argument
+# gates further down: those vary flags, these vary the machine.
+ASK_ROOT_SB="${SANDBOX}/askroot"
+ask_root_sandbox() {
+  [[ -e "${ASK_ROOT_SB}/scripts/ask.sh" ]] && return 0
+  mkdir -p "${ASK_ROOT_SB}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${ASK_ROOT_SB}" )
+  write_ask_stubs "${ASK_ROOT_SB}/stub"
+  # Three files of known size, so a case can push the TOTAL over the budget
+  # without any single source exceeding its own cap — which is exactly the hole
+  # this gate exists for: every source was capped and the sum was not.
+  mkdir -p "${ASK_ROOT_SB}/ctx"
+  local i
+  for i in 1 2 3; do
+    head -c 12000 /dev/zero | tr '\0' 'x' > "${ASK_ROOT_SB}/ctx/f${i}.txt"
+  done
+  chmod -R a+rX "${ASK_ROOT_SB}"
+}
+ASK_BODY="";  ASK_ERR="";  ASK_RC=0
+ask_run_in() {   # CTX  [PS]  [GENERATE-RC]  ARGS... -> sets ASK_BODY/ASK_ERR/ASK_RC
+  ask_root_sandbox
+  local ctx="$1" ps="$2" grc="$3"; shift 3
+  cp "${REPO}/.env.example" "${ASK_ROOT_SB}/.env"
+  sed -i "s/^OLLAMA_CONTEXT_LENGTH=.*/OLLAMA_CONTEXT_LENGTH=${ctx}/" "${ASK_ROOT_SB}/.env"
+  record_configuration "${ASK_ROOT_SB}/.env"
+  local cap="${ASK_ROOT_SB}/body.json" err="${ASK_ROOT_SB}/err.txt"
+  : > "${cap}"; : > "${err}"
+  ASK_RC=0
+  # Piped input as well as the files, because the trim is documented to keep it
+  # last — it is the thing the reader just produced.
+  head -c 12000 /dev/zero | tr '\0' 'p' \
+    | ( cd "${ASK_ROOT_SB}" \
+        && PATH="$(stub_path "${ASK_ROOT_SB}/stub")" LCA_CAPTURE="${cap}" \
+           LCA_FAKE_PS="${ps}" LCA_FAKE_GENERATE_RC="${grc}" \
+           LCA_FAKE_GENERATE='{"response":"x","done":true}' \
+           timeout 90 bash scripts/ask.sh "$@" "hi" >/dev/null 2>"${err}" ) || ASK_RC=$?
+  ASK_BODY="$(jq -r '.prompt // empty' <"${cap}" 2>/dev/null || true)"
+  ASK_ERR="$(cat "${err}")"
+}
+ask_ctx_files() { printf -- '-f\n%s/ctx/f1.txt\n-f\n%s/ctx/f2.txt\n-f\n%s/ctx/f3.txt\n' \
+  "${ASK_ROOT_SB}" "${ASK_ROOT_SB}" "${ASK_ROOT_SB}"; }
 # 'lca ask' streams the answer through a pipeline. Bare under 'set -o pipefail'
 # that pipeline was the last statement of main, so a curl that died mid-answer
 # — the 600s cap, or Ollama being OOM-killed by the model it just loaded — took
 # the whole command down silently: half an answer, no error, and a non-zero
 # status nothing explained. speed.sh has always said so on the same failure.
+#
+# Driven. The greps this replaces asked that the pipeline's status is captured
+# into a variable and that the variable is compared to zero somewhere. Both
+# survive the comparison sitting in a branch nothing reaches, and neither is
+# about the thing at stake: what the reader sees when the answer stops
+# half-way. So the request is made to die mid-stream.
 ask_reports_a_cut_short_answer() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
-  # The pipeline's status has to be captured...
-  grep -qE 'tee "[$]\{answer_tmp\}" \|\| [a-z_]+=[$]\?' <<<"${body}" || {
-    echo 'ask.sh runs the answer pipeline bare — a truncated answer exits silently' >&2
-    return 1; }
-  # ...and acted on, not just stored.
-  grep -qE '\(\( *stream_rc *!= *0 *\)\)' <<<"${body}"
+  local bad=0
+  ask_run_in 8192 "" 1
+  grep -qi 'answer above is incomplete' <<<"${ASK_ERR}" || {
+    printf 'the request to Ollama ended early and the reader was not told:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and it names the causes it can actually have, because "incomplete" alone
+  # sends people looking at their question.
+  grep -qi 'killed for memory' <<<"${ASK_ERR}" || {
+    printf 'the truncation notice does not say what ends a request early:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and the command fails, so a script piping this cannot read a half answer
+  # as a whole one.
+  (( ASK_RC != 0 )) || {
+    echo 'a request that died mid-answer exited 0' >&2
+    bad=1
+  }
+  # The complement: a request that completes says none of it and exits 0.
+  ask_run_in 8192 "" 0
+  grep -qi 'answer above is incomplete' <<<"${ASK_ERR}" && {
+    printf 'a complete answer was reported as cut short:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  (( ASK_RC == 0 )) || {
+    printf 'an ordinary question no longer succeeds (rc=%s):\n%s\n' "${ASK_RC}" "${ASK_ERR}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_answer
 # ...and it must say something BEFORE the answer starts, when the model has to
@@ -7453,37 +8750,51 @@ check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_
 # words, so each arm below now checks it where it lives. All three are kept:
 # relocating a guard is not an excuse to drop one, and the mutation that beat
 # the first version of this check is still the mutation to beat.
+#
+# Driven. The greps this replaces read model_load_notice for the name of a
+# helper, for a redirect (after joining continuations, because the first
+# version was beaten by deleting the '>&2'), and for the order of two lines in
+# ask.sh. Every one of them is about the shape of the source. What matters is
+# whether a reader waiting on a cold box sees anything — and whether a reader
+# on a warm one is spared a line that would be noise on every question.
 ask_announces_a_cold_load() {
-  local body notice
-  body="$(sed 's/#.*//' "${REPO}/scripts/ask.sh")"
-  notice="$(sed -n '/^model_load_notice() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
-  [[ -n "${notice}" ]] || { echo 'could not find model_load_notice in lib.sh' >&2; return 1; }
-  # Asked, so the message appears only when it is true — on a resident model
-  # the first token is immediate and this would be noise on every question.
-  grep -q 'ollama_processor' <<<"${notice}" || {
-    echo 'the cold-load notice never checks whether the model is already resident, so it cannot know if the wait is coming' >&2
-    return 1; }
-  # stderr, or it lands in the answer. README documents
-  # 'lca logs | lca ask "why did this fail?"', and answers get redirected.
-  #
-  # Continuations joined first: the redirect sits on the line AFTER the printf,
-  # so a line-scoped grep sees the two separately and matches with the '>&2'
-  # deleted — which is exactly the mutation that walked through the first
-  # version of this check.
-  local joined
-  joined="$(sed -e :a -e '/\\$/N; s/\\\n//; ta' <<<"${notice}")"
-  grep -qE "printf 'Loading %s.*>&2" <<<"${joined}" || {
-    echo 'the cold-load notice is not printed to stderr, so it would contaminate the answer' >&2
-    return 1; }
-  # And it must come before the request, not after it.
-  # END decides, and only END: a rule-level 'exit N' in awk still RUNS the END
-  # block, so an 'END { exit 1 }' underneath silently overwrites the status.
-  # Second time in this session — see CONTRIBUTING trap #8.
-  awk '/model_load_notice/      { seen = 1 }
-       /curl .*api\/generate/   { if (!done) { done = 1; in_order = seen } }
-       END { exit (done && in_order) ? 0 : 1 }' <<<"${body}" || {
-    echo 'the cold-load notice comes after the request it is meant to explain' >&2
-    return 1; }
+  local bad=0
+  # Nothing resident: 'ollama ps' says so, and the wait is real.
+  ask_run_in 8192 "" 0
+  grep -q 'Loading' <<<"${ASK_ERR}" || {
+    printf 'a cold model was loaded with nothing on screen to explain the silence:\n%s\n' \
+      "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and it says the wait is expected, not a hang. That is the whole job of
+  # the sentence.
+  grep -qi 'not stuck' <<<"${ASK_ERR}" || {
+    printf 'the notice does not say the wait is expected:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...on stderr, and only there. README documents
+  # 'lca logs | lca ask "why did this fail?"', so the answer gets redirected —
+  # a notice on stdout lands inside it. ASK_BODY is what reached the model and
+  # stdout is discarded by the harness, so the proof is that the notice is in
+  # ASK_ERR and the answer is not.
+  grep -q 'Loading' <<<"${ASK_BODY}" && {
+    echo 'the cold-load notice was fed to the model as part of the prompt' >&2
+    bad=1
+  }
+  # Resident: 'ollama ps' shows the model at 100% CPU, so the first token is
+  # immediate and the notice would be noise on every single question.
+  ask_run_in 8192 "NAME  ID  SIZE  PROCESSOR  UNTIL
+qwen2.5-coder:7b  abc123  5 GB  100% CPU  4 minutes from now" 0
+  grep -q 'Loading' <<<"${ASK_ERR}" && {
+    printf 'a model already in memory was announced as loading:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # ...and the run still worked, or "no notice" is what a failed run looks like.
+  (( ASK_RC == 0 )) || {
+    printf 'the warm-model run failed (rc=%s):\n%s\n' "${ASK_RC}" "${ASK_ERR}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' explains the silence before a cold model answers" \
   ask_announces_a_cold_load
@@ -8148,10 +9459,13 @@ echo "# ...and a chat app it could not even LOOK at is not a chat app it removed
 # Driven through the stubs rather than grepped, the same way report_ollama_removal
 # above is: the fault was a missing DISTINCTION, and no amount of matching the
 # word 'docker' in this file would have seen it.
+REMOVE_WEBUI_LOG="${SANDBOX}/.remove-webui-calls"
+remove_webui_calls() { cat "${REMOVE_WEBUI_LOG}" 2>/dev/null || true; }
 remove_webui_run() {  # CASE [KEEP] -> the output, with "rc=N" as its last line
+  : > "${REMOVE_WEBUI_LOG}"
   bash -c '
     source "$1" >/dev/null 2>&1
-    CASE="$2"; KEEP="$3"
+    CASE="$2"; KEEP="$3"; LOG="$4"
     # Stubs AFTER the source: inside a function "$2" is the FUNCTION argument.
     if [[ "${CASE}" == "nodocker" ]]; then have() { [[ "$1" != "docker" ]]; }
     else have() { return 0; }; fi
@@ -8159,15 +9473,26 @@ remove_webui_run() {  # CASE [KEEP] -> the output, with "rc=N" as its last line
     else docker_daemon_reachable() { return 0; }; fi
     # Both inspects answer "present", so every case below is a machine that
     # really does still have a container and a volume to lose.
+    #
+    # Recording as well as answering: what this step REMOVED cannot be read off
+    # its output, because every removal here is >/dev/null 2>&1. The agent
+    # container is the one that matters most and the one whose absence would be
+    # invisible — a run that never touched it prints nothing about it either.
     as_root() {
+      printf "AS_ROOT %s\n" "$*" >> "${LOG}"
       case "$*" in
+        # Its own case arm, before the general one: rmfails is about the chat
+        # app, and a machine where only the AGENT removal fails is a different
+        # verdict — it is the container that hands out a shell.
+        *"rm -f ${AGENT_CONTAINER}"*)
+          [[ "${CASE}" == "agentfails" || "${CASE}" == "rmfails" ]] && return 1 ;;
         *"rm -f"*)     [[ "${CASE}" == "rmfails"  ]] && return 1 ;;
         *"volume rm"*) [[ "${CASE}" == "volfails" ]] && return 1 ;;
       esac
       return 0
     }
     rc=0; remove_webui "${KEEP}" 2>&1 || rc=$?
-    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${2:-false}"
+    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${2:-false}" "${REMOVE_WEBUI_LOG}"
 }
 uninstall_reports_the_chat_app_it_left() {
   local out bad=0
@@ -8221,6 +9546,144 @@ uninstall_reports_the_chat_app_it_left() {
 }
 check "an uninstall that could not reach docker says the chat app is still here" \
   uninstall_reports_the_chat_app_it_left
+# An uninstall that leaves the agent behind is this file's own worst failure
+# shape repeated: it once printed "Uninstall complete" while the chat app's
+# container and every account in it were still on the machine. The agent is the
+# more serious version — it holds the docker socket and serves a session that
+# runs commands.
+#
+# Driven. The greps this replaces asked that the string AGENT_CONTAINER appears
+# in uninstall.sh and that 'as_root docker rm -f "${AGENT_CONTAINER}"' appears
+# somewhere in it. Both survive the line sitting in a branch no run reaches,
+# and neither says anything about what happens when the removal FAILS — which
+# is the case where the container is still serving and the run must say so.
+uninstall_removes_the_agent() {
+  local out calls bad=0
+  out="$(remove_webui_run live false)"
+  calls="$(remove_webui_calls)"
+  [[ -n "${calls}" ]] || {
+    echo 'the uninstall step escalated for nothing at all — this gate is reading an empty log' >&2
+    return 1
+  }
+  # It was really removed, and through as_root like every other removal here.
+  grep -q "AS_ROOT docker rm -f openhands-app" <<<"${calls}" || {
+    printf 'an ordinary uninstall never removed the agent container — it holds the docker socket and serves a session that can run commands:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # ...before the chat app, which is the order the comment in uninstall.sh
+  # argues for: the dangerous one first.
+  local agent_at webui_at
+  agent_at="$(grep -n 'AS_ROOT docker rm -f openhands-app' <<<"${calls}" | head -1 | cut -d: -f1)"
+  webui_at="$(grep -n 'AS_ROOT docker rm -f open-webui' <<<"${calls}" | head -1 | cut -d: -f1)"
+  if [[ -n "${agent_at}" && -n "${webui_at}" ]] && (( agent_at > webui_at )); then
+    printf 'the chat app is removed before the container that hands out a shell:\n%s\n' "${calls}" >&2
+    bad=1
+  fi
+  grep -qi "container 'openhands-app' removed" <<<"${out}" || {
+    printf 'the agent container was removed and the run did not say so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a removal that FAILS is the case the grep could never see: the
+  # container is still answering on its port, and the caller has to be told so
+  # the closing line cannot say "Uninstall complete" over the top of it.
+  out="$(remove_webui_run agentfails false)"
+  grep -q 'STILL on this machine' <<<"${out}" || {
+    printf 'the agent container survived the uninstall and nothing said so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'execute commands' <<<"${out}" || {
+    printf 'it reported the survivor without saying what it can do:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'rc=1' <<<"${out}" || {
+    printf 'the step reported success while the agent container was still running:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and the chat app is still removed in that case, or "the agent failed" is
+  # satisfied by a step that gives up entirely.
+  grep -q "AS_ROOT docker rm -f open-webui" <<<"$(remove_webui_calls)" || {
+    printf 'an agent removal that failed took the chat app removal down with it:\n%s\n' \
+      "$(remove_webui_calls)" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "uninstall removes the agent container too" \
+  uninstall_removes_the_agent
+REMOVE_SANDBOX_LOG="${SANDBOX}/.remove-sandbox-calls"
+remove_sandboxes_calls() { cat "${REMOVE_SANDBOX_LOG}" 2>/dev/null || true; }
+remove_agent_sandboxes_run() {  # two|none|rmfails -> the output, with "rc=N" last
+  : > "${REMOVE_SANDBOX_LOG}"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  bash -c '
+    source "$1" >/dev/null 2>&1
+    CASE="$2"; LOG="$3"
+    have() { return 0; }
+    docker_daemon_reachable() { return 0; }
+    # The sandbox list, as docker would give it. Two of them, because a loop
+    # that stops after the first is exactly the shape this is watching for.
+    agent_live_sandboxes() {
+      [[ "${CASE}" == "none" ]] && return 0
+      printf "oh-agent-server-a\noh-agent-server-b\n"
+    }
+    as_root() {
+      printf "AS_ROOT %s\n" "$*" >> "${LOG}"
+      case "$*" in *"rm -f"*) [[ "${CASE}" == "rmfails" ]] && return 1 ;; esac
+      return 0
+    }
+    rc=0; remove_agent_sandboxes 2>&1 || rc=$?
+    printf "rc=%s\n" "${rc}"' _ "${REPO}/uninstall.sh" "$1" "${REMOVE_SANDBOX_LOG}"
+}
+# ...and the sandboxes the agent spawned must go with it. Found by asking what
+# an uninstall leaves behind that it never mentions: the app container was
+# removed and every oh-agent-server-* it had created was left RUNNING, under a
+# closing line that said "Uninstall complete". A sandbox belongs to a
+# conversation inside the app container, so once that container is gone nothing
+# can reach them — and step 6 of the same run removes 'lca', taking with it the
+# only two commands ('lca agent stop', 'lca agent gc') that could have
+# collected them. Nothing was left on the machine that could ever clean up.
+uninstall_takes_the_sandboxes_too() {
+  local out calls bad=0
+  out="$(remove_agent_sandboxes_run two)"
+  calls="$(remove_sandboxes_calls)"
+  grep -q 'docker rm -f oh-agent-server-a' <<<"${calls}" || {
+    printf 'an uninstall left the agent sandboxes running:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  grep -q 'docker rm -f oh-agent-server-b' <<<"${calls}" || {
+    printf 'it removed one sandbox and stopped:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  grep -qx 'rc=0' <<<"${out}" || {
+    printf 'removing the sandboxes reported a failure:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # A machine with none is silent and clean — the honest quiet answer.
+  out="$(remove_agent_sandboxes_run none)"
+  grep -qx 'rc=0' <<<"${out}" || {
+    printf 'a machine with no sandboxes is reported as having them:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'sandbox' <<<"${out}" && {
+    printf 'a machine with no sandboxes was told about sandboxes:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and one that will not die is reported as still running, and reaches the
+  # verdict rather than being warned about once and forgotten.
+  out="$(remove_agent_sandboxes_run rmfails)"
+  grep -q 'STILL running on this machine' <<<"${out}" || {
+    printf 'a sandbox that could not be removed was not reported as still running:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qx 'rc=1' <<<"${out}" || {
+    printf 'a sandbox survived and the step reported success:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "uninstall takes the agent's sandbox containers with it" \
+  uninstall_takes_the_sandboxes_too
 # ...and the closing line has to agree with it, because that is the line people
 # read. "Uninstall complete" directly above "Kept on purpose: ..." is a full
 # accounting of what survived, and it was signed off on a machine still holding
@@ -8267,20 +9730,92 @@ check "...and it names every step that left something behind, not just one" \
   uninstall_closing_line_carries_every_leftover
 # ...and main has to actually FEED them to it. The banner taking a list is no
 # use if the caller still throws each status away on the line that produced it.
+#
+# Driven. The greps this replaces asked that four call sites match
+# '<step> ... || var=1' and that closing_banner is handed "${left_behind[@]}".
+# A regex over four call sites is a regex, not a verdict: it survives the
+# variable never being read, it survives the arm that reads it being
+# unreachable, and it says nothing about what the reader is finally told.
+#
+# So the whole uninstall is run, once per step, with that step failing. Nothing
+# on this machine is touched: every destructive line in uninstall.sh goes
+# through as_root, and as_root here records rather than runs — which is also
+# the property that makes the run safe to do at all.
+UNINSTALL_SB="${SANDBOX}/uninstall-run"
+uninstall_run() {   # units|webui|workspace|models|none -> the whole run
+  local sb="${UNINSTALL_SB}"
+  if [[ ! -e "${sb}/uninstall.sh" ]]; then
+    mkdir -p "${sb}/scripts" "${sb}/config" "${sb}/home"
+    cp "${REPO}/uninstall.sh"   "${sb}/"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/"
+    cp "${REPO}/.env.example"   "${sb}/.env.example"
+    cp "${REPO}/.env.example"   "${sb}/.env"
+    cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/"
+  fi
+  # HOME into the sandbox, because main computes the homes to clean from it and
+  # then looks for an agent workspace under them. A real one here would take
+  # the workspace arm down a different branch.
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  HOME="${sb}/home" bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    FAIL="$2"
+    # Records nothing and runs nothing. Every removal in uninstall.sh goes
+    # through here, so this one line is what makes running main safe.
+    as_root() { return 0; }
+    # ollama present, so the derived-model arm of the verdict is reachable at
+    # all — it is guarded by "have ollama", because step 4 normally takes the
+    # model store with it. nft absent, so the firewall block is skipped.
+    have() { [[ "$1" == "ollama" ]]; }
+    systemd_available() { return 1; }
+    # The four steps whose status is under test, each failing on demand. Their
+    # own behaviour is covered by their own gates; what is under test here is
+    # whether main carries the answer to the end.
+    remove_boot_units()      { [[ "${FAIL}" != "units" ]]; }
+    remove_webui()           { [[ "${FAIL}" != "webui" ]]; }
+    remove_agent_sandboxes() { [[ "${FAIL}" != "sandboxes" ]]; }
+    remove_agent_workspace() { [[ "${FAIL}" != "workspace" ]]; }
+    remove_agent_models()    { [[ "${FAIL}" != "models" ]]; }
+    main --yes 2>&1' _ "${sb}/uninstall.sh" "$1"
+}
 uninstall_feeds_every_step_to_the_verdict() {
-  local body
-  body="$(sed 's/#.*//' "${REPO}/uninstall.sh")"
-  local call
-  for call in remove_agent_workspace remove_agent_models remove_boot_units remove_webui; do
-    grep -qE "^ *(local [a-z_]+=[0-9] )?${call}[^|]*\|\| *[a-z_]+=1" <<<"${body}" || {
-      printf '%s is called without its status reaching the verdict\n' "${call}" >&2
-      return 1
-    }
-  done
-  grep -qE 'closing_banner "\$\{left_behind\[@\]\}"' <<<"${body}" || {
-    echo 'the closing banner is no longer given the list of what survived' >&2
+  local out bad=0 case want
+  # A clean run still reads as complete, first — every "it did not say
+  # complete" below means nothing if it never says it.
+  out="$(uninstall_run none)"
+  grep -q 'Uninstall complete' <<<"${out}" || {
+    printf 'an uninstall where every step succeeded no longer reads as complete:\n%s\n' "${out}" >&2
     return 1
   }
+  # ...then each step in turn. The sentence is the one the reader acts on, so
+  # it is the sentence that is checked.
+  for case in "units|start again at the next reboot" \
+              "webui|chat app was NOT removed" \
+              "sandboxes|sandbox containers could not be removed and are STILL running" \
+              "workspace|workspace could not be removed" \
+              "models|still listed by: ollama list"; do
+    want="${case#*|}"
+    out="$(uninstall_run "${case%%|*}")"
+    grep -qF "${want}" <<<"${out}" || {
+      printf 'the %s step failed and the closing verdict never mentioned it:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+    # ...and the line above it must stop saying the run finished cleanly. This
+    # is the whole failure: "Uninstall complete" printed over a machine that
+    # still has the thing on it.
+    grep -q 'Uninstall complete' <<<"${out}" && {
+      printf 'the %s step left something behind and the run still said complete:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+    grep -q 'thing(s) are still on this machine' <<<"${out}" || {
+      printf 'the %s step left something behind and the banner did not count it:\n%s\n' \
+        "${case%%|*}" "${out}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
 }
 check "...and every removal step's status reaches that verdict" \
   uninstall_feeds_every_step_to_the_verdict
@@ -8465,30 +10000,90 @@ echo "# 'lca ask' must bound its TOTAL context, not just each piece of it"
 # own instructions and answering like a stock model — on
 # 'lca logs | lca ask "why did this fail?"', which README.md and
 # TROUBLESHOOTING.md both recommend as the way to diagnose a broken box.
+#
+# Driven. The greps this replaces asked that a variable called budget_chars
+# exists, that its assignment mentions ctx_tokens and ${#system}, that a
+# particular parameter expansion appears, and that a warn sits inside the if.
+# Five greps, all of them about the shape of one arithmetic line, and none of
+# them about the number that reaches the model.
+#
+# Three windows and two input sizes. The files are 12,000 characters each and
+# the piped input is another 12,000, so no single source exceeds its own cap
+# and the TOTAL is what goes over — which is precisely the hole: every source
+# was capped and the sum was not.
 ask_bounds_the_whole_context() {
-  local src="${REPO}/scripts/ask.sh"
-  # The budget must derive from the model's window and account for the system
-  # prompt, not be a constant someone guessed.
-  grep -q 'budget_chars=' "${src}" || {
-    echo "ask.sh computes no total context budget" >&2; return 1
+  local bad=0 kept_8k kept_4k
+  local -a files
+  mapfile -t files < <(ask_ctx_files)
+  # 1. Over budget: it trims, and it says so.
+  ask_run_in 8192 "" 0 "${files[@]}"
+  grep -q 'Context (' <<<"${ASK_ERR}" || {
+    printf '48,000 characters of context went to a 8192-token window with nothing said:\n%s\n' \
+      "${ASK_ERR}" >&2
+    return 1
   }
-  grep -qE 'budget_chars=.*ctx_tokens' "${src}" || {
-    echo "ask.sh's context budget ignores the model's context length" >&2; return 1
+  kept_8k="$(grep -oE 'most recent [0-9]+' <<<"${ASK_ERR}" | grep -oE '[0-9]+' | head -1)"
+  [[ -n "${kept_8k}" ]] || {
+    printf 'the trim notice no longer says how much it kept:\n%s\n' "${ASK_ERR}" >&2
+    return 1
   }
-  grep -qE 'budget_chars=.*\$\{#system\}' "${src}" || {
-    echo "ask.sh's context budget ignores the size of the system prompt" >&2; return 1
+  # ...and the prompt that actually reached the model is that size, not the
+  # 48,000 it was handed. This is the assertion the five greps could not make.
+  (( ${#ASK_BODY} <= kept_8k + 200 )) || {
+    printf 'the notice says %s characters were kept and %s reached the model\n' \
+      "${kept_8k}" "${#ASK_BODY}" >&2
+    bad=1
   }
-  # It must actually trim...
-  grep -qE 'context="\$\{context: -budget_chars\}"' "${src}" || {
-    echo "ask.sh never trims the context to its budget" >&2; return 1
+  (( ${#ASK_BODY} >= kept_8k )) || {
+    printf 'the prompt is smaller than the budget the notice announced (%s < %s)\n' \
+      "${#ASK_BODY}" "${kept_8k}" >&2
+    bad=1
   }
-  # ...and never silently: losing context changes the answer.
-  awk '/if \(\( \$\{#context\} > budget_chars \)\); then/ { inb = 1 }
-       inb && /warn / { found = 1 }
-       inb && /^  fi$/ { exit }
-       END { exit !found }' "${src}" || {
-    echo "ask.sh trims the context without telling anyone" >&2; return 1
+  # ...and it names the window and the way out, because the fix is a setting.
+  grep -q '8192-token window' <<<"${ASK_ERR}" || {
+    printf 'the trim notice does not name the window it is trimming to:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
   }
+  grep -q 'OLLAMA_CONTEXT_LENGTH' <<<"${ASK_ERR}" || {
+    printf 'the trim notice does not say what to raise:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  # 2. A SMALLER window must keep less. This is the claim "the budget derives
+  # from the model context length", and the only way to make it is to change
+  # the model context length. 4096 is the window of the 3b rung, the smallest
+  # this project ships — the machine the hole was measured on.
+  ask_run_in 4096 "" 0 "${files[@]}"
+  kept_4k="$(grep -oE 'most recent [0-9]+' <<<"${ASK_ERR}" | grep -oE '[0-9]+' | head -1)"
+  [[ -n "${kept_4k}" ]] || {
+    printf 'the same context did not trim at half the window:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  if [[ -n "${kept_4k}" ]] && (( kept_4k >= kept_8k )); then
+    printf 'halving the window did not shrink the budget (%s at 4096, %s at 8192) — it is a constant, not a budget\n' \
+      "${kept_4k}" "${kept_8k}" >&2
+    bad=1
+  fi
+  # 3. A window big enough for all of it must not trim, and must say nothing.
+  # Without this arm every assertion above is satisfied by a version that
+  # always trims and always warns.
+  ask_run_in 32768 "" 0 "${files[@]}"
+  grep -q 'Context (' <<<"${ASK_ERR}" && {
+    printf 'a context that fits was trimmed anyway:\n%s\n' "${ASK_ERR}" >&2
+    bad=1
+  }
+  (( ${#ASK_BODY} > kept_8k )) || {
+    printf 'a 32768-token window received no more context than an 8192-token one (%s)\n' \
+      "${#ASK_BODY}" >&2
+    bad=1
+  }
+  # 4. ...and piped input survives the trim, because it is appended last and
+  # the tail is what is kept. It is the thing the reader just produced.
+  ask_run_in 8192 "" 0 "${files[@]}"
+  [[ "${ASK_BODY}" == *pppppppppp* ]] || {
+    echo 'the trim dropped the piped input, which is documented to survive it' >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "'lca ask' bounds its total context and says when it trims" \
   ask_bounds_the_whole_context
@@ -8537,27 +10132,125 @@ check "nothing re-types a path into the venv" venv_python_is_the_only_source
 echo "# the README's privacy claim about the inbound guard must stay true"
 # README's "How your services are kept private" states the guard is re-applied
 # "whenever WebUI is (re)created". That is a security claim, and it rests on a
-# single line in install_webui.sh. It matters more now than when it was
-# written: 'lca apply' re-creates the container on every settings change, so
-# this is the path that keeps ports 3000 and 11434 off the public internet
-# after routine use, not just at install time.
+# single line at the very end of install_webui.sh. It matters more now than
+# when it was written: 'lca apply' re-creates the container on every settings
+# change, so this is the path that keeps ports 3000 and 11434 off the public
+# internet after routine use, not just at install time.
 #
 # Delete that line and nothing fails, nothing logs, and the only symptom is an
-# exposed port on someone's droplet.
+# exposed port on someone's droplet. The grep this replaces would have caught
+# the deletion — and nothing else: not a harden that runs BEFORE the container
+# exists, not one whose failure kills the install, and not a line sitting in a
+# branch the installer never reaches.
+#
+# So the installer is run. install_webui.sh ends in a bare 'main "$@"', so the
+# copy is the file minus that line; netmode.sh in the sandbox records instead
+# of acting, and shares one log with as_root so the ORDER is visible.
+#
+# A COPY of the tree, and not the webui_install_run harness further up this
+# file, for one reason: that one runs the installer out of the real checkout,
+# where "${REPO_ROOT}/netmode.sh" harden is the real thing. This suite must
+# never apply a firewall rule to the machine it runs on. (It never has: with
+# the container reported not-running, wait_for_webui returns 2 and the
+# installer die()s well before that line — which is also why the harness above
+# cannot answer this question.)
+WEBUI_GUARD_SB="${SANDBOX}/webuiinstall"
+webui_guard_install_run() {   # HARDEN-RC -> the output, with the call log at WEBUI_GUARD_SB/.calls
+  local sb="${WEBUI_GUARD_SB}"
+  if [[ ! -e "${sb}/scripts/install_webui.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/lib.sh" "${sb}/scripts/lib.sh"
+    grep -v '^main "\$@"$' "${REPO}/scripts/install_webui.sh" > "${sb}/scripts/install_webui.sh"
+    cp "${REPO}/.env.example" "${sb}/.env.example"
+    cp "${REPO}/.env.example" "${sb}/.env"
+    cp -r "${REPO}/config" "${sb}/"
+  fi
+  # The kill switch and the whole netmode surface, replaced by one recorder
+  # that exits however the case needs.
+  printf '#!/usr/bin/env bash\nprintf "netmode %%s\\n" "$*" >> "%s/.calls"\nexit %s\n' \
+    "${sb}" "$1" > "${sb}/netmode.sh"
+  chmod +x "${sb}/netmode.sh"
+  : > "${sb}/.calls"
+  # shellcheck disable=SC2016  # code for the probe's shell, not a string to expand here
+  bash -c '
+    set -uo pipefail
+    source "$1" >/dev/null 2>&1
+    LOG="$2"
+    # ss absent, so the port-squatter check has nothing to find; everything
+    # else present.
+    have() { case "$1" in ss) return 1 ;; *) return 0 ;; esac; }
+    docker_daemon_reachable() { return 0; }
+    net_guard() { :; }
+    webui_wait_or_die() { :; }
+    # Records and answers. State.Running has to say true or the installer dies
+    # on a container it just created; volume inspect says no, which is the
+    # first-install shape.
+    as_root() {
+      printf "as_root %s\n" "$*" >> "${LOG}"
+      case "$*" in
+        *"{{.State.Running}}"*) printf "true\n" ;;
+        *"volume inspect"*)     return 1 ;;
+      esac
+      return 0
+    }
+    main
+    printf "RC=%s\n" "$?"
+  ' _ "${sb}/scripts/install_webui.sh" "${sb}/.calls" 2>&1
+}
+# Just the two lines that matter, because the docker run argv is four kilobytes
+# of system prompt and nobody reading a failure wants it.
+webui_guard_calls() { grep -nE 'docker run|^netmode ' "${WEBUI_GUARD_SB}/.calls" | cut -c1-90; }
 webui_installer_applies_the_guard() {
-  grep -qE 'netmode\.sh" harden' "${REPO}/scripts/install_webui.sh" || {
-    echo "install_webui.sh no longer applies the inbound guard — README claims it does" >&2
+  local out calls run_at harden_at bad=0
+  out="$(webui_guard_install_run 0)"
+  grep -qx 'RC=0' <<<"${out}" || {
+    printf 'the installer did not finish at all, so nothing below measured the guard:\n%s\n' "${out}" >&2
     return 1
+  }
+  calls="$(webui_guard_calls)"
+  run_at="$(grep -n 'docker run' <<<"${calls}" | head -1 | cut -d: -f1)"
+  harden_at="$(grep -n '^[0-9]*:netmode harden' <<<"${calls}" | head -1 | cut -d: -f1)"
+  [[ -n "${run_at}" ]] || {
+    printf 'no container was created, so this run says nothing about the guard:\n%s\n' "${calls}" >&2
+    return 1
+  }
+  [[ -n "${harden_at}" ]] || {
+    printf 'install_webui.sh created the container and never applied the inbound guard — the README says it does, and the only symptom is an exposed port:\n%s\n' \
+      "${calls}" >&2
+    return 1
+  }
+  # After the container exists, not before. A guard applied first covers the
+  # port .env names while the container that then starts may bind another.
+  (( harden_at > run_at )) || {
+    printf 'the guard is applied BEFORE the container is created:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  # ...and a guard that cannot be applied must not kill the install. Warn-only
+  # is deliberate: a box without nftables should still end up with a working
+  # chat app, and be told what is not protecting it.
+  out="$(webui_guard_install_run 1)"
+  grep -qx 'RC=0' <<<"${out}" || {
+    printf 'a machine with no nftables cannot install the chat app at all:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'may be publicly reachable' <<<"${out}" || {
+    printf 'the guard failed to apply and the install said nothing about the exposure:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'netmode.sh harden' <<<"${out}" || {
+    printf 'it reported the exposure without naming the command that closes it:\n%s\n' "${out}" >&2
+    bad=1
   }
   # And the README must still be making the claim this guards; if the sentence
   # goes, the test should be re-examined rather than silently protecting a
   # promise nobody makes any more.
   grep -qi 'whenever WebUI is' "${REPO}/README.md" || {
     echo "README no longer claims the guard is re-applied when WebUI is re-created" >&2
-    return 1
+    bad=1
   }
+  return "${bad}"
 }
-check "install_webui.sh re-applies the inbound guard, as the README promises" \
+check "install_webui.sh really re-applies the inbound guard, as the README promises" \
   webui_installer_applies_the_guard
 
 echo "# 'lca update' must re-run setup even when the checkout is already current"
@@ -8586,7 +10279,13 @@ echo "# 'lca update' must re-run setup even when the checkout is already current
 # What is under test is update.sh's own wiring and its verdicts — which is
 # exactly what was untested. (The REAL selftest.sh runs through this same path
 # in CI's end-to-end job, where a working stack exists.)
-drive_update() {   # SETUP_RC SELFTEST_RC -> output, then RC:<status>
+drive_update() {   # SETUP_RC SELFTEST_RC [BACKUP_RC] [BEHIND] -> output, then RC:<status>
+  # BACKUP_RC absent means --no-backup, which is what every case below wanted
+  # until the recovery advice needed driving. update.sh offers restore.sh only
+  # when a backup was really taken AND new code was really applied, and with
+  # neither of those true the whole branch was unreachable — asserted by an awk
+  # over the source and never once produced.
+  local setup_rc="$1" selftest_rc="$2" backup_rc="${3:-}" behind="${4:-0}"
   local root="${SANDBOX}/upd" work="${SANDBOX}/upd/work" origin="${SANDBOX}/upd/origin.git"
   rm -rf "${root}"; mkdir -p "${root}"
   git init -q --bare "${origin}"
@@ -8595,17 +10294,31 @@ drive_update() {   # SETUP_RC SELFTEST_RC -> output, then RC:<status>
   cp "${REPO}/update.sh" "${work}/update.sh"
   cp "${REPO}/scripts/lib.sh" "${work}/scripts/lib.sh"
   cp "${REPO}/.env.example" "${work}/.env.example"
-  printf '#!/usr/bin/env bash\necho "SETUP RAN"\nexit %s\n' "$1" > "${work}/setup.sh"
-  printf '#!/usr/bin/env bash\necho "SELFTEST RAN"\nexit %s\n' "$2" > "${work}/scripts/selftest.sh"
-  chmod +x "${work}/update.sh" "${work}/setup.sh" "${work}/scripts/selftest.sh"
+  printf '#!/usr/bin/env bash\necho "SETUP RAN"\nexit %s\n' "${setup_rc}" > "${work}/setup.sh"
+  printf '#!/usr/bin/env bash\necho "SELFTEST RAN"\nexit %s\n' "${selftest_rc}" > "${work}/scripts/selftest.sh"
+  printf '#!/usr/bin/env bash\necho "BACKUP RAN"\nexit %s\n' "${backup_rc:-0}" > "${work}/backup.sh"
+  chmod +x "${work}/update.sh" "${work}/setup.sh" "${work}/scripts/selftest.sh" "${work}/backup.sh"
   git -C "${work}" add -A >/dev/null
   git -C "${work}" -c user.email=t@t -c user.name=t commit -qm base >/dev/null
   git -C "${work}" branch -M main >/dev/null 2>&1
   git -C "${work}" remote add origin "${origin}"
   git -C "${work}" push -q origin main 2>/dev/null
   git -C "${work}" branch --set-upstream-to=origin/main main >/dev/null 2>&1
+  # ...and, when asked, a checkout that is genuinely BEHIND its remote: commit
+  # forward, push, step back. 'behind' is what update.sh computes from
+  # HEAD..origin/main, and it is the whole difference between "roll back to the
+  # pre-update state" and "there is nothing to roll back".
+  if (( behind > 0 )); then
+    printf 'a newer commit\n' > "${work}/NEWER"
+    git -C "${work}" add -A >/dev/null
+    git -C "${work}" -c user.email=t@t -c user.name=t commit -qm newer >/dev/null
+    git -C "${work}" push -q origin main 2>/dev/null
+    git -C "${work}" reset -q --hard HEAD~1
+  fi
   local out rc=0
-  out="$(cd "${work}" && ./update.sh --yes --no-backup </dev/null 2>&1)" || rc=$?
+  local -a flags=(--yes)
+  [[ -n "${backup_rc}" ]] || flags+=(--no-backup)
+  out="$(cd "${work}" && ./update.sh "${flags[@]}" </dev/null 2>&1)" || rc=$?
   printf '%s\nRC:%s\n' "${out}" "${rc}"
 }
 UPDATE_OK="$(drive_update 0 0)"
@@ -8644,6 +10357,44 @@ check "...saying so, and exiting non-zero" \
 # had not changed.
 check "...without offering a rollback it did not create" \
   grep -qF 'nothing to roll back' <<<"${UPDATE_SETUP_FAILED}"
+# ...and the branch on the other side of that, which had never run.
+#
+# Tier 1 of the census order: what a silent failure costs here is the ability
+# to recover. update.sh offers the restore point only when a backup was really
+# taken AND new code was really applied; every case above has neither, so the
+# one sentence that tells a reader how to get their machine back was asserted
+# by reading update.sh for the words 'restore.sh' and produced by nothing.
+#
+# A checkout genuinely one commit behind its remote, a backup that really ran,
+# and a setup that fails after the new code is in.
+UPDATE_RECOVERABLE="$(drive_update 1 0 0 1)"
+# One line, not two greps. The first draft of this asserted 'restore.sh'
+# anywhere in the output and passed with the branch disabled — update.sh names
+# restore.sh in its BACKUP message as well ("restore with ... if this update
+# goes wrong"), so the weak version was measuring the successful backup and
+# calling it recovery advice. Mutating the branch away is what found it.
+recovery_advice_names_the_restore_script() {
+  grep -qE 'Roll back to the pre-update state with: .*restore\.sh' \
+    <<<"${UPDATE_RECOVERABLE}"
+}
+check "...while a failed setup that DID apply new code offers the restore point" \
+  recovery_advice_names_the_restore_script
+check "...having really taken that backup first" \
+  grep -qF 'BACKUP RAN' <<<"${UPDATE_RECOVERABLE}"
+check "...and exiting non-zero" \
+  grep -qF 'RC:1' <<<"${UPDATE_RECOVERABLE}"
+# The other half of the same protection: a backup that FAILS must stop the
+# update rather than proceed without a restore point. Unattended is unattended,
+# however it got that way — a cron'd update has no terminal and confirm()
+# auto-answers yes.
+UPDATE_BACKUP_FAILED="$(drive_update 0 0 1 1)"
+setup_not_reached_without_a_restore_point() {
+  ! grep -qF 'SETUP RAN' <<<"${UPDATE_BACKUP_FAILED}"
+}
+check "a backup that fails refuses to update unattended" \
+  grep -qF 'refusing to update unattended' <<<"${UPDATE_BACKUP_FAILED}"
+check "...and never reaches setup, so there is nothing to roll back FROM" \
+  setup_not_reached_without_a_restore_point
 
 echo "# ...and a fetch that failed must name the reason it actually had"
 # One line covered every cause: "Could not reach the remote. Check
@@ -8814,6 +10565,63 @@ ci_compares_the_whole_prompt() {
 check "CI compares the container's prompt with this repo's, byte for byte" \
   ci_compares_the_whole_prompt
 
+# --- running the acceptance test itself ---------------------------------
+#
+# scripts/selftest.sh is straight-line — no main, no BASH_SOURCE guard — so
+# there is no seam to stub through after it sources lib.sh.
+#
+# The stub bodies below are INDENTED inside their strings on purpose. This
+# file's own source-grep classifier reads a line matching 'name() {' at column
+# zero as a function definition, and it does not skip multi-line single-quoted
+# strings — so an un-indented stub here is read as a gate in this suite that
+# greps source and cannot justify itself. It reported webui_drift; there is no
+# such gate. The stubs are
+# APPENDED to the sandbox's copy of lib.sh instead: a definition at the end of
+# that file wins over the one above it, and selftest.sh sources it whole. Same
+# trick sudo_waits_sandbox uses for systemd_available.
+#
+# Steps 1 to 3 talk to Ollama and to aider, so they fail here. That is fine and
+# deliberate: what is under test is step 4, and a self-test whose first three
+# checks failed must still run and still report the fourth.
+SELFTEST_SB="${SANDBOX}/selftest-run"
+selftest_run() {   # LIB-SHIM -> everything the acceptance test printed
+  local sb="${SELFTEST_SB}"
+  if [[ ! -e "${sb}/scripts/selftest.sh" ]]; then
+    mkdir -p "${sb}" "${sb}/bin" "${sb}/home"
+    ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${sb}" )
+    cp "${REPO}/.env.example" "${sb}/.env"
+    local c
+    for c in ollama docker nft tailscale systemctl sudo; do
+      printf '#!/bin/sh\nexit 1\n' > "${sb}/bin/${c}"
+    done
+    printf '#!/bin/sh\nexit 7\n' > "${sb}/bin/curl"
+    cp "${sb}/scripts/lib.sh" "${sb}/scripts/lib.sh.orig"
+    chmod -R a+rX "${sb}"
+    chmod +x "${sb}/bin/"*
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # The two that would otherwise sit in their own announced waits, and the
+  # chat app answering, so step 4 reaches the prompt comparison at all.
+  { printf '\nwait_for_ollama() { return 1; }\nensure_ollama_up() { return 1; }\n'
+    printf 'webui_responds() { return 0; }\nwebui_url() { printf "http://127.0.0.1:3000"; }\n'
+    printf '%s\n' "$1"; } >> "${sb}/scripts/lib.sh"
+  local out rc=0
+  out="$( cd "${sb}" \
+          && PATH="$(stub_path "${sb}/bin")" HOME="${sb}/home" \
+             timeout 120 bash "${sb}/scripts/selftest.sh" 2>&1 )" || rc=$?
+  printf '%s\n' "${out}"
+  return 0
+}
+# Non-vacuity for everything below: the run has to reach its own summary.
+selftest_harness_works() {
+  local out; out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { return 0; }')"
+  grep -q 'Self-test summary' <<<"${out}" || {
+    printf 'the acceptance test did not run to a summary in the sandbox:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+check "the acceptance test can be run against stand-ins" selftest_harness_works
 echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
 # The self-test's 4th check was "does the HTTP port answer". The only real bug
 # report ever filed against this project was a box where Ollama, the model,
@@ -8821,20 +10629,63 @@ echo "# 'lca test' must not call a stale assistant 'works end-to-end'"
 # so this test would have printed "SELF-TEST PASSED — your stack works
 # end-to-end" to the person filing it. That is the worst thing a test can do:
 # vouch for the exact thing that is broken.
+#
+# Driven. The awk this replaces asked that the string DEFAULT_MODEL_PARAMS or
+# webui_drift appears somewhere after the "4/4" banner, and that the phrase
+# "skipped, not passed" appears anywhere in the file. Neither says which line a
+# given machine LANDS on, which is the entire question: the bug was a box where
+# the comparison could not run and the test printed a pass.
+#
+# Three machines, one run each.
 selftest_checks_the_live_prompt() {
-  awk '/step "4\/4 Open WebUI"/ { seen = 1 }
-       seen && /DEFAULT_MODEL_PARAMS|webui_drift/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/selftest.sh" || {
-    echo "selftest.sh never checks which assistant prompt the chat app is running" >&2
-    return 1
+  local out bad=0
+  # 1. The prompt is compared at all, and a match is reported as one.
+  out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { return 0; }')"
+  grep -q "carries this repo's assistant prompt" <<<"${out}" || {
+    printf "the acceptance test says nothing about which assistant prompt the chat app is running:\n%s\n" \
+      "${out}" >&2
+    bad=1
   }
-  # ...and an unreadable value must not be reported as a pass. "Cannot look"
-  # and "fine" are different answers, and this file already learned that the
-  # hard way for docker probes.
-  grep -q 'skipped, not passed' "${REPO}/scripts/selftest.sh" || {
-    echo "selftest.sh does not distinguish 'could not check' from 'passed'" >&2
-    return 1
+  # 2. A STALE prompt is a failure, not a note. This is the check the only real
+  # bug report ever filed against this project would have needed: every
+  # infrastructural check passed and the assistant was wrong.
+  out="$(selftest_run 'webui_prompt_comparable() { return 0; }
+  webui_drift() { printf "SYSTEM_PROMPT\n"; }')"
+  grep -q 'OLDER assistant prompt' <<<"${out}" || {
+    printf 'a chat app running a stale assistant prompt was not reported:\n%s\n' "${out}" >&2
+    bad=1
   }
+  grep -qE '\[FAIL\].*assistant prompt' <<<"${out}" || {
+    printf 'a stale assistant prompt was reported at less than failure severity:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf 'the same run both failed and passed the prompt check:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 3. ...and a comparison that could not be made is SKIPPED, not passed.
+  # "Cannot look" and "fine" are different answers, and this file learned that
+  # the hard way for docker probes.
+  out="$(selftest_run 'webui_prompt_comparable() { return 1; }
+  webui_drift() { return 0; }')"
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf 'a prompt comparison that could not run was not reported as skipped:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf 'a box that could not compare the prompt was told the chat app carries this repo one:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and the skip is COUNTED, because the summary line branches on it: a run
+  # with a skip must not read as "works end-to-end".
+  grep -qE 'SKIPPED=[1-9]' <<<"${out}" || {
+    printf 'the skipped prompt check was not counted, so the summary cannot know about it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 # The "wrote no file" advice must not name causes nothing looked at.
 # "Check LCA_EDIT_FORMAT in .env and the context window" was a guess: observed
@@ -9168,6 +11019,84 @@ check "an offline restore says nothing was touched" \
   'net_blocked() { return 0; }
    as_root() { case "$*" in *"image inspect"*) return 1 ;; esac; return 0; }' \
   'any existing data is intact'
+# ...and restore.sh must actually tell those apart rather than share a branch.
+#
+# Driven. The greps this replaces asked that two sentences appear in the file
+# and that one of them is not inside the '5)' arm. A sentence survives being in
+# an arm nothing reaches, and an awk over a case statement says nothing about
+# which arm a given failure LANDS in. What is at stake is the one question a
+# reader has during a failed restore — is my data still there? — and the two
+# answers are opposite.
+#
+# So each status is produced and the verdict read back. The container's own
+# exit codes are already driven above (3 before the clear, 5 after it); this is
+# what restore.sh does with them.
+restore_verdict_for() {   # STATUS -> what restore.sh said about that outcome
+  restore_volume_with "as_root() { case \"\$*\" in *'docker run'*) return $1 ;; esac; return 0; }"
+}
+restore_distinguishes_the_stages() {
+  local out bad=0 code
+  # 3: the archive would not read, so nothing was touched. This is the
+  # reassuring answer and it must never be given for a wiped volume.
+  out="$(restore_verdict_for 3)"
+  grep -q 'was NOT wiped' <<<"${out}" || {
+    printf 'a failure BEFORE the volume was touched did not say the data survived:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 5: the volume was emptied and the unpack did not finish. The opposite
+  # answer, and the whole reason the two codes exist.
+  out="$(restore_verdict_for 5)"
+  grep -q 'FAILED PART-WAY' <<<"${out}" || {
+    printf 'a restore that emptied the volume and then failed was not reported as such:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qE 'NOT wiped|is intact|still there and unchanged' <<<"${out}" && {
+    printf 'a volume that WAS emptied was reported as untouched — this is the sentence the two codes exist to keep apart:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and it is the one outcome here that is an error rather than a warning:
+  # every other arm leaves the reader with their data, this one does not.
+  grep -q '\[FAIL\]' <<<"${out}" || {
+    printf 'losing the accounts and chat history is reported at the same severity as not touching them:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4, 6 and 7 all fail before anything is replaced, so all three must say so —
+  # otherwise "NOT wiped" at 3 is one lucky sentence rather than a rule.
+  for code in 4 6 7; do
+    out="$(restore_verdict_for "${code}")"
+    grep -qE 'is intact|still there and unchanged' <<<"${out}" || {
+      printf 'status %s fails before anything is replaced and the reader is not told their data survived:\n%s\n' \
+        "${code}" "${out}" >&2
+      bad=1
+    }
+    grep -q 'FAILED PART-WAY' <<<"${out}" && {
+      printf 'status %s was reported as a half-finished restore:\n%s\n' "${code}" "${out}" >&2
+      bad=1
+    }
+  done
+  # A status nobody has a sentence for must say it cannot tell, rather than
+  # picking one of the two answers. This is the arm that keeps the gate honest
+  # about codes added later.
+  out="$(restore_verdict_for 42)"
+  grep -q 'cannot say whether' <<<"${out}" || {
+    printf 'an unrecognised status was given one of the two definite answers:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and every one of them carried on to the model restore, because a
+  # recovery command must finish everything it still can.
+  for code in 3 4 5 6 7 42; do
+    grep -q 'RC=0' <<<"$(restore_verdict_for "${code}")" || {
+      printf 'status %s ended the restore instead of continuing with the models\n' "${code}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
+  restore_distinguishes_the_stages
 
 # ...and the SUCCESSFUL path has to say what it costs, which it never did.
 # 'rm -rf /to/*' replaces everything in the live volume with the backup's, and
@@ -9253,31 +11182,173 @@ check "...while agreeing to it restores as before" \
   restore_survives "confirmed" \
   'webui_volume_has_data() { return 0; }; confirm() { return 0; }' \
   'WebUI data restored'
-# The two RECOVERY scripts must never reach for net_guard again. Every other
-# caller is an installer, where dying is right — one that cannot download
-# cannot install, and there is nothing else for it to do. These two have plenty
-# else to do, and backup.sh's abort was the worse of the pair: it threw away
-# the whole tarball, losing .env and the model list over a docker image, and
-# skipped the bookkeeping that keeps older backups from being pruned.
+# Driven. The greps this replaces asked that neither recovery script names
+# net_guard and that both name net_blocked. Both survive the branch never being
+# reached, and backup.sh's failure here was the worse of the pair: net_guard
+# die()s, so an offline box threw away the WHOLE tarball — losing .env and the
+# model list over a docker image it only wanted a tar binary from — and skipped
+# the bookkeeping that keeps older backups from being pruned.
+#
+# So the kill switch is turned ON and the run is watched.
 recovery_scripts_survive_offline() {
-  local bad=0 f
-  for f in restore.sh backup.sh; do
-    local src; src="$(sed 's/#.*//' "${REPO}/${f}")"
-    if grep -qE '(^|[^_[:alnum:]])net_guard' <<<"${src}"; then
-      printf '%s calls net_guard, which die()s — offline would end the run\n' "${f}" >&2
-      bad=1
-    fi
-    # Anti-vacuity: they must still ASK, or "no net_guard" is satisfied by not
-    # checking the kill switch at all and letting a download hang instead.
-    grep -q 'net_blocked' "${REPO}/${f}" || {
-      printf '%s no longer checks the kill switch at all\n' "${f}" >&2
-      bad=1
-    }
-  done
+  local out calls bad=0
+  # Docker is there and the volume exists; the IMAGE is not cached, which is
+  # the one thing an offline box cannot fix.
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  out="$(backup_run_in offline 'have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 0; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 1 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}')"
+  # 1. It finished. This is the gate: an offline backup that dies loses .env
+  # and the model list too.
+  grep -q 'Backup written and verified' <<<"${out}" || {
+    printf 'an offline backup wrote nothing at all — .env and the model list went with the docker image:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 2. ...and said the volume could not be captured, rather than implying it
+  # was.
+  grep -qi 'OFFLINE' <<<"${out}" || {
+    printf 'the offline run said nothing about why the chat data is missing from this archive:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 3. ...and older backups are KEPT, because this one is incomplete. Pruning
+  # on the strength of an archive that is missing the chat data is how the last
+  # complete backup disappears.
+  grep -qi 'KEPT' <<<"${out}" || {
+    printf 'an incomplete offline backup did not say older ones would be kept:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 4. ...and it never tried to download. Non-vacuity is the other half: with
+  # the switch OFF the same missing image IS pulled, so "did not pull" above is
+  # about the kill switch and not about a backup that never pulls anything.
+  calls="$(backup_as_root_calls offline)"
+  grep -q 'docker pull' <<<"${calls}" && {
+    printf 'the offline backup reached for the network anyway:\n%s\n' "${calls}" >&2
+    bad=1
+  }
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  backup_run_in online 'have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 1; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 1 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}' >/dev/null
+  grep -q 'docker pull' <<<"$(backup_as_root_calls online)" || {
+    echo 'a missing image is not pulled even with the network up, so "did not pull when offline" proves nothing' >&2
+    bad=1
+  }
   return "${bad}"
 }
-check "the backup and restore commands survive the kill switch being on" \
+check "an offline backup still writes one, and keeps the older ones" \
   recovery_scripts_survive_offline
+
+# Driven. The greps this replaces asked that both scripts contain the string
+# 'docker image inspect'. That survives the check running AFTER the container it
+# is meant to guard, and it survives the branch never being reached at all.
+# Docker pulls a missing image silently — several gigabytes, and in backup.sh's
+# case with the chat app FROZEN, during a command the reader expects to take
+# seconds.
+#
+# Still both scripts, because both run a container purely to borrow a tar binary
+# from it. Restore is watched through its own harness rather than backup's.
+restore_as_root_calls() {   # -> every escalation a real volume restore made
+  local log="${SANDBOX}/restore-as-root.log"
+  : > "${log}"
+  # Success for everything, so the whole path runs instead of stopping at the
+  # first step. The log path is spliced in by THIS shell; the "$*" beside it is
+  # for the probe's.
+  # shellcheck disable=SC2016  # deliberate: $* belongs to the probe, not here
+  restore_volume_with 'as_root() { printf "%s\n" "$*" >> "'"${log}"'"; return 0; }' >/dev/null
+  cat "${log}"
+}
+looks_before_it_runs() {   # WHO  ESCALATION-LOG
+  local who="$1" calls="$2" inspect_at run_at
+  [[ -n "${calls}" ]] || {
+    printf '%s: no escalation was recorded at all — this gate is reading an empty log\n' "${who}" >&2
+    return 1
+  }
+  inspect_at="$(grep -n 'docker image inspect' <<<"${calls}" | head -1 | cut -d: -f1)"
+  run_at="$(grep -n 'docker run' <<<"${calls}" | head -1 | cut -d: -f1)"
+  # Non-vacuity first: with no container in the log there is no ordering to
+  # judge, and "nothing ran" would otherwise read as "it looked in time".
+  [[ -n "${run_at}" ]] || {
+    printf '%s: no container was ever run, so the ordering below measures nothing:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  }
+  [[ -n "${inspect_at}" ]] || {
+    printf '%s: the image was never checked for before it was used, so a missing one is several silent gigabytes:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  }
+  if (( inspect_at > run_at )); then
+    printf '%s: the image is checked only AFTER it has been used — by then docker has already pulled it:\n%s\n' \
+      "${who}" "${calls}" >&2
+    return 1
+  fi
+}
+image_pulls_are_never_implicit() {
+  local bad=0
+  # The 'online' run just above already has the shape: image absent, network up.
+  looks_before_it_runs backup.sh "$(backup_as_root_calls online)" || bad=1
+  looks_before_it_runs restore.sh "$(restore_as_root_calls)"      || bad=1
+  return "${bad}"
+}
+check "a missing image is noticed before it is used, never pulled by accident" \
+  image_pulls_are_never_implicit
+
+# Driven. The awk this replaces asked that ENABLE_WEBUI does not appear inside
+# webui_data_state. What is at stake is a chat app that .env says is off and
+# that is still running: its accounts and conversations are on the disk either
+# way, and a backup that skips them because a switch says the feature is off
+# archives a machine that is not the one you have.
+retention_ignores_enable_webui() {
+  local calls bad=0
+  # The switch says off. The volume says otherwise — and a listening socket, or
+  # a volume with data in it, is a fact.
+  # shellcheck disable=SC2016  # deliberate: the shim is code for the probe
+  backup_run_in webuioff 'ENABLE_WEBUI=false
+have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+net_blocked() { return 1; }
+docker() {
+  case "$*" in
+    *"volume inspect"*) return 0 ;;
+    *"image inspect"*)  return 0 ;;
+    *"{{.State."*)      printf "false\n" ;;
+    *)                  printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}' >/dev/null
+  calls="$(backup_as_root_calls webuioff)"
+  grep -q 'open-webui-volume.tar.gz' <<<"${calls}" || {
+    printf 'ENABLE_WEBUI=false made the backup skip a volume that still holds every account and conversation:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # ...and the volume really was consulted rather than assumed.
+  grep -q 'volume inspect' <<<"${calls}" || {
+    echo 'the backup never asked docker about the volume at all — this measured nothing' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a chat app switched off in .env still has its data backed up" \
+  retention_ignores_enable_webui
 # ...and net_guard must still be the dying one, for the installers that want it.
 # Driven, because the grep version could not fail. It scanned net_guard's body
 # for the string 'die ' — and the mutation sweep stubs a function by inserting
@@ -9975,18 +12046,62 @@ warm_returns_promptly() {
   (( SECONDS - t0 < 5 ))
 }
 check "warm_model returns promptly" warm_returns_promptly
-# Structural: the request must stay backgrounded. Losing the '&' is the one
-# edit that would silently reintroduce a multi-minute stall at boot, and no
-# behavioural test catches it without a host that accepts and never answers.
-# '[[:space:]]' not '\s' — awk has no \s, and the first version of this check
-# silently failed against correct code. Caught by mutation-testing it.
-warm_is_detached() {
-  awk '/^warm_model\(\)/ {f=1}
-       f && /curl .*api\/generate/ {c=1}
-       f && c && /&[[:space:]]*\)/ {ok=1}
-       f && /^}/ {exit !ok}' "${REPO}/scripts/lib.sh"
+# The request must stay backgrounded. Losing the '&' is the one edit that would
+# silently reintroduce a multi-minute stall at boot.
+#
+# This gate carried a written excuse — "no behavioural test catches it without
+# a host that accepts and never answers" — and the excuse was wrong. A host
+# that accepts and never answers is a curl that sleeps. The two arms above use
+# an unreachable port, which is refused instantly and so returns promptly with
+# or without the '&'; that is what made this look undrivable.
+#
+#   detached      returned in 0s, and the request was really made
+#   '&' deleted   returned in 8s
+WARM_SB="${SANDBOX}/warmdetach"
+warm_returns_in() {   # -> "SECONDS CALLS" for one warm_model against a sleeping curl
+  local sb="${WARM_SB}"
+  [[ -d "${sb}/stub" ]] || {
+    make_stub_dir "${sb}/stub"
+    # Accepts, records, and never answers. Eight seconds, so a blocked caller
+    # is unmistakable and an orphan cannot outlive the suite.
+    # shellcheck disable=SC2016  # the stub's own variable, read when it runs
+    { printf '#!/bin/sh\n'; printf 'printf "CURL\\n" >> "${WARM_LOG}"\n'; printf 'sleep 8\n'; } \
+      > "${sb}/stub/curl"
+    chmod +x "${sb}/stub/curl"
+  }
+  : > "${sb}/log"
+  local t0="${SECONDS}"
+  PATH="$(stub_path "${sb}/stub")" WARM_LOG="${sb}/log" \
+    bash -c 'source "$1" >/dev/null 2>&1; MODEL_NAME="not-a-real-model:1b"; warm_model >/dev/null 2>&1' \
+    _ "${REPO}/scripts/lib.sh"
+  local took=$(( SECONDS - t0 ))
+  # The call is made by a backgrounded child, so it may not have been scheduled
+  # yet when the parent returns — which is the whole point. One second is
+  # plenty and costs nothing next to the eight the failure would take.
+  sleep 1
+  printf '%s %s\n' "${took}" "$(grep -c . "${sb}/log")"
 }
-check "warm_model backgrounds the request" warm_is_detached
+warm_is_detached() {
+  local answer took calls
+  answer="$(warm_returns_in)"
+  took="${answer%% *}"; calls="${answer##* }"
+  # Non-vacuity first: warm_model returns 0 without doing anything when curl or
+  # jq is missing, and then "it returned promptly" is true of nothing at all.
+  (( calls >= 1 )) || {
+    echo 'warm_model made no request at all, so "it did not block" is about nothing' >&2
+    return 1
+  }
+  (( took < 3 )) || {
+    printf 'warm_model waited %ss for a server that accepts and never answers — at the end of the boot oneshot that is the whole unit sitting there\n' \
+      "${took}" >&2
+    return 1
+  }
+}
+if command -v jq >/dev/null 2>&1; then
+  check "warm_model backgrounds the request" warm_is_detached
+else
+  echo "skip - no jq, so warm_model returns before it would reach curl"
+fi
 
 echo "# a deliberately skipped component must not be reported as a problem"
 # Adding a skip flag without teaching the health check about it produces an
@@ -10732,36 +12847,49 @@ ollama_models_dir_answers_correctly() {
 }
 check "ollama_models_dir prefers OLLAMA_MODELS, then the real store" \
   ollama_models_dir_answers_correctly
-# The ORDER of the two candidates matters and cannot be asserted on a box that
-# has only one of them: Ollama runs as its own service account, so on a machine
-# with both stores the service one is the filesystem that fills up.
+# The ORDER of the two candidates matters, and this gate carried a written
+# excuse for reading source instead of driving it: "cannot be asserted on a box
+# that has only one of them". That was true of the box, not of the function.
+# ollama_models_dir takes OLLAMA_SYSTEM_MODELS_DIR as a seam and HOME decides
+# the other, so a machine with BOTH stores is two mkdirs — no root, no service
+# account, nothing that a CI runner lacks.
 #
-# No pipe anywhere in here, deliberately. Written first as
-# 'sed lib.sh | awk ... exit', which passed on this machine and FAILED in CI:
-# awk stops reading at the line it wants, sed keeps writing into a closed pipe,
-# takes SIGPIPE, and under 'set -o pipefail' the pipeline reports failure. It
-# is a race against the 64 KiB pipe buffer, so it depends on how much of the
-# file is left — lib.sh is the biggest file here and the match is halfway up,
-# which is why this one lost and the identical checks against motd.sh do not.
-# The same trap lib.sh's own current_run_log() carries a comment about.
+# What is at stake: Ollama runs as its own service account, so on a machine
+# with both stores the service one is the filesystem that fills up, and the
+# disk check that reads this answers about the wrong one.
 service_store_is_checked_first() {
-  local body l line="" svc_at home_at
-  # A range match reads the whole file; nothing exits early.
-  body="$(sed -n '/^ollama_models_dir() {/,/^}/p' "${REPO}/scripts/lib.sh")"
-  while IFS= read -r l; do
-    [[ "${l}" == *"for d in"* ]] && { line="${l}"; break; }
-  done <<<"${body}"
-  [[ -n "${line}" ]] || {
-    echo 'ollama_models_dir no longer loops over candidate stores' >&2; return 1; }
-  [[ "${line}" == */usr/share/ollama* && "${line}" == *HOME* ]] || {
-    echo 'the candidate list no longer names both the service store and the user one' >&2
-    return 1; }
-  # Prefix lengths, so the comparison is positional without invoking anything.
-  svc_at="${line%%/usr/share/ollama*}"
-  home_at="${line%%HOME*}"
-  (( ${#svc_at} < ${#home_at} )) || {
-    echo "the user's store is checked before the service account's" >&2
-    return 1; }
+  local sb="${SANDBOX}/mstore" got bad=0
+  rm -rf "${sb}"; mkdir -p "${sb}/svc/.ollama/models" "${sb}/home/.ollama/models"
+  # Both present: the service account's wins.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  OLLAMA_MODELS=""; HOME="$2/home"
+                  OLLAMA_SYSTEM_MODELS_DIR="$2/svc/.ollama/models"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/svc/.ollama/models" ]] || {
+    printf "on a machine with both stores the user's was chosen: %s\n" "${got}" >&2
+    bad=1
+  }
+  # Only the user's exists: it is the answer, or "the service one wins" is
+  # satisfied by a function that always returns the service path.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  OLLAMA_MODELS=""; HOME="$2/home"
+                  OLLAMA_SYSTEM_MODELS_DIR="$2/nowhere/.ollama/models"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/home/.ollama/models" ]] || {
+    printf 'with only the user store present the answer was: %s\n' "${got}" >&2
+    bad=1
+  }
+  # ...and an explicit OLLAMA_MODELS outranks both, which is the documented
+  # override and the reason the loop is not the first thing this function does.
+  got="$(bash -c 'source "$1" >/dev/null 2>&1
+                  HOME="$2/home"; OLLAMA_SYSTEM_MODELS_DIR="$2/svc/.ollama/models"
+                  OLLAMA_MODELS="$2/explicit"
+                  ollama_models_dir' _ "${REPO}/scripts/lib.sh" "${sb}")"
+  [[ "${got}" == "${sb}/explicit" ]] || {
+    printf 'an explicit OLLAMA_MODELS was ignored in favour of: %s\n' "${got}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "...and looks at the service account's store before the user's" \
   service_store_is_checked_first
@@ -11254,21 +13382,232 @@ check "'lca apply' reports an agent still running after .env disabled it" \
 # right here: the inbound guard was never reconciled, no summary was printed"
 # — and the other two did exactly that, including the last one, where
 # everything else has already succeeded by the time it runs.
+#
+# Driven. The grep this replaces looked for bare invocation lines and for one
+# guarded form still existing. It cannot see an applier that checks the status
+# and then returns anyway, it cannot see the summary going missing, and it says
+# nothing about the thing the comment is actually about: whether the GUARD is
+# still reconciled after an earlier step failed. So each sub-script is made to
+# fail in turn and the whole of 'lca apply' is run.
+APPLY_SB="${SANDBOX}/applyrun"
+apply_run_failing() {   # FAILING-SUBSCRIPT [EXTRA-LIB] [EXTRA-ENV] -> the whole run
+  local sb="${APPLY_SB}" f
+  if [[ ! -e "${sb}/scripts/apply.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/apply.sh" "${sb}/scripts/"
+    cp "${REPO}/scripts/lib.sh"   "${sb}/scripts/lib.sh.orig"
+    cp "${REPO}/.env.example"     "${sb}/.env.example"
+    cp "${REPO}/.env.example"     "${sb}/.env"
+    make_stub_dir "${sb}/stub"
+    # The timer has to read as installed, or apply_backup_timer returns before
+    # it ever reaches backup.sh — "not installed" is a choice, not drift.
+    printf '#!/bin/sh\ncase "$*" in *is-enabled*) exit 0 ;; esac\nexit 0\n' > "${sb}/stub/systemctl"
+    chmod +x "${sb}/stub/systemctl"
+    # The three sub-scripts, recording themselves and failing on demand. Their
+    # own behaviour has its own gates; what is under test is what apply does
+    # with the answer.
+    for f in scripts/install_webui.sh backup.sh netmode.sh scripts/ollama-relay.sh; do
+      mkdir -p "${sb}/$(dirname "${f}")"
+      # shellcheck disable=SC2016  # the stand-in's own variables, read when IT runs
+      { printf '#!/usr/bin/env bash\n'
+        printf 'printf "RAN %s %%s\\n" "$*" >> "${APPLY_LOG}"\n' "${f##*/}"
+        printf '[ "${APPLY_FAIL:-}" = "%s" ] && exit 1\nexit 0\n' "${f##*/}"; } > "${sb}/${f}"
+      chmod +x "${sb}/${f}"
+    done
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # Appended, because apply.sh sources lib.sh and there is no seam after it.
+  # Every one of these exists to put the machine in the state where all three
+  # appliers have something to do — a run where nothing needs applying would
+  # call none of the sub-scripts and prove nothing.
+  cat >> "${sb}/scripts/lib.sh" <<'STUBS'
+have() { return 0; }
+am_root() { return 0; }
+as_root() { "$@"; }
+can_root_now() { return 0; }
+systemd_available() { return 0; }
+docker_daemon_reachable() { return 0; }
+webui_container_running() { return 0; }
+webui_container_exists() { return 0; }
+webui_drift() { printf 'MODEL_NAME\n'; }
+agent_container_running() { return 1; }
+agent_container_exists() { return 1; }
+agent_live_port() { return 1; }
+render_ollama_dropin() { return 0; }
+restart_ollama() { return 0; }
+ollama_dropin_drift() { printf 'context\n'; }
+installed_backup_schedule() { printf '*-*-* 05:00:00\n'; }
+guarded_ports() { printf 'WebUI 3000\n'; }
+inbound_guard_uncovered() { printf 'WebUI 3000\n'; }
+ollama_relay_unit_address() { printf '172.17.0.1:11435\n'; }
+ollama_relay_drift() { printf '172.18.0.1:11435\n'; }
+STUBS
+  # The caller's own lines last, so they win over the block above.
+  [[ -z "${2:-}" ]] || printf '%s\n' "$2" >> "${sb}/scripts/lib.sh"
+  # The relay switched ON, because with it off apply_relay returns before it
+  # reaches its sub-script and one of the four below would never be driven.
+  # That is configuration blindness in miniature — see tests/config-coverage.tsv.
+  cp "${REPO}/.env.example" "${sb}/.env"
+  printf 'ENABLE_OLLAMA_RELAY=true\n' >> "${sb}/.env"
+  # ...and the caller's own settings after it. This has to be .env and not the
+  # lib shim: apply.sh sources lib.sh and THEN calls load_env, so a value set
+  # in the shim is overwritten by the file a moment later.
+  [[ -z "${3:-}" ]] || printf '%s\n' "$3" >> "${sb}/.env"
+  record_configuration "${sb}/.env"
+  : > "${sb}/log"
+  ( cd "${sb}" && PATH="$(stub_path "${sb}/stub")" APPLY_LOG="${sb}/log" APPLY_FAIL="$1" \
+      timeout 90 bash scripts/apply.sh 2>&1 ) || true
+}
+apply_ran() { cat "${APPLY_SB}/log" 2>/dev/null || true; }
+apply_reached_its_summary() { grep -qE 'change\(s\)|Everything in .env' <<<"$1"; }
 appliers_check_the_scripts_they_call() {
-  local hits
-  hits="$(grep -nE '^[[:space:]]*"\$\{(REPO_ROOT|SCRIPT_DIR)\}/[^"]*"' "${REPO}/scripts/apply.sh" || true)"
-  [[ -z "${hits}" ]] || {
-    printf 'apply.sh runs these without checking their status:\n%s\n' "${hits}" >&2
-    return 1
+  local out bad=0 who
+  # Nothing failing: all four are reached, so the arms below are about a run
+  # that really calls them, and nothing is reported as unapplied.
+  out="$(apply_run_failing '')"
+  for who in install_webui.sh backup.sh netmode.sh ollama-relay.sh; do
+    grep -q "RAN ${who}" <<<"$(apply_ran)" || {
+      printf 'a clean apply never reached %s, so failing it proves nothing:\n%s\n' \
+        "${who}" "$(apply_ran)" >&2
+      return 1
+    }
+  done
+  grep -q 'could not be' <<<"${out}" && {
+    printf 'a run where every step succeeded still reported something unapplied:\n%s\n' "${out}" >&2
+    bad=1
   }
-  # ...and the guarded form must still be there, or a rename could empty this.
-  grep -qE 'if ! "\$\{(REPO_ROOT|SCRIPT_DIR)\}/' "${REPO}/scripts/apply.sh" || {
-    echo "apply.sh no longer calls any sub-script — this gate stopped watching" >&2
-    return 1
-  }
+  # ...then each one in turn.
+  for who in install_webui.sh backup.sh netmode.sh ollama-relay.sh; do
+    out="$(apply_run_failing "${who}")"
+    apply_reached_its_summary "${out}" || {
+      printf '%s failed and lca apply never printed a summary — its whole contract is the summary:\n%s\n' \
+        "${who}" "${out}" >&2
+      bad=1
+      continue
+    }
+    grep -q 'could not be' <<<"${out}" || {
+      printf '%s failed and the run said nothing about it:\n%s\n' "${who}" "${out}" >&2
+      bad=1
+    }
+    grep -qE '[0-9]+ component\(s\) could not be checked' <<<"${out}" || {
+      printf '%s failed and the summary did not count it:\n%s\n' "${who}" "${out}" >&2
+      bad=1
+    }
+    # ...and the GUARD still ran. This is what the comment in apply_webui is
+    # about and what the grep could never see: an abort at the chat app leaves
+    # the ports as they were, on the command whose job is to close them.
+    grep -q 'RAN netmode.sh' <<<"$(apply_ran)" || {
+      printf '%s failed and the inbound guard was never reconciled:\n%s\n' "${who}" "$(apply_ran)" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
 }
 check "no applier runs a sub-script without checking it worked" \
   appliers_check_the_scripts_they_call
+# ...and the chat-app rebuild in particular, which is the one that shipped the
+# bug and the one every 'lca apply' on a settings change reaches.
+apply_survives_a_failed_rebuild() {
+  local out bad=0
+  out="$(apply_run_failing install_webui.sh)"
+  grep -q 'could not be re-created' <<<"${out}" || {
+    printf 'a failed container re-create was not reported as one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # It says what is therefore NOT in effect, because the reader edited .env and
+  # is entitled to know the edit did not land.
+  grep -q 'still not in effect' <<<"${out}" || {
+    printf 'the failed rebuild did not say which setting is still not applied:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -qi 'Continuing with the rest' <<<"${out}" || {
+    printf 'it reported the failure without saying it carried on:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  apply_reached_its_summary "${out}" || {
+    printf 'a failed rebuild took the whole apply with it:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca apply' survives a chat app that will not rebuild" \
+  apply_survives_a_failed_rebuild
+# ...and the relay, which nothing here reconciled until now.
+#
+# Found by asking what 'lca apply' does NOT apply. Its summary is a statement
+# about what in .env is in effect, and the word "relay" did not appear in
+# scripts/apply.sh at all. Measured, with ENABLE_OLLAMA_RELAY=true and the
+# units absent:
+#
+#   [ ok ] Applied 1 change(s). Verify with: lca check
+#
+# ...about a machine where the switch the reader set was doing nothing. 'lca
+# check' warns about exactly that state, so the two commands disagreed — and
+# this file already refuses to let them disagree about the ports.
+apply_reconciles_the_relay() {
+  local out bad=0
+  # Off: silent about a thing that is not there, and nothing counted.
+  out="$(apply_run_failing '' 'ollama_relay_unit_address() { return 1; }
+  ollama_relay_drift() { return 1; }' 'ENABLE_OLLAMA_RELAY=false')"
+  grep -qi 'Relay:    disabled' <<<"${out}" || {
+    printf 'a machine with the relay off was not told the relay needed nothing:\n%s\n' \
+      "$(grep -i relay <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'could not be checked' <<<"${out}" && {
+    printf 'a switched-off relay was counted as something that could not be applied:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # On, and the units are not installed. THE regression: the summary must stop
+  # being a clean bill.
+  out="$(apply_run_failing '' 'ollama_relay_unit_address() { return 1; }
+  ollama_relay_drift() { return 1; }')"
+  grep -q 'boot units are not installed' <<<"${out}" || {
+    printf 'the relay is enabled in .env, nothing is listening, and apply said nothing:\n%s\n' \
+      "$(grep -i relay <<<"${out}" || echo '(the word relay never appeared)')" >&2
+    bad=1
+  }
+  grep -qE '[0-9]+ component\(s\) could not be checked' <<<"${out}" || {
+    printf "apply reported a clean bill about a machine where .env's relay is not in effect:\n%s\n" \
+      "${out}" >&2
+    bad=1
+  }
+  grep -q 'lca relay install' <<<"${out}" || {
+    printf 'it reported the missing relay without naming the command that installs it:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # On, installed, and the bridge has MOVED. Same shape as the guard: a boot
+  # unit that bakes in an address the machine no longer has. This one apply
+  # fixes rather than reports.
+  out="$(apply_run_failing '')"
+  grep -q 'RAN ollama-relay.sh install' <<<"$(apply_ran)" || {
+    printf 'the relay unit listens where nothing dials and apply did not re-install it:\n%s\n' \
+      "$(apply_ran)" >&2
+    bad=1
+  }
+  grep -qi 'Relay:    applied' <<<"${out}" || {
+    printf 'the relay was re-installed and the run did not say so:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # On, installed, and in place: nothing to do, and it must not re-install on
+  # every apply. Without this arm the assertion above is satisfied by a version
+  # that always re-installs.
+  out="$(apply_run_failing '' 'ollama_relay_drift() { return 1; }')"
+  grep -q 'RAN ollama-relay.sh' <<<"$(apply_ran)" && {
+    printf 'a relay that is already right was re-installed anyway:\n%s\n' "$(apply_ran)" >&2
+    bad=1
+  }
+  grep -qi 'already listening on' <<<"${out}" || {
+    printf 'a relay that is already right was not reported as such:\n%s\n' \
+      "$(grep -i relay <<<"${out}")" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca apply' reconciles the relay it never used to mention" \
+  apply_reconciles_the_relay
 
 echo "# setup.sh may only die on the two steps that leave nothing able to run"
 # Same rule, one script over. setup.sh already knows the distinction — it
@@ -11914,12 +14253,455 @@ else
   echo "skip - no 'timeout' command, cannot bound the docker read"
 fi
 
+# --- running 'lca check' and reading its report -----------------------------
+#
+# Several gates below claim things about what 'lca check' SAYS, and each of
+# them used to grep check-system.sh for a token. A grep cannot tell a sentence
+# that is printed from one that sits in an unreachable branch, and it cannot
+# tell which of two branches a given machine lands in — which is the whole
+# subject of the two most expensive of them.
+#
+# So the report is produced. A copy of the tree, every external command
+# answered by a stub that returns at once, and an .env assembled per case.
+CHECK_SB="${SANDBOX}/checkreport"
+check_sandbox() {
+  [[ -e "${CHECK_SB}/check-system.sh" ]] && return 0
+  mkdir -p "${CHECK_SB}" "${CHECK_SB}/bin" "${CHECK_SB}/home"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${CHECK_SB}" )
+  # WEBUI_STATE is the one fact these gates vary: what docker says about the
+  # chat app's container. Empty means there is no container.
+  cat > "${CHECK_SB}/bin/docker" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *openhands-app*)        exit 1 ;;
+  info*)                  exit 0 ;;
+  *"Config.Env"*)         if [ -n "${WEBUI_STATE:-}" ]; then printf 'PORT=%s\n' "${WEBUI_LIVE_PORT:-3000}"; exit 0; fi; exit 1 ;;
+  *"{{.State.Running}}"*) if [ "${WEBUI_STATE:-}" = "running" ]; then echo true; else echo false; fi; exit 0 ;;
+  *"{{.State.Status}}"*)  if [ -n "${WEBUI_STATE:-}" ]; then echo "${WEBUI_STATE}"; exit 0; fi; exit 1 ;;
+  *"container inspect"*)  if [ -n "${WEBUI_STATE:-}" ]; then exit 0; fi; exit 1 ;;
+  *)                      exit 1 ;;
+esac
+STUB
+  # A ruleset that covers exactly the ports NFT_COVERS names, in the shape
+  # inbound_guard_uncovered parses.
+  cat > "${CHECK_SB}/bin/nft" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *"list table inet lca_inbound"*)
+    printf 'table inet lca_inbound {\n  chain lca_in {\n    tcp dport { %s } drop\n  }\n}\n' "${NFT_COVERS:-11434}" ;;
+  *) exit 1 ;;
+esac
+STUB
+  # A passwordless sudoer. These gates are about what the report SAYS; whether
+  # a report may wait for a password is probes_use_the_stricter_test's subject,
+  # and it uses the opposite stub. Without this, every branch guarded by
+  # can_root_now would answer "could not look" on a suite that is not root.
+  cat > "${CHECK_SB}/bin/sudo" <<'STUB'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in -n|-E) shift ;; *) break ;; esac
+done
+[ $# -eq 0 ] && exit 0
+exec "$@"
+STUB
+  local c
+  for c in ollama tailscale systemctl curl; do
+    printf '#!/bin/sh\nexit 1\n' > "${CHECK_SB}/bin/${c}"
+  done
+  # A pristine copy, so a per-case shim can be appended to lib.sh and then
+  # taken off again. Appending is how a stub reaches a straight-line product
+  # script: check-system.sh sources lib.sh and there is no seam after that.
+  cp "${CHECK_SB}/scripts/lib.sh" "${CHECK_SB}/scripts/lib.sh.orig"
+  chmod -R a+rX "${CHECK_SB}"
+  chmod +x "${CHECK_SB}/bin/"*
+}
+check_report() {   # ENV-LINES [WEBUI_STATE] [NFT_COVERS] [LIB-SHIM] -> the whole report
+  check_sandbox
+  # Restored every time, so one case's shim cannot leak into the next.
+  cp "${CHECK_SB}/scripts/lib.sh.orig" "${CHECK_SB}/scripts/lib.sh"
+  [[ -z "${4:-}" ]] || printf '\n%s\n' "$4" >> "${CHECK_SB}/scripts/lib.sh"
+  cp "${REPO}/.env.example" "${CHECK_SB}/.env"
+  printf '%s\n' "$1" >> "${CHECK_SB}/.env"
+  # This harness overwrites its .env per case, so the file left at the end
+  # shows only the last one. Without this line the configuration census would
+  # read every 'lca check' as having run at the shipped defaults.
+  record_configuration "${CHECK_SB}/.env"
+  # The status is discarded rather than swallowed with '|| true': the report is
+  # the product, and check-system.sh exits non-zero whenever anything FAILed,
+  # which is most of these cases. That the report exists at all is asserted
+  # separately, just below.
+  local out rc=0
+  out="$( cd "${CHECK_SB}" \
+          && PATH="$(stub_path "${CHECK_SB}/bin")" \
+             WEBUI_STATE="${2:-}" NFT_COVERS="${3:-11434}" \
+             timeout 120 bash "${CHECK_SB}/check-system.sh" 2>&1 )" || rc=$?
+  printf '%s\n' "${out}"
+  return 0
+}
+# Non-vacuity for every gate that reads this report: a run that produced no
+# report at all would satisfy most "must not say X" assertions.
+check_report_is_a_report() {
+  local out; out="$(check_report '' running)"
+  grep -q 'SUMMARY' <<<"${out}" || {
+    printf 'check-system.sh did not run to a summary in the sandbox:\n%s\n' "${out}" >&2
+    return 1
+  }
+}
+check "the 'lca check' harness produces a whole report" check_report_is_a_report
+
 # And check-system.sh must say something about open signups, since that is
 # where a user looks when asking "is this box safe?".
+#
+# Driven. The grep this replaces asked that the string WEBUI_ENABLE_SIGNUP
+# appeared anywhere in check-system.sh — satisfied by a comment, by a variable
+# nothing prints, and by a branch no machine reaches. What is at stake is the
+# one setting on the documented happy path whose last step is manual
+# (YOUR-TURN.md 4.3): forget it and anyone who can reach the chat app can
+# register an account on the private AI this project exists to keep private.
 signup_reported_by_check() {
-  grep -qF 'WEBUI_ENABLE_SIGNUP' "${REPO}/check-system.sh"
+  local out bad=0
+  # Open. It has to be a WARNING, not a line of prose: the reader is scanning
+  # for the things that are wrong.
+  out="$(check_report 'WEBUI_ENABLE_SIGNUP=true' running)"
+  grep -qE '\[warn\].*signups are OPEN' <<<"${out}" || {
+    printf 'open signups are not reported as a warning by lca check:\n%s\n' \
+      "$(grep -i signup <<<"${out}" || echo '(the word signup never appeared)')" >&2
+    bad=1
+  }
+  # ...and it names the fix, because the setting lives in .env and takes a
+  # container re-creation to reach the running app.
+  grep -q 'lca apply' <<<"$(grep -i 'signups are OPEN' <<<"${out}" || true)" || {
+    echo 'the open-signup warning does not say how to close them' >&2
+    bad=1
+  }
+  # Closed. The complement, or "warn about signups" is satisfied by a check
+  # that warns always — which is a check nobody reads twice.
+  out="$(check_report 'WEBUI_ENABLE_SIGNUP=false' running)"
+  grep -qE '\[ ?ok ?\].*signups are closed' <<<"${out}" || {
+    printf 'closed signups are not reported as closed:\n%s\n' \
+      "$(grep -i signup <<<"${out}" || echo '(the word signup never appeared)')" >&2
+    bad=1
+  }
+  grep -qi 'signups are OPEN' <<<"${out}" && {
+    echo 'a box with signups closed is warned that they are open' >&2
+    bad=1
+  }
+  return "${bad}"
 }
-check "check-system.sh reports the signup setting" signup_reported_by_check
+check "'lca check' reports open signups as a warning, and closed ones as closed" \
+  signup_reported_by_check
+
+echo "# ...and the same report, in the configurations nothing ever ran it in"
+# Configuration blindness, worked. Each of these sections is correct code that
+# had never executed: every fixture in this repo that builds an .env for a
+# product script hands it .env.example, where the agent tier and the relay are
+# off and the chat keeps the short prompt. tests/config-coverage.tsv is the
+# census; these are the three cheapest cells of it, and one of them turned out
+# to hold a warning nothing had ever produced.
+check_reports_the_agent_tier() {
+  local out bad=0
+  out="$(check_report 'ENABLE_AGENT=true' running)"
+  # This is the section the stall lived in. It is not enough that it no longer
+  # hangs: it has to say the four things it exists to say.
+  grep -qi 'agent is enabled in .env but its container is not running' <<<"${out}" || {
+    printf 'the agent tier is on and its container is absent, and lca check did not say so:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  grep -qi 'loopback is the container' <<<"${out}" || {
+    echo 'nothing warned that an agent with the relay off cannot reach Ollama on 127.0.0.1' >&2
+    bad=1
+  }
+  grep -qi 'agent is on but' <<<"${out}" || {
+    echo 'the derived agent model is missing and the report says nothing about the context it will run at' >&2
+    bad=1
+  }
+  # ...and the exposure half. The agent's UI is the most dangerous port here —
+  # a browser session on it runs anything on the box.
+  grep -q 'Agent 3001' <<<"${out}" || {
+    printf 'the agent is enabled and its port is not in the list the inbound guard must cover:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and with the tier off, none of it appears. Without this the four above
+  # are satisfied by a report that says everything always.
+  out="$(check_report 'ENABLE_AGENT=false' running)"
+  grep -qi 'agent is enabled' <<<"${out}" && {
+    printf 'a machine with the agent tier off is told about an agent:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Agent 3001' <<<"${out}" && {
+    printf 'the guard is asked to cover a port nothing is offering:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "'lca check' reports the agent tier, in the configuration that has one" \
+  check_reports_the_agent_tier
+relay_is_reported_when_it_is_on() {
+  local out bad=0
+  out="$(check_report 'ENABLE_OLLAMA_RELAY=true' running)"
+  grep -qi 'relay is enabled in .env but its boot units are not installed' <<<"${out}" || {
+    printf 'the relay is switched on with nothing listening and the report says nothing:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # It binds the docker bridge, which is not routable from outside — but the
+  # guard's job is to know every port this stack opens, so it is in the list.
+  grep -q 'Ollama relay' <<<"${out}" || {
+    printf 'the relay port is not among the ports the guard is asked to cover:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  out="$(check_report 'ENABLE_OLLAMA_RELAY=false' running)"
+  grep -qi 'relay is enabled' <<<"${out}" && {
+    printf 'a machine with no relay is told its relay is unhealthy:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'Ollama relay' <<<"${out}" && {
+    printf 'a port nothing binds is demanded of the guard:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "...and the relay, in the configuration that has one" \
+  relay_is_reported_when_it_is_on
+# The sharpest cell of the census, and the one that found something. The chat's
+# system prompt is budgeted at 15% of the context window. CONVENTIONS.md adds
+# ~618 tokens to it, and CONVENTIONS_CHAT=true is what puts them there. At the
+# 8192 window of the shipped default the total just fits; at 4096 — the 3b
+# rung, the SMALLEST this project ships — the budget is 614 and the prompt is
+# double it, re-sent on every message for the life of the conversation.
+#
+# Both switches sit at their shipped values in every fixture in this repo, so
+# that warning had never been produced by anything. Measured now: 577 tokens
+# with the appendix off, 1224 with it on, and only the fourth cell warns.
+#
+# Read as a relationship, not as those two numbers: CONVENTIONS.md is a file
+# people are meant to edit, and a gate that hardcodes its token count is a gate
+# that fails on a good change.
+chat_prompt_budget_holds_with_the_appendix_on() {
+  local small_off small_on big_on bad=0
+  big_on="$(check_report 'CONVENTIONS_CHAT=true' running | grep -i 'system prompt' || true)"
+  small_off="$(check_report 'CONVENTIONS_CHAT=false
+OLLAMA_CONTEXT_LENGTH=4096' running | grep -i 'system prompt' || true)"
+  small_on="$(check_report 'CONVENTIONS_CHAT=true
+OLLAMA_CONTEXT_LENGTH=4096' running | grep -i 'system prompt' || true)"
+  [[ -n "${big_on}" && -n "${small_off}" && -n "${small_on}" ]] || {
+    echo 'the report says nothing about the system prompt at all — this gate has lost its subject' >&2
+    return 1
+  }
+  # 1. The appendix is really being added, or every cell below is the same run.
+  local n_on n_off
+  n_on="$(grep -oE '~[0-9]+ tokens' <<<"${big_on}" | tr -dc '0-9')"
+  n_off="$(grep -oE '~[0-9]+ tokens' <<<"${small_off}" | tr -dc '0-9')"
+  [[ -n "${n_on}" && -n "${n_off}" ]] || {
+    printf 'the report no longer says how big the prompt is:\n%s\n%s\n' "${big_on}" "${small_off}" >&2
+    return 1
+  }
+  (( n_on > n_off )) || {
+    printf 'CONVENTIONS_CHAT=true did not make the chat prompt any bigger (%s vs %s) — the appendix is not reaching it:\n%s\n' \
+      "${n_on}" "${n_off}" "${big_on}" >&2
+    bad=1
+  }
+  # 2. The small window with the appendix ON is over budget, and says so. This
+  # is the cell nothing had ever run.
+  grep -qi 'over the' <<<"${small_on}" || {
+    printf 'the smallest rung this project ships carries a prompt over its own budget and is told it fits:\n%s\n' \
+      "${small_on}" >&2
+    bad=1
+  }
+  # ...and names the file responsible, because the fix is a setting and not a
+  # smaller model.
+  grep -q 'CONVENTIONS.md' <<<"${small_on}" || {
+    printf 'the over-budget warning does not name what is in the prompt:\n%s\n' "${small_on}" >&2
+    bad=1
+  }
+  # 3. The other three cells fit, or "over budget" is what it says always.
+  grep -qi 'over the' <<<"${small_off}" && {
+    printf 'the small window is over budget even without the appendix:\n%s\n' "${small_off}" >&2
+    bad=1
+  }
+  grep -qi 'over the' <<<"${big_on}" && {
+    printf 'the shipped window is over budget with the appendix on, which the arithmetic in lib.sh says it is not:\n%s\n' \
+      "${big_on}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the chat prompt's context budget is checked with the conventions appendix on" \
+  chat_prompt_budget_holds_with_the_appendix_on
+
+echo "# the three conventions switches, run through a whole command at both values"
+# Three rows of tests/config-coverage.tsv at once, all SHIPPED-ONLY, all with
+# 'Cost: low' beside them and none of them paid. What makes them one block is
+# that they are one decision seen from three sides: AIDER_CONVENTIONS is the
+# master switch, CONVENTIONS_AIDER and CONVENTIONS_AGENT are the per-surface
+# overrides, and 'lca check' is the only command that reports on all of them.
+#
+# The census note for AIDER_CONVENTIONS said check_report "reaches it". It does
+# not, at the shipped defaults: CONVENTIONS_CHAT is false, so the chat prompt
+# carries no appendix and turning the master switch off changes nothing a
+# report can see. Measured — identical output, ~577 tokens either way. The
+# other side is only reachable with the chat surface switched on as well, which
+# is precisely the kind of thing a row saying "cost: low" hides.
+prompt_tokens_in() {   # REPORT -> the token count 'lca check' printed
+  sed -n 's/.*system prompt fits its share of the context (~\([0-9]*\) tokens).*/\1/p' \
+    <<<"$1" | head -1
+}
+conventions_master_switch_reaches_a_real_run() {
+  local on off n_on n_off bad=0
+  on="$(check_report "CONVENTIONS_CHAT=true")"
+  off="$(check_report "CONVENTIONS_CHAT=true
+AIDER_CONVENTIONS=false")"
+  n_on="$(prompt_tokens_in "${on}")"
+  n_off="$(prompt_tokens_in "${off}")"
+  [[ "${n_on}" =~ ^[0-9]+$ && "${n_off}" =~ ^[0-9]+$ ]] || {
+    printf 'lca check no longer reports the prompt size, so this measures nothing (on=%s off=%s)\n' \
+      "${n_on:-none}" "${n_off:-none}" >&2
+    return 1; }
+  # The appendix is the difference, and it is hundreds of tokens rather than a
+  # rounding change: measured at 1224 with it and 577 without.
+  (( n_on - n_off > 200 )) || {
+    printf 'AIDER_CONVENTIONS=false did not take the appendix out of the prompt: %s tokens on, %s off\n' \
+      "${n_on}" "${n_off}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "AIDER_CONVENTIONS=false really empties the appendix, through a whole 'lca check'" \
+  conventions_master_switch_reaches_a_real_run
+# ...and the per-surface override, at a value that is neither true nor false.
+#
+# This is the setting .env.example only SUGGESTS, in a comment. boolean_settings
+# could not see it until it learned to read commented lines, and the value that
+# matters is 'yes' — which reads as OFF because every switch here is compared
+# against the word 'true'. The difference between the two settings was which
+# side of a '#' they were written on.
+a_switch_written_as_yes_is_reported() {
+  local out bad=0
+  out="$(check_report "CONVENTIONS_AIDER=yes")"
+  grep -qE "CONVENTIONS_AIDER='yes' is not true or false" <<<"${out}" || {
+    printf "lca check accepts CONVENTIONS_AIDER=yes without saying it reads as OFF:\n%s\n" \
+      "$(grep -iE 'setting|conventions' <<<"${out}")" >&2
+    bad=1; }
+  grep -qi 'reads as OFF' <<<"${out}" || {
+    echo 'the warning does not say which way a non-boolean is read' >&2
+    bad=1; }
+  # ...and a real boolean is simply counted, either way round, so the warning
+  # above is about the VALUE and not about the name. Both values also because a
+  # row cannot claim BOTH on a fixture that only ever ran one of them — this
+  # file's own configuration census refuses that.
+  local v
+  for v in true false; do
+    out="$(check_report "CONVENTIONS_AIDER=${v}")"
+    grep -qE 'on/off setting\(s\) hold true or false' <<<"${out}" || {
+      printf 'CONVENTIONS_AIDER=%s is not accepted as a switch:\n%s\n' \
+        "${v}" "$(grep -iE 'setting' <<<"${out}")" >&2
+      bad=1; }
+    grep -q "CONVENTIONS_AIDER='${v}' is not true or false" <<<"${out}" && {
+      printf 'a real boolean was reported as not being one: CONVENTIONS_AIDER=%s\n' "${v}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "...and a conventions switch written as 'yes' is reported, not silently OFF" \
+  a_switch_written_as_yes_is_reported
+# ...and the agent surface's override, which .env.example also only suggests.
+# Setting it takes the count from 12 to 13: check-system skips a name the
+# reader has not set, so the count IS the observable difference between a
+# suggestion and a decision.
+setting_the_agent_override_is_counted() {
+  local n1 n2 v bad=0 count_re
+  # Inline rather than a helper: a two-line function called only from inside
+  # another one that 'check' invokes by name reads as unreachable to
+  # ShellCheck, and SC2317 on a live function is a warning nobody can act on.
+  count_re='s/.*\[ ok \] \([0-9]*\) on\/off setting(s) hold true or false.*/\1/p'
+  n1="$(sed -n "${count_re}" <<<"$(check_report "")" | head -1)"
+  [[ "${n1}" =~ ^[0-9]+$ ]] || {
+    printf 'lca check no longer counts its switches at all (%s)\n' "${n1:-none}" >&2
+    return 1; }
+  # Both values, because the census will not accept a BOTH row from a fixture
+  # that only ran one of them — and because the count is the same either way,
+  # which is the point: what changes it is being SET, not what it is set to.
+  for v in true false; do
+    n2="$(sed -n "${count_re}" <<<"$(check_report "CONVENTIONS_AGENT=${v}")" | head -1)"
+    [[ "${n2}" =~ ^[0-9]+$ ]] || {
+      printf 'the switch count vanished with CONVENTIONS_AGENT=%s\n' "${v}" >&2
+      bad=1; continue; }
+    (( n2 == n1 + 1 )) || {
+      printf 'CONVENTIONS_AGENT=%s did not join the count: %s shipped, %s with it set\n' \
+        "${v}" "${n1}" "${n2}" >&2
+      bad=1; }
+  done
+  return "${bad}"
+}
+check "...and setting CONVENTIONS_AGENT brings it into the count it was not in" \
+  setting_the_agent_override_is_counted
+# ...and the switches .env.example only SUGGESTS must be checked like the ones
+# it ships. Found by asking the configuration question of the switch list
+# itself: which settings does the thing that validates switches not see?
+#
+# .env.example does not only ship switches. Under "leaving these alone changes
+# nothing" it offers two more as commented lines a reader is invited to
+# uncomment — and boolean_settings read live lines only, so:
+#
+#   AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+#   CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+#
+# ...while lca_user_instructions compares it against the word "true" exactly
+# like every other switch. Measured: 2,527 characters of appendix at 'true',
+# 0 at 'yes'. The only difference between the two settings was which side of a
+# '#' they were written on.
+switch_count_in() { grep -oE '[0-9]+ on/off setting' <<<"$1" | grep -oE '^[0-9]+'; }
+suggested_switches_are_validated_too() {
+  local out base taken bad=0
+  # 1. The behaviour that makes it matter: 'yes' is OFF, silently.
+  local on off
+  on="$(as_nobody "${REPO}/scripts/lib.sh" 'load_env >/dev/null 2>&1
+CONVENTIONS_AIDER=true;  lca_user_instructions aider | wc -c')"
+  off="$(as_nobody "${REPO}/scripts/lib.sh" 'load_env >/dev/null 2>&1
+CONVENTIONS_AIDER=yes;   lca_user_instructions aider | wc -c')"
+  [[ "${on}" =~ ^[0-9]+$ && "${off}" =~ ^[0-9]+$ ]] || {
+    printf 'could not measure the appendix at all (%s / %s) — this gate lost its subject\n' \
+      "${on}" "${off}" >&2
+    return 1
+  }
+  (( on > 0 && off == 0 )) || {
+    printf 'CONVENTIONS_AIDER is no longer compared against the word "true" (true -> %s chars, yes -> %s), so the warning below is about nothing\n' \
+      "${on}" "${off}" >&2
+    return 1
+  }
+  # 2. ...so a value that is not true or false has to be named.
+  out="$(check_report 'CONVENTIONS_AIDER=yes' running)"
+  grep -q "CONVENTIONS_AIDER='yes' is not true or false" <<<"${out}" || {
+    printf 'a switch .env.example suggests can hold a word that silently reads as OFF, and lca check says nothing:\n%s\n' \
+      "$(grep -iE 'on/off|not true or false' <<<"${out}" || echo '(nothing about switches at all)')" >&2
+    bad=1
+  }
+  # 3. A suggestion the reader has NOT taken is not a fault, and does not
+  # change the count on a shipped machine.
+  out="$(check_report '' running)"
+  base="$(switch_count_in "${out}")"
+  grep -qi 'CONVENTIONS_AIDER' <<<"${out}" && {
+    printf 'a shipped machine is told about a setting it does not have:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # 4. ...and a suggestion that IS taken, validly, is counted rather than
+  # ignored — otherwise "not true or false" above could be the only thing this
+  # ever notices.
+  taken="$(switch_count_in "$(check_report 'CONVENTIONS_AGENT=false' running)")"
+  [[ -n "${base}" && -n "${taken}" ]] || {
+    echo 'lca check no longer says how many switches it validated' >&2
+    return 1
+  }
+  (( taken == base + 1 )) || {
+    printf 'taking a suggested switch did not add it to the validated set (%s -> %s)\n' \
+      "${base}" "${taken}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "a switch .env.example only suggests is validated like one it ships" \
+  suggested_switches_are_validated_too
 
 echo "# every drift message must name the one command that fixes drift"
 # 'lca apply' exists precisely so nobody has to remember which script applies
@@ -14712,21 +17494,56 @@ check "...and netmode's ruleset really does cover it, so the report is closable"
 # entirely. The note in its own else-branch already said why that is wrong:
 # "'lca apply' now fixes what this reports, and the two must not be able to
 # disagree about which ports count."
+# Driven, because the awk this replaces read the section for the ABSENCE of
+# the string ENABLE_WEBUI. That is satisfied by a section that reads a variable
+# holding the same value, by one that asks a helper which reads it, and by one
+# that never runs. What it is protecting is a measured security hole: with
+# ENABLE_WEBUI=false and the container left running, 'lca check' said "no
+# public service ports to guard" while curl on port 3000 answered
+# {"status":true} from every interface. Turning a feature off in .env made the
+# box more exposed, and the health check agreed there was nothing there.
+#
+# So the machine is built and the section is read: chat app off in .env, its
+# container still running on 3000, and a guard that covers 11434 only.
 check_system_asks_for_the_port_list() {
-  local body
-  body="$(sed -n '/^step "Inbound guard"$/,/^step /p' "${REPO}/check-system.sh" | sed 's/#.*//')"
-  [[ -n "${body}" ]] || {
-    echo "could not find check-system.sh's inbound guard section — this gate stopped watching" >&2
-    return 1; }
-  grep -q 'guarded_ports' <<<"${body}" || {
-    echo 'check-system.sh decides what needs guarding without asking guarded_ports' >&2
-    return 1; }
-  # The regression exactly: the section must not branch on ENABLE_WEBUI itself.
-  ! grep -q 'ENABLE_WEBUI' <<<"${body}" || {
-    echo 'check-system.sh is back to reading ENABLE_WEBUI directly — a chat app left running while .env disables it goes unreported' >&2
-    return 1; }
+  local out bad=0
+  out="$(check_report 'ENABLE_WEBUI=false' running '11434')"
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"${out}")"
+  [[ -n "${out}" ]] || {
+    echo "the report has no inbound guard section — this gate stopped watching" >&2
+    return 1
+  }
+  # The regression, in the words the reader would have seen.
+  grep -qi 'no public service ports to guard\|Nothing binds a public service port' <<<"${out}" && {
+    printf 'a chat app that .env says is off, still listening on 3000, is reported as nothing to guard:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # ...and the port is named, so the claim can be checked by eye rather than
+  # taken on trust.
+  grep -q '3000' <<<"${out}" || {
+    printf 'the live chat-app port is not named anywhere in the inbound section:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # The other direction, and it matters as much: with no container there is
+  # nothing on 3000, and demanding the guard cover it would be a gap nothing
+  # can close — 'lca webui stop' leaves the container and its baked-in port in
+  # place. An unfixable failure is worse than saying nothing.
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"$(check_report 'ENABLE_WEBUI=false' '' '11434')")"
+  grep -q '3000' <<<"${out}" && {
+    printf 'a port nothing is listening on is demanded of the guard:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  # ...and a guard that DOES cover the live port reports clean, or the first
+  # arm is satisfied by a section that fails no matter what.
+  out="$(sed -n '/Inbound guard/,/^==> /p' <<<"$(check_report 'ENABLE_WEBUI=false' running '11434, 3000')")"
+  grep -qi 'does NOT cover' <<<"${out}" && {
+    printf 'a guard that covers every live port is still reported stale:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  return "${bad}"
 }
-check "'lca check' asks lib.sh which ports need guarding" \
+check "'lca check' guards the port a disabled-but-running chat app is really on" \
   check_system_asks_for_the_port_list
 # ...and 'lca apply', whose one promise is to make the running system match
 # .env, must not answer "nothing to apply" about the single setting that turns
@@ -15727,6 +18544,121 @@ installers_answer_help_before_acting() {
 check "the installers answer --help without installing anything" \
   installers_answer_help_before_acting
 
+# The whole-command harness the two gates below drive. It came into this file
+# with the entry-point gates and was replaced there by ep_sandbox, which runs
+# installers with a recording preamble; these two need the other shape — a
+# recorder aider on PATH's side of the checkout and an Ollama that answers —
+# so it is kept here, beside its only callers. Losing it is what a clean
+# text merge did: one branch deleted the harness, the other added callers.
+ENTRY_SB="${SANDBOX}/entry"
+ENTRY_PATH=""
+entry_harness() {
+  local bin="${ENTRY_SB}/bin" c
+  rm -rf "${ENTRY_SB}"; mkdir -p "${bin}" "${ENTRY_SB}/repo" "${ENTRY_SB}/home"
+  make_stub_dir "${bin}"
+  ( cd "${REPO}" && git ls-files -z | xargs -0 cp --parents -t "${ENTRY_SB}/repo" )
+  for c in apt-get apt systemctl docker ollama tailscale useradd usermod \
+           nft iptables pip pip3 npm curl wget; do
+    cat > "${bin}/${c}" <<STUB
+#!/bin/sh
+printf '%s %s\n' "\${0##*/}" "\$*" >> "${ENTRY_SB}/did"
+exit 0
+STUB
+  done
+  chmod +x "${bin}"/*
+  # The forwarders — run-agent.sh, and 'lca' with no subcommand — parse nothing
+  # and hand everything to aider, so the recorder has to be where they look for
+  # it, and reaching that exec needs an Ollama that answers.
+  mkdir -p "${ENTRY_SB}/repo/.venv/bin"
+  cat > "${ENTRY_SB}/repo/.venv/bin/aider" <<STUB
+#!/bin/sh
+printf 'aider %s\n' "\$*" >> "${ENTRY_SB}/did"
+exit 0
+STUB
+  chmod +x "${ENTRY_SB}/repo/.venv/bin/aider"
+  printf '\nensure_ollama_up_announced() { return 0; }\n' >> "${ENTRY_SB}/repo/scripts/lib.sh"
+  ENTRY_PATH="$(stub_path "${bin}" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')"
+}
+entry_run() {   # SCRIPT ARGS... -> EXIT n, then what it printed, then a DID line per command it ran
+  local t="$1"; shift
+  : > "${ENTRY_SB}/did"
+  local out rc=0
+  # env -i, so nothing this suite happens to export leaks in and answers a
+  # question the user's shell would not have answered.
+  out="$( cd "${ENTRY_SB}/repo" && env -i "PATH=${ENTRY_PATH}" \
+            "HOME=${ENTRY_SB}/home" TERM=dumb LCA_MAY_PROMPT=false \
+            timeout 25 bash "${ENTRY_SB}/repo/${t}" "$@" </dev/null 2>&1 )" || rc=$?
+  printf 'EXIT %s\n%s\n' "${rc}" "${out}"
+  sed 's/^/DID /' "${ENTRY_SB}/did"
+}
+echo "# 'lca' itself, run end to end — the headline command had no whole-command run"
+# AIDER_NO_AUTO_COMMIT was the last switch tests/config-coverage.tsv had as
+# SHIPPED-ONLY, and its note said why in one sentence: "Driven at both values by
+# the argv probe; no whole-command run of run-agent.sh exists at EITHER value."
+#
+# That is configuration blindness one level up. The argv probe pulls one block
+# out of run-agent.sh and evaluates it; what it cannot see is any of the forty
+# lines above that block deciding never to reach it — a missing aider, a model
+# that is not downloaded, a metadata file that cannot be written, a question
+# asked of a terminal that is not there. 'lca' is this project's headline
+# command and nothing had ever run it.
+#
+# The harness for it already existed: entry_harness has recorded a stub aider
+# at .venv/bin/aider since the day it was written, for the forwarder gates, and
+# nothing had asked it what the argv contained.
+entry_env() {   # ENV-LINES -> the .env the next entry_run will read
+  cp "${REPO}/.env.example" "${ENTRY_SB}/repo/.env"
+  printf '%s\n' "$1" >> "${ENTRY_SB}/repo/.env"
+  record_configuration "${ENTRY_SB}/repo/.env"
+}
+lca_reaches_aider_at_all() {
+  local out model bad=0
+  entry_harness
+  model="$(sed -n 's/^MODEL_NAME=//p' "${REPO}/.env.example" | head -1)"
+  entry_env ""
+  out="$(entry_run run-agent.sh)"
+  grep -qx 'EXIT 0' <<<"${out}" || {
+    printf "'lca' did not reach aider:\n%s\n" "${out}" >&2
+    bad=1; }
+  grep -q '^DID aider ' <<<"${out}" || {
+    printf "'lca' exited without ever running aider:\n%s\n" "${out}" >&2
+    return 1; }
+  # The model aider is actually pointed at, prefix and all: litellm needs the
+  # ollama_chat/ form and a bare name reaches a different provider entirely.
+  grep -qF "ollama_chat/${model}" <<<"${out}" || {
+    printf 'aider was not started against ollama_chat/%s:\n%s\n' "${model}" \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "'lca' starts aider against the local model, end to end" \
+  lca_reaches_aider_at_all
+auto_commit_switch_reaches_the_real_argv() {
+  local out bad=0
+  entry_env "AIDER_NO_AUTO_COMMIT=true"
+  out="$(entry_run run-agent.sh)"
+  grep -qE '^DID aider .*--no-auto-commits' <<<"${out}" || {
+    printf 'AIDER_NO_AUTO_COMMIT=true and aider was started with auto-commit on:\n%s\n' \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  # ...and the reader is told, because this removes the entire undo path for a
+  # small model's unrequested edits.
+  grep -qi 'will NOT be committed' <<<"${out}" || {
+    printf 'auto-commit was switched off and nothing said so:\n%s\n' "${out}" >&2
+    bad=1; }
+  entry_env "AIDER_NO_AUTO_COMMIT=false"
+  out="$(entry_run run-agent.sh)"
+  grep -qE '^DID aider .*--no-auto-commits' <<<"${out}" && {
+    printf 'AIDER_NO_AUTO_COMMIT=false and the flag was passed anyway:\n%s\n' \
+      "$(grep '^DID aider ' <<<"${out}")" >&2
+    bad=1; }
+  grep -qi 'will NOT be committed' <<<"${out}" && {
+    printf 'the shipped configuration warns about something it is not doing:\n%s\n' "${out}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and AIDER_NO_AUTO_COMMIT reaches the argv aider really gets, both ways" \
+  auto_commit_switch_reaches_the_real_argv
 # Driven, not read. The grep version read the last line of each file and looked
 # for the characters 'main "$@"'. That is the right line to worry about — this
 # is the bug it was written for, and it is worth restating because the shape
@@ -16897,6 +19829,309 @@ hook_does_not_promise_more_than_it_runs() {
 check "the pre-push hook does not promise a green CI it cannot deliver" \
   hook_does_not_promise_more_than_it_runs
 
+# ...and EVERY place that counts those jobs has to count them right.
+#
+# The gate above was written for exactly this drift and still missed two of
+# them, because it looked for one phrasing per file:
+#
+#   Makefile        "(2 of CI's 6 jobs)"        the number was never read
+#   CONTRIBUTING.md "all six jobs, not just"    a fourth site nobody listed
+#
+# CI has had seven jobs since `webui` was added. Both said six, in a document
+# whose own comment reads "a gate that watches one file while the same claim
+# lives in three is a gate with a blind spot" — the blind spot was the
+# phrasing, not the file. So this one does not look for a sentence. It reads
+# every number that sits immediately in front of the word "jobs", and every
+# number after "of CI's", in the files that talk about CI, and requires all of
+# them to be the count in the workflow. A new sentence in a new shape is
+# covered the day it is written.
+#
+# Scoped to the CI-facing files on purpose: docs/AGENT.md says "two different
+# jobs" about the supervisor, which is not this number and never will be.
+#
+# SOURCE-GREP: the subject IS prose about the workflow, checked against the
+# workflow. There is no behaviour to drive.
+CI_CLAIM_FILES=( CONTRIBUTING.md README.md Makefile .githooks/pre-push )
+CI_NUMBER_WORDS='one|two|three|four|five|six|seven|eight|nine|ten'
+count_word() {   # a number, written either way -> the number
+  case "${1,,}" in
+    one) echo 1 ;; two) echo 2 ;; three) echo 3 ;; four) echo 4 ;;
+    five) echo 5 ;; six) echo 6 ;; seven) echo 7 ;; eight) echo 8 ;;
+    nine) echo 9 ;; ten) echo 10 ;; *) echo "$1" ;;
+  esac
+}
+every_job_count_claim_is_the_real_one() {
+  local total f blob n a b bad=0 seen=0
+  total="$(grep -cE '^    name: ' "${REPO}/.github/workflows/ci.yml" || true)"
+  (( total > 0 )) || { echo 'could not count the CI jobs' >&2; return 1; }
+  for f in "${CI_CLAIM_FILES[@]}"; do
+    [[ -r "${REPO}/${f}" ]] || {
+      printf 'a file this gate watches is gone: %s\n' "${f}" >&2; return 1; }
+    # One blob, not lines: "That is two / of CI's seven" is one claim wrapped
+    # over two lines, and a line-at-a-time reader sees "two" and "seven" as
+    # separate numbers belonging to nothing.
+    #
+    # Fenced blocks and backticked spans come out first, because this document
+    # teaches its own rules by QUOTING the wrong version — the table below the
+    # section that added this gate contains the literal strings "2 of CI's 6
+    # jobs" and "all six jobs", which are the drift, not a claim of it. That is
+    # a deliberate blind spot: a real claim written inside backticks would
+    # escape. The floor on how many claims this gate must find is what stops
+    # that from emptying it out silently.
+    # shellcheck disable=SC2016  # backticks are markdown here, not a command
+    blob="$(awk '/^```/ { fence = !fence; next } !fence' "${REPO}/${f}" \
+            | sed 's/`[^`]*`//g' | tr '\n' ' ' | tr -s ' ')"
+    while read -r n; do
+      [[ -n "${n}" ]] || continue
+      seen=$(( seen + 1 ))
+      [[ "$(count_word "${n}")" == "${total}" ]] || {
+        printf '%s says CI has %s jobs; the workflow defines %s\n' \
+          "${f}" "${n}" "${total}" >&2
+        bad=1; }
+    done < <( { grep -oiE "(${CI_NUMBER_WORDS}|[0-9]+) jobs" <<<"${blob}" | awk '{print $1}'
+                grep -oiE "of CI's (${CI_NUMBER_WORDS}|[0-9]+)" <<<"${blob}" | awk '{print $3}'
+              } || true )
+    # ...and where a sentence splits the set — "runs two of them, the other
+    # five need a fresh machine" — the halves have to add up to it. That
+    # sentence is the promise the hook is allowed to make; if it drifts, the
+    # reader is told a smaller gap than the one they have.
+    while read -r a b; do
+      [[ -n "${a}" && -n "${b}" ]] || continue
+      seen=$(( seen + 1 ))
+      a="$(count_word "${a}")"; b="$(count_word "${b}")"
+      (( a + b == total )) || {
+        printf '%s splits %s CI jobs into %s local and %s not, which is %s\n' \
+          "${f}" "${total}" "${a}" "${b}" "$(( a + b ))" >&2
+        bad=1; }
+    done < <(grep -oiE "(${CI_NUMBER_WORDS}|[0-9]+) of (them|CI's (${CI_NUMBER_WORDS}|[0-9]+)).{0,40}the other (${CI_NUMBER_WORDS}|[0-9]+)" \
+               <<<"${blob}" | awk '{print $1, $NF}' || true)
+  done
+  # A sweep that finds nothing passes, having done nothing.
+  (( seen >= 6 )) || {
+    printf 'only %s job-count claims found across %s files — this gate stopped watching\n' \
+      "${seen}" "${#CI_CLAIM_FILES[@]}" >&2
+    return 1; }
+  return "${bad}"
+}
+check "...and every place that counts those jobs counts them right" \
+  every_job_count_claim_is_the_real_one
+
+echo "# the rail itself: a push that fails the gates has to be actually refused"
+# Found by asking what in this project has never been looked at, and landing on
+# the thing that watches everything else. .githooks/pre-push is documented as
+# "the safety rail for the AI-assisted loop": an agent edits code, this runs
+# ShellCheck, bash -n and both suites, and a push that fails them never leaves
+# the machine. Nothing had ever run it. The gate above reads its PROSE — that
+# it does not over-promise — and stops there.
+#
+# Two things had to be true for it to be broken with nobody noticing, and one
+# of them was: git never invokes it, because 'make hooks' is opt-in and no
+# clone that skipped it says so. This clone had skipped it. core.hooksPath was
+# unset and .git/hooks/pre-push did not exist, so every push made from here
+# went out with the rail unarmed — and the only reason that cost nothing is
+# that the suite was run by hand each time. A safety mechanism whose absence is
+# silent is indistinguishable from one that is present and broken.
+#
+# So: a real sandbox repository, the documented 'make hooks' run for real
+# inside it, a real bare remote, and real 'git push'es either side of a gate
+# that fails. The stub 'make' is deliberate — what is under test here is the
+# RAIL, not the gates it runs: does git invoke this hook, does it ask make for
+# 'gates', and does a non-zero answer stop the commit reaching the remote.
+HOOK_SB="${SANDBOX}/hookrepo"
+HOOK_REMOTE="${SANDBOX}/hookremote.git"
+hook_sandbox() {
+  [[ -e "${HOOK_SB}/.git" ]] && return 0
+  mkdir -p "${HOOK_SB}/.githooks"
+  cp "${REPO}/Makefile" "${HOOK_SB}/Makefile"
+  cp "${REPO}/.githooks/pre-push" "${HOOK_SB}/.githooks/pre-push"
+  make_stub_dir "${HOOK_SB}/stub"
+  # shellcheck disable=SC2016  # the stub's own variables, read when IT runs
+  { printf '#!/bin/sh\n'
+    printf 'printf "%%s\\n" "$*" >> "${LCA_HOOK_MAKE_LOG}"\n'
+    printf 'exit "${LCA_HOOK_MAKE_RC:-0}"\n'
+  } > "${HOOK_SB}/stub/make"
+  chmod +x "${HOOK_SB}/stub/make"
+  git init -q "${HOOK_SB}"
+  git -C "${HOOK_SB}" symbolic-ref HEAD refs/heads/main
+  git -C "${HOOK_SB}" config user.email 'gates@example.invalid'
+  git -C "${HOOK_SB}" config user.name  'gate probe'
+  git -C "${HOOK_SB}" add -A
+  git -C "${HOOK_SB}" commit -qm 'the tree this rail is installed into'
+  git init -q --bare "${HOOK_REMOTE}"
+  git -C "${HOOK_SB}" remote add origin "${HOOK_REMOTE}"
+  # The baseline push goes round the hook on purpose: the hook is not installed
+  # yet, and this establishes a remote head for the gates to compare against.
+  git -C "${HOOK_SB}" push -q --no-verify origin main
+  # The documented install, executed. Nothing in this repo had ever run this
+  # recipe — 'make hooks' was a line in a document.
+  ( cd "${HOOK_SB}" && make hooks >/dev/null 2>&1 )
+}
+hook_remote_head() { git -C "${HOOK_REMOTE}" rev-parse main 2>/dev/null || printf none; }
+# rail_notice DIR — the line to say about DIR's pre-push rail, or nothing.
+#
+# 'make gates' says this too, but an agent working in a fresh clone runs this
+# suite directly and never types 'make'. The verdict at the bottom of this file
+# is the most-read line in the project, so the notice goes there: not a
+# failure, and it disappears the moment the hook is installed.
+rail_notice() {   # DIR -> nothing if the rail is armed there
+  local dir="$1" hp
+  hp="$(git -C "${dir}" config --get core.hooksPath 2>/dev/null || true)"
+  [[ "${hp}" == ".githooks" ]] && return 0
+  printf 'note - no pre-push hook in this clone, so nothing runs this suite for you. Install it: make hooks\n'
+}
+HOOK_OUT=""; HOOK_RC=0
+hook_push_attempt() {   # MAKE-RC -> HOOK_RC, HOOK_OUT, and a remote that moved or did not
+  hook_sandbox
+  local rc="$1"
+  : > "${HOOK_SB}/make.log"
+  date +%s%N > "${HOOK_SB}/tick"
+  git -C "${HOOK_SB}" add -A
+  git -C "${HOOK_SB}" commit -qm 'a change somebody is trying to push'
+  HOOK_RC=0
+  HOOK_OUT="$( cd "${HOOK_SB}" \
+    && PATH="$(stub_path "${HOOK_SB}/stub")" \
+       LCA_HOOK_MAKE_LOG="${HOOK_SB}/make.log" LCA_HOOK_MAKE_RC="${rc}" \
+       timeout 120 git push origin main 2>&1 )" || HOOK_RC=$?
+}
+the_documented_install_arms_the_hook() {
+  hook_sandbox
+  local hp
+  hp="$(git -C "${HOOK_SB}" config --get core.hooksPath 2>/dev/null || true)"
+  [[ "${hp}" == ".githooks" ]] || {
+    printf "'make hooks' left core.hooksPath as %s, so git runs nothing\\n" "${hp:-unset}" >&2
+    return 1; }
+  [[ -x "${HOOK_SB}/.githooks/pre-push" ]] || {
+    echo "'make hooks' left the hook non-executable, which git skips in silence" >&2
+    return 1; }
+}
+check "'make hooks' really arms the pre-push gate" \
+  the_documented_install_arms_the_hook
+failing_gates_refuse_a_real_push() {
+  local before after bad=0
+  before="$(hook_remote_head)"
+  hook_push_attempt 1
+  after="$(hook_remote_head)"
+  (( HOOK_RC != 0 )) || {
+    printf 'a push whose gates failed succeeded:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  [[ "${before}" == "${after}" ]] || {
+    echo 'the gates failed and the commit reached the remote anyway' >&2
+    bad=1; }
+  grep -q 'push aborted' <<<"${HOOK_OUT}" || {
+    printf 'the refusal does not say the push was aborted:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  # ...and it asked make for the gates, rather than for something that happens
+  # to exit non-zero. 'make gates' is the whole claim.
+  grep -qx 'gates' "${HOOK_SB}/make.log" || {
+    printf 'the hook ran make with %s, not with gates\\n' \
+      "$(tr '\\n' ' ' < "${HOOK_SB}/make.log")" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and a failing gate stops a real push reaching a real remote" \
+  failing_gates_refuse_a_real_push
+passing_gates_let_the_push_through() {
+  local before after bad=0
+  before="$(hook_remote_head)"
+  hook_push_attempt 0
+  after="$(hook_remote_head)"
+  (( HOOK_RC == 0 )) || {
+    printf 'a push whose gates passed was refused (rc=%s):\\n%s\\n' "${HOOK_RC}" "${HOOK_OUT}" >&2
+    bad=1; }
+  [[ "${before}" != "${after}" ]] || {
+    echo 'the gates passed and the commit never reached the remote' >&2
+    bad=1; }
+  grep -q 'gates passed' <<<"${HOOK_OUT}" || {
+    printf 'a successful run does not say so:\\n%s\\n' "${HOOK_OUT}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and a passing one lets it through, so the rail is not simply a wall" \
+  passing_gates_let_the_push_through
+# The other half of the finding: a clone that never ran 'make hooks' has no
+# way to know. 'make hooks-status' is that way, and it has to be right in both
+# directions — a status line that always says the same thing is decoration.
+hooks_status_says_whether_the_rail_is_armed() {
+  hook_sandbox
+  local armed unarmed bad=0
+  armed="$( cd "${HOOK_SB}" && make --no-print-directory hooks-status 2>&1 )"
+  grep -q 'hook armed' <<<"${armed}" || {
+    printf 'an armed clone is not reported as armed:\\n%s\\n' "${armed}" >&2
+    bad=1; }
+  git -C "${HOOK_SB}" config --unset core.hooksPath
+  unarmed="$( cd "${HOOK_SB}" && make --no-print-directory hooks-status 2>&1 )"
+  git -C "${HOOK_SB}" config core.hooksPath .githooks
+  grep -q 'NOT installed' <<<"${unarmed}" || {
+    printf 'a clone with no hook is not told so:\\n%s\\n' "${unarmed}" >&2
+    bad=1; }
+  grep -q 'make hooks' <<<"${unarmed}" || {
+    printf 'the notice does not say how to install it:\\n%s\\n' "${unarmed}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and 'make hooks-status' tells the truth about both kinds of clone" \
+  hooks_status_says_whether_the_rail_is_armed
+# ...and the same fact, said where this suite's own reader will see it.
+the_verdict_names_an_unarmed_rail() {
+  hook_sandbox
+  local armed unarmed bad=0
+  armed="$(rail_notice "${HOOK_SB}")"
+  [[ -z "${armed}" ]] || {
+    printf 'an armed clone is nagged anyway: %s\n' "${armed}" >&2
+    bad=1; }
+  git -C "${HOOK_SB}" config --unset core.hooksPath
+  unarmed="$(rail_notice "${HOOK_SB}")"
+  git -C "${HOOK_SB}" config core.hooksPath .githooks
+  grep -q 'make hooks' <<<"${unarmed}" || {
+    printf 'a clone with no rail is told nothing by the verdict: %s\n' "${unarmed:-<silence>}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "...and this suite's own verdict says so too, where an agent will read it" \
+  the_verdict_names_an_unarmed_rail
+# ...and every script under tests/ has to have a way in.
+#
+# The other half of the same question, asked of the parts of this project
+# nobody had reason to look at: which files can nothing reach? One answer, and
+# it was the sharpest one available. tests/live-verify.sh — the other half of
+# the unit suite, same subjects with no stubs at all, against a real docker and
+# a real agent — had no Makefile target, no CI job, no bin/lca subcommand and
+# no caller. The only record that it could be run at all was one sentence in
+# docs/PROMPT-WINDOW.md.
+#
+# An instrument with no way in is reached for exactly once: in a hurry, on the
+# machine it was written for, by somebody who has to rediscover that it exists.
+# Whether it still works is discovered then, which is the worst possible moment.
+# It is now 'make live-verify', beside 'make coverage' and 'make smoke', and
+# this refuses the next one.
+#
+# SOURCE-GREP: the subject IS whether a file's name appears in the files that
+# could invoke it. There is no behaviour to drive.
+every_test_script_has_a_way_in() {
+  # 'no_way_in' rather than 'missing': that name is an ARRAY elsewhere in this
+  # file, and ShellCheck types a name across the whole file. CONTRIBUTING has a
+  # section on it; this is the fourth time.
+  local f b callers n=0 no_way_in=""
+  for f in "${REPO}"/tests/*.sh; do
+    b="$(basename "${f}")"
+    n=$(( n + 1 ))
+    callers="$(grep -rlF "tests/${b}" \
+                 "${REPO}/Makefile" "${REPO}/.github/workflows/ci.yml" \
+                 "${REPO}/bin/lca" "${REPO}/.githooks/pre-push" \
+                 "${REPO}"/*.sh "${REPO}"/scripts/*.sh 2>/dev/null || true)"
+    [[ -n "${callers}" ]] || no_way_in+="  ${b}"$'\n'
+  done
+  (( n >= 5 )) || {
+    printf 'only %s scripts found under tests/ — this gate stopped watching\n' "${n}" >&2
+    return 1; }
+  [[ -z "${no_way_in}" ]] || {
+    printf 'these test scripts have no way in — no make target, no CI job, no caller:\n%sGive it one, or it gets found the day it is needed.\n' \
+      "${no_way_in}" >&2
+    return 1; }
+}
+check "...and every script under tests/ has a way in" \
+  every_test_script_has_a_way_in
+
 echo "# five failure paths that reported the wrong thing, or nothing"
 # Each of these was verified by running the mechanism, not by reading it.
 errexit_survives_sourcing_tune() {
@@ -16914,45 +20149,67 @@ prompt_check_is_not_claimed_when_skipped() {
   # webui_drift skips both prompt comparisons without jq, or when either side
   # is unreadable; the pass line named "system prompt" regardless.
   #
-  # Every reporter that makes the CLAIM, not just check-system.sh. selftest.sh
-  # had the same bug and was not covered by this: it rolled its own probe,
-  # reading the LIVE value alone, so on a box without jq the drift list could
-  # not contain SYSTEM_PROMPT and it printed "the chat app carries this repo's
-  # assistant prompt" — while install_webui.sh, on that same box, warns that the
-  # chat was started WITHOUT our prompt.
-  #
-  # Keyed on the success line, because that is the thing being made honest. A
-  # file that only reports drift when it finds it needs no guard: webui.sh
-  # warns per drifted key and never gives the prompt a clean bill of health, so
-  # its silence on a jq-less box is silence, not a false claim.
-  #
-  # Comments stripped before looking for the guard. Caught in mutation: the
-  # first version of this passed while selftest.sh was reverted to its own
-  # live-value probe, because the comment explaining the fix says the helper's
-  # name. Fourth time in this file.
-  local f code claimants=0
+  # Driven. The greps this replaces asked that each file claiming the prompt
+  # also contains the string webui_prompt_comparable and the phrase "skipped,
+  # not passed". Both survive the guard sitting in a branch nothing reaches —
+  # and this gate has already been fooled once by its own explanation, when the
+  # comment describing the fix satisfied the grep while selftest.sh was
+  # reverted to a hand-rolled probe. So both reporters are now RUN, on a
+  # machine where the comparison cannot be made and on one where it can.
+  local out bad=0
+  # 'lca check'. webui_drift is stubbed empty in both arms so the run reaches
+  # the success line at all — the drift branch above it says nothing about the
+  # prompt either way.
+  out="$(check_report '' running '' 'webui_drift() { return 0; }
+  webui_prompt_comparable() { return 1; }')"
+  grep -q 'system prompt' <<<"$(grep -E '^\[ ?ok ?\].*matches \.env' <<<"${out}" || true)" && {
+    printf "'lca check' could not compare the assistant prompt and passed it anyway:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf "'lca check' said nothing about the comparison it could not make:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  # ...and where it CAN compare, it says so, or "does not claim the prompt" is
+  # satisfied by a line that never mentions it.
+  out="$(check_report '' running '' 'webui_drift() { return 0; }
+  webui_prompt_comparable() { return 0; }')"
+  grep -qE '^\[ ?ok ?\].*matches \.env.*system prompt' <<<"${out}" || {
+    printf "'lca check' can compare the assistant prompt and does not say it did:\n%s\n" \
+      "$(grep -E 'matches \.env|skipped' <<<"${out}")" >&2
+    bad=1
+  }
+  # 'lca test' — the same claim, from the command whose whole output is a
+  # verdict on whether the stack works.
+  out="$(selftest_run 'webui_prompt_comparable() { return 1; }
+  webui_drift() { return 0; }')"
+  grep -q "carries this repo's assistant prompt" <<<"${out}" && {
+    printf "'lca test' could not compare the assistant prompt and passed it anyway:\n%s\n" \
+      "$(grep -i prompt <<<"${out}")" >&2
+    bad=1
+  }
+  grep -q 'skipped, not passed' <<<"${out}" || {
+    printf "'lca test' said nothing about the comparison it could not make:\n%s\n" \
+      "$(grep -i prompt <<<"${out}")" >&2
+    bad=1
+  }
+  # A THIRD claimant would be undriven, and this gate would not know. The
+  # enumeration is text — which files make the claim — and it exists to fail
+  # loudly when the answer changes rather than to stand in for the two runs
+  # above.
+  local f claimants=()
   for f in "${REPO}"/*.sh "${REPO}"/scripts/*.sh; do
     [[ "${f}" == "${REPO}/scripts/lib.sh" ]] && continue
-    grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" || continue
-    claimants=$(( claimants + 1 ))
-    code="$(sed 's/#.*//' "${f}")"
-    grep -q 'webui_prompt_comparable' <<<"${code}" || {
-      printf '%s claims the prompt matched without checking it could compare it\n' \
-        "${f##*/}" >&2
-      return 1; }
-    grep -q 'skipped, not passed' "${f}" || {
-      printf '%s does not say the prompt check was skipped rather than passed\n' \
-        "${f##*/}" >&2
-      return 1; }
+    grep -qE '^[[:space:]]*(p_pass|ok)[[:space:]]+"[^"]*prompt' "${f}" && claimants+=("${f##*/}")
   done
-  # A file list that matched nothing passes silently. The claim this guards is
-  # made by check-system.sh and selftest.sh; if neither still makes it,
-  # somebody reworded the success line and this stopped watching.
-  (( claimants >= 2 )) || {
-    printf 'only %s file(s) still claim the prompt matched — this stopped watching them\n' \
-      "${claimants}" >&2
-    return 1
+  [[ "${claimants[*]}" == "check-system.sh selftest.sh" ]] || {
+    printf 'the files claiming the assistant prompt matched are now: %s — the two arms above drive check-system.sh and selftest.sh, so any other one is a claim nothing checks\n' \
+      "${claimants[*]:-none at all}" >&2
+    bad=1
   }
+  return "${bad}"
 }
 prompt_comparable_needs_both_sides() {
   local out
@@ -16965,21 +20222,6 @@ prompt_comparable_needs_both_sides() {
                   webui_container_env() { return 1; }    # container unreadable
                   webui_prompt_comparable && echo yes || echo no' _ "${REPO}/scripts/lib.sh")"
   [[ "${out}" == no ]] || { echo "webui_prompt_comparable said yes with the container unreadable" >&2; return 1; }
-}
-apply_survives_a_failed_rebuild() {
-  # A bare install_webui.sh under errexit aborted 'lca apply' before the guard
-  # was reconciled and before any summary was printed.
-  awk '/^apply_webui\(\) \{/ { inb = 1 }
-       inb && /^\}/ { exit }
-       inb && /^[[:space:]]*#/ { next }
-       # Anchored to a bare INVOCATION line. Matching "install_webui.sh\"$"
-       # anywhere also matched the info() a few lines up that merely names the
-       # script — the message about the thing, counted as the thing.
-       inb && /^[[:space:]]*"\$\{SCRIPT_DIR\}\/install_webui\.sh"$/ { bare = 1 }
-       inb && /if ! "\$\{SCRIPT_DIR\}\/install_webui\.sh"/ { guarded = 1 }
-       END { exit !(guarded && !bare) }' "${REPO}/scripts/apply.sh" || {
-    echo 'apply.sh runs install_webui.sh unguarded, so a failed rebuild aborts the apply' >&2
-    return 1; }
 }
 # Driven. The grep this replaced could only see that update.sh still said
 # '-t 0' somewhere; the claim is a runtime one — that a failed backup stops an
@@ -17079,7 +20321,6 @@ check "check-system restores set +e after sourcing tune.sh" errexit_survives_sou
 check "the prompt check is reported as skipped, not passed"  prompt_check_is_not_claimed_when_skipped
 check "webui_prompt_comparable needs jq AND a readable container" \
   prompt_comparable_needs_both_sides
-check "'lca apply' carries on when the chat app rebuild fails" apply_survives_a_failed_rebuild
 # ...and so must the FIRST applier, which takes all three of the others down
 # with it. apply_ollama ran render_ollama_dropin and restart_ollama bare, and
 # it could not have been fixed the way apply_webui was: both of those die(),
@@ -17407,24 +20648,97 @@ echo "# 'already tuned' has to mean the model is on disk, not named in .env"
 # could not work, and the machine was left with .env naming a model that is not
 # there, which is what 'lca ask' and 'lca speed' then die on.
 #
-# Structural: reproducing it needs a real Ollama, a real pull and a real
-# interruption. The shape is the fix — both decisions have to consult the disk.
+# This gate carried a written excuse — "reproducing it needs a real Ollama, a
+# real pull and a real interruption" — and it needs none of them. What decides
+# the branch is model_present, which lives in lib.sh; the sandbox's copy of
+# lib.sh can answer either way, and a stand-in ollama records the pull that
+# follows. The interruption is not needed at all: its only product is a .env
+# that names a model which is not on disk, and that state can simply be
+# written.
+TUNE_REAL_SB="${SANDBOX}/tunereal"
+tune_run_with_model() {   # present|missing -> what a real 'lca tune' printed
+  local sb="${TUNE_REAL_SB}" want=0
+  [[ "$1" == "missing" ]] && want=1
+  if [[ ! -e "${sb}/scripts/tune.sh" ]]; then
+    mkdir -p "${sb}/scripts"
+    cp "${REPO}/scripts/tune.sh" "${sb}/scripts/"
+    cp "${REPO}/scripts/lib.sh"  "${sb}/scripts/lib.sh.orig"
+    cp "${REPO}/.env.example"    "${sb}/.env.example"
+    make_stub_dir "${sb}/stub"
+    # Records what it was asked to do and agrees to all of it. A real pull is
+    # the one thing this must not do.
+    # shellcheck disable=SC2016  # the stub's own variables, read when it runs
+    { printf '#!/bin/sh\n'; printf 'printf "OLLAMA %%s\\\\n" "$*" >> "${TUNE_LOG}"\n'; printf 'exit 0\n'; } \
+      > "${sb}/stub/ollama"
+    printf '#!/bin/sh\nexit 1\n' > "${sb}/stub/systemctl"
+    chmod +x "${sb}/stub/ollama" "${sb}/stub/systemctl"
+  fi
+  cp "${sb}/scripts/lib.sh.orig" "${sb}/scripts/lib.sh"
+  # Appended, because tune.sh sources lib.sh and there is no seam after that.
+  # Everything here except model_present is about keeping a real run from
+  # touching this machine: as_root records instead of acting, and the two waits
+  # answer at once.
+  # shellcheck disable=SC2016  # the stubs' own variables, read when THEY run
+  { printf '\nmodel_present() { return %s; }\n' "${want}"
+    printf 'as_root() { printf "AS_ROOT %%s\\n" "$*" >> "${TUNE_LOG}"; return 0; }\n'
+    printf 'systemd_available() { return 1; }\nwait_for_ollama() { return 0; }\n'
+    printf 'restart_ollama() { return 0; }\nensure_agent_model() { return 0; }\n'
+  } >> "${sb}/scripts/lib.sh"
+  # The ladder decides from THIS machine's RAM, so .env is seeded with whatever
+  # it chooses here rather than with a guess that holds on one box. A --dry-run
+  # to ask; the real run to assert on.
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=false\nOLLAMA_KEEP_ALIVE=30m\n' > "${sb}/.env"
+  local first m c
+  first="$( cd "${sb}" && timeout 60 bash scripts/tune.sh --dry-run 2>&1 )"
+  m="$(sed -n 's/.*Ladder decision: model=\([^ ]*\).*/\1/p' <<<"${first}" | head -1)"
+  c="$(sed -n 's/.*context=\([0-9]*\).*/\1/p' <<<"${first}" | head -1)"
+  [[ -n "${m}" && -n "${c}" ]] || {
+    printf 'could not read the ladder decision: %s\n' "${first}" >&2
+    return 1
+  }
+  # .env now says exactly what the ladder wants. Nothing about it is wrong
+  # EXCEPT, in the 'missing' case, that the model is not on the disk — which is
+  # precisely the state the two early exits leave behind.
+  printf 'AUTO_TUNE=true\nENABLE_AGENT=false\nMODEL_NAME=%s\nOLLAMA_CONTEXT_LENGTH=%s\nOLLAMA_KEEP_ALIVE=-1\n' \
+    "${m}" "${c}" > "${sb}/.env"
+  : > "${sb}/log"
+  ( cd "${sb}" && PATH="$(stub_path "${sb}/stub")" TUNE_LOG="${sb}/log" \
+      timeout 90 bash scripts/tune.sh 2>&1 ) || true
+}
+tune_calls() { cat "${TUNE_REAL_SB}/log" 2>/dev/null || true; }
 tune_checks_the_model_is_downloaded() {
-  # 1. the fast path
-  awk '/^[[:space:]]*#/ { next }
-       /TUNE_MODEL.*==.*MODEL_NAME.*TUNE_CTX.*==.*OLLAMA_CONTEXT_LENGTH/ { fast = NR }
-       fast && NR >= fast && NR <= fast + 2 && /model_present/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/tune.sh" || {
-    echo 'tune.sh takes the "already tuned" fast path without checking the model is downloaded' >&2
-    return 1
+  local out bad=0
+  # The regression: .env matches the ladder exactly, and the model is not
+  # there. A fast path that compares .env against the ladder and nothing else
+  # calls this machine tuned.
+  out="$(tune_run_with_model missing)" || return 1
+  grep -q 'Already tuned for this machine' <<<"${out}" && {
+    printf 'a machine whose model is not downloaded was told it is already tuned:\n%s\n' "${out}" >&2
+    bad=1
   }
-  # 2. the pull decision
-  awk '/^[[:space:]]*#/ { next }
-       /TUNE_MODEL.*!=.*MODEL_NAME.*\|\|.*model_present/ { found = 1 }
-       END { exit !found }' "${REPO}/scripts/tune.sh" || {
-    echo 'tune.sh only fetches when the model NAME changed, so a missing model is never pulled' >&2
-    return 1
+  grep -q 'is not downloaded' <<<"${out}" || {
+    printf 'the missing model was not named as missing:\n%s\n' "${out}" >&2
+    bad=1
   }
+  # ...and it actually fetched it, which is the half the fast path skipped.
+  grep -q 'OLLAMA pull' <<<"$(tune_calls)" || {
+    printf 'tune said the model was missing and never pulled it:\n%s\n' "$(tune_calls)" >&2
+    bad=1
+  }
+  # The complement, and the reason the above is not satisfied by a tune that
+  # pulls on every run: with the model on disk and .env already right, it must
+  # say so and fetch nothing. A 9 GB download on every boot is the opposite
+  # failure.
+  out="$(tune_run_with_model present)" || return 1
+  grep -q 'Already tuned for this machine' <<<"${out}" || {
+    printf 'a fully tuned machine is no longer reported as one:\n%s\n' "${out}" >&2
+    bad=1
+  }
+  grep -q 'OLLAMA pull' <<<"$(tune_calls)" && {
+    printf 'a machine that needed nothing pulled a model anyway:\n%s\n' "$(tune_calls)" >&2
+    bad=1
+  }
+  return "${bad}"
 }
 check "tune.sh will not call a machine tuned when the model is missing" \
   tune_checks_the_model_is_downloaded
@@ -18051,39 +21365,78 @@ check "a backup is readable only by its owner, directory and archive alike" \
   backup_is_not_world_readable
 
 echo "# a backup must not leave the chat app frozen for the next one to inherit"
-# backup.sh pauses the WebUI container so the SQLite snapshot is consistent,
-# with an EXIT trap to guarantee the unpause. A signal the trap cannot catch
-# leaves it paused — and a paused container still reports State.Running=true,
-# while 'docker pause' fails on it. The old order asked Running first, so that
-# failure took the "could not pause" branch: no trap, 'paused' left false, no
-# unpause at the end. Every later backup then archived happily and left the
-# chat app frozen and unreachable, with the warning saying it was "archiving
-# live" — the opposite of what was happening.
+# Driven. The awk this replaces asked that State.Paused appears above
+# State.Running in the file. That is the shape which produces the behaviour,
+# and the gate said so honestly — "the behaviour needs a docker daemon and a
+# container that has been killed mid-pause". A stand-in docker supplies both.
 #
-# Structural, because the behaviour needs a docker daemon and a container that
-# has been killed mid-pause. The shape is what produces it: Paused has to be
-# asked before Running, or the already-paused case cannot be seen at all.
+# What is at stake: a paused container still reports Running=true, and
+# 'docker pause' fails on it. Asked in the wrong order, that failure took the
+# "could not pause" branch — no trap, paused left false, no unpause at the end
+# — so every later backup archived happily and left the chat app frozen and
+# unreachable, while the warning said it was "archiving live".
+# shellcheck disable=SC2016  # the shim is code for the probe's shell, not a string to expand here
+BACKUP_DOCKER_SHIM='have() { case "$1" in ollama) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+docker_daemon_reachable() { return 0; }
+docker() {
+  case "$*" in
+    *"{{.State.Paused}}"*)  printf "%s\n" "${WAS_PAUSED}" ;;
+    *"{{.State.Running}}"*) printf "true\n" ;;
+    *"volume inspect"*)     return 0 ;;
+    *"image inspect"*)      return 0 ;;
+    *)                      printf "DOCKER %s\n" "$*" >&2 ;;
+  esac
+}'
 backup_checks_paused_before_running() {
-  # Comments stripped first. The comment above this very check explains the bug
-  # by naming State.Running, and the first version of this scanner counted that
-  # sentence as the code — failing on the fixed file. Same trap as every other
-  # whole-file grep in this suite: the explanation matches the pattern.
-  awk '/^[[:space:]]*#/ { next }
-       /State.Paused/   { if (!paused)  paused  = NR }
-       /State.Running/  { if (!running) running = NR }
-       END { exit !(paused && running && paused < running) }' "${REPO}/backup.sh" || {
-    printf 'backup.sh asks State.Running before State.Paused, so a container left paused reads as running\n' >&2
-    return 1
+  local out bad=0
+  # 1. Already paused — the state a signal the EXIT trap cannot catch leaves.
+  out="$(backup_run_in waspaused "WAS_PAUSED=true
+${BACKUP_DOCKER_SHIM}")"
+  # Read off the ESCALATION LOG, not the output. The unpause runs from the EXIT
+  # trap as 'as_root docker unpause ... >/dev/null 2>&1 || true', so it reaches
+  # no stream at all — a first version asserted on stdout and failed against
+  # code doing exactly the right thing.
+  grep -q 'docker unpause' <<<"$(backup_as_root_calls waspaused)" || {
+    printf 'a container that was already paused was left paused — the chat app stays frozen and unreachable, and every later backup does it again:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
-  # ...and finding it paused must take responsibility for resuming it.
-  awk '/State.Paused/ { inb = 1 }
-       inb && /paused=true/ { found = 1 }
-       inb && /elif/ { exit }
-       END { exit !found }' "${REPO}/backup.sh" || {
-    printf 'backup.sh sees an already-paused container but does not adopt the unpause\n' >&2
-    return 1
+  grep -qi 'already paused' <<<"${out}" || {
+    printf 'the adoption was silent, so nobody learns an earlier backup was killed mid-pause:\n%s\n' \
+      "${out}" >&2
+    bad=1
   }
+  grep -qi 'archiving live' <<<"${out}" && {
+    printf 'a paused container was reported as being archived live, which is the opposite of what was happening:\n%s\n' \
+      "${out}" >&2
+    bad=1
+  }
+  # 2. Running and not paused — the ordinary path, which must still pause and
+  # unpause. Without this, "never says archiving live" would be satisfied by a
+  # backup that never touched the container at all.
+  out="$(backup_run_in wasrunning "WAS_PAUSED=false
+${BACKUP_DOCKER_SHIM}")"
+  local calls; calls="$(backup_as_root_calls wasrunning)"
+  grep -q 'docker pause' <<<"${calls}" || {
+    printf 'a running container was archived without being paused, so the SQLite snapshot is not consistent. What it escalated for:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  grep -q 'docker unpause' <<<"${calls}" || {
+    printf 'the chat app was paused for the backup and never resumed. What it escalated for:\n%s\n' \
+      "${calls}" >&2
+    bad=1
+  }
+  # 3. Non-vacuity: the stand-in docker really was asked. Everything above is
+  # about which branch ran, and a run that reached no branch would look calm.
+  grep -q 'container inspect' "${SANDBOX}/backup-waspaused/.as-root.log" 2>/dev/null || {
+    echo 'the backup never inspected the container at all — this measured nothing' >&2
+    bad=1
+  }
+  return "${bad}"
 }
+check "a chat app left paused is adopted and resumed, not archived live" \
+  backup_checks_paused_before_running
 echo "# an interrupted backup must not leave a partial archive behind"
 # A failed archive must not be left where restore.sh would read it as a backup,
 # and a COMPLETE one must survive the same exit path. Driven both ways: the old
@@ -18126,9 +21479,6 @@ partial_cleanup_behaves() {
   rm -f "${f}"
 }
 check "...and it deletes only while the marker is set" partial_cleanup_behaves
-
-check "backup.sh notices a container left paused by an earlier run" \
-  backup_checks_paused_before_running
 
 echo "# the volume restore must know whether it already emptied the volume"
 # restore.sh replaces the WebUI volume by clearing it and unpacking over it.
@@ -18208,18 +21558,6 @@ unpack_failure_is_distinguishable() {
 }
 check "an unpack that fails after clearing exits 5, not 3" \
   unpack_failure_is_distinguishable
-# ...and restore.sh must actually tell those apart rather than share a branch.
-restore_distinguishes_the_stages() {
-  grep -q 'existing WebUI data was NOT wiped' "${REPO}/restore.sh" || return 1
-  grep -q 'FAILED PART-WAY' "${REPO}/restore.sh" || return 1
-  # the "not wiped" sentence must not live in the same arm as the wiped case
-  ! awk '/^ *5\)/ { inarm = 1; next }
-         inarm && /^ *;;/ { inarm = 0 }
-         inarm && /NOT wiped/ { found = 1 }
-         END { exit !found }' "${REPO}/restore.sh"
-}
-check "restore.sh reports 'not wiped' and 'wiped' as different outcomes" \
-  restore_distinguishes_the_stages
 
 # ...and an option it does not take must be refused as one, not read as a
 # filename. It fell through as one, and — after the step banner, so it looked
@@ -18262,63 +21600,6 @@ check "...and still reports a backup that really is missing" \
   restore_still_reports_a_missing_file
 
 echo "# an answer that never arrived is not an answer"
-# 'lca ask' streams with 'curl -sS' — no '-f' — so an HTTP error arrives as a
-# body with a zero exit status. Measured against a model that is not installed:
-#
-#   $ curl -sS .../api/generate -d '{"model":"no-such-model:1b",...}'
-#   {"error":"model 'no-such-model:1b' not found"}      (curl rc=0)
-#
-# piped through jq '.response // empty' that yields nothing, the pipeline
-# exits 0, and the only check afterwards was on the pipeline's status. So the
-# command printed nothing, warned about nothing and exited 0, throwing away the
-# one sentence that named the problem. Seen live as well: a cold 'lca ask -c'
-# printed "continuing from your last question", no answer, status 0.
-#
-# Driven end to end against ask.sh with curl stubbed, because the shape that
-# matters is the whole pipeline — capture, extraction and the check after it.
-# One stub for all three cases. A quoted heredoc, so the '$@' and '$a' inside
-# it are the generated script's, not this one's — and the body it answers with
-# comes through the environment rather than being interpolated in.
-#
-# 'ollama' is stubbed as well as curl, and that is not belt-and-braces: ask.sh
-# checks model_present (which runs 'ollama show') before it generates anything,
-# and CI's unit job has neither the binary nor the model. Without this the
-# three gates below passed here and failed there with
-#
-#   [FAIL] Model 'qwen2.5-coder:7b' is not downloaded.
-#
-# which is ask.sh being right and the test being environment-dependent — the
-# exact class this file carries systemic guards for, introduced by me.
-write_ask_stubs() {  # DIR
-  make_stub_dir "$1"
-  cat > "$1/curl" <<'STUB'
-#!/bin/sh
-# With LCA_CAPTURE set, keep the request body: some gates need to see the
-# prompt that would have reached the model, not just the reply.
-if [ -n "${LCA_CAPTURE:-}" ]; then
-  prev=""
-  for a in "$@"; do
-    [ "$prev" = "-d" ] && printf '%s' "$a" > "${LCA_CAPTURE}"
-    prev="$a"
-  done
-fi
-for a in "$@"; do
-  case "$a" in
-    */api/generate) printf '%s' "${LCA_FAKE_GENERATE}"; exit 0 ;;
-  esac
-done
-printf '%s' '{"version":"0.32.5"}'
-STUB
-  cat > "$1/ollama" <<'STUB'
-#!/bin/sh
-# Only what ask.sh asks: 'ollama show MODEL' decides model_present.
-case "${1:-}" in
-  show) exit 0 ;;
-  *)    exit 0 ;;
-esac
-STUB
-  chmod +x "$1/curl" "$1/ollama"
-}
 ask_with_stubbed_curl() {  # generate-body -> "rc=N" then stderr
   local sb="${SANDBOX}/askstub" rc=0 out
   rm -rf "${sb}"; write_ask_stubs "${sb}"
@@ -20046,6 +23327,158 @@ else
   echo "  SKIPPED - driving the typed surface needs root, useradd and runuser to make a throwaway account; it was NOT checked on this run"
 fi
 
+# Two places decide every default: .env.example ships one, and lib.sh resolves
+# one with ':-' for the machine that has no .env yet. Nothing made them agree.
+# A setting decided in two places that disagree is worse than one left as a
+# warning — the reader edits the file, the code uses the other value, and both
+# halves look right on their own.
+#
+# Driven, exhaustively, from .env.example's own keys: load lib.sh with NO .env
+# at all and compare what it resolves against what ships.
+shipped_defaults_disagreeing() {   # -> KEY ships=X resolves=Y, for each that differs
+  local sb="${SANDBOX}/defaults" k v got
+  rm -rf "${sb}"; mkdir -p "${sb}/scripts" "${sb}/config"
+  cp "${REPO}/scripts/lib.sh"        "${sb}/scripts/lib.sh"
+  cp "${REPO}/.env.example"          "${sb}/.env.example"
+  cp "${REPO}/config/CONVENTIONS.md" "${sb}/config/CONVENTIONS.md"
+  while IFS='=' read -r k v; do
+    [[ -n "${k}" ]] || continue
+    # LCA_ENV_READONLY, so load_env creates nothing: the question is what this
+    # resolves to on a machine that has not been set up yet.
+    # shellcheck disable=SC2016  # code for the probe's shell
+    got="$(cd "${sb}" && LCA_ENV_READONLY=true bash -c '
+        source "$1/scripts/lib.sh" >/dev/null 2>&1
+        load_env >/dev/null 2>&1
+        printf "%s" "${!2-<unset>}"' _ "${sb}" "${k}" 2>/dev/null)"
+    v="${v%\"}"; v="${v#\"}"
+    [[ "${got}" == "${v}" ]] || printf '%s ships=%s resolves=%s\n' "${k}" "${v:-<empty>}" "${got:-<empty>}"
+  done < <(grep -E '^[A-Z_]+=' "${REPO}/.env.example")
+}
+shipped_defaults_are_what_lib_resolves() {
+  local out n
+  out="$(shipped_defaults_disagreeing)"
+  [[ -z "${out}" ]] || {
+    printf 'these settings are decided in two places and the two disagree — the reader edits .env.example and the code uses something else:\n%s\n' \
+      "${out}" >&2
+    return 1
+  }
+  # Non-vacuity: a key list that had gone empty would agree about nothing.
+  n="$(grep -cE '^[A-Z_]+=' "${REPO}/.env.example")"
+  (( n >= 20 )) || {
+    printf 'only %s settings read out of .env.example — this comparison has stopped watching\n' "${n}" >&2
+    return 1
+  }
+}
+check "every default is the same in both places that decide it" \
+  shipped_defaults_are_what_lib_resolves
+
+# ...and keep-alive is decided in a THIRD place, which is the one that writes.
+# keepalive_plan chooses it from this box's RAM and whether the agent tier is
+# on; 'lca tune' persists that answer to .env. So the value .env.example ships
+# has to be the one keepalive_plan would choose for the configuration
+# .env.example ships — otherwise the stock default is a value the first boot
+# silently rewrites, and the file the reader was told to edit disagrees with
+# the machine within a minute of the install finishing.
+shipped_keep_alive_is_the_one_tune_would_choose() {
+  local agent want ships
+  agent="$(example_value ENABLE_AGENT)"
+  ships="$(example_value OLLAMA_KEEP_ALIVE)"
+  [[ -n "${ships}" ]] || { echo '.env.example ships no OLLAMA_KEEP_ALIVE' >&2; return 1; }
+  # RAM is not the deciding factor with the agent off, and with it on the
+  # answer only changes below the headroom floor — so any ordinary size settles
+  # it, and 8 GiB is the droplet this project is written for.
+  want="$(keepalive_plan 8 "${agent}" "$(example_value MODEL_NAME)")"
+  want="${want%%|*}"
+  [[ "${ships}" == "${want}" ]] || {
+    printf '.env.example ships OLLAMA_KEEP_ALIVE=%s, and keepalive_plan chooses %s for the configuration it ships (ENABLE_AGENT=%s) — the first tune would overwrite the shipped default\n' \
+      "${ships}" "${want}" "${agent}" >&2
+    return 1
+  }
+}
+check "...and the shipped keep-alive is the one 'lca tune' would choose" \
+  shipped_keep_alive_is_the_one_tune_would_choose
+
+# ...and the other direction, which nothing asked at all: a setting lib.sh
+# HONOURS that .env.example never mentions. The code reads it, the file the
+# reader is told to edit does not have it, and nothing watches it — so setting
+# it is a decision made in one place and recorded in none.
+#
+# WEBUI_IMAGE is the one that made this worth a rule. lib.sh resolves it, four
+# scripts use it, its own comment anticipates somebody pinning the tag — and
+# webui_drift has no key for it. Measured, with a container running v0.3.0 and
+# .env asking for v9.9.9: drift reported []. 'lca apply' answered "already
+# matches .env" and the chat app ran the old image for ever. That is the
+# fourth-setting-of-that-kind shape aider_pin_is_watched already records, one
+# setting further on.
+#
+# Since fixed: webui_drift compares it. Whether .Config.Image reads back as the
+# tag that was passed or as a digest decided whether 'lca apply' re-creates the
+# container once or on every run, and a real daemon settled it — the tag — so
+# a stock install compares equal. It is still not shipped in .env.example (the
+# lib.sh default IS the pin), so it stays listed below. What this gate does is
+# stop the gap being an accident: every
+# honoured setting is either shipped, or listed here as internal with its
+# reason.
+# SOURCE-GREP: which names lib.sh resolves a default for is a property of
+# lib.sh's text, and which names .env.example ships is a property of that
+# file's. There is no behaviour between them to drive — the point is that the
+# two lists agree about what the reader can set.
+INTERNAL_SETTINGS=(
+  LCA_LIB_LOADED            # a source guard, not a setting
+  LCA_MAY_PROMPT            # the caller's declaration, set in code
+  LCA_ENV_READONLY          # set by load_env_readonly for one call
+  LCA_LOG                   # deploy/do-user-data.sh names its own log
+  LCA_INSPECT_TIMEOUT       # the login banner's short leash on one probe
+  LCA_DOCKER_PROBE_TIMEOUT  # the bound every read-only docker question runs under
+  LCA_READER_PROBE_TIMEOUT  # ...and the one run_reader's "can this be read" gets
+  MODEL_PROBE_TIMEOUT       # how long a probe waits, not what it probes
+  WEBUI_START_TIMEOUT       # likewise
+  OLLAMA_DROPIN             # a path this project owns
+  OLLAMA_DROPIN_DIR         # likewise
+  OLLAMA_SYSTEM_MODELS_DIR  # likewise
+  OLLAMA_MODELS             # Ollama's own variable, honoured where it is set
+  AGENT_CONVERSATION_FILE   # a path under the agent workspace
+  CONVENTIONS_AIDER         # shipped as a commented example, with its sibling
+  CONVENTIONS_AGENT         # likewise
+  WEBUI_IMAGE               # honoured and unshipped; webui_drift watches it — see above
+)
+honoured_settings() {   # -> every user-shaped name lib.sh resolves a default for
+  sed 's/#.*//' "${REPO}/scripts/lib.sh" \
+    | grep -oE '\$\{(LCA|OLLAMA|WEBUI|AGENT|AIDER|MODEL|ENABLE|SKIP|BACKUP|AUTO|CONVENTIONS|TUNE|VENV)_[A-Z_]+:[-=]' \
+    | sed 's/^\${//; s/:[-=]$//' | sort -u
+}
+every_honoured_setting_is_accounted_for() {
+  local k e skip bad=0 seen=0
+  while read -r k; do
+    [[ -n "${k}" ]] || continue
+    seen=$(( seen + 1 ))
+    grep -qE "^${k}=" "${REPO}/.env.example" && continue
+    skip=false
+    for e in "${INTERNAL_SETTINGS[@]}"; do
+      [[ "${k}" == "${e}" ]] && skip=true
+    done
+    [[ "${skip}" == "true" ]] && continue
+    printf '%s is honoured by lib.sh, is not in .env.example, and is not listed as internal — setting it is a decision recorded nowhere\n' \
+      "${k}" >&2
+    bad=1
+  done < <(honoured_settings)
+  (( seen >= 20 )) || {
+    printf 'only %s honoured settings found in lib.sh — this has stopped watching\n' "${seen}" >&2
+    bad=1
+  }
+  # ...and the exemption list may not name something that IS shipped: a stale
+  # entry there is how a real setting stops being checked.
+  for e in "${INTERNAL_SETTINGS[@]}"; do
+    grep -qE "^${e}=" "${REPO}/.env.example" && {
+      printf '%s is listed as internal but .env.example ships it\n' "${e}" >&2
+      bad=1
+    }
+  done
+  return "${bad}"
+}
+check "every setting the code honours is either shipped or declared internal" \
+  every_honoured_setting_is_accounted_for
+
 echo "# the survivor list, driven — what a mutation sweep found nothing was holding"
 # Every function below survived being stubbed to 'return 0': the whole suite
 # still passed. In each case something LOOKED like coverage. For some it was a
@@ -21096,12 +24529,175 @@ check "every census row names a real gate and says what it does" \
 group_a_debt_has_not_grown() {
   local n
   n="$(grep -v '^#' "${CENSUS}" | awk -F'\t' '$1 == "A"' | grep -c .)"
-  (( n <= 114 )) || {
-    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 39 have since been driven, and the only honest direction is down\n' "${n}" >&2
+  (( n <= 74 )) || {
+    printf 'the source-grep debt has grown to %s Group A gates — 153 were measured and 79 have since been driven, and the only honest direction is down\n' "${n}" >&2
     return 1
   }
 }
 check "...and the measured debt never gets bigger" group_a_debt_has_not_grown
+# ...and the census header must count its own rows.
+#
+# Found by re-reading my own bookkeeping after a status check. The header said
+# "A rows now 87 / still worth driving 54" while the file held 85 A rows: a
+# commit lowered the ratchet, which IS driven, and left the prose beside it,
+# which was not. That is exactly the failure this whole file exists to remove —
+# a statement about the work that nothing checks — committed in the ledger that
+# records the removing of it.
+#
+# SOURCE-GREP: the subject IS two numbers written in this file's own header,
+# checked against the rows underneath them. There is no behaviour to drive.
+census_header_counts_its_own_rows() {
+  local head_a head_driving narrow actual bad=0
+  head_a="$(sed -n 's/^#   A rows now  *\([0-9]\+\) .*/\1/p' "${CENSUS}" | head -1)"
+  head_driving="$(sed -n 's/^#   still worth driving  *\([0-9]\+\).*/\1/p' "${CENSUS}" | head -1)"
+  narrow="$(sed -n 's/^#   correctly narrow  *\([0-9]\+\).*/\1/p' "${CENSUS}" | head -1)"
+  actual="$(grep -c '^A' "${CENSUS}")"
+  [[ -n "${head_a}" && -n "${head_driving}" && -n "${narrow}" ]] || {
+    echo 'the census header no longer states its own progress numbers — this gate stopped watching' >&2
+    return 1
+  }
+  (( head_a == actual )) || {
+    printf 'the census header says %s A rows and the file holds %s — the prose beside the ratchet was not updated with it\n' \
+      "${head_a}" "${actual}" >&2
+    bad=1
+  }
+  (( head_driving + narrow == head_a )) || {
+    printf 'the header splits %s A rows into %s worth driving and %s correctly narrow, which is %s\n' \
+      "${head_a}" "${head_driving}" "${narrow}" "$(( head_driving + narrow ))" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "the census header's numbers are the ones under it" \
+  census_header_counts_its_own_rows
+# ...and the order published in that header has to cover the rows it orders.
+#
+# The order is the reason the tranche was worth doing, and until this gate it
+# was a list in a comment: a statement about the work with nothing driving it,
+# in the file that exists to remove those. A row that is quietly dropped from
+# the order is a row nobody will ever reach, and a name in the order that is no
+# longer an A row makes the tiers look fuller than they are.
+#
+# SOURCE-GREP: the subject IS a list in this file's own header, checked against
+# the rows underneath it. There is no behaviour to drive.
+census_order_covers_every_a_row() {
+  local ordered rows dupes only_order only_rows
+  # The order's entries are the only five-space-indented bare names in the
+  # header; the tier headings and prose are all wider or contain spaces.
+  ordered="$(sed -n 's/^#     \([a-z_][a-z0-9_]*\)$/\1/p' "${CENSUS}" | sort)"
+  rows="$(grep '^A'$'\t' "${CENSUS}" | cut -f2 | sort)"
+  [[ -n "${ordered}" ]] || {
+    echo 'the census header no longer publishes an order — this gate stopped watching' >&2
+    return 1; }
+  dupes="$(uniq -d <<<"${ordered}")"
+  [[ -z "${dupes}" ]] || {
+    printf 'these rows are in the published order more than once:\n%s\n' "${dupes}" >&2
+    return 1; }
+  only_order="$(comm -23 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  only_rows="$(comm -13 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  [[ -z "${only_order}" && -z "${only_rows}" ]] || {
+    [[ -z "${only_order}" ]] || printf 'the published order names rows that are no longer A:\n%s\n' "${only_order}" >&2
+    [[ -z "${only_rows}" ]] || printf 'these A rows are in no tier, so nobody will ever reach them:\n%s\n' "${only_rows}" >&2
+    return 1; }
+}
+check "...and the order published in the header covers every A row exactly once" \
+  census_order_covers_every_a_row
+# ...and the same for what the COMMIT MESSAGE says about them.
+#
+# The other half of the same audit. Every message in this branch's history that
+# moves census rows states the transition — "Census: A 102 -> 100, FP 79 -> 81".
+# Checked against the diffs afterwards, twenty-two of twenty-four were right and
+# one commit's two were not: it claimed A 112 -> 109 where the parent held 113,
+# because it carried a fourth conversion from a previous session's working tree
+# that the message did not count. Nobody would ever have noticed; the number in
+# the file was right and only the story about it was wrong.
+#
+# HEAD's message only, deliberately. A gate over all of history cannot be
+# satisfied without rewriting it, and a gate nobody can satisfy gets deleted.
+# This one fails before a wrong claim is pushed — the pre-push hook runs this
+# suite — and an amend fixes it.
+#
+# SOURCE-GREP: the subject IS the text of a commit message, compared with the
+# diff it describes. There is no behaviour to drive.
+census_counts_in() {   # REV FILE LABEL -> how many rows of that label it had
+  git -C "${REPO}" show "$1:$2" 2>/dev/null | grep -c "^$3	" || true
+}
+# The judging half, separated from HEAD on purpose: a gate whose only input is
+# the commit that happens to be checked out cannot be shown to fail, and this
+# suite's whole argument is that a gate nobody has seen fail is decoration.
+census_claims_in_message() {   # REV MESSAGE -> 1 if the message miscounts REV's diff
+  local rev="$1" msg="$2" label from to before after bad=0 blob
+  # A message that QUOTES a wrong claim is describing one, not making one —
+  # the commit that added this gate quotes the miscount it found, and was
+  # rejected by its own gate for saying so. Double quotes are how a message
+  # quotes; this repo's convention writes a real transition bare, on a
+  # "Census:" line. Blobbed first because the quotation wraps over a line
+  # break, and a line-at-a-time reader sees only an unbalanced quote. It is the
+  # same deliberate escape hatch the job-count sweep has for backticks, with
+  # the same mitigation: the controls below still require an unquoted claim to
+  # be caught.
+  blob="$(tr '\n' ' ' <<<"${msg}" | sed 's/"[^"]*"//g')"
+  while read -r label from to; do
+    [[ -n "${label}" ]] || continue
+    before="$(census_counts_in "${rev}^" tests/source-grep-census.tsv "${label}")"
+    after="$(census_counts_in "${rev}"   tests/source-grep-census.tsv "${label}")"
+    [[ "${before}" == "${from}" && "${after}" == "${to}" ]] || {
+      printf 'this commit says "%s %s -> %s" and its diff moved %s from %s to %s\n' \
+        "${label}" "${from}" "${to}" "${label}" "${before}" "${after}" >&2
+      bad=1
+    }
+  done < <(grep -oE '\b(A|B|FP|H) [0-9]+ -> [0-9]+' <<<"${blob}" | sed 's/ -> / /')
+  while read -r from to; do
+    [[ -n "${from}" ]] || continue
+    before="$(census_counts_in "${rev}^" tests/config-coverage.tsv SHIPPED-ONLY)"
+    after="$(census_counts_in "${rev}"   tests/config-coverage.tsv SHIPPED-ONLY)"
+    [[ "${before}" == "${from}" && "${after}" == "${to}" ]] || {
+      printf 'this commit says "SHIPPED-ONLY %s -> %s" and its diff moved it from %s to %s\n' \
+        "${from}" "${to}" "${before}" "${after}" >&2
+      bad=1
+    }
+  done < <(grep -oE 'SHIPPED-ONLY [0-9]+ -> [0-9]+' <<<"${blob}" | sed 's/SHIPPED-ONLY //; s/ -> / /')
+  # A message with no such claim is fine, and most are. Nothing is asserted
+  # about messages that say nothing about the census.
+  return "${bad}"
+}
+commit_message_claims_match_its_diff() {
+  local msg
+  msg="$(git -C "${REPO}" log -1 --format=%B 2>/dev/null || true)"
+  [[ -n "${msg}" ]] || { echo 'could not read HEAD as a commit' >&2; return 1; }
+  census_claims_in_message HEAD "${msg}"
+}
+# ...and the same judge, shown failing. Both controls run against the real HEAD
+# diff, so they cost nothing and cannot go stale with the history.
+commit_message_gate_can_fail() {
+  local a
+  a="$(census_counts_in HEAD tests/source-grep-census.tsv A)"
+  census_claims_in_message HEAD "Census: A $(( a + 40 )) -> $(( a + 41 ))" 2>/dev/null && {
+    echo 'a message claiming a census transition that never happened was accepted' >&2
+    return 1; }
+  census_claims_in_message HEAD "SHIPPED-ONLY 99 -> 98" 2>/dev/null && {
+    echo 'a message miscounting the configuration census was accepted' >&2
+    return 1; }
+  census_claims_in_message HEAD "a message that says nothing about any census" || {
+    echo 'a message making no census claim was rejected anyway' >&2
+    return 1; }
+  # ...and the same wrong claim QUOTED rather than made. A message about a
+  # miscount has to be able to say what the miscount was, including across the
+  # line break it will inevitably wrap over.
+  census_claims_in_message HEAD "an earlier commit claimed \"A $(( a + 40 )) -> $(( a + 41 )),
+and it was wrong\", which is what this paragraph is about" || {
+    echo 'a message QUOTING a wrong claim was rejected as though it had made it' >&2
+    return 1; }
+  return 0
+}
+if git -C "${REPO}" rev-parse --verify -q HEAD^ >/dev/null 2>&1; then
+  check "...and this commit's message counts the rows its own diff moved" \
+    commit_message_claims_match_its_diff
+  check "...and a message that miscounts them is caught" \
+    commit_message_gate_can_fail
+else
+  echo "skip - no parent commit here, so a message cannot be compared with its diff"
+fi
 
 # A gate that is defined and never run passes, having done nothing — the exact
 # failure this suite exists to catch, turned on the suite itself. It happened
@@ -21168,6 +24764,61 @@ no_test_function_is_defined_and_never_run() {
   }
   return "${dead}"
 }
+echo "# no tracked path may be hostile to a glob"
+# Found the hard way, by leaving one behind. A stray file in the repo root
+# whose name began with '-' turned every harness that globs "${REPO}"/* into
+#
+#   cp: invalid option -- '1'
+#
+# and nineteen gates failed at once with messages about the product — "the
+# reader was not told", "setup.sh does not reach its end" — when what had
+# happened was that cp read a filename as a flag and copied nothing. A whole
+# cycle went into reading those messages as if they were about the code.
+#
+# It is not only a test problem: uninstall.sh, backup.sh and the installers all
+# glob and 'rm -rf' inside this tree, and a leading dash is read as an option by
+# every one of those tools. A newline is worse — it breaks the 'while read'
+# loops this file and the product both use to walk lists of files.
+#
+# SOURCE-GREP: the subject IS the set of names in the tree. There is no
+# behaviour to drive; the property is what git is tracking.
+no_tracked_path_is_hostile_to_a_glob() {
+  local bad=0 names
+  names="$( cd "${REPO}" && git ls-files )"
+  [[ -n "${names}" ]] || {
+    echo 'git listed no tracked files at all — this gate stopped watching' >&2
+    return 1
+  }
+  # A component that starts with '-'. Anchored per path segment, because
+  # 'docs/-x.md' is read as a flag by anything that globs that directory.
+  local dashed
+  dashed="$(grep -E '(^|/)-' <<<"${names}" || true)"
+  [[ -z "${dashed}" ]] || {
+    printf 'these tracked paths have a component starting with "-", which cp, rm and every other tool reads as an option:\n%s\n' \
+      "${dashed}" >&2
+    bad=1
+  }
+  # ...and whitespace, which splits under an unquoted expansion.
+  local spaced
+  spaced="$(grep -E '[[:space:]]' <<<"${names}" || true)"
+  [[ -z "${spaced}" ]] || {
+    printf 'these tracked paths contain whitespace, which splits wherever the tree is walked:\n%s\n' \
+      "${spaced}" >&2
+    bad=1
+  }
+  # Non-vacuity: the scanner has to be able to SEE a bad name, or an empty
+  # answer above means nothing. Asked of the matcher, not of the tree — there
+  # is deliberately no such file to find, and the made-up name must not look
+  # like a document either: the gate that checks every doc a script names is a
+  # file will go looking for it.
+  grep -qE '(^|/)-' <<<"somewhere/-hostile" || {
+    echo 'the leading-dash matcher no longer matches a leading dash' >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "no tracked path starts with a dash or contains whitespace" \
+  no_tracked_path_is_hostile_to_a_glob
 check "no test file defines a gate that nothing ever runs" \
   no_test_function_is_defined_and_never_run
 
@@ -21389,6 +25040,114 @@ long_wait_rule_still_fires_on_real_code() {
 check "...and still fires on the same line written as code" \
   long_wait_rule_still_fires_on_real_code
 
+echo "# ...and the configuration those gates were driven IN"
+# A different failure from a gate that reads source, and named separately:
+# CONFIGURATION BLINDNESS. A source-grep is dishonest — it claims a runtime
+# behaviour and offers text. This one is honest and partial: it drives its
+# subject, it drives it in exactly ONE configuration, and nothing about the
+# gate says which. That is arguably the worse of the two, because a source
+# grep at least looks suspicious when you read it.
+#
+# The instance that named it: 'lca check' is first in REPORTING_COMMANDS and
+# had run under the blocking-sudo stub on every CI run since that gate was
+# written. It stalled for ever on any machine with ENABLE_AGENT=true. The gate
+# held. Its FIXTURE was .env.example, where the agent tier is off, so the whole
+# agent half of check-system.sh was unreachable and the bare 'as_root docker ps'
+# inside agent_live_sandboxes was never reached.
+#
+# Measured, not read: 34 places in this repo build an .env for a product script
+# to be run against, and 31 of them are .env.example verbatim. So the shipped
+# defaults are not merely the common case here — they are, very nearly, the
+# only case.
+CONFIG_CENSUS="${REPO}/tests/config-coverage.tsv"
+# Harnesses that VARY their .env overwrite it per case, so the file left at the
+# end shows only the last one. Those record here as they go; an unparameterised
+# harness needs nothing, because its one .env is still on disk to be read.
+# What this RUN drove. Every .env still on disk under the sandbox, plus the
+# ledger above.
+fixture_values() {   # SETTING -> the distinct values a product script was run at
+  local f
+  { while IFS= read -r f; do
+      [[ -n "${f}" ]] || continue
+      env_switch_value "${f}" "$1"
+    done < <(find "${SANDBOX}" -name '.env' -type f 2>/dev/null)
+    sed -n "s/^$1=\(true\|false\)\$/\1/p" "${CONFIG_LEDGER}" 2>/dev/null
+  } | sort -u
+}
+# ...and what CI drives, which this run cannot see because those .env files are
+# built on a runner. Read from the workflow and the fresh-install script, whose
+# text IS the subject: they are recipes, and a recipe that stops overriding a
+# switch is a change to that text.
+ci_fixture_values() {   # SETTING -> the values CI's own fixtures set it to
+  grep -ohE "s/\^$1=[^/]*/$1=(true|false)/|^[[:space:]]*$1=(true|false)\$" \
+    "${REPO}/.github/workflows/ci.yml" "${REPO}"/tests/test-fresh-install.sh 2>/dev/null \
+    | grep -oE '(true|false)/?$' | tr -d '/' | sort -u
+}
+config_driven_values() {   # SETTING -> every value some fixture, here or in CI, ran it at
+  { fixture_values "$1"; ci_fixture_values "$1"; } | sort -u | paste -sd, -
+}
+# 1. Nothing may go unclassified. A switch added to .env.example without a row
+# here is a configuration nobody decided about.
+every_switch_is_in_the_config_census() {
+  local s bad=0 seen=0
+  [[ -r "${CONFIG_CENSUS}" ]] || { echo 'the configuration census is missing' >&2; return 1; }
+  for s in $(config_switches); do
+    seen=$(( seen + 1 ))
+    grep -qE "^(BOTH|SHIPPED-ONLY)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" || {
+      printf '%s is a switch in .env.example with no row in tests/config-coverage.tsv — decide whether anything drives its other value\n' \
+        "${s}" >&2
+      bad=1
+    }
+  done
+  (( seen >= 12 )) || {
+    printf 'only %s switches were read out of .env.example — the extractor has stopped matching\n' "${seen}" >&2
+    bad=1
+  }
+  return "${bad}"
+}
+check "every switch in .env.example is classified in the configuration census" \
+  every_switch_is_in_the_config_census
+# 2. ...and the census's claim is checked against what the fixtures really
+# produced, so a row saying BOTH cannot survive the fixture that made it true
+# being deleted. This is the half that keeps the file honest.
+config_census_matches_the_fixtures() {
+  local s label driven bad=0
+  for s in $(config_switches); do
+    label="$(grep -E "^(BOTH|SHIPPED-ONLY)"$'\t'"${s}"$'\t' "${CONFIG_CENSUS}" | cut -f1 | head -1)"
+    [[ -n "${label}" ]] || continue          # gate 1 reports the missing row
+    driven="$(config_driven_values "${s}")"
+    case "${label}" in
+      BOTH)
+        [[ "${driven}" == "false,true" ]] || {
+          printf '%s is recorded as driven at BOTH values, but the fixtures of this suite and of CI only ever ran it at: %s\n' \
+            "${s}" "${driven:-nothing at all}" >&2
+          bad=1
+        } ;;
+      SHIPPED-ONLY)
+        [[ "${driven}" != "false,true" ]] || {
+          printf '%s is now driven at both values — move its row to BOTH and say what drives it\n' "${s}" >&2
+          bad=1
+        } ;;
+    esac
+  done
+  return "${bad}"
+}
+check "...and what it claims agrees with the .env files the fixtures built" \
+  config_census_matches_the_fixtures
+# 3. The ratchet, the same shape as the source-grep debt: the number of
+# switches whose other side nothing runs may only go down.
+config_blindness_has_not_grown() {
+  local n
+  n="$(grep -cE '^SHIPPED-ONLY'$'\t' "${CONFIG_CENSUS}")"
+  (( n <= 0 )) || {
+    printf 'the number of switches nothing drives the other side of has grown to %s — 8 were measured when this census was written and all eight have since been driven, and the only honest direction is down\n' \
+      "${n}" >&2
+    return 1
+  }
+}
+check "...and the number of undriven configurations never gets bigger" \
+  config_blindness_has_not_grown
+
 # The tripwire recorded at the top, read here: nothing this suite ran may have
 # repointed the live machine's login banner. Last, so it covers every harness
 # above it including ones written after this line.
@@ -21406,6 +25165,10 @@ check "...and the suite left the live machine's login banner alone" \
 
 echo
 SUITE_FINISHED=true
+# CI has no hook to install and no push to make from here, so it is told
+# nothing. Everywhere else, a clone that skipped 'make hooks' is running this
+# because somebody remembered to, and that is worth saying out loud.
+[[ -n "${CI:-}" ]] || rail_notice "${REPO}"
 if (( FAILED > 0 )); then
   echo "RESULT: ${FAILED} test(s) FAILED"
   exit 1

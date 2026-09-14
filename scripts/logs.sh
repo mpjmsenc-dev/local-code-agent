@@ -24,7 +24,7 @@ usage() {
   cat <<EOF
 Usage: lca logs [-n LINES] [-f] [SOURCE]
 
-  SOURCE   ollama | webui | setup | all   (default: all)
+  SOURCE   ollama | webui | agent | setup | all   (default: all)
   -n N     how many lines per source (default 50)
   -f       follow live; needs a single SOURCE, not 'all'
 
@@ -120,6 +120,37 @@ logs_webui() {
     || warn "Could not read logs for container '${WEBUI_CONTAINER}' (is it created? try: lca webui status)."
 }
 
+# The agent tier, which this command did not know about.
+#
+# Found by asking the reverse question of the four gates above: not "does it
+# tell an unreadable log from a missing one", but WHICH of this project's own
+# logs does it not offer at all? 'lca logs' is documented as "recent logs from
+# everything" and pitched as 'lca logs | lca ask "why did this fail?"', and on
+# a machine with ENABLE_AGENT=true it handed the model every tier except the
+# one that was failing. 'lca agent logs' existed, but nobody reaching for the
+# general command would find it.
+#
+# Same shape as logs_webui, deliberately: one message for "cannot ask" whatever
+# the cause, because the reader does the same two things either way.
+logs_agent() {
+  local lines="$1" follow="$2"
+  heading "agent (the autonomous tier)"
+  if ! have docker; then
+    info "Docker is not installed, so the agent tier is not running here."
+    return 0
+  fi
+  if ! docker_daemon_reachable; then
+    info "The Docker daemon could not be reached from this account, so the agent's logs were not read — which says nothing about whether it is running. $(docker_unreachable_advice), then try again."
+    return 0
+  fi
+  local -a cmd=(docker logs --tail "${lines}" "${AGENT_CONTAINER}")
+  [[ "${follow}" == "true" ]] && cmd+=( -f )
+  # info, not warn: on the shipped machine the tier is off and no container is
+  # the normal state, not a fault.
+  run_reader docker container inspect "${AGENT_CONTAINER}" -- "${cmd[@]}" \
+    || info "No container '${AGENT_CONTAINER}' — the agent tier is off, or has never been started (lca agent start)."
+}
+
 logs_setup() {
   local lines="$1" follow="$2" when=""
   # Dated, because the install log is the one source here that is usually OLD
@@ -163,7 +194,7 @@ main() {
       -n|--lines) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "-n needs a number"; lines="$2"; shift 2 ;;
       -f|--follow) follow=true; shift ;;
       -h|--help) usage; exit 0 ;;
-      ollama|webui|setup|all) source="$1"; shift ;;
+      ollama|webui|agent|setup|all) source="$1"; shift ;;
       *) arg="$1"; usage >&2; die "Unknown argument: ${arg}" ;;
     esac
   done
@@ -177,10 +208,19 @@ main() {
   case "${source}" in
     ollama) logs_ollama "${lines}" "${follow}" ;;
     webui)  logs_webui  "${lines}" "${follow}" ;;
+    agent)  logs_agent  "${lines}" "${follow}" ;;
     setup)  logs_setup  "${lines}" "${follow}" ;;
     all)
       logs_ollama "${lines}" false
       logs_webui  "${lines}" false
+      # The agent only where there is one. On the shipped machine the tier is
+      # off, and a section explaining that on every 'lca logs' is noise; where
+      # it IS on, leaving it out is what made "everything" untrue. The switch
+      # OR the container, because the container outlives the switch — the same
+      # reason retention does not read ENABLE_WEBUI.
+      if [[ "${ENABLE_AGENT}" == "true" ]] || agent_container_exists; then
+        logs_agent "${lines}" false
+      fi
       logs_setup  "${lines}" false
       printf '\n'
       info "Ask the model about it:  lca logs | lca ask \"why did this fail?\""

@@ -697,7 +697,16 @@ jobs:
           git -c user.email=ci@example.com -c user.name=ci commit -qam "no-op setup for the verify check"
           git remote set-url origin /tmp/upd-verify-origin
           git push -q origin HEAD:refs/heads/main
-          git branch -M main
+          # 'checkout -B', not 'branch -M'. actions/checkout leaves the
+          # workspace on a detached HEAD, and what a clone of a detached-HEAD
+          # repository lands on depends on the git version: 2.43 guesses the
+          # source's default branch, 2.55 leaves the clone detached too. On the
+          # newer one 'git branch -M main' is
+          #   fatal: cannot rename the current branch while not on any
+          # and this step failed on a runner-image upgrade with nothing in the
+          # project changed. 'checkout -B' creates-or-resets main at HEAD and
+          # works either way.
+          git checkout -qB main
           git branch --set-upstream-to=origin/main main
           out="$(./update.sh --yes --no-backup 2>&1)" || {
             printf '%s\n' "${out}"; echo "FAIL: update.sh did not complete its apply-and-verify path"; exit 1; }

@@ -220,6 +220,19 @@ tune_exit_refresh() {
 }
 
 main() {
+  # This script ACTS — see LCA_MAY_PROMPT in lib.sh. 'lca tune' writes .env and
+  # restarts the Ollama service, so the shared probes may ask for a password.
+  #
+  # Inside main(), NOT at the top level beside the source line, which is where
+  # every other acting script puts it. check-system.sh and update-model.sh both
+  # SOURCE this file for its ladder, and a top-level assignment executes in
+  # THEIR shell — turning 'lca check', the one command that must never stop for
+  # a password, into a command that does. Measured: with it at the top, lca
+  # check reached webui_container_running and sat on 'sudo docker container
+  # inspect'. The same file already carries a gate for the same leak in the
+  # other direction: its top-level 'set -euo pipefail' lands in check-system's
+  # shell too.
+  LCA_MAY_PROMPT=true
   local dry_run=false
   case "${1:-}" in
     "") ;;

@@ -35,7 +35,7 @@ Commands:
   restart   Restart it
   status    Container state + HTTP health on port ${AGENT_PORT}
   url       The address to open on your phone, over Tailscale
-  logs      Follow the agent's logs (Ctrl-C to stop)
+  logs      The agent's recent logs; -f to follow, -n N for how many lines
   watch     Supervise a run in progress: stop it at the step ceiling, the
             wall-clock limit, or when the same failure keeps repeating.
             'watch --live' is the read-only view instead: each turn as it
@@ -483,18 +483,21 @@ agent_url_line() {
 main() {
   local cmd="${1:-}"
   [[ $# -gt 0 ]] && shift
-  # Which half of this script you are in decides whether it may wait for a
-  # password -- see LCA_MAY_PROMPT in lib.sh, and webui.sh, which carries the
-  # same case for the same reason. This file had NEITHER half right, and the
-  # two halves were wrong in opposite directions:
+  # Who may wait for a password, decided HERE rather than inside the helpers —
+  # the rule above root_for_probe in lib.sh. These four change this machine, so
+  # a prompt is fair: the reader typed them. status, url and logs only report,
+  # and lib.sh records what happens when a reporter is allowed to ask.
+  #
+  # Both branches of this project found this independently and wrote the same
+  # case line. This file had NEITHER half right, and the two halves were wrong
+  # in opposite directions:
   #
   #   the actions never opted in, so every shared probe took the strict answer
-  #     -> 'lca agent start' died in 0.18s with "Cannot reach the Docker
-  #        daemon as 'lcasudoer'. ... add yourself to the docker group",
-  #        measured on this box against a daemon that was up and an account
-  #        that is an ordinary sudoer. The user TYPED start; refusing where a
-  #        password would have worked is the 'lca backup' regression lib.sh
-  #        calls the worse of the two;
+  #     -> 'lca agent start' refused with "Cannot reach the Docker daemon as
+  #        ..." against a daemon that was up and an account that is an
+  #        ordinary sudoer, instead of asking. Refusing where a password would
+  #        have worked is the 'lca backup' regression lib.sh calls the worse
+  #        of the two;
   #
   #   the reporters escalated anyway, through bare as_root rather than through
   #     the shared probes
@@ -516,6 +519,10 @@ main() {
       # if/else, not 'A && B || C', which is not if-then-else: C runs when A
       # succeeds and B fails, so a stop that worked could still report that
       # nothing was running.
+      # The redirect below takes sudo's prompt with docker's noise, so without
+      # this the command printed NOTHING and waited. Measured: RC=124, no
+      # output at all — which is how the worst of the five stalls presented.
+      announce_possible_prompt "Stopping the agent"
       if as_root docker stop "${AGENT_CONTAINER}" >/dev/null 2>&1; then
         # Not "its workspace is kept in ~/.openhands" — it never was. Stopping
         # the app leaves the sandbox up, so at this moment the agent's files are
@@ -575,6 +582,7 @@ main() {
         read -r answer || answer=""
         [[ "${answer}" =~ ^[Yy]$ ]] || { info "Nothing removed."; return 0; }
       fi
+      announce_possible_prompt "Removing sandbox containers"
       while IFS=$'\t' read -r name why; do
         [[ -n "${name}" ]] || continue
         # Same order as remove_orphan_sandboxes, for the same reason: this is
@@ -618,23 +626,41 @@ main() {
       if agent_health "${live}"; then
         ok "Agent answering on port ${live}"
       else
-        warn "No answer on port ${live} yet (still unpacking? check: lca agent logs)"
+        warn "No answer on port ${live} yet (still unpacking? check: lca agent logs, or lca agent logs -f to watch)"
         return 1
       fi
       ;;
     url)    printf '%s\n' "$(agent_url_line)" ;;
+    # A reporter, and it waited for ever. 'as_root docker logs' is a bare
+    # sudo: on any account that is not a passwordless sudoer that does not
+    # fail, it WAITS — measured, RC=124 with nothing on stdout but the prompt.
+    # Same fault as 'lca webui status'. run_reader tries unprivileged first,
+    # which is also the right answer for anyone in the docker group, and
+    # escalates only if the caller allowed it. This branch does not.
+    #
+    # ...and following is opt-in now. It was unconditional, so the command
+    # 'lca agent status' sends people to ("still unpacking? check: lca agent
+    # logs") never returned, and it could not be piped into 'lca ask' — which
+    # is the whole reason 'lca logs' exists. 'lca agent watch' is the command
+    # for watching.
     logs)
       require_cmd docker
-      # run_reader, the same escalation scripts/logs.sh uses for exactly this
-      # -- probe cheaply once, and let LCA_MAY_PROMPT above decide whether the
-      # fallback may ask. This was a bare 'as_root docker logs', so on any
-      # account that is not a passwordless sudoer it printed one line and then
-      # sat on the password prompt for ever. 'lca logs' was converted when that
-      # was first found; this is the project's OTHER log reader, and it was
-      # never converted with it.
-      run_reader docker container inspect "${AGENT_CONTAINER}" \
-        -- docker logs -f --tail 100 "${AGENT_CONTAINER}" \
-        || die "Could not read the agent's logs as '$(id -un)'. $(docker_unreachable_advice)"
+      local log_lines=100 log_follow=false
+      while [[ $# -gt 0 ]]; do
+        case "${1}" in
+          -f|--follow) log_follow=true; shift ;;
+          -n|--lines) [[ "${2:-}" =~ ^[0-9]+$ ]] || die "-n needs a number"; log_lines="$2"; shift 2 ;;
+          -h|--help)
+            printf 'Usage: lca agent logs [-n LINES] [-f]\n\nPrints the last LINES (default 100) and returns, so it can be piped:\n  lca agent logs | lca ask "why did this fail?"\n'
+            return 0 ;;
+          *) die "Unknown option: ${1}. Try: lca agent logs --help" ;;
+        esac
+      done
+      local -a log_cmd=(docker logs --tail "${log_lines}" "${AGENT_CONTAINER}")
+      [[ "${log_follow}" != "true" ]] \
+        || log_cmd=(docker logs --tail "${log_lines}" -f "${AGENT_CONTAINER}")
+      run_reader docker container inspect "${AGENT_CONTAINER}" -- "${log_cmd[@]}" \
+        || die "Could not read the agent's logs as '$(id -un)' — either it was never created or the daemon cannot be read from here. 'lca agent status' tells the two apart."
       ;;
     watch)  "${SCRIPT_DIR}/scripts/agent-watch.sh" "$@" ;;
     help|-h|--help) usage ;;

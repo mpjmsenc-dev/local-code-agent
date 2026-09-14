@@ -180,6 +180,21 @@ can_root_now() {
   sudo -n true >/dev/null 2>&1
 }
 
+# announce_possible_prompt WHAT — say a password may be wanted, before an
+# escalation whose own prompt the caller has redirected away.
+#
+# Quiet for root and for a passwordless sudoer, because nothing will be asked
+# of them, and quiet where the caller never opted into prompting, because then
+# nothing will be asked at all. What is left is the one case that needs a
+# sentence: a command the reader typed, on an account where sudo will stop and
+# wait, with sudo's own prompt going to /dev/null.
+
+announce_possible_prompt() {
+  if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+    warn "${1:-This} needs root — sudo may ask for your password."
+  fi
+}
+
 # LCA_MAY_PROMPT / root_for_probe — who decides, for the SHARED helpers.
 #
 # The rule above is a property of the CALLER, not of the function. The three
@@ -2169,9 +2184,17 @@ ensure_ollama_up() {
   if systemd_available; then
     # Never call as_root unguarded here: with neither root nor sudo it die()s,
     # and that exit kills the CALLER mid-run — '|| true' cannot catch an exit,
-    # and the redirect below would swallow the explanation. can_root() returns
-    # false instead, so callers (selftest.sh, tune.sh) degrade gracefully.
-    if can_root; then
+    # and the redirect below would swallow the explanation.
+    #
+    # root_for_probe, not can_root. can_root is the INTERACTIVE answer, and
+    # choosing it here decided for every caller that this command may wait for
+    # a password — which is the one decision the comment above root_for_probe
+    # says belongs to the caller. Seven scripts call this and only two of them
+    # act. Measured, with systemd present and an account that is not a
+    # passwordless sudoer: 'sudo systemctl start ollama' asked for a password
+    # into a discarded stream and waited. '|| true' cannot catch a wait, and
+    # the 2>&1 meant nothing was on screen to explain the silence.
+    if root_for_probe; then
       as_root systemctl start ollama >/dev/null 2>&1 || true
     fi
     wait_for_ollama "${timeout}"
@@ -2522,7 +2545,17 @@ run_reader() {
     if [[ "${seen}" == "false" ]]; then probe+=( "${arg}" ); else real+=( "${arg}" ); fi
   done
   (( ${#probe[@]} > 0 && ${#real[@]} > 0 )) || return 2
-  if "${probe[@]}" >/dev/null 2>&1; then
+  # The probe is bounded and the real command is not, because they are
+  # different kinds of thing: the probe is a question ("can this be read?")
+  # and the reader's output may legitimately stream for as long as it likes.
+  # Unbounded, the question was the hang: 'lca agent logs' asks
+  # 'docker container inspect' first, and against a daemon that accepts its
+  # socket and never answers that call never returns — so the command sat
+  # there having printed nothing, which is exactly the failure this helper was
+  # written to remove one layer further up.
+  local -a bound=()
+  if have timeout; then bound=(timeout "${LCA_READER_PROBE_TIMEOUT:-5}"); fi
+  if "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
     "${real[@]}"
     return 0
   fi
@@ -2543,7 +2576,7 @@ run_reader() {
       # stderr, so it cannot land inside a log stream someone is piping.
       warn "Reading this needs root — sudo may ask for your password."
     fi
-    if as_root "${probe[@]}" >/dev/null 2>&1; then
+    if as_root "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
       as_root "${real[@]}"
       return 0
     fi
@@ -2765,6 +2798,28 @@ webui_container_image() {
   printf '%s' "${out}"
 }
 
+# LCA_DOCKER_RUNNER — the bound every read-only docker question runs under.
+#
+# 'docker inspect', 'docker info', 'docker ps' and 'docker network inspect'
+# have no client-side deadline against a daemon that accepts its socket and
+# never answers: the call does not run slowly, it never returns. Exactly one
+# probe in this file used to be bounded — webui_container_env_list, whose
+# comment gives the reason in full — and the other eight were not, so every
+# reporting command that asked any of them stopped there for ever. Measured
+# against a docker that accepts and never answers, in the SHIPPED
+# configuration: 'lca check', 'lca webui status', 'lca logs', 'lca agent logs'
+# and 'lca agent status' all sat there.
+#
+# An array rather than a wrapper function, because half of these run through
+# 'as_root' and sudo cannot execute a shell function. Empty when timeout is
+# absent, which expands to nothing.
+#
+# ACTIONS are deliberately not bounded by it: 'docker run', 'docker pull' and
+# 'docker rm' are things the reader asked for and may legitimately take
+# minutes. This is for questions.
+LCA_DOCKER_RUNNER=()
+if have timeout; then LCA_DOCKER_RUNNER=(timeout "${LCA_DOCKER_PROBE_TIMEOUT:-5}"); fi
+
 # docker_daemon_reachable — true when docker commands can actually run here.
 #
 # Needed because "no container" and "cannot ask" are different answers that
@@ -2776,8 +2831,40 @@ webui_container_image() {
 # password; the login banner may not.
 docker_daemon_reachable() {
   have docker || return 1
-  docker info >/dev/null 2>&1 && return 0
-  root_for_probe && as_root docker info >/dev/null 2>&1
+  # Bounded, exactly like webui_container_env_list six lines above and for the
+  # same reason — which is why this one is worth reading twice: the argument
+  # was already written down in this file and applied to the neighbouring
+  # probe, not to this one. A daemon that accepts its socket and never answers
+  # gives 'docker info' no deadline of its own, so an unbounded call does not
+  # run slowly, it never returns.
+  #
+  # Measured against a docker that accepts and never answers, in the SHIPPED
+  # configuration: 'lca check' printed its Docker heading with nothing under
+  # it, and 'lca webui status', 'lca logs', 'lca agent logs' and 'lca agent
+  # status' all sat there too. This is the probe with thirteen callers.
+  #
+  # Five seconds. 'docker info' on a healthy daemon here is well under one —
+  # this project's boxes run two or three containers — and the cost of being
+  # too tight is not a slow report but a WRONG one: a false "cannot reach the
+  # daemon" refuses to start the agent, and this project has already shipped
+  # the mirror-image bug, a healthy daemon called unusable. Overridable with
+  # LCA_DOCKER_PROBE_TIMEOUT for a box where that is not true.
+  "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 && return 0
+  # The announcement below is here because sudo's own prompt goes to the same
+  # /dev/null as docker's noise, so without it a command that IS allowed to ask
+  # sits on a password prompt with nothing on screen. Measured on 'lca agent
+  # start': RC=124, no output whatsoever. Kept to one line so the guard stays
+  # inside the window sudo_probes_are_guarded looks at.
+  # The bound goes INSIDE the sudo, not around it: the password prompt happens
+  # before timeout is ever exec'd, so it is outside the bound either way — the
+  # same note webui_container_env_list carries. And the comment below it stays
+  # two lines, because sudo_probes_are_guarded reads the call line and the four
+  # above it, and a longer explanation pushes root_for_probe out of that window.
+  root_for_probe || return 1
+  announce_possible_prompt "Reaching the Docker daemon"
+  # The outcome stated rather than fallen through to: both callers ask this
+  # from inside a condition, where errexit does not fire.
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 || return 1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -2787,8 +2874,8 @@ docker_daemon_reachable() {
 # project keeps taking out.
 webui_container_exists() {
   have docker || return 1
-  docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
-  root_for_probe && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
+  root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
 }
 
 # webui_container_running — true when the chat app's container is not merely
@@ -2802,8 +2889,8 @@ webui_container_exists() {
 webui_container_running() {
   have docker || return 1
   local state
-  state="$(docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
            || true)"
   [[ "${state}" == "true" ]]
 }
@@ -3309,7 +3396,7 @@ agent_preserve_workspace() {
   # busybox image answers neither, and the function then reported "nothing to
   # save" about a workspace full of work. Silence about an empty sandbox and
   # silence about an unreadable one must not look the same.
-  if [[ -n "$(as_root docker ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
+  if [[ -n "$(as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
     local probe rc=0
     probe="$(as_root docker exec "${name}" find /workspace \
         -path /workspace/bash_events -prune -o \
@@ -3361,28 +3448,36 @@ agent_preserve_workspace() {
 # docker ps already orders by creation time, newest first, which is the one
 # piece of ordering here that is documented and reliable — the conversation
 # listing carries no timestamp this project could sort on.
+# Unprivileged first, then root_for_probe — never a bare as_root. Both callers
+# are read-only questions: 'lca check' listing what could be collected, and
+# 'lca agent gc' deciding what to offer. A bare as_root decided for them, and
+# on any account that is not a passwordless sudoer it printed nothing (sudo's
+# prompt goes to the 2>/dev/null with docker's noise) and waited for ever.
+# Measured with ENABLE_AGENT=true: 'lca check' reached the sandbox question and
+# stopped there, RC=124, the summary never printed.
+#
+# Same defect as select_docker and run_reader, through a different door. Those
+# named can_root, which the gate on that rule scans lib.sh for; this one went
+# straight to as_root and was invisible to it. What catches it now does not
+# read lib.sh at all: the reporting commands are run twice, once with the agent
+# tier off and once with it on. The gate held — for the shipped default only.
 agent_live_sandboxes() {
   have docker || return 1
-  # Unprivileged first, and the escalation goes through root_for_probe like
-  # every other shared docker helper -- see LCA_MAY_PROMPT at the top of this
-  # file. It was a bare 'as_root docker ps', which is the same defect
-  # select_docker and run_reader carried, in the one vocabulary no gate was
-  # watching: the rule is written about can_root, and this line never mentions
-  # it. as_root IS the escalation; can_root is only one way of deciding to.
+  # Unprivileged first, bounded, and the escalation goes through root_for_probe
+  # like every other shared docker helper -- see LCA_MAY_PROMPT at the top of
+  # this file. It was a bare 'as_root docker ps', and it was found from both
+  # directions at once:
   #
-  # Measured on this box, from an account that is not a passwordless sudoer:
-  # 'lca check' printed seven lines and then sat on "[sudo] password for ..."
-  # for as long as it was left, because check-system.sh reaches here through
-  # agent_reclaimable_sandboxes. The '2>/dev/null || true' around that call is
-  # exactly the wrapper CONTRIBUTING says cannot notice a command that never
-  # returns -- and sudo writes its prompt to the terminal, not to stderr, so
-  # the redirect does not even hide it.
-  local names=""
-  names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
-  if [[ -z "${names}" ]] && root_for_probe; then
-    names="$(as_root docker ps --format '{{.Names}}' 2>/dev/null || true)"
-  fi
-  printf '%s\n' "${names}" | grep -E '^oh-agent-server-' || true
+  #   from an account that is not a passwordless sudoer, 'lca check' printed
+  #   seven lines and then sat on "[sudo] password for ..." -- it reaches here
+  #   through agent_reclaimable_sandboxes, and the '2>/dev/null || true' around
+  #   that call cannot notice a command that never returns;
+  #
+  #   against a daemon that accepts its socket and never answers, the
+  #   unbounded question never returned either.
+  { "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null; } \
+    || true; } | grep -E '^oh-agent-server-' || true
 }
 
 # agent_reclaimable_sandboxes — running sandboxes whose conversation is over,
@@ -3516,7 +3611,7 @@ agent_orphan_sandboxes() {
 # still going, collection wants all of them.
 agent_all_sandboxes() {
   have docker || return 1
-  as_root docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
 }
 
 # agent_conversation_warning — what is ambiguous about this machine right now,
@@ -4273,8 +4368,8 @@ agent_backup_decision() {
 agent_container_running() {
   have docker || return 1
   local state
-  state="$(docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
-           || { root_for_probe && as_root docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
            || true)"
   [[ "${state}" == "true" ]]
 }
@@ -4283,8 +4378,8 @@ agent_container_running() {
 # it been created" and the wrong one for "is it exposed".
 agent_container_exists() {
   have docker || return 1
-  docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
-    || { root_for_probe && as_root docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
 }
 
 # agent_live_port — the host port the running agent container really publishes.
@@ -4298,8 +4393,8 @@ agent_container_exists() {
 agent_live_port() {
   have docker || return 1
   local spec
-  spec="$(docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
-          || { root_for_probe && as_root docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
+  spec="$("${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
           || true)"
   # '0.0.0.0:3001' / '[::]:3001' -> 3001. First line only: docker prints one
   # per address family and they are the same host port.
@@ -4478,8 +4573,8 @@ agent_sandbox_env() {
 docker_bridge_gateway() {
   local gw=""
   if have docker; then
-    gw="$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
-          || { root_for_probe && as_root docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
+    gw="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
           || true)"
   fi
   # One address, even if docker ever reports several IPAM entries.
@@ -4498,8 +4593,8 @@ docker_bridge_gateway() {
 docker_bridge_interface() {
   local name=""
   if have docker; then
-    name="$(docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
-            || { root_for_probe && as_root docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
+    name="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
+            || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
             || true)"
   fi
   name="${name%%$'\n'*}"
@@ -4623,7 +4718,7 @@ tailscale_promise_gaps() {
 # the archive before it clears anything either way.
 webui_volume_has_data() {
   have docker || return 1
-  as_root docker volume inspect open-webui >/dev/null 2>&1 || return 1
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker volume inspect open-webui >/dev/null 2>&1 || return 1
   local listing
   listing="$(as_root docker run --rm --entrypoint sh -v open-webui:/v:ro \
                "${WEBUI_IMAGE}" -c 'ls -A /v' 2>/dev/null || true)"
@@ -4775,9 +4870,27 @@ valid_bool() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
 
 # boolean_settings — the .env keys that ARE switches, read out of .env.example
 # rather than listed here, so a new one is covered the day it ships.
+#
+# Commented lines too, and that is the whole of a measured hole. .env.example
+# does not only SHIP switches, it SUGGESTS them: CONVENTIONS_AIDER and
+# CONVENTIONS_AGENT appear under "leaving these alone changes nothing", as
+# lines a reader is invited to uncomment. They were invisible here, so:
+#
+#   AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+#   CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+#
+# ...while lca_user_instructions compares it against the word "true" exactly
+# like every other switch, so 'yes' turned the conventions file off for aider
+# and nothing said so. Measured: 2,527 characters of appendix at 'true', 0 at
+# 'yes'. The only difference between the two settings was which side of a '#'
+# .env.example wrote them on.
+#
+# A suggestion the reader has not taken is not checked — see check-system.sh,
+# which skips any name that is unset. So the shipped machine still counts 12.
 boolean_settings() {
   [[ -r "${ENV_EXAMPLE}" ]] || return 1
-  grep -oE '^[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" | cut -d= -f1 | sort -u
+  grep -oE '^[[:space:]]*#?[[:space:]]*[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" \
+    | sed -E 's/^[[:space:]]*#?[[:space:]]*//' | cut -d= -f1 | sort -u
 }
 
 # valid_port PORT — a number a service can actually listen on.

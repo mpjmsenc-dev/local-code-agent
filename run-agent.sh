@@ -9,6 +9,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh. It starts Ollama and
+# hands the terminal to aider, and the reader typed 'lca' to work: a
+# password prompt is fair, and refusing where it used to work is the worse
+# trade. Without this the shared probes take the strict default and the
+# coding agent reports a stopped model it could have started.
+LCA_MAY_PROMPT=true
 load_env
 
 main() {
