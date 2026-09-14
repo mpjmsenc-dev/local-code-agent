@@ -59,8 +59,19 @@ docker run --rm "${limit[@]}" \
       | ( cd /src && tar --null --ignore-failed-read -T - -cf - 2>/dev/null ) \
       | tar -C /work/repo -xf - || exit 3
     ( cd /src && git ls-files -z --deleted ) | ( cd /work/repo && xargs -0 -r rm -f -- )
-    cd /work/repo && make "$1"
+    cd /work/repo && make "$1"; rc=$?
+    cp /work/repo/.git/lca-suite-runs /out/suite-runs 2>/dev/null || true
+    exit "${rc}"
   ' _ "${TARGET}" > "${OUT}/gates.log" 2>&1 || rc=$?
 echo "EXIT:${rc}" >> "${OUT}/gates.log"
+# The container's record of the run, carried back to this checkout so a commit
+# of the same tree can cite it (.githooks/commit-msg). The container's copy of
+# the repository is gone when it exits; without this the run left no trace.
+if [[ -s "${OUT}/suite-runs" ]]; then
+  cat "${OUT}/suite-runs" >> "$(git -C "${REPO}" rev-parse --absolute-git-dir)/lca-suite-runs"
+  echo "Recorded in .git/lca-suite-runs: $(tail -1 "${OUT}/suite-runs")"
+else
+  echo "No suite run was recorded — the suite did not reach its verdict."
+fi
 tail -3 "${OUT}/gates.log"
 exit "${rc}"

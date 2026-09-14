@@ -25396,6 +25396,40 @@ check_counts_a_skip_as_a_skip() {
 check "...and a gate that cannot run is counted as not run, with its reason" \
   check_counts_a_skip_as_a_skip
 
+# ...and a commit message's "Suite:" line is held to a run on the tree being
+# committed. Driven: the real hook, against a ledger and a tree this gate
+# chooses, with every way a claim can outrun its evidence.
+commit_msg_hook_holds_suite_claims_to_a_run() {
+  local d="${SANDBOX}/suite-claims" hook="${REPO}/.githooks/commit-msg" bad=0
+  rm -rf "${d}"; mkdir -p "${d}"
+  [[ -x "${hook}" ]] || { echo 'the commit-msg hook is missing or not executable, so git would skip it in silence' >&2; return 1; }
+  printf '%s\n' \
+    'tree=aaaa passed=1300 failed=0 skipped=0 when=x where=container' \
+    'tree=bbbb passed=1290 failed=0 skipped=3 when=x where=container' \
+    'tree=dddd passed=1300 failed=2 skipped=0 when=x where=container' > "${d}/ledger"
+  judge() {   # TREE MESSAGE -> the hook's status
+    printf '%s\n' "$2" > "${d}/msg"
+    LCA_SUITE_LEDGER="${d}/ledger" LCA_COMMIT_TREE="$1" bash "${hook}" "${d}/msg" >/dev/null 2>&1
+  }
+  judge aaaa $'A change\n\nSuite: 1,300 checks, all passing.' \
+    || { echo 'a claim matching a recorded clean run was rejected' >&2; bad=1; }
+  judge aaaa $'A change\n\nSuite: 1299 checks, all passing.' \
+    && { echo 'a miscounted claim was accepted' >&2; bad=1; }
+  judge cccc $'A change\n\nSuite: 1300 checks, all passing.' \
+    && { echo 'a claim about a tree with no recorded run was accepted' >&2; bad=1; }
+  judge bbbb $'A change\n\nSuite: 1290 checks, all passing.' \
+    && { echo 'a run with checks NOT RUN was accepted as all passing' >&2; bad=1; }
+  judge bbbb $'A change\n\nSuite: 1290 checks passed, 3 not run.' \
+    || { echo 'an honest claim about a run with skips was rejected' >&2; bad=1; }
+  judge dddd $'A change\n\nSuite: 1300 checks passed.' \
+    && { echo 'a claim about a run that FAILED was accepted' >&2; bad=1; }
+  judge cccc $'A change that says nothing about the suite' \
+    || { echo 'a message making no claim was rejected' >&2; bad=1; }
+  return "${bad}"
+}
+check "a commit message's Suite: line must name a run recorded on the tree it commits" \
+  commit_msg_hook_holds_suite_claims_to_a_run
+
 # 4. The fingerprint recorded at the top, read here, over every path on the
 # product's list. Last, so it covers every harness above it including ones
 # written after this line. It replaced a check on the login banner alone, which
@@ -25436,6 +25470,32 @@ SUITE_FINISHED=true
 # nothing. Everywhere else, a clone that skipped 'make hooks' is running this
 # because somebody remembered to, and that is worth saying out loud.
 [[ -n "${CI:-}" ]] || rail_notice "${REPO}"
+# The run, recorded against the tree it ran on, for .githooks/commit-msg to hold
+# a "Suite:" line in a commit message to. The tree is the WORKING TREE — tracked
+# and untracked-but-not-ignored files as they are on disk — hashed through a
+# throwaway index, so the real index is never touched. A commit of exactly this
+# tree then has exactly this hash. Recorded for every outcome, failures
+# included: the ledger is a record of runs, not of successes.
+suite_record_run() {
+  local gd idx tree where
+  gd="$(git -C "${REPO}" rev-parse --absolute-git-dir 2>/dev/null)" || {
+    echo "note - not a git checkout, so this run is not recorded and no commit message can cite it"; return 0; }
+  idx="$(mktemp)"
+  cp "${gd}/index" "${idx}" 2>/dev/null || : > "${idx}"
+  tree="$(GIT_INDEX_FILE="${idx}" git -C "${REPO}" add -A >/dev/null 2>&1 \
+          && GIT_INDEX_FILE="${idx}" git -C "${REPO}" write-tree 2>/dev/null)" || tree=""
+  rm -f "${idx}"
+  [[ -n "${tree}" ]] || {
+    echo "note - the working tree could not be hashed, so this run is not recorded and no commit message can cite it"; return 0; }
+  where=host
+  suite_in_a_container && where=container
+  [[ -z "${CI:-}" ]] || where=ci
+  printf 'tree=%s passed=%s failed=%s skipped=%s when=%s where=%s\n' \
+    "${tree}" "${PASSED}" "${FAILED}" "${SKIPPED}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${where}" \
+    >> "${gd}/lca-suite-runs"
+  echo "recorded - ${PASSED} passed, ${FAILED} failed, ${SKIPPED} not run, on tree ${tree:0:12} (${where})"
+}
+suite_record_run
 # The verdict counts all three outcomes, and says "all passed" only when that is
 # the whole truth: nothing failed, nothing was skipped, and something ran.
 if (( FAILED > 0 )); then

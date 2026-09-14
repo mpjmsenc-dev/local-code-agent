@@ -1725,6 +1725,25 @@ positive, because a message legitimately names the subject under test and not
 only the paths it touched. No gate came out of it. Recorded because it was
 asked, and because "we looked and there was nothing" is a result.
 
+### ...and the suite's own verdict, in a commit message
+
+Commit messages here close with a line like `Suite: 1299 checks, all passing.`
+Nothing tied that line to a run. A number carried over from the run before the
+last edit reads exactly like a measured one.
+
+Now `tests/test-lib.sh` appends every run to `.git/lca-suite-runs` — the working
+tree it ran on (hashed through a throwaway index), passed, failed, not run, and
+where — and `tests/in-container.sh` carries the container's record back.
+`.githooks/commit-msg`, installed by `make hooks`, rejects a `Suite: N checks`
+line unless a run on the tree being committed passed N with nothing failed,
+and rejects "all passing" if anything was not run. The gate
+`commit_msg_hook_holds_suite_claims_to_a_run` drives the hook through every way
+a claim can outrun its run.
+
+So: run `make gates-container` on exactly what you are committing, then copy the
+counts from its `recorded -` line. If you edit after the run, run again or drop
+the line.
+
 ## Reviewing a PR
 
 The diff is the source of truth. Worth a close look:
