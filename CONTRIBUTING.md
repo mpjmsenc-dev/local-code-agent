@@ -785,6 +785,11 @@ suite. The census is a record of debt, not permission.
 
 ### What the census found, from reading all 278 of them
 
+*The totals in this section were counted by a classifier that had no lexer,
+and several do not survive re-measurement — see* Counts taken with a broken
+instrument, re-measured *below. The A, B, FP and H labels are readings and
+stand.*
+
 The list started as 286 grandfathered names with no reason beside any of them.
 Two samples of a dozen each disagreed about how much of it was real debt — four
 of twelve, then eight of twelve — so the whole population was read one gate at a
@@ -845,6 +850,48 @@ The meta-gate is itself the kind of thing that becomes decoration, so it is
 driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
+
+### Counts taken with a broken instrument, re-measured
+
+Every count of source-grep gates in this document came out of
+`source_grep_gates`, and that classifier has been wrong three ways in turn.
+With no lexer it counted its own fixture functions and missed gates. The lexer
+added in `207d1dc` lost its place inside `"$(...)"` and hid about a third of the
+suite. And a tool name inside a file extension read as a call to the tool. Each
+number below was re-measured by running the fixed lexer and classifier over that
+commit's own `tests/test-lib.sh`. A pushed commit message cannot be edited; this
+table is its correction.
+
+| commit | what it said | classifier it used | fixed instruments, same tree |
+|---|---|---|---|
+| `4198414` | the corrected scanner finds 303 source-grep gates | no lexer | 307: 11 of its 303 are not source greps, 15 were missed |
+| `7624c1b` | 302 source-grep gates | no lexer | 307: 10 are not (the classifier's own fixture functions among them), 15 missed |
+| `1c84c68` | "the 296" | no lexer | 309: 2 are not, 15 missed |
+| `29540e6`, and the section above | read all 278; 28 of the 296 names the scanner flags are helpers | no lexer | 312: 2 of the 296 are not source greps (`new_source_greps_are_justified`, `recommend_with`), and **18 gates were never flagged, so the reading never saw them**. Of those 18, 12 have census rows now, 3 were deleted and 3 now drive their subject. |
+| `c03bb99` | seventeen gates read source through a variable | no lexer | not reproduced: that classifier, before and after that change on that tree, adds 12 |
+| `207d1dc` to `0126e69` | (the meta-gate's own view) | the lexer that lost its place | `ca3194b`: 209 seen of 302. `0126e69`: 220 of 303. For two weeks `new_source_greps_are_justified` watched about two thirds of the gates. One unjustified gate landed in that window, `host_paths_all_move` in `733b482`; `5dc8933` found and marked it. |
+| `5dc8933` | the classifier went from 221 gates to 305 | fixed lexer, old tool-word rule | 304 under the tool-word rule of `d4d2f7c` |
+
+What stands: the labels, because they were read row by row, and the 28 helpers,
+which is a reading of the 296 and true of them. What does not: every total that
+counts the classifier's output, and the claim that the census read every gate
+that reads repo source — it read every gate the classifier of the day could see.
+
+Eight census rows are gates the fixed classifier still cannot see, because their
+reads happen inside a helper: one A, `sudo_asks_out_loud`, and seven B,
+`new_source_greps_are_justified` itself among them. The meta-gate would not
+notice any of them changing shape. That is a list and not an estimate because
+the census was read.
+
+**The standard this leaves.** Every instrument in this repository has been
+wrong at least once, and the ones trusted longest were wrong longest. So a
+verdict that rests on one detector gets the shape the absence rules now have: a
+census made by reading and checked in; the detector demoted to a tripwire that
+refuses what nobody listed; and the detector's recall measured against a reading
+made without it, written where the detector is. The source-grep census has the
+first two. It does not yet have the third — nobody has measured what
+`source_grep_gates` misses — and until it does, its totals are the
+classifier's opinion.
 
 ### An aggregate nobody could check, replaced by a per-row fact
 
