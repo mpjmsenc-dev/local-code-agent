@@ -1,0 +1,208 @@
+# tests/absence-rule-census.tsv — every absence rule in tests/test-lib.sh, and
+# every function the absence detector flags that is not one. Read by hand.
+#
+#   STATUS<TAB>FUNCTION<TAB>WHAT IS KNOWN
+#
+#   PROVED   shown able to fail by rows in ABSENCE_RULES: it passes an untouched
+#            copy of the tree, and fails a stripped one and a planted one
+#   PENDING  an absence rule nothing has yet shown able to fail — the debt
+#   NOT      flagged by tests/absence-candidates.awk; a reader found it is not
+#            an absence rule, and says what it is instead
+#
+# Made on 2026-09-14 from three readings of function bodies: a full audit of the
+# suite's absence rules (113 named, 5 later judged not to be), then a
+# reading of every other function the detector flagged, twice as it was widened.
+# Moving a row to PROVED means adding its rows to ABSENCE_RULES and lowering
+# ABSENCE_PENDING in tests/test-lib.sh, in the same change.
+PROVED	absence_census_is_well_formed	in ABSENCE_RULES: a census row for a function that does not exist
+PROVED	every_absence_candidate_is_in_the_census	in ABSENCE_RULES: an absence rule nobody listed, appended to test-lib.sh
+PROVED	every_scanned_file_lexes_to_its_end	in ABSENCE_RULES: an unterminated string appended to speed.sh
+PROVED	every_test_script_has_a_way_in	in ABSENCE_RULES: a tests/ script nothing calls
+PROVED	new_source_greps_are_justified	in ABSENCE_RULES: an unexcused source grep appended to test-lib.sh
+PROVED	no_host_path_outside_lib	in ABSENCE_RULES: a literal /etc path written into setup.sh
+PROVED	no_skip_goes_uncounted	in ABSENCE_RULES: an uncounted skip echoed in test-netmode.sh
+PROVED	no_test_function_is_defined_and_never_run	in ABSENCE_RULES: a dead function appended to test-agent-watch.sh
+PROVED	no_test_function_is_defined_twice	in ABSENCE_RULES: a duplicate appended to test-netmode.sh
+PROVED	no_unannounced_long_wait	in ABSENCE_RULES: bare, announced-only, comment-above and start-in-data waits
+PENDING	actions_opt_in_to_prompting	passes with its subject deleted, and nothing plants a violation
+PENDING	advice_names_only_documented_commands	passes with its subject deleted, and nothing plants a violation
+PENDING	advice_paths_are_absolute	passes with its subject deleted, and nothing plants a violation
+PENDING	apply_does_not_read_ollama_ps	fails when its subject is gone, but nothing plants a violation
+PENDING	apt_failure_checks_sudo_first	found by the third reading, mixed: ordering fails when 'held the lock' line precedes sudo_would_block; presence greps
+PENDING	ask_keeps_its_answer_stream_clean	found by the second reading, fails on any ask.sh status line not sent to stderr; lib.sh presence rider
+PENDING	asks_before_it_concludes	fails when its subject is gone, but nothing plants a violation
+PENDING	banner_network_probes_bound_themselves	fails when its subject is gone, but nothing plants a violation
+PENDING	banner_states_are_documented	fails when its subject is gone, but nothing plants a violation
+PENDING	both_reporters_ask_lib	fails when its subject is gone, but nothing plants a violation
+PENDING	cache_writes_cannot_abort	passes with its subject deleted, and nothing plants a violation
+PENDING	census_names_real_gates	fails when its subject is gone, but nothing plants a violation
+PENDING	census_order_covers_every_a_row	found by the second reading, parity: fails on dupes/rows in one CENSUS list not the other; guarded
+PENDING	chmod_lists_agree	fails when its subject is gone, but nothing plants a violation
+PENDING	config_blindness_has_not_grown	passes with its subject deleted, and nothing plants a violation
+PENDING	config_census_matches_the_fixtures	passes with its subject deleted, and nothing plants a violation
+PENDING	contributing_names_things_that_exist	fails when its subject is gone, but nothing plants a violation
+PENDING	counted_headings_match_their_lists	found by the second reading, fails when awk finds a miscounted heading in CONTRIBUTING.md; guarded
+PENDING	defaults_agree_on_values	passes with its subject deleted, and nothing plants a violation
+PENDING	disk_check_names_a_directory_that_exists	found by the second reading, mixed, presence-heavy: fails if a message names raw MODELS_DIR
+PENDING	disk_check_uses_the_shared_helpers	found by the second reading, mixed: fails if check-system.sh code runs its own df; presence clauses too
+PENDING	dispatched_commands_are_all_documented	passes with its subject deleted, and nothing plants a violation
+PENDING	doc_blocks_establish_their_directory	passes with its subject deleted, and nothing plants a violation
+PENDING	doc_section_references_resolve	a partial floor only, and nothing plants a violation
+PENDING	docker_advice_is_conditional	fails when its subject is gone, but nothing plants a violation
+PENDING	docs_copy_one_backup_not_all	passes with its subject deleted, and nothing plants a violation
+PENDING	docs_read_backups_safely	passes with its subject deleted, and nothing plants a violation
+PENDING	docs_repeat_the_ladder_correctly	found by the second reading, fails when a doc line pairs RAM with a wrong ctx; checked>=6 guard
+PENDING	docs_show_the_prompt_recipe	passes with its subject deleted, and nothing plants a violation
+PENDING	drift_decision_is_shared	passes with its subject deleted, and nothing plants a violation
+PENDING	drift_messages_name_apply	passes with its subject deleted, and nothing plants a violation
+PENDING	env_keys_and_defaults_agree	fails when its subject is gone, but nothing plants a violation
+PENDING	every_advised_flag_is_real	passes with its subject deleted, and nothing plants a violation
+PENDING	every_advised_path_exists	fails when its subject is gone, but nothing plants a violation
+PENDING	every_baked_setting_is_compared	passes with its subject deleted, and nothing plants a violation
+PENDING	every_bash_script_is_linted	a partial floor only, and nothing plants a violation
+PENDING	every_caller_uses_the_deciding_wrapper	a partial floor only, and nothing plants a violation
+PENDING	every_clean_environment_moves_the_host	fails when its subject is gone, but nothing plants a violation
+PENDING	every_dispatch_target_is_checked	passes with its subject deleted, and nothing plants a violation
+PENDING	every_docker_question_is_bounded	a partial floor only, and nothing plants a violation
+PENDING	every_drift_key_is_reported	fails when its subject is gone, but nothing plants a violation
+PENDING	every_honoured_setting_is_accounted_for	fails when its subject is gone, but nothing plants a violation
+PENDING	every_job_count_claim_is_the_real_one	fails when its subject is gone, but nothing plants a violation
+PENDING	every_numeric_setting_is_guarded	fails when its subject is gone, but nothing plants a violation
+PENDING	every_path_stub_survives_sudo	passes with its subject deleted, and nothing plants a violation
+PENDING	every_promised_setting_is_applied	fails when its subject is gone, but nothing plants a violation
+PENDING	every_reporter_classifies_the_placement	fails when its subject is gone, but nothing plants a violation
+PENDING	every_setup_stop_names_a_command	found by the second reading, fails on a 'blocked "' line in agent-setup.sh naming no command; guarded
+PENDING	every_switch_is_in_the_config_census	fails when its subject is gone, but nothing plants a violation
+PENDING	example_env_is_valid	found by the second reading, grep -v finds .env.example lines breaking LCA_ENV_LINE_RE; missing file passes
+PENDING	faq_does_not_overclaim_offline	passes with its subject deleted, and nothing plants a violation
+PENDING	gpu_doc_vram_table_matches_the_code	found by the third reading, parity: fails when a GPU.md table row disagrees with largest_model_for_vram; guarded
+PENDING	group_a_debt_has_not_grown	passes with its subject deleted, and nothing plants a violation
+PENDING	help_commands_all_real	passes with its subject deleted, and nothing plants a violation
+PENDING	image_is_named_once	fails when its subject is gone, but nothing plants a violation
+PENDING	installer_does_not_reteach_next_steps	fails when its subject is gone, but nothing plants a violation
+PENDING	ladder_agrees_with_tune	found by the third reading, mixed: awk fails on own 'RAM_GIB < 9' ladder in check-system.sh; drives chooser
+PENDING	listing_flags_models_that_do_not_fit	found by the second reading, mixed: ! grep old heading in update-model.sh; model_fits_ram presence too
+PENDING	makefile_header_matches_targets	found by the second reading, parity: fails on stray header/target names in Makefile; non-empty guard
+PENDING	md_anchor_links_resolve	a partial floor only, and nothing plants a violation
+PENDING	model_flags_are_discoverable	passes with its subject deleted, and nothing plants a violation
+PENDING	no_aider_collision	passes with its subject deleted, and nothing plants a violation
+PENDING	no_bare_set_env_var	passes with its subject deleted, and nothing plants a violation
+PENDING	no_commandless_exec_redirects_the_shell	passes with its subject deleted, and nothing plants a violation
+PENDING	no_conditional_caller_relies_on_errexit	a partial floor only, and nothing plants a violation
+PENDING	no_file_read_piped_into_awk	passes with its subject deleted, and nothing plants a violation
+PENDING	no_gate_is_satisfied_by_a_comment	a partial floor only, and nothing plants a violation
+PENDING	no_gate_passes_on_its_own_definition	fails when its subject is gone, but nothing plants a violation
+PENDING	no_hardcoded_ladder	passes with its subject deleted, and nothing plants a violation
+PENDING	no_helper_decides_for_its_caller	a partial floor only, and nothing plants a violation
+PENDING	no_installer_as_apply_instruction	passes with its subject deleted, and nothing plants a violation
+PENDING	no_message_sends_the_user_into_a_self_match	passes with its subject deleted, and nothing plants a violation
+PENDING	no_ollama_lookup_matches_a_shell	a partial floor only, and nothing plants a violation
+PENDING	no_pipe_into_grep_q_in_the_suite	passes with its subject deleted, and nothing plants a violation
+PENDING	no_reader_uses_the_false_swallowing_form	passes with its subject deleted, and nothing plants a violation
+PENDING	no_restart_as_apply_instruction	passes with its subject deleted, and nothing plants a violation
+PENDING	no_runtime_artefact_is_tracked	passes with its subject deleted, and nothing plants a violation
+PENDING	no_script_asks_who_by_hand	a partial floor only, and nothing plants a violation
+PENDING	no_script_blames_ram_on_its_own	fails when its subject is gone, but nothing plants a violation
+PENDING	no_script_calls_an_unreachable_helper	fails when its subject is gone, but nothing plants a violation
+PENDING	no_script_hardcodes_docker_remedies	a partial floor only, and nothing plants a violation
+PENDING	no_script_recites_the_formula	passes with its subject deleted, and nothing plants a violation
+PENDING	no_silent_ollama_start	passes with its subject deleted, and nothing plants a violation
+PENDING	no_sourced_script_declares_for_its_caller	fails when its subject is gone, but nothing plants a violation
+PENDING	no_status_command_sends_you_to_an_installer	passes with its subject deleted, and nothing plants a violation
+PENDING	no_tee_into_a_root_file	passes with its subject deleted, and nothing plants a violation
+PENDING	no_test_breaks_docker_through_the_environment	fails when its subject is gone, but nothing plants a violation
+PENDING	no_tracked_path_is_hostile_to_a_glob	plants a violation of half its matcher; not shown against a stripped tree
+PENDING	no_unbounded_listing_is_piped_into_grep_q	passes with its subject deleted, and nothing plants a violation
+PENDING	no_unsourced_subshell_calls_lib	fails when its subject is gone, but nothing plants a violation
+PENDING	no_variable_is_piped_into_an_early_exiting_reader	passes with its subject deleted, and nothing plants a violation
+PENDING	not_stock	found by the second reading, ! grep stock suggestion text in SUGGESTIONS; missing file passes
+PENDING	ollama_advice_is_conditional	a partial floor only, and nothing plants a violation
+PENDING	ollama_bg_log_path_is_named_once	passes with its subject deleted, and nothing plants a violation
+PENDING	one_copy_of_the_coverage_rule	passes with its subject deleted, and nothing plants a violation
+PENDING	optional_installers_are_not_fatal	found by the second reading, fails on an optional installer called without if!/||; found>0 guard
+PENDING	perf_baseline_is_stated_once	found by the third reading, fails when PERFORMANCE.md bold speed differs from measured table; rows>0 guard
+PENDING	perf_measured_figures_match_the_table	found by the third reading, fails on a non-tilde figure near model differing from table; rows guard
+PENDING	perf_vram_within_the_computed_maximum	found by the third reading, parity: fails when a comfortable-VRAM row exceeds largest_model_for_vram; rows>=3 guard
+PENDING	pin_is_sized_before_the_pull	found by the third reading, mixed: ordering fails when pull_model line precedes model_fits_ram in main(); presence
+PENDING	printed_recipe_matches_the_prompt	passes with its subject deleted, and nothing plants a violation
+PENDING	prompt_check_is_not_claimed_when_skipped	fails when its subject is gone, but nothing plants a violation
+PENDING	prompt_commands_all_real	fails when its subject is gone, but nothing plants a violation
+PENDING	pull_advice_checks_the_kill_switch	passes with its subject deleted, and nothing plants a violation
+PENDING	readme_documents_every_command	fails when its subject is gone, but nothing plants a violation
+PENDING	readme_documents_every_setting	found by the second reading, parity README table vs .env.example keys/defaults; fails on mismatch; guarded
+PENDING	readme_family_table_matches_the_code	found by the third reading, parity: fails when README family row rungs differ from family_sizes; >=4 guard
+PENDING	readme_ram_ladder_matches_the_code	found by the third reading, parity: fails when README RAM band disagrees with choose_for_ram at edges; guarded
+PENDING	readme_supply_chain_matches_the_code	found by the third reading, mixed: fails when README image tag differs from lib.sh's; pipe-to-root presence
+PENDING	readme_tree_lists_every_script	passes with its subject deleted, and nothing plants a violation
+PENDING	remote_installers_retry	passes with its subject deleted, and nothing plants a violation
+PENDING	retention_is_described_once	fails when its subject is gone, but nothing plants a violation
+PENDING	root_docs_are_swept_or_exempt	passes with its subject deleted, and nothing plants a violation
+PENDING	root_scripts_are_advised_with_sudo	fails when its subject is gone, but nothing plants a violation
+PENDING	same_group_branch_kills_nothing	found by the second reading, ! grep kill/pkill command in the extracted arm; non-empty guard
+PENDING	script_doc_references_resolve	a partial floor only, and nothing plants a violation
+PENDING	seed_uses_a_diff_and_reads_it_back	found by the second reading, mixed: ! grep 'llm_model:' in agent.sh; presence clauses too
+PENDING	self_rewriting_scripts_exit_explicitly	fails when its subject is gone, but nothing plants a violation
+PENDING	selftest_uses_the_verdict	found by the second reading, mixed: ! grep 'SELF-TEST PASSED' in selftest.sh; verdict call presence
+PENDING	setup_only_dies_on_core_steps	found by the second reading, fails on a bare non-core step line in setup.sh; count==2 guard
+PENDING	setup_runs_every_installer	fails when its subject is gone, but nothing plants a violation
+PENDING	setup_skips_only_what_it_already_proved	found by the second reading, mixed: ! grep literal --quick on invocation; awk presence clauses
+PENDING	setup_uses_verdict	found by the second reading, mixed: ! grep hardcoded verdict line in setup.sh; setup_verdict presence
+PENDING	shared_probes_let_the_caller_decide	found by the second reading, mixed: fails if a probe body contains can_root; presence clauses too
+PENDING	speed_measures_reading_separately	found by the second reading, mixed: ! grep cached counters off response in speed.sh; presence too
+PENDING	start_bg_reads_the_file_rather_than_copying_it	found by the second reading, mixed: ! grep hand-copied OLLAMA_ settings in start_ollama_bg
+PENDING	submit_waits_longer_than_the_measured_lag	found by the third reading, mixed: fails when any 'seq 1 N' loop waits under 120s; presence guards
+PENDING	sudo_asks_out_loud	a partial floor only, and nothing plants a violation
+PENDING	sudo_probes_are_guarded	fails when its subject is gone, but nothing plants a violation
+PENDING	unbacked_settings	passes with its subject deleted, and nothing plants a violation
+PENDING	undocumented_settings	passes with its subject deleted, and nothing plants a violation
+PENDING	uninstall_removals_can_reach_root	found by the second reading, fails on a bare rm not behind as_root; escalated>=8 guard
+PENDING	usage_on_an_error_path_goes_to_stderr	fails when its subject is gone, but nothing plants a violation
+PENDING	venv_python_is_the_only_source	passes with its subject deleted, and nothing plants a violation
+PENDING	view_cannot_touch_the_run	found by the second reading, fails when grep finds write verbs in agent-view.sh; curl presence rider
+PENDING	watch_judges_on_time_not_only_on_output	found by the second reading, mixed: ! grep negated read in agent-watch.sh; read -t presence
+PENDING	work_is_saved_before_the_sandbox_is_destroyed	found by the third reading, mixed: fails on docker rm site lacking preserve, or ~/.openhands workspace claim
+NOT	a_real_answer_still_works	behaviour: runs ask.sh with stubs; greps its output for the answer
+NOT	absence_rule_can_fail	helper: the absence harness itself; no check line runs it
+NOT	aider_privacy_settings_reach_aider	presence: --config arg, conf file, 'analytics/check-update: false' lines, README claim must exist
+NOT	announcement_avoids_stdout	behaviour: runs ensure_ollama_up_announced from lib.sh; asserts its stdout is empty
+NOT	background_server_is_launched_with_the_settings	behaviour: runs start_ollama_bg with stub ollama; greps the env it launched with
+NOT	baked_scanner_sees_array_form	presence: baked_keys (grep of install_webui.sh) must yield two keys; second clause tautological
+NOT	big_unknown_is_elided	behaviour: runs agent-view.sh on a fixture; greps the output
+NOT	boot_units_parse_as_systemd_units	behaviour: renders units and runs systemd-analyze verify on them
+NOT	both_commands_announce_a_model_load	presence: ask.sh/run-agent.sh must contain model_load_notice; notice body must use ollama_processor
+NOT	conventions_carry_the_measured_gotchas	presence: four gotcha phrases, arithmetic fix and '<<<' must appear in CONVENTIONS.md
+NOT	conventions_keep_their_keyed_phrases	presence: each CONVENTIONS_KEYED_PHRASES entry must appear in model-facing CONVENTIONS.md text
+NOT	conventions_note_lists_the_same_phrases	presence: editor note must exist and contain each suite-array phrase; extras never fail
+NOT	every_boot_unit_is_verified	presence: check-system.sh must contain 'stale_boot_program <unit>' for three units
+NOT	every_command_explains_itself	behaviour: runs 'lca <cmd> --help' per subcommand; greps output
+NOT	every_entry_point_refuses_or_forwards	behaviour: ep_run executes each entry point with a bogus flag
+NOT	every_supported_family_is_accepted	behaviour: family_note_for sources tune.sh and runs unknown_family_note per family
+NOT	every_surface_reads_one_instructions_source	presence: agent.sh, run-agent.sh, lca_system_prompt must reference lca_user_instructions
+NOT	fatal_callers_use_require_service	second reading: shape `(( hits == 3 ))`; pinned count, stated as presence; 0 callers fails
+NOT	first_boot_help_touches_nothing	behaviour: runs do-user-data.sh --help with stubbed apt-get; checks output/sandbox
+NOT	guard_ruleset_covers_a_disabled_but_live_chat_app	behaviour: runs netmode.sh render-inbound; asserts on the dump
+NOT	help_is_answered_not_performed	behaviour: runs each LCA_TARGETS script with --help; checks rc and usage
+NOT	host_paths_all_move	behaviour: sources lib.sh, runs lca_host_paths, checks each printed path
+NOT	identity_does_not_escalate_to_itself	behaviour: runs git_identity with stubs; ! grep ESCALATED on its output
+NOT	identity_label_matches_value	behaviour: runs git_identity with stubs; greps its output
+NOT	install_is_truncation_safe	behaviour: truncation_run executes install.sh prefixes; asserts no side effects
+NOT	installers_answer_help_before_acting	behaviour: ep_run executes installers with --help/-h; checks acted/rc/output
+NOT	memory_preflight_names_a_kill_as_a_kill	behaviour: runs tests/memory-preflight.sh --killed on fixture logs; checks rc/output
+NOT	memory_preflight_refuses_and_says_what_to_unload	behaviour: runs memory-preflight.sh on fixture meminfo; checks rc/output
+NOT	motd_markers_are_real	presence: each fixed marker must appear in motd.sh and setup/do-user-data
+NOT	net_guard_still_dies	behaviour: runs net_guard offline/online; asserts rc and output
+NOT	netmode_help_is_not_an_action	behaviour: runs netmode.sh status --help; ! grep is on the output
+NOT	no_test_asked_the_real_docker	second reading: RUNTIME: reads LCA_UNSTUBBED_LOG, `[[ -s ]] || return 0`; not repo text
+NOT	no_test_called_a_missing_command	second reading: RUNTIME: reads LCA_MISSING_CMD_LOG, `[[ -s ]] || return 0`; not repo text
+NOT	relay_units_parse_as_systemd_units	behaviour: evals render functions, runs systemd-analyze verify on output
+NOT	resync_rule_is_shared	second reading: `[[ defs == 1 ]]`, `(( calls >= 2 ))`: pinned presence counts; 0 fails
+NOT	shipped_defaults_are_what_lib_resolves	behaviour: helper sources lib.sh and runs load_env per key; compares resolved values
+NOT	silent_when_already_up	behaviour: runs ensure_ollama_up_announced; asserts output empty
+NOT	suite_did_not_touch_the_host	second reading: RUNTIME: diffs HOST_BEFORE vs host fingerprint; not repo text; src var unknown
+NOT	tailscale_advice_is_conditional	presence: only ! grep -q presence tests: tailscale up / not installed / SKIP_TAILSCALE
+NOT	truncation_stops_the_run	behaviour: drives agent_run_verdict/agent_context_verdict with inputs; presence greps of agent-watch.sh
+NOT	uninstall_removes_only_derived	behaviour: runs remove_agent_models with stub ollama; greps the rm log
+NOT	unreadable_is_not_reported_as_empty	presence: both files must contain readable_by_us check and unknown-message
+NOT	unrequested_edits_are_documented	presence: section, 'unrequested changes', 'git diff HEAD~', 'git revert' must be present
+NOT	value_options_explain_a_missing_value	behaviour: runs each script with a value flag missing its value
+NOT	verdict_line_is_consistent	presence: SETUP_DONE_LINE must appear in three named files

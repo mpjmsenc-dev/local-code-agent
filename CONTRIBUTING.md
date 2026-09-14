@@ -161,9 +161,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Ten shell traps that turn a gate into decoration
+## Eleven shell traps that turn a gate into decoration
 
-All ten were shipped here at least once. They matter more in an assertion
+All eleven were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -388,6 +388,35 @@ requires the lexer to reject it. The other three mutations (stop treating `"`
 as a quote, stop treating heredocs as data, lex comments as code) each flip a
 scanner's answer over the fixture and are killed by it; without the
 non-vacuity half, removing the safety net was the one change nothing noticed.
+
+**11. A glob that matches nothing, and an exit status nobody reads.** Two
+defaults, and it takes both. bash leaves a glob that matches nothing as its own
+text, so `"${REPO}"/docs/*.md` over a tree with no docs is one "file" named
+`*.md`. The scanner errors on it — and there the second default takes over:
+`2>/dev/null || true`, `hits="$(awk …)"`, and `! grep` each turn *could not
+read* into *found nothing*. grep exits 1 for no match and 2 for a file it
+cannot open; `!` makes both a success, and `$(…)` in an assignment keeps
+neither. The output is identical to a clean tree's, so nothing downstream can
+tell. An audit of this suite's absence rules found about 110, and roughly half
+still passed with their subject files deleted. The guard written for exactly
+this, `(( ${#DOC_SURFACES[@]} >= 3 ))`, counted array entries — which two fixed
+paths and an unmatched glob keep at three whatever is on disk.
+
+Same family as 5 and 10, one level up: a shell default that turns a scanner into
+a no-op without changing what it prints. And the fix is not a better guard in
+each gate, because a guard is one more thing to get wrong silently. An absence
+rule is a claim that something is *not* there, and over a clean tree it passes
+whether or not it can see anything. So every absence rule is run twice more,
+against a copy of the tree with its subjects stripped and against a copy with a
+violation planted, and must fail both (`absence_rule_can_fail` in
+`tests/test-lib.sh`, which is itself shown a rule that can never fail and must
+reject it). Which functions are absence rules is a census made by reading,
+`tests/absence-rule-census.tsv`: proved, pending, or not a rule and why. The
+pending count is written down beside the harness, so it cannot rise without an
+edit that shows it. A detector refuses a new rule nobody listed — and it is a
+tripwire, not the census. Measured against a reading made without it, it finds
+101 of 108 absence rules; `tests/absence-candidates.awk` names the shapes that
+get past it.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
