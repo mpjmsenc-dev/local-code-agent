@@ -20864,8 +20864,11 @@ echo "# a heading that counts its own list has to count it correctly"
 counted_headings_match_their_lists() {
   local out wrong
   out="$(awk '
+    # Through twenty. It stopped at ten, so the day the trap list reached
+    # eleven its heading stopped being a counted heading at all: num() said 0,
+    # the heading was skipped, and only the floor below noticed.
     function num(w) {
-      split("one two three four five six seven eight nine ten", a, " ")
+      split("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty", a, " ")
       for (i in a) if (tolower(w) == a[i]) return i
       return 0
     }
@@ -20881,7 +20884,7 @@ counted_headings_match_their_lists() {
     END { if (heading != "" && stated != items) printf "%s: says %s, lists %s\n", heading, stated, items }
   ' "${REPO}/CONTRIBUTING.md")"
   # The scan has to have found at least one such heading, or it proves nothing.
-  grep -qE '^## (One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten) ' "${REPO}/CONTRIBUTING.md" || {
+  grep -qE '^## (One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty) ' "${REPO}/CONTRIBUTING.md" || {
     echo 'CONTRIBUTING.md no longer has a heading that counts its own list' >&2; return 1; }
   wrong="${out}"
   [[ -z "${wrong}" ]] || {
@@ -24466,7 +24469,7 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
       # first one-liner, this list included. Found by mutating the gate.
       if ($0 ~ /\}[[:space:]]*$/) {
         if (($0 ~ /\$\{REPO\}\// || $0 ~ /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/) \
-          && $0 ~ /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
+          && $0 ~ /(^|[^a-zA-Z_./-])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
         inb=0; next
       }
       inb=1; next
@@ -24475,7 +24478,9 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # prose classified the gate: a comment ending "and this still passed."
     # contains "sed", so writing that sentence turned a driven test into a
     # source grep. A classifier that reads text and draws conclusions from it
-    # is the very thing this section exists to stop.
+    # is the very thing this section exists to stop. Nor is a word right after
+    # a dot, slash or dash a tool: cp "${TESTS_DIR}"/*.awk calls nothing that
+    # reads source, and the extension alone made a copy step a source grep.
     inb && /^[[:space:]]*#/ { next }
     # A repo path reached through a VARIABLE counts too. The rule used to be
     # "${REPO}/ appears in the body", and ${APPLY}, ${TESTS_DIR}, ${CENSUS} and
@@ -24485,7 +24490,7 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # for the name of an applier were among them.
     inb && /\$\{REPO\}\// { src=1 }
     inb && /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/ { src=1 }
-    inb && /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
+    inb && /(^|[^a-zA-Z_./-])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
     inb && LEX_CODE && /^\}/ { if (src && tool) print fn; inb=0 }
   ' "$1" | sort -u
 }
@@ -24559,6 +24564,9 @@ reads_the_source_on_a_closing_line() {
   awk '/something/ { found = 1 }
        END { exit !found }' "${REPO}/scripts/lib.sh"
 }
+copies_the_scanner_programs() {
+  cp "${TESTS_DIR}"/*.awk "$1/"
+}
 SGFIX
 check "the classifier sees a gate that reads source" \
   grep -qx 'reads_the_source_with_no_excuse' <<<"$(source_grep_gates "${SG_FIXTURE}")"
@@ -24586,6 +24594,13 @@ closing_line_is_read_as_code() {
 }
 check "...nor does a repo path on the closing line of a quoted program go unseen" \
   closing_line_is_read_as_code
+# ...and a file extension is not a tool. The absence harness copies the scanner
+# programs with a *.awk glob, and the word in the extension made that copy step
+# an unjustified source grep.
+extension_is_not_a_tool() {
+  ! grep -qx 'copies_the_scanner_programs' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "...nor is a file named *.awk a call to awk" extension_is_not_a_tool
 prose_does_not_reclassify_a_driven_test() {
   ! grep -qx 'drives_the_behaviour' <<<"$(source_grep_gates "${SG_FIXTURE}")"
 }
