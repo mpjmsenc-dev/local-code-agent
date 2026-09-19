@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# This script ACTS — see LCA_MAY_PROMPT in lib.sh.
+LCA_MAY_PROMPT=true
 load_env
 
 install_docker_repo_and_engine() {
@@ -26,19 +28,14 @@ install_docker_repo_and_engine() {
   esac
 
   curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" \
-    | as_root tee /etc/apt/keyrings/docker.asc >/dev/null
+    | write_root_file /etc/apt/keyrings/docker.asc 0644
   as_root chmod a+r /etc/apt/keyrings/docker.asc
 
   echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${distro_id} ${codename} stable" \
-    | as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
+    | write_root_file /etc/apt/sources.list.d/docker.list 0644
 
   apt_get update -y
   apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-}
-
-# docker_daemon_up — true if a docker daemon is reachable (root or not).
-docker_daemon_up() {
-  docker info >/dev/null 2>&1 || as_root docker info >/dev/null 2>&1
 }
 
 main() {
@@ -69,7 +66,7 @@ main() {
   fi
 
   # Let the invoking (non-root) user run docker without sudo.
-  local docker_user="${SUDO_USER:-$(id -un)}"
+  local docker_user; docker_user="$(invoking_user)"
   if [[ "${docker_user}" != "root" ]]; then
     if id -nG "${docker_user}" | grep -qw docker; then
       ok "User '${docker_user}' is already in the docker group."
@@ -82,8 +79,16 @@ main() {
   # The smoke test needs a running daemon. If none is reachable (e.g. no
   # init system started dockerd), warn and continue rather than crash the
   # whole setup — the rest of the stack (Ollama, aider) does not need Docker.
-  if ! docker_daemon_up; then
-    warn "Docker daemon is not running (no init system started it?) — start it, then re-run scripts/install_webui.sh. Skipping the smoke test."
+  #
+  # lib.sh's docker_daemon_reachable, not a local copy. The copy that lived
+  # here was one line and one guard short: it fell straight through to
+  # 'as_root docker info', and as_root DIES when there is neither root nor
+  # sudo. So on the one host shape this branch exists for — no init system,
+  # daemon down — a passwordless-sudo-less user got "Root privileges needed
+  # for: docker info" and setup stopped, instead of the warning below and a
+  # stack that carries on without Docker.
+  if ! docker_daemon_reachable; then
+    warn "Docker daemon is not running (no init system started it?) — start it, then re-run sudo ${REPO_ROOT}/scripts/install_webui.sh. Skipping the smoke test."
     return 0
   fi
 

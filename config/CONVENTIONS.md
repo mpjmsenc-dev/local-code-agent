@@ -1,19 +1,101 @@
+<!--
+FOR WHOEVER EDITS THIS FILE — this block never reaches the model, so it costs
+you nothing to read and nothing to keep.
+
+Some wording here is LOAD-BEARING: the test suite matches on it, and two of the
+phrases below were broken while trimming this file to fit the prompt budget.
+Both were caught by a failing gate, but only because someone was watching.
+
+Reword these and a gate fails, naming the phrase:
+
+  Never report success on code you have not executed
+  working directory you were given
+  without executing what you built
+  paste the real output
+  check each requirement
+  smallest change that satisfies the request
+  kills the script
+  swallows the exit status
+  SIGPIPEs the writer
+  NEXT line only
+  passes on the definition
+
+That list lives in tests/test-lib.sh, next to the gate that reads it. If you
+genuinely need to reword one, change it there in the same commit.
+
+The file is also budgeted: 'lca check' warns when the whole prompt passes 15%
+of OLLAMA_CONTEXT_LENGTH, and a gate fails if the SHIPPED default would trip
+that warning. There is very little headroom. Trim prose, never a case.
+
+WHAT THIS FILE IS, which used to be the first paragraph below and cost 75
+tokens of budget to tell the model things it cannot act on. It is read by
+aider ('lca'), the chat app and the agent; AIDER_CONVENTIONS=false switches it
+off for all three. It is APPENDED to the chat app's prompt, never substituted —
+that part tells the model it has no filesystem and no tools. Short on purpose:
+it is re-sent on every message. If you need to make room again, look for more
+prose like this before you touch a rule.
+-->
+
 # Coding conventions
 
-aider loads this read-only at the start of each session (`run-agent.sh --read`)
-to steer the local model — unless you set `AIDER_CONVENTIONS=false` in `.env`,
-which skips it to reclaim the context it costs. Kept short on purpose: every
-line here spends part of the model's context window.
-
-- Make the smallest change that satisfies the request. Don't refactor or
-  reformat code you weren't asked to touch.
-- Match the surrounding file's existing style, naming, and structure.
-- Don't add comments that merely restate the code; comment only non-obvious
-  intent. Never add license or authorship headers.
+- Never report a task complete without running what you built. If it named
+  outputs or behaviours, exercise them and paste the real output. Code you have
+  not run is a draft. Never report success on code you have not executed.
+- Never write outside the working directory you were given — not the sandbox
+  root, not anywhere above it.
+- Before finishing, re-read the task and check each requirement against what
+  you did. If any is untouched, it is not complete.
+- Make the smallest change that satisfies the request; don't refactor code you
+  weren't asked to touch.
+- Match the surrounding file's style, naming and structure.
+- Comment non-obvious intent only. No authorship headers.
 - Preserve existing behavior and public interfaces unless asked to change them.
-- Prefer the standard library and already-imported dependencies; call out any
-  new dependency you introduce.
-- In shell scripts: keep them bash-clean under `set -euo pipefail` and quote
-  your variable expansions.
-- If the request is ambiguous, implement the most conventional interpretation
-  and state the assumption in one line.
+- Prefer the stdlib and already-imported deps; call out any new one.
+- In shell: bash-clean under `set -euo pipefail`, and quote your expansions.
+- If the request is ambiguous, take the conventional reading and say so.
+
+## Bash gotchas we've hit for real
+
+Each silently broke something here. Copy the "correct" form.
+
+**1. `((x++))` returns non-zero when x was 0, so `set -e` kills the script** —
+post-increment yields the OLD value.
+
+```bash
+f() { local n=0; ((n++)); echo hi; }      # BROKEN: exits 1, never prints
+f() { local n=0; n=$((n+1)); echo hi; }   # correct
+```
+
+**2. `local` swallows the exit status of a command substitution** — you get
+`local`'s own 0, so `|| handle_error` never fires. Declare, then assign; same
+for `export`/`readonly`.
+
+```bash
+f() { local m="$(grep -c x "$f")"; }      # BROKEN: $? is 0
+f() { local m; m="$(grep -c x "$f")"; }   # correct: $? is 1
+```
+
+**3. A reader that exits early SIGPIPEs the writer, and `pipefail` makes that a
+failure.** `grep -q` leaves on its first match, so the pipeline is 141 — "not
+found" when it WAS. Capture first, then match.
+
+```bash
+if producer | grep -q "$pat"; then                       # BROKEN: 141
+out="$(producer)"; if grep -q "$pat" <<<"$out"; then     # correct
+```
+
+**4. `# shellcheck disable=` applies to the NEXT line only** — put it directly
+above the line it excuses, reason above that.
+
+```bash
+# shellcheck disable=SC2016
+                        # BROKEN: a blank line here excuses nothing
+grep 'x ${VAR}' "$f"
+```
+
+**5. A test that greps for a NAME passes on the definition.** Drive the
+behaviour instead.
+
+```bash
+grep -q 'helper' lib.sh             # BROKEN: lib.sh defines helper
+[[ "$(under_test)" == expected ]]   # correct: drive it

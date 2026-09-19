@@ -11,7 +11,15 @@
 # exactly that. Printing something first is NOT enough, and was tried: with
 # 'info|warn|step' in the allow list, a 60-second silent poll under the heading
 # "==> Switching default model" counted as announced, which is the bug wearing
-# a hat. The mutation that exposed that is in tests/test-lib.sh.
+# a hat.
+#
+# Every rule below is DRIVEN, one fixture each, by
+# 'the long-wait scanner reports what it must and excuses what it must' in
+# tests/test-lib.sh. That gate did not exist until an audit asked what was
+# exercising this file and found the answer was nothing: the scanner was run
+# once, over the real tree, and a tree with no offending line cannot tell a
+# working scanner from a broken one. This header used to claim the mutation
+# lived in the suite. It did not.
 #
 # FNR, not NR: NR keeps counting across files, so the reported line numbers
 # pointed into the middle of nowhere (setup.sh:1488 for a 150-line script).
@@ -27,7 +35,19 @@ FNR == 1 { delete hist }
     # the rule read its own prose as proof the server had been started.
     if (hist[i] ~ /^[[:space:]]*#/) continue
     if (hist[i] ~ /systemctl (re)?start ollama/) allowed = 1
-    if (hist[i] ~ /nohup ollama serve/)          allowed = 1
+    # A start spelled across lines. start_ollama_bg builds its environment from
+    # config/ollama.env, so the command is "nohup env \ ... \ ollama serve
+    # >LOG 2>&1 &". Anchored on the trailing '&': that is what makes it a START
+    # rather than a sentence about one, so a warn() that merely tells the
+    # reader to run 'ollama serve' still counts as silence.
+    #
+    # An unanchored /nohup ollama serve/ sat here as well, left behind when the
+    # command changed shape. It matched nothing this scanner visits, so it
+    # looked harmless — but it excused any line CONTAINING those words, which
+    # is exactly the warn() the sentence above says must not be excused. A rule
+    # that never fires is not a rule that does nothing; it is a rule nobody has
+    # checked. Removed, and the case it used to let through is now a fixture.
+    if (hist[i] ~ /ollama serve.*&[[:space:]]*$/)  allowed = 1
     if (hist[i] ~ /ensure_ollama_up/)            allowed = 1
   }
   if (!allowed) printf "%s:%d:%s\n", FILENAME, FNR, $0

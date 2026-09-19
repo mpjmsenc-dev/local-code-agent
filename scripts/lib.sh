@@ -37,8 +37,15 @@ LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 ENV_EXAMPLE="${REPO_ROOT}/.env.example"
-OLLAMA_DROPIN_DIR="/etc/systemd/system/ollama.service.d"
-OLLAMA_DROPIN="${OLLAMA_DROPIN_DIR}/local-code-agent.conf"
+# Overridable ONLY so a test can keep tune.sh out of the real /etc. The default
+# is the systemd location and nothing in the product ever sets these; a test
+# that did not have this was writing the machine's actual Ollama drop-in from a
+# unit suite when run as root, and failing with EACCES when not — which is how
+# two gates came to pass on every developer box and fail on every CI run.
+# Nothing reads them from .env: sync_env_keys works from .env.example, and these
+# are not in it.
+OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+OLLAMA_DROPIN="${OLLAMA_DROPIN:-${OLLAMA_DROPIN_DIR}/local-code-agent.conf}"
 NETMODE_DIR="/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
 # Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs
@@ -54,6 +61,23 @@ SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
 # these, skips any name containing one.
 # shellcheck disable=SC2034
 MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
+
+# Where start_ollama_bg() sends Ollama's output on a host with no service
+# manager — and therefore where 'lca logs ollama' has to look on that host.
+# Named once for the reason git_identity() gives: two places asking the same
+# question drift, and these two already had. logs.sh answered "check the
+# terminal you started 'ollama serve' in" on a box where this project started
+# it itself, under 'nohup ... &', so there was no terminal to check and the log
+# it wrote was sitting right here.
+# shellcheck disable=SC2034
+OLLAMA_BG_LOG="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+
+# The Open WebUI image, named once. Three scripts use it and only one owned
+# the string: install_webui.sh created the container with it, while backup.sh
+# and restore.sh hardcoded the same literal to borrow a tar binary next to the
+# volume. Pin or move that tag and two of the three would go on using the old
+# one — tarring a volume with a different image than the app runs.
+WEBUI_IMAGE="${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
 
 # ---------------------------------------------------------------------------
 # Colors — tput when stdout is a terminal, plain text when piped/redirected.
@@ -89,7 +113,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 require_cmd() {
   local cmd
   for cmd in "$@"; do
-    have "$cmd" || die "Required command '${cmd}' not found. Run ./setup.sh (or scripts/install_dependencies.sh) first."
+    have "$cmd" || die "Required command '${cmd}' not found. Run sudo ${REPO_ROOT}/setup.sh (or sudo ${REPO_ROOT}/scripts/install_dependencies.sh) first."
   done
 }
 
@@ -107,8 +131,87 @@ as_root() {
 # Unlike as_root this never exits, so callers that must keep running even
 # without a way to escalate (check-system.sh) can degrade gracefully instead
 # of dying silently inside a redirected probe.
+#
+# THE RULE, and there is a gate on it (tests/test-lib.sh):
+#   an ACTION the user asked for   -> can_root.     A password prompt is fair:
+#                                     they typed 'lca apply', 'webui.sh start'.
+#   a PROBE that only reports      -> can_root_now. A prompt here is a stall in
+#                                     something nobody asked to run.
+# Getting this backwards is not a style question. It cost a login banner that
+# hung for ever and two health-check lines that were confidently wrong; see
+# can_root_now directly below.
 can_root() {
   [[ "${EUID}" -eq 0 ]] || have sudo
+}
+
+# can_root_now — can this process become root WITHOUT prompting?
+#
+# can_root above answers "is the sudo binary installed", which is the right
+# question for a step that is allowed to ask for a password. It is the wrong
+# question for a PROBE, and the difference produced a false security alarm:
+# 'lca check' as a user who is not a sudoer took the can_root branch, ran
+# 'sudo nft list table', got nothing, and reported "inbound guard NOT loaded —
+# WebUI/Ollama ports may be publicly reachable" on a machine whose guard may be
+# perfectly loaded. It then advised 'sudo netmode.sh harden', which that user
+# cannot run either. Measured on this box with a freshly created account.
+#
+# 'sudo -n' also means a probe can never sit waiting for a password inside a
+# health check that setup.sh runs unattended. That is not a theoretical
+# nicety: an interactive sudo on a real terminal does not fail, it WAITS.
+# Measured from an account that is not a sudoer, the login banner printed two
+# lines and then sat on "[sudo] password for ..." for as long as it was left —
+# every SSH login, and the bounding 'timeout' was inside the sudo, so it never
+# got to start. With this function: 0.10s.
+can_root_now() {
+  [[ "${EUID}" -eq 0 ]] && return 0
+  have sudo || return 1
+  sudo -n true >/dev/null 2>&1
+}
+
+# announce_possible_prompt WHAT — say a password may be wanted, before an
+# escalation whose own prompt the caller has redirected away.
+#
+# Quiet for root and for a passwordless sudoer, because nothing will be asked
+# of them, and quiet where the caller never opted into prompting, because then
+# nothing will be asked at all. What is left is the one case that needs a
+# sentence: a command the reader typed, on an account where sudo will stop and
+# wait, with sudo's own prompt going to /dev/null.
+
+announce_possible_prompt() {
+  if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+    warn "${1:-This} needs root — sudo may ask for your password."
+  fi
+}
+
+# LCA_MAY_PROMPT / root_for_probe — who decides, for the SHARED helpers.
+#
+# The rule above is a property of the CALLER, not of the function. The three
+# docker helpers further down are asked the same question by both kinds of
+# caller: docker_daemon_reachable is a reporter's question inside the login
+# banner and an action's question inside 'lca backup'. Deciding it inside the
+# helper is wrong in one direction or the other every single time, and this
+# project has now shipped BOTH mistakes:
+#
+#   can_root everywhere      -> 'lca check' and the banner stopped dead on a
+#                               password prompt (measured: indefinitely).
+#   can_root_now everywhere  -> 'lca backup' run without sudo by an ordinary
+#                               sudoer skipped the chat history and called a
+#                               perfectly healthy daemon "not usable".
+#
+# The second is the worse one: a backup that quietly omits the accounts and
+# chat history is only discovered when it is restored.
+#
+# So the caller says, once, next to where it sources this file. The default is
+# the strict answer, because the default caller is a reporter and a reporter
+# that stops for a password is the bug all of this exists to prevent — a new
+# script gets the safe behaviour by saying nothing.
+: "${LCA_MAY_PROMPT:=false}"
+root_for_probe() {
+  if [[ "${LCA_MAY_PROMPT}" == "true" ]]; then
+    can_root
+  else
+    can_root_now
+  fi
 }
 
 # apt_get ARGS... — apt-get as root, non-interactive, and tolerant of the
@@ -120,6 +223,55 @@ can_root() {
 apt_get() {
   as_root env DEBIAN_FRONTEND=noninteractive \
     apt-get -o DPkg::Lock::Timeout=600 "$@"
+}
+
+# writable_by_us PATH — true when this process could create or modify PATH.
+#
+# Its own function, like have_terminal beside it, so failure branches that
+# depend on it can be tested. As root '[[ -w ]]' is true for every path, so a
+# suite running as root can never reach the "not writable" arm and one running
+# as anybody else can never reach the other.
+writable_by_us() { [[ -w "$1" ]]; }
+
+# readable_by_us PATH — true when this process could actually read PATH.
+#
+# For a directory that means both bits: r lists the names, x stats what is in
+# them, and a glob over a directory with only one of the two comes back empty
+# rather than failing. For a regular file r is the whole question — requiring x
+# as well would call every backup archive unreadable, since they are 0600.
+#
+# Same seam, same reason as writable_by_us above: root reads everything, so the
+# arm that matters is unreachable on a suite running as root.
+readable_by_us() {
+  [[ -r "$1" ]] || return 1
+  [[ -d "$1" ]] || return 0
+  [[ -x "$1" ]]
+}
+
+# sudo_would_block — true when becoming root is possible in principle but not
+# in THIS run: sudo is installed, it will ask for a password, and there is no
+# terminal to type it into.
+#
+# A predicate, never a die. It is consulted by failure branches that already
+# have their own handling — some callers tolerate an apt failure with '|| warn'
+# — and turning a survivable step into an exit is exactly the shape this
+# project keeps removing.
+#
+# The distinction it draws is the one can_root_now already makes for probes,
+# applied to an action that has just failed: "could have escalated" and "could
+# escalate here, now, without a human" are different, and only the second one
+# was ever going to work in a pipe, a cron job or a CI step.
+# have_terminal — its own function so sudo_would_block can be tested in all
+# four of its states. '[[ -t 0 ]]' cannot be stubbed from outside, so a test
+# either re-declares the whole predicate (and stops testing it) or depends on
+# whether a pty happened to be allocated. Both were tried; the first let a
+# mutation through.
+have_terminal() { [[ -t 0 ]]; }
+
+sudo_would_block() {
+  can_root_now && return 1     # root already, or sudo needs no password
+  can_root || return 1         # no sudo at all — as_root's own message is better
+  ! have_terminal
 }
 
 # confirm PROMPT — ask yes/no. Auto-answers YES when non-interactive so
@@ -135,6 +287,126 @@ confirm() {
   [[ -z "${reply}" || "${reply}" =~ ^[Yy] ]]
 }
 
+# docker_start_hint — how to start the Docker daemon ON THIS HOST.
+#
+# Five separate messages said "sudo systemctl start docker" unconditionally:
+# webui.sh, restore.sh, apply.sh, install_webui.sh and check-system.sh. On a
+# host with no systemd — containers and WSL, the same hosts start_ollama_bg()
+# exists for — that is a dead end, and a confusing one. Measured here:
+#
+#   $ systemctl start docker
+#   System has not been booted with systemd as init system (PID 1). Can't operate.
+#   Failed to connect to bus: Host is down
+#
+# Note systemctl is PRESENT on such a box; it is systemd that is not running,
+# which is why 'have systemctl' is not the question and systemd_available()
+# below — which this project already had, and already used elsewhere — is.
+#
+# Same rule as chat_address() and the 'lca' rows in the banner: do not hand the
+# reader a command that cannot work where they are standing.
+docker_start_hint() {
+  if systemd_available; then
+    printf 'sudo systemctl start docker'
+  else
+    printf 'start the Docker daemon for this host — there is no systemd here, so systemctl cannot do it'
+  fi
+}
+
+# docker_unreachable_advice — what to DO about a daemon this account cannot
+# reach, given who this account is.
+#
+# docker_start_hint above asks "what works on this host". This asks the second
+# half of the same question, "what works for this user", and three messages
+# answered it with a fixed list. Measured on this box with the daemon genuinely
+# down, running as root:
+#
+#   [FAIL] Cannot reach the Docker daemon as 'root'. Start it (...), or add
+#          yourself to the docker group (sudo .../install_docker.sh) and log
+#          out/in, or re-run this as root.
+#
+# Two of those three remedies belong to somebody else. root is not missing from
+# the docker group — group membership is not consulted for uid 0 — and root
+# cannot re-run anything as root. So the only remedy that can work is the first
+# one, offered in the middle of two that cannot, to a reader whose daemon is
+# down and who is reading this precisely because they do not know what to do.
+#
+# check-system.sh has always known the rule: "running as root — docker group
+# membership not needed". Three messages never asked. Same rule as
+# docker_start_hint, chat_address() and the 'lca' rows in the banner: do not
+# hand the reader a command that cannot work where they are standing.
+docker_unreachable_advice() {
+  if am_root; then
+    printf 'Start it: %s' "$(docker_start_hint)"
+  else
+    printf 'Start it (%s), or add yourself to the docker group (sudo %s/scripts/install_docker.sh) and log out/in, or re-run this as root' \
+      "$(docker_start_hint)" "${REPO_ROOT}"
+  fi
+}
+
+# ollama_log_hint — where to read the model engine's own output ON THIS HOST.
+#
+# Three messages sent people to 'journalctl -u ollama' unconditionally:
+# check-system.sh and selftest.sh (both on "the model did not respond") and
+# setup.sh (on the same failure during the install). Where there is no systemd
+# there is no journal for ollama either — this project starts the server itself
+# under nohup and writes OLLAMA_BG_LOG — so the one command offered at the
+# moment inference fails returns nothing at all.
+#
+# scripts/logs.sh already makes exactly this decision and is the command the
+# rest of the project points at, so the no-systemd arm names it rather than the
+# raw path: it follows the file, and says where it would be when it is absent.
+ollama_log_hint() {
+  if systemd_available; then
+    printf 'journalctl -u ollama'
+  else
+    printf '%s ollama' "${REPO_ROOT}/scripts/logs.sh"
+  fi
+}
+
+# pull_advice MODEL — how to get MODEL onto this machine FROM HERE.
+#
+# Seven messages tell someone their model is missing. Three of them asked
+# whether the kill switch was on first — check-system.sh, restore.sh and
+# run-agent.sh each wrote the same two-arm branch by hand — and four did not:
+# 'lca ask', 'lca speed', 'lca test' and prompt-bench.sh all said "pull it
+# with: ollama pull X" flat out. With netmode OFFLINE that command cannot
+# reach the registry, and the one thing standing between the reader and their
+# model goes unmentioned.
+#
+# Being correct in three places is how the fourth is not, which is the same
+# argument docker_daemon_reachable's header makes. All seven route through
+# here now, so the gate on it can be blanket rather than an allow-list: lib.sh
+# is the only file that may name the raw command, and the other occurrence
+# here is pull_model actually running it.
+# A whole sentence, not a fragment, so every caller can simply append it after
+# a full stop. Returning just the command read fine online and badly offline —
+# "Get it with: netmode is OFFLINE — run ..." — and a message that parses wrong
+# is a message people skim past.
+pull_advice() {
+  if net_blocked; then
+    printf "The netmode kill switch is ON, so nothing can download — run 'sudo %s/netmode.sh online', then: ollama pull %s" \
+      "${REPO_ROOT}" "$1"
+  else
+    printf 'Pull it with: ollama pull %s' "$1"
+  fi
+}
+
+# ollama_restart_hint — how to get the model engine running again ON THIS HOST.
+#
+# run-agent.sh and tune.sh both branch on systemd here already, and neither is
+# folded into this helper on purpose: their arms differ in BEHAVIOUR, not just
+# wording (tune.sh writes the tuned values to .env and exits 0 rather than
+# dying). selftest.sh had no arm at all and offered 'sudo systemctl restart
+# ollama' everywhere — on 'lca test', which is the command a new owner runs to
+# find out whether any of this works.
+ollama_restart_hint() {
+  if systemd_available; then
+    printf 'sudo systemctl restart ollama'
+  else
+    printf "start it yourself ('ollama serve') — there is no systemd here to manage it"
+  fi
+}
+
 # systemd_available — true when systemd is PID 1 and systemctl is usable.
 systemd_available() {
   have systemctl && [[ -d /run/systemd/system ]]
@@ -147,26 +419,87 @@ systemd_available() {
 # load_env — create .env from .env.example on first run, source it, then
 # apply defaults for anything left unset. Safe to call repeatedly; a repeat
 # call re-reads the file, so changes made via set_env_var become visible.
+# What a .env line is allowed to be: blank, a comment, or one assignment whose
+# value is bare (no whitespace) or fully quoted. 'export ' is accepted because
+# people write it out of habit and source handles it; a trailing '# comment' is
+# accepted because bash does.
+#
+# Held in a variable rather than inlined so the gate that proves it can feed it
+# the same expression the loader uses, instead of a second copy that drifts.
+#
+# DELIBERATELY LOOSER than env_file_is_inert() below, and the two must not be
+# merged. That one guards a .env that arrived inside a tarball named on the
+# command line and is about to be sourced as root, so it rejects '$', backticks
+# and every other construct outright. This one guards the file the user edited
+# themselves, where 'FOO=$HOME/x' is their business and works today — applying
+# the tarball rule here would refuse a config that has always been valid.
+# Different threat, different answer; a gate asserts they still disagree.
+LCA_ENV_LINE_RE='^[[:space:]]*(#|$)|^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]'\''"]*)[[:space:]]*(#.*)?$'
+
 load_env() {
   if [[ ! -f "${ENV_FILE}" ]]; then
     if [[ "${LCA_ENV_READONLY:-false}" == "true" ]]; then
       # Deliberately create nothing: see load_env_readonly below.
       :
     elif [[ -f "${ENV_EXAMPLE}" ]]; then
-      cp "${ENV_EXAMPLE}" "${ENV_FILE}"
-      # Notice goes to stderr: load_env may run inside commands whose stdout
-      # is data (a message on stdout would corrupt it).
-      info "Created ${ENV_FILE} from .env.example (edit it to customize)." >&2
+      # The copy can fail, and unguarded it failed the way every raw tool
+      # failure does. setup.sh installs to /opt/local-code-agent as root, and
+      # 'lca' is meant to be run as an ordinary user, so a missing .env there
+      # gives:
+      #
+      #   cp: cannot create regular file '/opt/local-code-agent/.env':
+      #   Permission denied
+      #
+      # ...and then the command aborts under errexit, mid-load_env, having said
+      # nothing about what .env is for or what to do. Measured as the 'ubuntu'
+      # user against a root-owned checkout.
+      #
+      # Not fatal: the branch below already treats a missing config as
+      # "continue with built-in defaults", and every default is right there in
+      # this function. So warn, name the cause and the fix, and carry on — the
+      # only thing actually lost is that settings will not persist.
+      if cp "${ENV_EXAMPLE}" "${ENV_FILE}" 2>/dev/null; then
+        # Notice goes to stderr: load_env may run inside commands whose stdout
+        # is data (a message on stdout would corrupt it).
+        info "Created ${ENV_FILE} from .env.example (edit it to customize)." >&2
+      else
+        warn "Could not create ${ENV_FILE} — $(id -un) cannot write to ${REPO_ROOT}. Continuing with built-in defaults, but settings will not persist. To fix: sudo cp ${ENV_EXAMPLE} ${ENV_FILE} && sudo chown $(id -un) ${ENV_FILE}"
+      fi
     else
       warn "Neither .env nor .env.example found in ${REPO_ROOT}; using built-in defaults."
     fi
   fi
   if [[ -f "${ENV_FILE}" ]]; then
-    set -a
     # Strip CR first so a CRLF (Windows-edited) .env never leaves a trailing
     # '\r' in values — which would break numeric checks, ports and URLs.
+    local cleaned bad
+    cleaned="$(tr -d '\r' < "${ENV_FILE}")"
+    # Checked BEFORE sourcing, because every doc in this project tells the
+    # reader to edit this file by hand — 'sed -i' on it appears in
+    # YOUR-TURN.md, PHONE.md and the README — and sourcing a typo is the one
+    # failure the reader cannot diagnose. Measured on two realistic slips:
+    #
+    #   WEBUI_PORT="3000               -> /dev/fd/63: line 60: unexpected EOF
+    #                                     while looking for matching `"'
+    #   MODEL_NAME=qwen2.5 coder:7b    -> /dev/fd/63: line 14: coder:7b:
+    #                                     command not found
+    #
+    # ...and then no banner at all, on every SSH login. '/dev/fd/63' is the
+    # process substitution below; it names nothing the reader can open, and
+    # nothing anywhere says the word '.env'.
+    #
+    # 'bash -n' alone is not enough: the second line is valid bash. It parses
+    # as an assignment followed by a command, which is exactly the damage. So
+    # the rule is the real invariant of the file — assignments only.
+    bad="$(grep -nvE "${LCA_ENV_LINE_RE}" <<<"${cleaned}" || true)"
+    bad="${bad%%$'\n'*}"
+    if [[ -n "${bad}" ]]; then
+      die "${ENV_FILE} line ${bad%%:*}: ${bad#*:}
+A .env holds KEY=value lines only, and this is not one — sourcing it would run part of the line as a command. Quote any value with spaces in it: KEY=\"a b\"."
+    fi
+    set -a
     # shellcheck disable=SC1090
-    source <(tr -d '\r' < "${ENV_FILE}")
+    source <(printf '%s\n' "${cleaned}")
     set +a
   fi
   AUTO_TUNE="${AUTO_TUNE:-true}"
@@ -179,6 +512,20 @@ load_env() {
   PYTHON_BIN="${PYTHON_BIN:-python3}"
   VENV_NAME="${VENV_NAME:-.venv}"
   AIDER_CONVENTIONS="${AIDER_CONVENTIONS:-true}"
+  # Defaulted to a LITERAL false, which is what makes this safe to do at load
+  # time. The comment below is about "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}"
+  # — a default that captures the master switch freezes the fallback, so an
+  # AIDER_CONVENTIONS=false set afterwards loses. This captures nothing:
+  # lca_user_instructions still applies the master switch on top, so off still
+  # means off everywhere.
+  CONVENTIONS_CHAT="${CONVENTIONS_CHAT:-false}"
+  # The three per-surface switches are deliberately NOT defaulted here. Baking
+  # "${CONVENTIONS_CHAT:-${AIDER_CONVENTIONS}}" at load time freezes the
+  # fallback: AIDER_CONVENTIONS=false set afterwards loses to a CONVENTIONS_CHAT
+  # that load_env already resolved to true, and the old single switch silently
+  # stops working. Two gates caught that within a minute. They resolve at CALL
+  # time instead, in lca_user_instructions.
+  AIDER_NO_AUTO_COMMIT="${AIDER_NO_AUTO_COMMIT:-false}"
   LCA_EDIT_FORMAT="${LCA_EDIT_FORMAT:-auto}"
   LCA_ASK_TOKENS="${LCA_ASK_TOKENS:-512}"
   SKIP_DOCKER="${SKIP_DOCKER:-false}"
@@ -188,8 +535,135 @@ load_env() {
   WEBUI_CONTAINER="${WEBUI_CONTAINER:-open-webui}"
   WEBUI_NAME="${WEBUI_NAME:-local-code-agent}"
   WEBUI_ENABLE_SIGNUP="${WEBUI_ENABLE_SIGNUP:-true}"
+  # The agent tier. Off by default: it is a multi-gigabyte download and it runs
+  # commands on this machine without asking, which is not something to switch
+  # on for somebody. AGENT_PORT is 3001 because 3000 is WEBUI_PORT's default
+  # AND the agent's own documented port — the collision is real, not defensive.
+  ENABLE_AGENT="${ENABLE_AGENT:-false}"
+  AGENT_PORT="${AGENT_PORT:-3001}"
+  AGENT_CONTAINER="${AGENT_CONTAINER:-openhands-app}"
+  AGENT_IMAGE="${AGENT_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}"
+  AGENT_RUNTIME_IMAGE="${AGENT_RUNTIME_IMAGE:-ghcr.io/openhands/agent-server}"
+  AGENT_RUNTIME_TAG="${AGENT_RUNTIME_TAG:-1.26.0-python}"
+  AGENT_MAX_ITERATIONS="${AGENT_MAX_ITERATIONS:-100}"
+  AGENT_TIMEOUT_MINUTES="${AGENT_TIMEOUT_MINUTES:-180}"
+  AGENT_STUCK_STRIKES="${AGENT_STUCK_STRIKES:-3}"
+  # 'auto' rather than 'events': the event API is where a real step ceiling has
+  # to read from, but the log arm is what shipped and it costs nothing to keep
+  # as the fallback. Nobody's run gets worse by upgrading.
+  AGENT_STEP_SOURCE="${AGENT_STEP_SOURCE:-auto}"
+  # false, and this is the setting that decides whether the agent tier does
+  # anything at all. Measured, twice, on this stack — see agent.sh.
+  AGENT_NATIVE_TOOL_CALLING="${AGENT_NATIVE_TOOL_CALLING:-false}"
+  # The window the agent's own derived model carries. Server-wide context stays
+  # where the ladder put it; only the agent gets this. Never applied below the
+  # server default — see agent_model_context.
+  AGENT_MODEL_CONTEXT="${AGENT_MODEL_CONTEXT:-16384}"
+  # Which ref of the public skills repository the agent's sandboxes may load
+  # from. The default names one that does not exist, deliberately: see
+  # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
+  AGENT_EXTENSIONS_REF="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  # Both of the keys below were found on a live droplet and both were the
+  # difference between a run that works and a run that does nothing while
+  # looking busy — though not for the reason first written down here.
+  #
+  # How much of the window the agent may spend on ONE reply. It is not a cap on
+  # verbosity, it is a cap on how much of the window the client RESERVES — and
+  # what is left is the only room the instructions have. Measured with nothing
+  # set, on the very first live run:
+  #
+  #   truncating input prompt   limit=8194  prompt=18313  keep=4  new=8194
+  #
+  # 16384 - 8190 = 8194, which is where "the client reserved half the window
+  # for output it was never going to produce" came from. CORRECTED, 2026-08-17,
+  # and the arithmetic was a coincidence: 16384/2 + 2 is also 8194.
+  #
+  # Measured by overflowing contexts Ollama honours, varying num_predict on
+  # purpose so the two theories separate:
+  #
+  #   num_ctx 512   num_predict 1     limit 258   (NumCtx-NumPredict predicts 511)
+  #   num_ctx 1024  num_predict 200   limit 514   (predicts 824)
+  #
+  # 'limit' there is not the threshold, it is the size Ollama cuts the prompt
+  # DOWN TO. Truncation fires when the prompt exceeds num_ctx, and when it fires
+  # the prompt is cut to num_ctx/2 + 2 with keep=4. Confirmed by this project's
+  # own agent after the skills cut: 13,975 tokens at num_ctx 16384, well above
+  # 8,194, processed in full with no warning at all. The product's own data says
+  # the same about the reservation theory: the run of 2026-08-17 carried
+  # max_output_tokens=2048 and was still cut to 8194, where a reservation of
+  # 2048 would have left 14,336.
+  #
+  # So this setting does NOT buy instruction room. Nothing is held back from the
+  # prompt for output; the budget is the whole 16,384. What IS brutal is the
+  # penalty for going over — 18,353 exceeded the window by 1,969 tokens and lost
+  # 10,159, because Ollama halves rather than trims. It remains worth setting as
+  # a cap on one reply, which is what it says on the tin. What actually buys
+  # room is cutting the prompt (see agent_sandbox_env), and
+  # docs/PROMPT-WINDOW.md has the measurement.
+  #
+  # Defaulted HERE rather than inside agent_max_output_tokens, which resolves
+  # the limitation the droplet session wrote down with a date on it: every key
+  # load_env defaults must also appear in .env.example and the README settings
+  # table, three files the suite gates against each other, and the docs were
+  # off-limits to that session. They are not any more — both keys are in
+  # .env.example, in the README table and validated by 'lca check'.
+  # agent_max_output_tokens stays, because it clamps against the context
+  # window, which a default cannot.
+  AGENT_MAX_OUTPUT_TOKENS="${AGENT_MAX_OUTPUT_TOKENS:-2048}"
+  # And the default client timeout discarded every reply that took longer than
+  # 300 s while this hardware was measured taking 901 s, so steps were thrown
+  # away mid-generation and the run sat "running" having executed nothing.
+  AGENT_REQUEST_TIMEOUT="${AGENT_REQUEST_TIMEOUT:-1800}"
+  # The relay that lets containers reach Ollama without Ollama leaving
+  # loopback. Off by default like every other component here; the agent tier is
+  # what needs it, and 'lca check' says so when the agent is on without it.
+  ENABLE_OLLAMA_RELAY="${ENABLE_OLLAMA_RELAY:-false}"
+  OLLAMA_RELAY_PORT="${OLLAMA_RELAY_PORT:-11435}"
+  # Off by default: the agent's workspace holds whole checked-out projects and
+  # is the one thing here whose size nobody controls. The ceiling applies only
+  # when it is switched on; 0 means no ceiling, as it does everywhere else.
+  BACKUP_AGENT_WORKSPACE="${BACKUP_AGENT_WORKSPACE:-false}"
+  BACKUP_AGENT_MAX_MB="${BACKUP_AGENT_MAX_MB:-2048}"
   BACKUP_KEEP="${BACKUP_KEEP:-7}"
   BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-*-*-* 03:30:00}"
+}
+
+# env_file_is_inert FILE — true when FILE is settings and nothing else:
+# comments, blank lines, and plain KEY=VALUE assignments with no expansion, no
+# command substitution and no second command on the line.
+#
+# load_env SOURCES .env, so every line in it is shell that runs with the
+# privileges of whoever called. That is fine for the file the user edits on
+# their own machine. It is not fine for restore.sh, which copies a .env
+# straight out of a tarball named on the command line and then calls load_env
+# — as root, because a restore recreates docker volumes. docs/MIGRATE.md is
+# built on moving that tarball between machines, so "it is your own backup" is
+# an assumption about a file that has been off-box and back.
+#
+# Deliberately a whitelist. A blacklist of dangerous constructs is a list
+# someone has to keep complete forever, and a real .env has never needed
+# anything outside this shape — see .env.example, where the most exotic line is
+# a double-quoted OnCalendar spec.
+env_file_is_inert() {
+  local file="$1" line
+  [[ -f "${file}" ]] || return 1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    # load_env strips CR before sourcing; match it, or a CRLF file would be
+    # rejected here and accepted there.
+    line="${line%$'\r'}"
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*= ]] || return 1
+    # One character class rather than a list of constructs, so there is nothing
+    # to keep complete: anything that could expand, substitute, start a second
+    # command, redirect, or join this line to the next is out. The backslash
+    # matters as much as the rest — a line ending in one continues, which would
+    # hide a rejected construct on a line this loop reads separately.
+    case "${line}" in
+      *[\$\`\;\&\|\<\>\\]*) return 1 ;;
+    esac
+  done < "${file}"
+  return 0
 }
 
 # The install's final verdict. Everything that reports on an install keys off
@@ -216,6 +690,35 @@ setup_verdict() {
   return 1
 }
 
+# selftest_verdict PASS FAIL SKIP — the self-test's final line AND its exit
+# status, here for the same reason setup_verdict is: docs/YOUR-TURN.md tells the
+# reader to look for the line, 'lca update' rolls back on the status, and the
+# two must not drift apart. Living in lib.sh also makes all three arms testable
+# without doing the real generations the self-test does.
+#
+# The SKIP arm is why this exists. "Works end-to-end" is a claim about every
+# part, and it may not be made while a part went unexamined — the rule 'lca
+# apply' already follows when a component could not be checked. It still exits
+# 0: a check that could not RUN is not a failed check, and update.sh treats a
+# non-zero self-test as reason to offer a rollback.
+selftest_verdict() {
+  local pass="${1:-0}" fail="${2:-0}" skip="${3:-0}"
+  info "PASS=${pass}  FAIL=${fail}  SKIPPED=${skip}"
+  if (( fail > 0 )); then
+    printf '%b%s%b\n' "${C_YELLOW}${C_BOLD}" \
+      "SELF-TEST FAILED (${fail}) — see the failing checks above and docs/TROUBLESHOOTING.md." "${C_RESET}"
+    return 1
+  fi
+  if (( skip > 0 )); then
+    printf '%b%s%b\n' "${C_YELLOW}${C_BOLD}" \
+      "SELF-TEST PASSED, WITH ${skip} CHECK(S) SKIPPED — everything that could be tested works; see the skipped one(s) above before trusting this end-to-end." "${C_RESET}"
+    return 0
+  fi
+  printf '%b%s%b\n' "${C_GREEN}${C_BOLD}" \
+    "SELF-TEST PASSED — your local-code-agent stack works end-to-end." "${C_RESET}"
+  return 0
+}
+
 # load_env_readonly — load_env's values without load_env's side effect.
 #
 # load_env creates .env from .env.example when it is missing, which is right
@@ -226,6 +729,127 @@ setup_verdict() {
 # load_env rather than re-parsing .env keeps the defaults in one place.
 load_env_readonly() {
   LCA_ENV_READONLY=true load_env
+}
+
+# am_root — are we actually running as root?
+#
+# Its own function so the branch below can be reached from a test. as_root,
+# can_root and can_root_now keep testing EUID inline on purpose: those decide
+# an ACTION, where being root is a fact the process cannot be wrong about. This
+# one decides what to PRINT about somebody else's account, and a reporter's
+# branch that only one kind of machine can reach is a branch that gets tested
+# on one kind of machine — the same reason writable_by_us and have_terminal
+# exist a few hundred lines up.
+am_root() { [[ "${EUID}" -eq 0 ]]; }
+
+# invoking_user — the human this command is acting for.
+#
+# Under 'sudo lca X' that is SUDO_USER rather than root: they are the account
+# that will own the files, run aider, need the docker group and SSH in.
+#
+# But SUDO_USER names whoever INVOKED sudo, which is not the account this
+# process is running as when sudo dropped privileges rather than raised them.
+# Measured, running check-system.sh under 'sudo -u ubuntu' — SUDO_USER=root,
+# process running as ubuntu:
+#
+#   [warn] no global git identity for 'root' — ... Fix once:
+#          git config --global user.name 'Ada Lovelace' && ...
+#   [info] running as root — docker group membership not needed.
+#
+# Neither sentence is about the reader. The first names an account that is not
+# the one whose config was read, and offers a fix that would set a third
+# party's identity. The second SKIPS the group check entirely — so the one
+# diagnostic that would explain an unreachable daemon is replaced by a claim
+# that no check is needed, on an account that may well need it.
+#
+# So SUDO_USER only counts while we are actually root. Four scripts wrote
+# '${SUDO_USER:-$(id -un)}' out by hand and all four had this; there is a gate
+# below on writing it again.
+#
+# 'have sudo' as well: without it we cannot act as another account at all, so
+# naming one would produce a label nothing can honour.
+invoking_user() {
+  if am_root && [[ -n "${SUDO_USER:-}" ]] && have sudo; then
+    printf '%s\n' "${SUDO_USER}"
+  else
+    id -un
+  fi
+}
+
+# git_identity_user — whose git config actually matters here. The same person
+# invoking_user names; kept as its own name because git_identity below is paired
+# with it and the two must be read together.
+git_identity_user() { invoking_user; }
+
+# git_identity — "Name <email>" from that user's GLOBAL git config, or nothing
+# (and non-zero) when either half is unset.
+#
+# One copy, because two reporters ask the same question. install_git.sh warns
+# about it at install time — inside a 20-30 minute log nobody reads twice — and
+# 'lca check' is where anyone looks afterwards. Without it:
+#
+#   - aider still commits, but stamps the work with a placeholder author.
+#     Measured on a HOME with no gitconfig: 'Your Name <you@example.com>'.
+#   - a 'git commit' the user runs themselves in that project refuses outright:
+#     "Author identity unknown ... Please tell me who you are." Measured on a
+#     host whose hostname has no domain, which is every fresh droplet.
+#
+# The chat's handover sends people into a brand-new git repo, so this is the
+# first thing many of them will do.
+git_identity() {
+  local who name email
+  have git || return 1
+  who="$(git_identity_user)"
+  # Escalate exactly when the account that matters is not the one we already
+  # are. This used to be a second copy of git_identity_user's condition, and
+  # the two disagreed: 'sudo -u ubuntu' put SUDO_USER=root in the label while
+  # this branch, seeing EUID != 0, read ubuntu's config. Derived from 'who'
+  # now, so a name and a value from different accounts is not expressible.
+  if [[ "${who}" != "$(id -un)" ]]; then
+    name="$(sudo -u "${who}" git config --global user.name 2>/dev/null || true)"
+    email="$(sudo -u "${who}" git config --global user.email 2>/dev/null || true)"
+  else
+    name="$(git config --global user.name 2>/dev/null || true)"
+    email="$(git config --global user.email 2>/dev/null || true)"
+  fi
+  [[ -n "${name}" && -n "${email}" ]] || return 1
+  printf '%s <%s>\n' "${name}" "${email}"
+}
+
+# commit_safety_state — whether an aider run started in THIS directory will
+# leave anything you can inspect or undo. Echoes one word:
+#
+#   repo    inside a git work tree — every edit becomes its own commit, so
+#           'git diff HEAD~1' shows it and 'git revert <sha>' takes it back
+#   home    $HOME, and not a repo — aider does NOT offer to create one here
+#   norepo  anywhere else without a repo — aider offers to create one, yes
+#
+# The 'home' case is the point of this function, and it is measured from
+# aider's own source rather than assumed: in main.py, a cwd equal to the home
+# directory prints "You should probably run aider in your project's directory,
+# not your home dir." and RETURNS — no prompt, no repo. Everywhere else it
+# asks "No git repo found, create one to track aider's changes (recommended)?"
+#
+# That exception lands on the likeliest directory there is. SSH puts you in
+# $HOME, 'lca help' describes the bare command as "start the coding agent
+# here", and the login banner now tells people to write code. So typing the
+# headline command the first time, in the directory you were already standing
+# in, is the one path where auto-commit — this project's entire answer to a
+# small model deleting a function nobody mentioned — silently does not exist.
+# aider says so in one line among ten lines of startup output.
+#
+# -ef, not string equality: it compares device and inode, so a symlinked or
+# non-canonical $HOME still matches instead of quietly missing the case.
+commit_safety_state() {
+  # The VALUE, not just the exit status: inside a bare .git directory
+  # 'rev-parse --is-inside-work-tree' prints false and still exits 0.
+  if have git && [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null || true)" == "true" ]]; then
+    printf 'repo\n'; return 0
+  fi
+  if [[ -n "${HOME:-}" && "${PWD}" -ef "${HOME}" ]]; then
+    printf 'home\n'; return 0
+  fi
+  printf 'norepo\n'
 }
 
 # set_env_var KEY VALUE — update KEY in .env in place, or append it, so that a
@@ -241,23 +865,116 @@ load_env_readonly() {
 # Quoting is applied only when the value actually contains whitespace, so every
 # write made today is byte-for-byte what it was before and the boot path cannot
 # change behaviour.
-set_env_var() {
-  local key="$1" value="$2" written="$2"
-  # A '"', '$' or newline would break or expand inside the quoting below, so a
-  # value that would not survive the round-trip is refused rather than written
-  # as something that reads back differently.
-  if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *$'\n'* ]]; then
-    err "Refusing to write ${key} to .env: the value contains a quote, '\$' or newline."
-    return 1
+# write_env_or_die KEY VALUE [EXTRA] — set_env_var, but a failure explains
+# itself instead of leaving sed to do it.
+#
+# Every caller outside load_env's back-fill was a bare 'set_env_var', so under
+# 'set -e' a failed write ended the script with nothing to read but sed's own
+#
+#   sed: couldn't flush <unknown>: No space left on device
+#
+# Measured on a full filesystem, and that is the likeliest moment for it: the
+# disk fills with models at gigabytes each, and 'lca model' — which writes
+# MODEL_NAME — is exactly what someone runs to fix that.
+#
+# The promise in the message is real: sed -i writes a temp file and renames, so
+# a failed write leaves .env byte for byte as it was. Verified on the same full
+# filesystem, 59 bytes before and after.
+write_env_or_die() {
+  local rc=0
+  set_env_var "$1" "$2" || rc=$?
+  if (( rc == 0 )); then
+    return 0
   fi
-  if [[ "${value}" =~ [[:space:]] ]]; then
+  if (( rc == 2 )); then
+    # A refused value: set_env_var has already said exactly what was wrong
+    # with it, and repeating that in different words helps nobody. Only 2 —
+    # 1 is what a failed append returns, which is a write failure and needs
+    # the message below.
+    exit 1
+  fi
+  # Permission before disk space, because sed has usually just said so.
+  #
+  # 'a full disk is the usual cause' was the only explanation offered, and it
+  # is the wrong one for anybody using a checkout they do not own — which is
+  # every ordinary user of a stack installed with 'sudo setup.sh'. Measured as
+  # such a user, running what 'lca tune' and 'lca model' both call:
+  #
+  #   sed: couldn't open temporary file /home/user/local-code-agent/sedlOoIFn:
+  #        Permission denied
+  #   [FAIL] Could not write MODEL_NAME to .../.env (sed exited 4) — a full
+  #          disk is the usual cause, so check 'df -h' ... re-run once there is
+  #          room.
+  #
+  # There was room. There always was. Freeing disk space would change nothing,
+  # and 'sed exited 4' is not something a reader can act on.
+  #
+  # The DIRECTORY is checked as well as the file, and that is what the error
+  # actually names: 'sed -i' writes its temp file next to the target, so a
+  # writable .env inside an unwritable directory fails the same way.
+  # The file is only consulted when it EXISTS. '[[ -w ]]' is false for a path
+  # that is not there, which is not the same as "you may not write it" — and
+  # the gate below drives a real failure through an ENV_FILE whose parent is a
+  # regular file, so the target cannot exist. Testing it unconditionally
+  # classified that as a permission problem, which it is not.
+  local env_dir
+  env_dir="$(dirname "${ENV_FILE}")"
+  if ! writable_by_us "${env_dir}" \
+     || { [[ -e "${ENV_FILE}" ]] && ! writable_by_us "${ENV_FILE}"; }; then
+    die "Could not write ${1} to ${ENV_FILE}: '$(id -un)' cannot write there. A checkout installed with 'sudo setup.sh' is owned by root, so this needs the same. Nothing was changed — re-run the command with sudo.${3:+ $3}"
+  fi
+  die "Could not write ${1} to ${ENV_FILE} (sed exited ${rc}) — a full disk is the usual cause, so check 'df -h'. ${ENV_FILE} was left exactly as it was; re-run once there is room.${3:+ $3}"
+}
+
+set_env_var() {
+  local key="$1" value="$2" written="$2" bt bs
+  # Built with printf rather than written inline: a literal backtick or
+  # backslash inside a quoted pattern is either unreadable or SC1003.
+  bt="$(printf '\140')"          # `
+  bs="$(printf '\134')"          # \
+  # Characters that cannot survive the round trip through the double quotes
+  # below, or that would RUN inside them: a quote ends the string, '$' and a
+  # backtick both expand, a backslash is eaten by 'source' ("a\\b" reads back
+  # as a\b), and a newline is a second line. Refused rather than written as
+  # something that reads back differently — or executes.
+  #
+  # The backtick and the backslash were not on this list. Nothing writes either
+  # today, so this was never live; but the whole point of the list is that the
+  # next caller does not have to know, and .env is a file load_env SOURCES.
+  if [[ "${value}" == *'"'* || "${value}" == *'$'* || "${value}" == *"${bt}"* \
+     || "${value}" == *"${bs}"* || "${value}" == *$'\n'* ]]; then
+    err "Refusing to write ${key} to .env: the value contains a quote, backtick, backslash, '\$' or newline."
+    # 2, not 1, and the distinction is load-bearing: the append below returns 1
+    # when it cannot write, so a shared code would let write_env_or_die read a
+    # genuinely failed write as "already explained" and exit saying nothing.
+    # A refusal is about the VALUE; anything else is about the FILE.
+    return 2
+  fi
+  # Quoted unless EVERY character is one 'source' reads back literally.
+  #
+  # The trigger was whitespace alone, and that is not the same question. An
+  # unquoted A&B is two commands to the shell, not a value; so are A;B and A|B.
+  # Every value written today — model tags, true/false, numbers, host:port — is
+  # made only of the characters below, so each is still written unquoted, byte
+  # for byte as before.
+  if [[ "${value}" =~ [^A-Za-z0-9_.:/,@%+-] ]]; then
     written="\"${value}\""
   fi
   if [[ ! -f "${ENV_FILE}" ]]; then
     touch "${ENV_FILE}"
   fi
   if grep -q "^${key}=" "${ENV_FILE}"; then
-    sed -i "s|^${key}=.*|${key}=${written}|" "${ENV_FILE}"
+    # sed's REPLACEMENT has its own two special characters, and '&' is the one
+    # that bites: it means "everything the pattern matched". Measured before
+    # this escaping existed —
+    #     set_env_var WEBUI_NAME 'A&B'
+    #     WEBUI_NAME=AWEBUI_NAME=local-code-agentB
+    # — written, returned 0, and read back as that. A '|' would instead end the
+    # s||| expression early and fail the write outright. A backslash cannot
+    # reach here: it is refused above.
+    local escaped="${written//&/\\&}"
+    escaped="${escaped//|/\\|}"
+    sed -i "s|^${key}=.*|${key}=${escaped}|" "${ENV_FILE}"
   else
     printf '%s=%s\n' "${key}" "${written}" >> "${ENV_FILE}"
   fi
@@ -363,11 +1080,66 @@ aider_map_tokens() {
 # empty, zero, or non-numeric prints nothing — retention disabled means keep
 # everything, so a bad value can never delete a backup. Pure (stdin->stdout),
 # so backup.sh's retention is unit-tested without ever touching the disk.
+# unique_backup_path DIR STAMP — a tarball path under DIR for STAMP that does
+# not already exist.
+#
+# The stamp is second-granular, and a backup finishes inside one second
+# whenever there is no WebUI volume to archive — a documented configuration
+# (ENABLE_WEBUI=false), not a corner. Two runs then landed on the SAME path,
+# and both said "Backup written and verified" while only one file survived.
+# Measured, with two concurrent runs: two success lines, one tarball.
+#
+# The suffix is '_N', not '-N', and that is not cosmetic. backups_to_prune
+# sorts these names lexically and treats the tail as newest, which works only
+# because the embedded YYYYmmdd-HHMMSS makes lexical order chronological. '-'
+# is 0x2D and '.' is 0x2E, so 'stamp-2.tar.gz' would sort BEFORE 'stamp.tar.gz'
+# and retention would delete the newer file first. '_' is 0x5F, after '.', so
+# the order holds.
+unique_backup_path() {
+  local dir="$1" stamp="$2" path n=2
+  path="${dir}/local-code-agent-backup-${stamp}.tar.gz"
+  while [[ -e "${path}" ]]; do
+    path="${dir}/local-code-agent-backup-${stamp}_${n}.tar.gz"
+    n=$(( n + 1 ))
+  done
+  printf '%s' "${path}"
+}
+
 backups_to_prune() {
   local keep="${1:-}"
   [[ "${keep}" =~ ^[0-9]+$ ]] || return 0
   (( keep > 0 )) || return 0
   sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
+}
+
+# retention_desc — how to describe BACKUP_KEEP to a human.
+#
+# The two early returns above are the whole reason this exists. BACKUP_KEEP=0
+# means "keep everything" and a non-number means "retention never runs", so
+# printing the raw value produces:
+#
+#   BACKUP_KEEP=0     keeping the newest 0
+#   BACKUP_KEEP=abc   keeping the newest abc
+#
+# The first is not merely unclear, it is backwards and alarming: it reads as
+# "every backup will be deleted" at the exact moment somebody is switching
+# scheduled backups ON, when the truth is that none of them ever will be. The
+# second is not a sentence.
+#
+# check-system.sh worked this out and carries a comment saying precisely that
+# — "BACKUP_KEEP=0 means 'keep everything', not 'keep newest 0'". backup.sh's
+# own --install-timer line, which is the one printed while setting retention
+# up, never asked. Same shape as docker_start_hint and pull_advice: the rule
+# existed, in one place, and the other caller did not know about it.
+retention_desc() {
+  local keep="${BACKUP_KEEP:-7}"
+  if ! [[ "${keep}" =~ ^[0-9]+$ ]]; then
+    printf "retention disabled (BACKUP_KEEP='%s' is not a number)" "${keep}"
+  elif [[ "${keep}" == "0" ]]; then
+    printf 'retention disabled (keeping all)'
+  else
+    printf 'keeping newest %s' "${keep}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -458,6 +1230,56 @@ model_present() {
   ollama show "$1" >/dev/null 2>&1
 }
 
+# model_load_notice MODEL — warn that the first request has to pull the model
+# into RAM, when it is not already resident. Silent when it is, which is the
+# normal case and would otherwise be noise on every command.
+#
+# One copy, called from both entry points. 'lca ask' grew this notice and 'lca'
+# — the command this project is named for, and the one people sit in front of —
+# did not, so the longest silence in the product was in the place with the
+# least explanation. Two hand-written copies is how 'pkill -f' outlived its own
+# fix in one file while speed.sh had the right form in another.
+#
+# stderr: 'lca ask' documents 'lca logs | lca ask "why did this fail?"' and its
+# answer must stay the only thing on stdout.
+#
+# No duration in the message. The same 7B load measured 32s with the weights in
+# the page cache and 388s without, so any figure would be an order of magnitude
+# wrong in one of the two cases people actually meet — and "several minutes" is
+# what the reader needs to decide it is not broken.
+model_load_notice() {
+  local model="${1:-${MODEL_NAME}}"
+  ollama_processor "${model}" >/dev/null 2>&1 && return 0
+  printf 'Loading %s into memory first — this happens once; later requests skip it. On a cold CPU box it can take several minutes, and it is not stuck.\n' \
+    "${model}" >&2
+}
+
+# input_file_ok PATH OPTION [EXTRA] — die with the right sentence for a file a
+# command was told to read, naming the option that took it.
+#
+# Three states, not one. '[[ -r ]]' is true for a DIRECTORY, so pointing an
+# option at one — 'lca ask -f src/ "explain this"', which is the obvious thing
+# to try — passed a single guard and then failed inside the reader with its own
+# words. Measured, in two different commands:
+#
+#   head: error reading '/home/you/src': Is a directory
+#   cat: /etc: Is a directory
+#
+# which reads as an I/O or permission fault and says nothing about what to do
+# instead. ask.sh had all three states and prompt-bench.sh had the bare -r, so
+# they lived here rather than in either.
+#
+# The -e arm is not redundant with the third: without it a name that does not
+# exist comes back as "owned by another account and this account cannot open
+# it", which is a confident answer to a question nobody asked.
+input_file_ok() {
+  local f="$1" opt="$2" extra="${3:-}"
+  [[ -e "${f}" ]] || die "No such file: ${f}"
+  [[ ! -d "${f}" ]] || die "${f} is a directory, and ${opt} takes a file.${extra:+ ${extra}}"
+  readable_by_us "${f}" \
+    || die "Cannot read ${f} — it is owned by $(stat -c %U "${f}" 2>/dev/null || echo 'another account') and this account cannot open it. Re-run with sudo, or copy it somewhere you can read."
+}
+
 # pull_model MODEL — download MODEL with progress, with a clear failure.
 # pull_model MODEL — download MODEL, retrying a transient registry failure.
 #
@@ -471,8 +1293,180 @@ model_present() {
 # Retrying is cheap and safe because 'ollama pull' resumes: completed blobs are
 # already in the local store, so a second attempt re-fetches only what is
 # missing rather than starting over.
+# ollama_models_dir — where Ollama keeps its blobs, for a free-space question.
+# OLLAMA_MODELS wins if set; otherwise the systemd service account's store,
+# then the invoking user's. The last branch is a best guess rather than a
+# failure, because the answer only feeds a warning.
+#
+# The systemd account's store is a named default rather than a literal, and the
+# name is the only reason the fallback below can be tested at all: it is taken
+# when NEITHER candidate exists, and on every machine this project is actually
+# installed on the first candidate does exist. The test for it therefore passed
+# only on hosts with no Ollama — CI's — and failed on the product, which is the
+# wrong way round for a gate. Overriding this is a test seam; nothing in the
+# stack sets it, and the default is the path that was hardcoded here.
+ollama_models_dir() {
+  local d
+  if [[ -n "${OLLAMA_MODELS:-}" ]]; then printf '%s' "${OLLAMA_MODELS}"; return 0; fi
+  for d in "${OLLAMA_SYSTEM_MODELS_DIR:-/usr/share/ollama/.ollama/models}" "${HOME}/.ollama/models"; do
+    [[ -d "${d}" ]] && { printf '%s' "${d}"; return 0; }
+  done
+  printf '%s' "${HOME}/.ollama/models"
+}
+
+# free_gb PATH — whole GB free on PATH's filesystem, walking up to the nearest
+# directory that exists (the models dir is created by the first pull).
+free_gb() {
+  local p="${1:-/}"
+  while [[ ! -d "${p}" && "${p}" != "/" ]]; do p="$(dirname "${p}")"; done
+  df -Pk "${p}" 2>/dev/null | awk 'NR == 2 { printf "%d\n", $4 / 1048576 }'
+}
+
+# model_disk_gb TAG — roughly what TAG will occupy, in whole GB.
+#
+# The same ~0.6 GB per billion parameters at q4 that model_fits_ram and
+# largest_model_for_vram already use, so a fourth estimate cannot drift from
+# the other three, plus 1 GB for the manifest and rounding. Nothing (exit 1)
+# for a tag with no parseable parameter count — an unknown size must not be
+# turned into a confident refusal.
+model_disk_gb() {
+  local params
+  params="$(model_params_b "$1" 2>/dev/null)" || return 1
+  awk -v p="${params}" 'BEGIN { printf "%d\n", p * 0.6 + 1 }'
+}
+
+# model_fits_ram TAG RAM_GIB — rough q4 sizing: ~0.6 GB per billion parameters
+# plus ~1 GB for context and overhead. Deliberately approximate; its only job is
+# to stop something being selected that cannot possibly load. An unparseable tag
+# returns true, so an unusual naming scheme is never blocked.
+#
+# Moved here from tune.sh, unchanged. It belongs beside model_disk_gb — same
+# 0.6 GB per billion — and update-model.sh's manual-pin path needs it without
+# sourcing tune.sh, which would redefine main() out from under its caller. Its
+# own tag parse rather than model_params_b's: this one also accepts a tag with
+# no trailing 'b' and keeps fractions (1.5b stays 1.5), and the tune ladder is
+# tested against exactly that behaviour.
+#
+# The 0.6 is not a guess any more. Measured on this project's own box, with
+# qwen2.5-coder:7b loaded at ctx 8192:
+#
+#   $ ps -eo rss,comm --sort=-rss | head -2
+#      4986.5 MB  llama-server
+#
+# 4.87 GiB actual against 5.2 predicted — right, and conservative in the safe
+# direction, which is what a guard wants.
+model_fits_ram() {
+  local need
+  need="$(model_ram_gb "$1")" || return 0
+  awk -v n="${need}" -v r="$2" 'BEGIN{ exit !(n <= r) }'
+}
+
+# model_ram_gb TAG — how much RAM model_fits_ram requires for TAG, or nothing
+# (exit 1) for a tag whose size cannot be read.
+#
+# Split out of model_fits_ram so the guard and the sentence explaining it
+# cannot disagree. A warning that says "needs about N GB" while the check
+# behind it uses a different N is worse than printing no number at all, and
+# update-model.sh was carrying the formula a second time, in prose:
+#
+#   "roughly 0.6 GB per billion parameters, plus about 1 GB"
+#
+# %.10g rather than a fixed number of decimals: every model tag this project
+# can parse has at most one decimal place, so the value is exact either way,
+# and this one also prints 2.8 rather than 2.80.
+model_ram_gb() {
+  local tag="${1##*:}" params
+  params="${tag%[bB]}"
+  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+  awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
+}
+
+# MODELS_HEADROOM_GB — free disk, in GB, that this project wants where models
+# live. It lived in check-system.sh alone, which is the command that JUDGES the
+# disk; tune.sh, the command that fills it, could not see the number it was
+# about to spend past. Here so both read one value.
+MODELS_HEADROOM_GB="${MODELS_HEADROOM_GB:-15}"
+
+# tune_cost_note NEW_MODEL FREE_GB HEADROOM_GB MODELS_DIR OLD_MODEL — what
+# applying the auto-tune recommendation would cost in disk, or nothing at all
+# when the disk can take it comfortably.
+#
+# 'lca check' recommended a 9 GB download and, eleven lines later, FAILED the
+# machine for having less disk than it wants. Measured on this project's own
+# box, at 14 GB free:
+#
+#   [warn] configured model (qwen2.5-coder:7b) differs from the recommendation
+#          (qwen2.5-coder:14b) — run .../scripts/tune.sh
+#   [FAIL] only 14 GB free at /root/.ollama/models — models need headroom
+#
+# Following the report's own advice deepens the failure the same report makes,
+# and tune.sh keeps the old model as a rollback, so nothing is reclaimed on the
+# way either. That is the same contradiction 'lca model --list-recommended'
+# carried for RAM and then for disk: a question answered in one place and
+# ignored in another.
+#
+# Two arms, because they are two different facts — pull_model would refuse the
+# download outright, or it would go through and leave the machine short. Here
+# rather than inline in check-system.sh so the sentence and the numbers it
+# quotes (model_disk_gb and free_gb, the ones pull_model and the disk check
+# actually use) cannot drift apart, and so it can be tested without driving the
+# whole health check.
+#
+# Nothing when the size cannot be read or the free space is unknown: an
+# unparseable tag must not become a warning any more than it may become a
+# refusal.
+# model_disk_state NEW FREE HEADROOM — 'refused', 'tight', or nothing at all
+# when the disk can take the download comfortably. Nothing, too, when either
+# number is unknown: a guess must not become a warning.
+#
+# The RULE, in one place, because it now has two readers that need different
+# renderings of it. tune_cost_note below turns it into a sentence for a single
+# model. 'lca model --list-recommended' prints five models in a table, where
+# that sentence repeated five times is noise rather than information — it needs
+# a tag, not a paragraph. Splitting the wording from the arithmetic is what
+# lets both exist without a second copy of the thresholds.
+model_disk_state() {
+  local new="$1" free="$2" headroom="$3" need
+  need="$(model_disk_gb "${new}")" || return 0
+  [[ -n "${free}" ]] || return 0
+  if (( free < need )); then
+    printf 'refused'
+  elif (( free - need < headroom )); then
+    printf 'tight'
+  fi
+}
+
+tune_cost_note() {
+  local new="$1" free="$2" headroom="$3" dir="$4" old="$5" need
+  need="$(model_disk_gb "${new}")" || return 0
+  [[ -n "${free}" ]] || return 0
+  # The thresholds are model_disk_state's, not a second copy of them here. This
+  # function owns the sentence; that one owns the rule.
+  case "$(model_disk_state "${new}" "${free}" "${headroom}")" in
+    refused)
+      printf ' — but it needs about %s GB and only %s GB is free at %s, so the download would be refused; free some space first' \
+        "${need}" "${free}" "${dir}"
+      ;;
+    tight)
+      printf " — note that it downloads about %s GB and would leave about %s GB free at %s, under the %s GB this check wants (the old model is kept as a rollback; 'ollama rm %s' reclaims it)" \
+        "${need}" "$(( free - need ))" "${dir}" "${headroom}" "${old}"
+      ;;
+  esac
+}
+
 pull_model() {
-  local model="$1" attempt
+  local model="$1" attempt need="" free_now="" store
+  store="$(ollama_models_dir)"
+  # Asked BEFORE the download, not after it. Every other disk message in this
+  # project is a post-mortem — "disk full? check df -h" — which on a pull means
+  # finding out after several gigabytes have already crossed the wire, on a VPS
+  # whose disk is fixed. Skipped silently when either number is unknown: a
+  # guess must not become a refusal.
+  if need="$(model_disk_gb "${model}")" && free_now="$(free_gb "${store}")" \
+     && [[ -n "${free_now}" ]] && (( free_now < need )); then
+    err "'${model}' needs about ${need} GB and only ${free_now} GB is free on ${store}. Nothing has been downloaded. Free some space — 'ollama list' shows what is already there, 'ollama rm <model>' removes one — then retry."
+    return 1
+  fi
   info "Pulling model '${model}' (this can take several minutes on first download)..."
   for attempt in 1 2 3; do
     if ollama pull "${model}"; then
@@ -480,6 +1474,16 @@ pull_model() {
       return 0
     fi
     if (( attempt < 3 )); then
+      # A pull that ran the disk out will not succeed on a retry, and retrying
+      # re-downloads gigabytes — twice, at five and ten seconds' notice. Asked
+      # by re-measuring rather than by reading ollama's output, because
+      # capturing that would hide the progress a multi-GB download needs to
+      # show. The retry is for a transient registry error; a full disk is not
+      # one of those.
+      if [[ -n "${need}" ]] && (( $(free_gb "${store}") < need )); then
+        err "'${model}' ran ${store} out of space part way through — not retrying, because the next attempt would download it all again. Free some space ('ollama rm <model>') and re-run."
+        return 1
+      fi
       warn "Pull attempt ${attempt}/3 for '${model}' failed (transient registry error?) — retrying in $((attempt * 5))s; finished parts are kept."
       sleep "$((attempt * 5))"
     fi
@@ -488,18 +1492,152 @@ pull_model() {
   return 1
 }
 
+# MODEL_PROBE_TIMEOUT — how long a real generation is allowed to take before
+# we stop calling it a generation.
+#
+# It was 300s by default and 240s in 'lca check', and both were guesses. The
+# first request after a restart does not just generate: it loads the whole
+# model into RAM first. Measured from this project's own CPU-only VPS, every
+# model load its Ollama log holds — "loading model via llama-server" to
+# "loaded runners":
+#
+#   298.6s   77.6s   39.6s   34.8s   26.0s   30.3s   64.8s
+#
+# The 298.6s one is not an outlier to be waved away, it is the ordinary case
+# this project is built for: the box had just rebooted and Ollama was loading
+# a 7b model on the same cores Open WebUI was using to load its embedding
+# model. 'lca check' allowed 240s for load AND generation, so on a freshly
+# rebooted box — the exact moment somebody runs it — the one command that
+# exists to diagnose this stack reported the model broken.
+MODEL_PROBE_TIMEOUT="${MODEL_PROBE_TIMEOUT:-600}"
+
+# Set by model_responds so its callers can say WHY without probing twice:
+# ok | timeout | refused, and the deadline that applied.
+MODEL_PROBE_OUTCOME=""
+MODEL_PROBE_SECONDS=""
+# Ollama's own words for the last failed probe, when it gave any.
+MODEL_PROBE_ERROR=""
+
 # model_responds MODEL [TIMEOUT] — prove MODEL can actually generate text by
 # asking the running Ollama server for a tiny real completion.
 model_responds() {
-  local model="$1" timeout="${2:-300}"
-  local url payload response
+  local model="$1" timeout="${2:-${MODEL_PROBE_TIMEOUT}}"
+  local url payload raw rc=0 response
+  MODEL_PROBE_OUTCOME="refused"
+  MODEL_PROBE_SECONDS="${timeout}"
+  MODEL_PROBE_ERROR=""
   url="$(ollama_url)"
   payload="$(jq -n --arg model "${model}" \
     '{model: $model, prompt: "Reply with the single word: ready", stream: false, options: {num_predict: 16}}')"
-  response="$(curl -fsS --max-time "${timeout}" -X POST "${url}/api/generate" \
-    -H 'Content-Type: application/json' -d "${payload}" 2>/dev/null \
-    | { jq -r '.response // empty' || true; })"
-  [[ -n "${response}" ]]
+  # Not piped into jq: a pipeline's exit status is the LAST command's, and
+  # curl's is the whole point here — 28 is its documented "operation timed
+  # out", which is the difference between "still loading" and "said no".
+  #
+  # No -f, and that is the fix. With it, curl treats any non-2xx as a failure,
+  # exits 22 and THROWS THE BODY AWAY — and the body is where Ollama puts its
+  # reason. Measured against a running server:
+  #
+  #   curl -sS  ... -d '{"model":"no-such-model:1b",...}'
+  #     -> {"error":"model 'no-such-model:1b' not found"}
+  #   curl -fsS ... (the same request)
+  #     -> rc=22, body empty
+  #
+  # It mattered most in the case this project is actually on a box for. With
+  # Ollama's stock 5m load limit it answered 500 before this probe's 600s was
+  # up, so rc was never 28, the outcome was always "refused", and
+  # model_silence_reason said "the server answered rather than running out of
+  # time, so this is not a slow load" about a load that had run out of time.
+  # Measured on this box, from its own log:
+  #
+  #   Load failed ... error="timed out waiting for llama-server to start - "
+  #   [GIN] 500 | 5m1s | POST "/api/generate"
+  #
+  # config/ollama.env now sets OLLAMA_LOAD_TIMEOUT=15m, which puts the two the
+  # other way round: this probe stops waiting first, and a slow cold load lands
+  # in the timeout branch rather than the error one. That is the better of the
+  # two outcomes and it is deliberate — the timeout message says the load may
+  # simply not have finished, which is exactly what is happening, and the load
+  # is no longer abandoned at 5m, so it goes on completing while the caller
+  # backs off and the next request meets a model that is already resident.
+  # Quoting Ollama's own error is still what the error branch is for; it is
+  # just no longer the branch a slow load arrives in.
+  #
+  # Same fix ask.sh already carries for the streaming path, which tees the raw
+  # body so Ollama's error survives.
+  raw="$(curl -sS --max-time "${timeout}" -X POST "${url}/api/generate" \
+    -H 'Content-Type: application/json' -d "${payload}" 2>/dev/null)" || rc=$?
+  if (( rc == 28 )); then
+    MODEL_PROBE_OUTCOME="timeout"
+    return 1
+  fi
+  (( rc == 0 )) || return 1
+  response="$(jq -r '.response // empty' <<<"${raw}" 2>/dev/null || true)"
+  if [[ -n "${response}" ]]; then
+    MODEL_PROBE_OUTCOME="ok"
+    return 0
+  fi
+  # Kept for the caller to quote. Empty when the answer was not JSON or had no
+  # error in it, which is a different thing from Ollama being silent and must
+  # not be presented as a reason.
+  MODEL_PROBE_ERROR="$(jq -r '.error // empty' <<<"${raw}" 2>/dev/null || true)"
+  return 1
+}
+
+# ollama_error_is_slow_load ERROR — true when what Ollama reported is its own
+# model load running out of time, rather than something wrong with the install.
+#
+# Narrow on purpose. "llama runner process has terminated" is the other common
+# error on this kind of box and it is usually the load being killed for memory:
+# running it again just kills it again, so it must not collect the advice below.
+ollama_error_is_slow_load() {
+  [[ "${1:-}" == *"timed out waiting for llama-server to start"* ]]
+}
+
+# model_silence_reason — why the last model_responds did not answer.
+#
+# Five messages named RAM, and four of them named it FIRST:
+#
+#   check-system.sh  "did not respond (RAM? see: free -h ...)"
+#   selftest.sh      "did not respond — check RAM headroom (free -h) ..."
+#   setup.sh         "did not respond. Check RAM headroom (free -h) ..."
+#   update-model.sh  "Does this machine have enough RAM for it?"
+#   tune.sh          "Check RAM headroom with: free -h"
+#
+# On the box those numbers above were measured on, RAM was never the cause
+# once — a cold load on busy cores was. update-model.sh's is the plainest:
+# it runs model_fits_ram BEFORE downloading and would have refused or warned
+# already, so by the time it asks, it has its own answer and is ignoring it.
+#
+# RAM is still worth naming, because a model too big for the box does fail
+# here. It belongs after the cause that measurement actually produced, not
+# instead of it.
+model_silence_reason() {
+  if [[ "${MODEL_PROBE_OUTCOME}" == "timeout" ]]; then
+    printf 'it was still not answering after %ss. The first request after a restart has to load the whole model into RAM before it can generate anything, and on this kind of CPU-only box that has been measured at anywhere from 26s to 5 minutes depending on what else is using the cores — so this may be a load that simply had not finished. %s shows "loading model" while it is working and "loaded runners" when it is done. If it never gets there, then check RAM: free -h.' \
+      "${MODEL_PROBE_SECONDS}" "$(ollama_log_hint)"
+  elif [[ -n "${MODEL_PROBE_ERROR}" ]]; then
+    # Ollama said why. Quote it instead of reasoning about it: the sentence
+    # below used to be printed here too, and it ruled out the commonest cause
+    # on this kind of box ("this is not a slow load") in exactly the case where
+    # that cause was what Ollama had just reported.
+    if ollama_error_is_slow_load "${MODEL_PROBE_ERROR}"; then
+      # The one thing that fixes this, and the message did not say it. Measured
+      # on a cold box, the same command twice in a row: the first request gave
+      # up after 304s with nothing resident, the second answered in 32s. The
+      # failed attempt is not wasted — it leaves the model file in the page
+      # cache, so the second load reads it from memory instead of from disk.
+      # Without this the reader is told the model "produced no answer" and left
+      # to conclude the install is broken, one keystroke away from working.
+      printf "Ollama's own answer was: %s. That is its load giving up before it finished, not a broken install — run the same command again. The first attempt leaves the model file in the page cache, so the second load reads it from memory: measured cold on this project's own box, 304s to fail and then 32s to answer. If it keeps timing out, check RAM (free -h) and the full log: %s." \
+        "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
+    else
+      printf "Ollama's own answer was: %s. %s has the full log." \
+        "${MODEL_PROBE_ERROR}" "$(ollama_log_hint)"
+    fi
+  else
+    printf 'the server answered, without an answer and without saying why — it returned nothing at all. Its own reason may be in the log: %s' \
+      "$(ollama_log_hint)"
+  fi
 }
 
 # detect_ram_gib — usable RAM in GiB, rounded to the nearest GiB (a nominal
@@ -536,7 +1674,15 @@ has_nvidia_gpu() {
 # be actively misleading.
 gpu_hardware_present() {
   have lspci || return 1
-  lspci 2>/dev/null | grep -qi 'nvidia'
+  # Captured, then matched against a here-string. 'lspci | grep -qi' is the
+  # shape that returns 141 under pipefail when grep exits on an early match
+  # while the producer is still writing — measured with a match at the head of
+  # a 200 KiB stream: the pipe form reported NOT FOUND, the capture form found
+  # it. A PCI listing is small enough that this has probably never fired, and
+  # that is exactly the argument that keeps a footgun loaded.
+  local devices
+  devices="$(lspci 2>/dev/null || true)"
+  [[ -n "${devices}" ]] && grep -qi 'nvidia' <<<"${devices}"
 }
 
 # vram_mib_from_smi — read `nvidia-smi --query-gpu=memory.total ...` output on
@@ -548,6 +1694,18 @@ vram_mib_from_smi() {
   while read -r line; do
     line="${line//[^0-9]/}"
     [[ -n "${line}" ]] || continue
+    # Normalised to base 10 ONCE, here, rather than at each comparison. Bash
+    # reads a leading zero as OCTAL, so a zero-padded reading does not compare
+    # wrong — it ERRORS: measured with '08192', bash printed
+    #   ((: 08192: value too great for base (error token is "08192")
+    # from inside a function whose whole job is to answer a question quietly,
+    # then dropped the reading and reported no VRAM at all.
+    #
+    # Fixing only the comparison below is not enough, which is why this
+    # normalises instead: '(( best > 0 ))' at the end hits the same trap, and
+    # the padded string would be printed back to the caller to trip over next.
+    # nvidia-smi does not pad today; not depending on that costs one line.
+    line=$(( 10#${line} ))
     (( line > best )) && best="${line}"
   done
   (( best > 0 )) || return 1
@@ -588,12 +1746,76 @@ classify_gpu() {
   esac
 }
 
-# gpu_state — classify_gpu against this machine.
-gpu_state() {
+# gpu_state_for_placement PLACEMENT — classify_gpu against this machine, for a
+# placement string the caller has ALREADY read out of 'ollama ps'.
+#
+# Both reporters used to read that string themselves and then decide what it
+# meant from its shape alone: "it contains a slash, therefore the model is
+# split across CPU and GPU". On a machine with no NVIDIA card that is a
+# conclusion about a device which does not exist — and Ollama 0.32.5 prints
+# exactly that string on a CPU-only box. Measured here, on a host with no
+# /dev/dri, no display device and no nvidia-smi:
+#
+#   qwen2.5-coder:7b   5.1 GB   13%/87% CPU/GPU   4096
+#
+# at 5.3 tokens/second, which is CPU speed for 7b on this machine and matches
+# docs/PERFORMANCE.md's CPU-only figure. 'lca check' printed "no NVIDIA GPU —
+# CPU inference" and then, three lines later, told the reader their model was
+# "only partially on the GPU" and to pick one that fits their VRAM. 'lca speed'
+# said the same. classify_gpu has always got this right — it refuses to reach
+# the placement branches without a card AND a driver — and neither caller
+# asked it.
+#
+# Taking the placement as an argument keeps each caller to one 'ollama ps', and
+# means the string a message quotes is the same one that was classified.
+gpu_state_for_placement() {
   local card=false driver=false
   gpu_hardware_present && card=true
   have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && driver=true
-  classify_gpu "${card}" "${driver}" "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
+  classify_gpu "${card}" "${driver}" "${1:-}"
+}
+
+# placement_summary PLACEMENT — one honest clause about where the model ran,
+# for a reporter that wants to state it rather than grade it.
+#
+# gpu_state_for_placement's comment says "both reporters used to read that
+# string themselves". There were three. selftest.sh printed it raw:
+#
+#   $ lca test
+#   [info] Running on: 20%/80% CPU/GPU
+#   $ lca check
+#   [info] no NVIDIA GPU — CPU inference (a reading pace)
+#
+# on the same box, minutes apart — 'lca test' telling the reader four fifths of
+# their model was on a card this machine does not have. Ollama 0.32.5 prints
+# that split on a CPU-only host for memory it manages itself, which is why
+# reading the string's shape can never answer the question.
+#
+# The sentence lives here so the reporters cannot drift again: check-system.sh
+# had worked it out and was the only one who had.
+placement_summary() {
+  local placement="${1:-}"
+  [[ -n "${placement}" ]] \
+    || { printf 'is not loaded right now — run a query, then re-check to see CPU/GPU placement'; return 0; }
+  case "$(gpu_state_for_placement "${placement}")" in
+    active) printf 'is running on the GPU (%s)' "${placement}" ;;
+    split)  printf 'is only partly on the GPU (%s) — a split runs at close to CPU speed' "${placement}" ;;
+    idle)   printf 'is running on the CPU (%s) even though a GPU driver is present' "${placement}" ;;
+    *)
+      # none | no-driver | unknown. A slash here is Ollama's own bookkeeping,
+      # not a device: say so rather than quote it as a fact about hardware.
+      if [[ "${placement}" == */* ]]; then
+        printf "placement reads '%s', but there is no usable NVIDIA GPU here — this is CPU inference. Ollama reports a split for memory it manages itself; there is no card on this machine to size a model against." "${placement}"
+      else
+        printf 'is running on the CPU (%s)' "${placement}"
+      fi
+      ;;
+  esac
+}
+
+# gpu_state — the same, reading the placement for MODEL itself.
+gpu_state() {
+  gpu_state_for_placement "$(ollama_processor "${1:-${MODEL_NAME:-}}" 2>/dev/null || true)"
 }
 
 # largest_model_for_vram VRAM_MIB — the biggest parameter count that fits
@@ -614,7 +1836,28 @@ largest_model_for_vram() {
 # PROCESSOR field itself contains a space, so $4 would only ever capture "100%".
 processor_from_ps() {
   local model="$1" line
-  line="$(grep -F -- "${model}" || true)"
+  # The NAME column, matched EXACTLY — not a substring of the row.
+  #
+  # 'ollama ps' lists every model currently resident, and 'grep -F' on the
+  # whole line matched 'qwen2.5-coder:7b-instruct' when asked about
+  # 'qwen2.5-coder:7b'. Measured: asked about the 7b sitting at 100% GPU, it
+  # answered 100% CPU — the instruct model's row, which happened to come first.
+  # Two models are resident whenever 'lca ask -m OTHER' has run inside
+  # OLLAMA_KEEP_ALIVE, and :7b alongside :7b-instruct is an ordinary pair of
+  # tags rather than a contrived one.
+  #
+  # The wrong answer is not cosmetic: this is what 'lca check' reports about
+  # whether YOUR model is on the GPU, on the machine someone paid for a GPU.
+  #
+  # No 'exit' in the awk, deliberately. Stopping at the first match would close
+  # the pipe while 'ollama ps' is still writing, and 141 under pipefail reads
+  # as "model not loaded" — the trap this file gates against elsewhere. It
+  # reads to the end and keeps the first hit.
+  #
+  # ENVIRON rather than -v: -v processes backslash escapes in the value, and a
+  # model tag is user-supplied text.
+  line="$(m="${model}" awk '$1 == ENVIRON["m"] && !seen { line = $0; seen = 1 }
+                            END { if (seen) print line }' || true)"
   [[ -n "${line}" ]] || return 1
   local proc
   proc="$(grep -oE '[0-9]+%/[0-9]+% [A-Z]+/[A-Z]+|[0-9]+% (GPU|CPU)' <<<"${line}" | head -1)"
@@ -652,29 +1895,160 @@ tokens_per_second() {
   awk -v c="${count}" -v n="${ns}" 'BEGIN { printf "%.1f\n", c / (n / 1000000000) }'
 }
 
+# read_probe_prompt — a prompt for measuring how fast this machine READS input,
+# which has to be two things the old benchmark was not: big, and different
+# every time.
+#
+# Different every time, because Ollama caches the KV prefix of a prompt it has
+# already seen. The benchmark prompt is a fixed 43-token string, so the second
+# and every later 'lca speed' re-read it out of that cache. Measured on this
+# box, the same 2,050-token prompt twice in a row:
+#
+#   {"prompt_eval_count":2050, "seconds":104, "read_tps":19}
+#   {"prompt_eval_count":2050, "seconds":0,   "read_tps":6899}
+#
+# Big, because at 43 tokens the per-request overhead dominates whatever is
+# left. Between them the two faults reported 160-213 tokens/second on a machine
+# that really reads at 20 — an order of magnitude, on the one number that
+# explains why a code edit takes minutes.
+#
+# The nonce goes FIRST so the differing bytes are at the head of the prefix;
+# a nonce at the end would leave everything before it cacheable.
+read_probe_prompt() {
+  local i filler="the quick brown fox jumps over the lazy dog while counting widgets "
+  printf 'Session %s-%s-%s. Ignore the notes below and reply with one word: ok.\n' \
+    "$(date +%s%N 2>/dev/null || printf 0)" "$$" "${RANDOM}"
+  for (( i = 0; i < 45; i++ )); do printf '%s' "${filler}"; done
+  printf '\n'
+}
+
+# What one small aider edit costs, in tokens. Measured on this project's own
+# defaults: adding a two-line function to a two-line file sent 2,800 tokens and
+# got 113 back. The prompt is not the file — it is aider's system prompt, the
+# repo map (768 tokens by default), the read-only conventions file (253,
+# measured) and the chat history. A tiny file still carries all of it.
+LCA_EDIT_PROMPT_TOKENS=2800
+LCA_EDIT_REPLY_TOKENS=113
+
+# aider_edit_seconds READ_TPS GEN_TPS — how long that edit takes at two
+# measured rates. Echoes whole seconds; non-zero if either rate is unusable.
+#
+# 'Generation N tokens/second' is the number this project quoted everywhere and
+# the one every local-LLM discussion quotes, and for the coding agent it is the
+# smaller half. At the rates measured here — 20 reading, 4.8 generating — that
+# edit is 140 seconds of reading against 23 of writing. Someone asking why it
+# is slow was being answered about the 14%.
+aider_edit_seconds() {
+  awk -v r="${1:-0}" -v g="${2:-0}" -v ti="${LCA_EDIT_PROMPT_TOKENS}" -v to="${LCA_EDIT_REPLY_TOKENS}" \
+    'BEGIN { if (r <= 0 || g <= 0) exit 1; printf "%d\n", (ti / r) + (to / g) }'
+}
+
+# human_duration SECONDS — "45s" / "3 min" / "1 h 5 min". Minutes past 90
+# seconds, because "187 seconds" is a number you have to convert before you can
+# feel it, and feeling it is the whole purpose of printing it.
+human_duration() {
+  local s="${1:-0}"
+  [[ "${s}" =~ ^[0-9]+$ ]] || return 1
+  if (( s < 90 )); then printf '%ss\n' "${s}"
+  elif (( s < 3600 )); then printf '%s min\n' "$(( (s + 30) / 60 ))"
+  else printf '%s h %s min\n' "$(( s / 3600 ))" "$(( (s % 3600 + 30) / 60 ))"
+  fi
+}
+
+# ollama_extra_env — the KEY=VALUE settings config/ollama.env adds, one per
+# line, or nothing when the file is absent.
+#
+# One reader, because there were two and they disagreed. The systemd drop-in
+# took every line of that file; start_ollama_bg hand-copied
+# OLLAMA_MAX_LOADED_MODELS=1 and did not copy OLLAMA_NO_CLOUD=1 — the setting
+# whose own comment says it exists because "Ollama ships with its cloud
+# features ON: remote inference and web search, which contact ollama.com", and
+# that leaving them enabled "contradicted the first line of the README".
+#
+# Measured on this project's own systemd-less box, reading the running
+# server's /proc/PID/environ:
+#
+#   OLLAMA_CONTEXT_LENGTH=8192
+#   OLLAMA_HOST=127.0.0.1:11434
+#   OLLAMA_KEEP_ALIVE=30m
+#   OLLAMA_MAX_LOADED_MODELS=1
+#
+# Four settings, and the privacy one absent. start_ollama_bg's own comment
+# said it starts Ollama "with the same environment the systemd drop-in would
+# apply", which is exactly the promise a second hand-written copy breaks.
+ollama_extra_env() {
+  local extra_env="${REPO_ROOT}/config/ollama.env"
+  [[ -f "${extra_env}" ]] || return 0
+  grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true
+}
+
 # render_ollama_dropin_content — print the drop-in the current .env implies,
 # to stdout (no writes). Kept separate so callers can diff it against the
 # installed file to detect drift.
 render_ollama_dropin_content() {
-  local extra_env="${REPO_ROOT}/config/ollama.env"
   echo "# Managed by local-code-agent (scripts/install_ollama.sh and scripts/tune.sh)."
   echo "# Manual edits will be overwritten on the next install or tune run."
   echo "[Service]"
   echo "Environment=OLLAMA_HOST=${OLLAMA_HOST}"
   echo "Environment=OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
   echo "Environment=OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"
-  if [[ -f "${extra_env}" ]]; then
-    { grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true; } \
-      | sed 's/^/Environment=/'
-  fi
+  ollama_extra_env | sed 's/^/Environment=/'
 }
 
 # render_ollama_dropin — (re)write the ollama systemd drop-in from the
 # current .env values plus any extra KEY=VALUE lines in config/ollama.env.
 # Used by install_ollama.sh at install time and tune.sh on every re-tune.
+# write_root_file DEST [MODE] — install stdin at DEST without ever leaving a
+# half-written file there.
+#
+# Replaces 'producer | as_root tee DEST'. tee opens DEST and TRUNCATES it
+# before the producer has written a byte, so anything that goes wrong part way
+# through replaces a working file with a fragment. Demonstrated: an unbound
+# variable inside render_ollama_dropin_content left the drop-in holding its
+# header and '[Service]' and nothing else — the OLLAMA_HOST and context-length
+# lines simply gone, on a file that had been correct a moment earlier.
+#
+# For the systemd units that matters more than it sounds. systemd will not load
+# a unit it cannot parse, and one of them is the service that re-applies the
+# inbound guard at boot: a truncated copy means the WebUI and Ollama ports come
+# back PUBLIC at the next reboot — the exact failure the rest of this project
+# spends paragraphs preventing.
+#
+# The temp sits beside DEST so the last step is a rename within one filesystem:
+# atomic, and impossible to half-do. DEST is not opened at all until the whole
+# content is on disk, so a full disk costs the temp and nothing else.
+#
+# Callers must still check the PIPELINE status, or better, materialise the
+# content first — nothing downstream can tell a producer that died early from
+# one that simply had little to say.
+write_root_file() {
+  local dest="$1" mode="${2:-0644}" tmp="$1.lca-new"
+  if ! as_root tee "${tmp}" >/dev/null; then
+    as_root rm -f "${tmp}" 2>/dev/null || true
+    return 1
+  fi
+  if as_root chmod "${mode}" "${tmp}" && as_root mv -f "${tmp}" "${dest}"; then
+    return 0
+  fi
+  as_root rm -f "${tmp}" 2>/dev/null || true
+  return 1
+}
+
 render_ollama_dropin() {
-  as_root mkdir -p "${OLLAMA_DROPIN_DIR}"
-  render_ollama_dropin_content | as_root tee "${OLLAMA_DROPIN}" >/dev/null
+  # Rendered into a variable FIRST, so a failure inside the renderer is caught
+  # while the existing drop-in is still untouched. Piping the renderer straight
+  # at the destination is what let a mid-render error truncate it.
+  local content
+  content="$(render_ollama_dropin_content)" \
+    || die "Could not render the Ollama settings — ${OLLAMA_DROPIN} is unchanged."
+  # Explicit for the same reason as restart_ollama below: apply.sh calls this
+  # inside a condition, where errexit does not fire. Bare, a failed mkdir let
+  # execution reach the write, which then failed for the obvious reason and
+  # blamed a full disk — the one cause it could be sure it was not.
+  as_root mkdir -p "${OLLAMA_DROPIN_DIR}" \
+    || die "Could not create ${OLLAMA_DROPIN_DIR}, so there is nowhere to write the Ollama settings. ${OLLAMA_DROPIN} is unchanged."
+  printf '%s\n' "${content}" | write_root_file "${OLLAMA_DROPIN}" \
+    || die "Could not write ${OLLAMA_DROPIN} — a full disk is the usual cause, so check 'df -h'. The previous settings are still in place."
   ok "Wrote ${OLLAMA_DROPIN}"
 }
 
@@ -693,14 +2067,68 @@ ollama_dropin_matches() {
 start_ollama_bg() {
   wait_for_ollama 2 && return 0
   have ollama || return 1
-  local logf="${REPO_ROOT}/.ollama-serve.log"   # *.log is gitignored
+  local logf="${OLLAMA_BG_LOG}"
+  # Serialised, because the line above is a CHECK and the one below is an ACT.
+  # Two lca commands on a box whose server is down — the normal state after a
+  # reboot, and the state this self-heal path exists for — both pass the check
+  # and both spawn a server. The loser cannot bind, but it has already opened
+  # this log with '>' , and O_TRUNC does not care that it is about to fail.
+  #
+  # Measured, two writers on one file with independent offsets:
+  #
+  #   ERROR: bind: address already in use
+  #   <NUL x19>GIN 200 /api/generate
+  #
+  # The real server's startup lines are gone, the file opens with an error from
+  # the process that failed, and there are NUL bytes in the middle of a text
+  # log. That is the file 'lca logs ollama' prints and the docs tell people to
+  # pipe into 'lca ask "why did this fail?"'.
+  #
+  # Re-checked under the lock: by the time the loser gets in, the winner has
+  # usually finished starting, so it returns success instead of starting a
+  # second one. Same flock-on-a-descriptor pattern as backup.sh, released by
+  # the kernel on exit, so a killed lca cannot wedge the next one.
+  local lock_fd=""
+  if have flock; then
+    # Braced, and that is not style. Written as 'if exec {lock_fd}>FILE
+    # 2>/dev/null', the 2>/dev/null is a redirection on a COMMAND-LESS exec —
+    # so it applies to this shell and stays applied: every warn, every die and
+    # every error from anything called afterwards went to /dev/null for the
+    # rest of the command. On a host without systemd, which is the only host
+    # that reaches this function, that is every message 'lca' had left to give.
+    # The braces make the redirection the group's, and temporary.
+    if { exec {lock_fd}>"${logf}.lock"; } 2>/dev/null; then
+      flock -w 60 "${lock_fd}" 2>/dev/null || true
+      if wait_for_ollama 2; then
+        exec {lock_fd}>&-
+        return 0
+      fi
+    else
+      lock_fd=""
+    fi
+  else
+    warn "flock is not installed, so two commands starting Ollama at once cannot be prevented — install util-linux."
+  fi
   warn "systemd not available — starting 'ollama serve' in the background (NOT persistent across reboots; use a systemd host for a managed service)."
-  OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
-  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
-  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
-  OLLAMA_MAX_LOADED_MODELS=1 \
-    nohup ollama serve >"${logf}" 2>&1 &
-  wait_for_ollama 30
+  # config/ollama.env through the same reader the drop-in uses, rather than a
+  # hand-picked copy of some of it — see ollama_extra_env for what that cost.
+  local extra=() line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && extra+=( "${line}" )
+  done < <(ollama_extra_env)
+  nohup env \
+    OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}" \
+    OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" \
+    OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}" \
+    ${extra[@]+"${extra[@]}"} \
+    ollama serve >"${logf}" 2>&1 &
+  # Held until the server answers, so a second command waits for THIS start
+  # rather than racing it, and released explicitly rather than left to exit —
+  # this function returns into a shell that keeps running.
+  local rc=0
+  wait_for_ollama 30 || rc=$?
+  [[ -z "${lock_fd}" ]] || exec {lock_fd}>&-
+  return "${rc}"
 }
 
 # ensure_ollama_up [TIMEOUT] — guarantee the API is reachable: return 0 if
@@ -713,9 +2141,17 @@ ensure_ollama_up() {
   if systemd_available; then
     # Never call as_root unguarded here: with neither root nor sudo it die()s,
     # and that exit kills the CALLER mid-run — '|| true' cannot catch an exit,
-    # and the redirect below would swallow the explanation. can_root() returns
-    # false instead, so callers (selftest.sh, tune.sh) degrade gracefully.
-    if can_root; then
+    # and the redirect below would swallow the explanation.
+    #
+    # root_for_probe, not can_root. can_root is the INTERACTIVE answer, and
+    # choosing it here decided for every caller that this command may wait for
+    # a password — which is the one decision the comment above root_for_probe
+    # says belongs to the caller. Seven scripts call this and only two of them
+    # act. Measured, with systemd present and an account that is not a
+    # passwordless sudoer: 'sudo systemctl start ollama' asked for a password
+    # into a discarded stream and waited. '|| true' cannot catch a wait, and
+    # the 2>&1 meant nothing was on screen to explain the silence.
+    if root_for_probe; then
       as_root systemctl start ollama >/dev/null 2>&1 || true
     fi
     wait_for_ollama "${timeout}"
@@ -724,12 +2160,82 @@ ensure_ollama_up() {
   fi
 }
 
+# ollama_bg_env KEY — the value KEY had when the background 'ollama serve' was
+# started. Nothing (exit 1) when it cannot be read.
+#
+# On a host with no systemd this project starts the server itself, passing
+# OLLAMA_CONTEXT_LENGTH and OLLAMA_KEEP_ALIVE from .env AT LAUNCH. Editing .env
+# afterwards changes nothing until it restarts, and until now nothing could say
+# whether that had happened: 'lca apply' reported "could not be looked at" on
+# every run of every such host, which is honest and permanently unhelpful.
+#
+# /proc/PID/environ is the launch environment, which is exactly the question.
+# Measured here, server started by start_ollama_bg:
+#
+#   OLLAMA_HOST=127.0.0.1:11434
+#   OLLAMA_CONTEXT_LENGTH=8192
+#   OLLAMA_KEEP_ALIVE=30m
+#
+# NOT 'ollama ps'. Its CONTEXT column looks like the answer and is not — two
+# calls a minute apart on an idle box read 11677 and then 11873, because newer
+# Ollama sizes the working context dynamically. Reporting drift from that would
+# have produced a config warning that came and went on its own.
+#
+# No pipes: this suite bans 'producer | reader-that-exits-early' outright, and
+# an environ block is small enough that it would have worked by luck.
+ollama_bg_env() {
+  local key="$1" pids pid environ val
+  have pgrep || return 1
+  # -x on the process NAME, not -f on the whole command line. '-f ollama serve'
+  # matches any process whose arguments contain that phrase, which includes the
+  # shell that is asking — measured here with the server stopped, it returned
+  # two PIDs and both were bash. This function then takes the first and reads
+  # /proc/PID/environ off it, so it was reading an unrelated process: either
+  # finding nothing (and apply.sh reporting "its launch settings could not be
+  # read" about a server that was fine) or, for a process started from an lca
+  # script, finding .env's own exported values and reporting no drift without
+  # ever having consulted the server.
+  #
+  # 'ollama serve' runs with comm=ollama, so -x finds it and cannot match a
+  # shell. speed.sh already did it this way; this was the copy that drifted.
+  pids="$(pgrep -x ollama 2>/dev/null || true)"
+  [[ -n "${pids}" ]] || return 1
+  read -r pid <<<"${pids}"
+  [[ -n "${pid}" && -r "/proc/${pid}/environ" ]] || return 1
+  environ="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null || true)"
+  val="$(sed -n "s/^${key}=//p" <<<"${environ}")"
+  read -r val <<<"${val}"
+  [[ -n "${val}" ]] || return 1
+  printf '%s' "${val}"
+}
+
 # restart_ollama — reload systemd and restart the ollama service, then wait
 # for the API to come back. Warns (does not crash) where systemd is absent.
 restart_ollama() {
   if systemd_available; then
-    as_root systemctl daemon-reload
-    as_root systemctl restart ollama
+    # Explicit, not bare under errexit. This function is called by apply.sh as
+    #
+    #   if ! ( render_ollama_dropin && restart_ollama ); then
+    #
+    # — a subshell, deliberately, because both of them die() and an exit is not
+    # a non-zero return. But a command inside a condition does not trigger
+    # errexit, so every bare line in here stopped aborting the moment that
+    # caller was written. Measured:
+    #
+    #   f() { false; echo REACHED; return 0; }
+    #   f                          -> aborts, exit 1
+    #   if ! ( f ); then ... fi    -> REACHED, and reports SUCCESS
+    #
+    # The consequence is specific: daemon-reload is what makes systemd re-read
+    # the drop-in we just rendered. If it fails and the restart succeeds, the
+    # service comes back on its OLD configuration, wait_for_ollama is satisfied,
+    # 'is-active' is satisfied, and this printed "Ollama restarted and
+    # answering" — with 'lca apply' reporting the new context and keep-alive
+    # applied. Success for the one piece of work the command exists to do.
+    as_root systemctl daemon-reload \
+      || die "'systemctl daemon-reload' failed, so systemd is still holding the previous unit definition and a restart now would come back on the OLD settings. Nothing was restarted and ${OLLAMA_DROPIN} is already written; re-run once systemd is answering."
+    as_root systemctl restart ollama \
+      || die "Could not restart the ollama service, so the settings in ${OLLAMA_DROPIN} are not in effect yet. Inspect it with: sudo systemctl status ollama"
     if wait_for_ollama 90; then
       # The API answering is not proof OUR service is healthy: a stray
       # 'ollama serve' holding the port answers too while the unit crash-loops
@@ -760,8 +2266,136 @@ restart_ollama() {
 # The 'lca' commands listed below are checked against bin/lca by the test
 # suite, so this can never quietly start advertising a command that does not
 # exist — the one hallucination we can actually prevent.
+#
+# "with nothing after it" is there because it was measured. On the 3b rung,
+# asked the starter question the empty screen offers — "which tasks need the
+# terminal agent instead? give me the exact command" — the previous wording
+# named the bare word only 6 times in 10, and the misses handed out 'lca
+# apply': a real command that does something else and needs sudo. Adding that
+# one clause took it to 9 in 10, with all four other bench questions
+# unchanged at n=6.
+#
+# The variant that did NOT work is worth more than the one that did. Naming
+# the wrong answer as a counter-example — "every 'lca <word>' is a server
+# command, not the agent: 'lca ask' prints text, 'lca apply' changes
+# settings" — measured 1 in 10. Mentioning 'lca apply' taught it 'lca apply'.
+# So: state what the command IS, and do not enumerate what it is not.
+#
+# "a service that will not start" is in the server-question list for the same
+# kind of reason, from the other side. That starter question — "walk me through
+# diagnosing it, starting with the exact commands" — has the SHAPE of a build
+# request while being a question about this box, and the handover fired on it
+# 13 times in 20. Naming the case in the list of things that are NOT a build
+# request took it to 6 in 20, and did not cost the handover elsewhere: at the
+# same seeds, build held at 18/20 against 19/20 with tutorials 2/20 against
+# 3/20, and the terminal starter improved from 12/20 to 16/20. Adding to the
+# list of RIGHT answers is safe in a way that naming a wrong one is not.
+#
+# One more thing that measurement showed, and it is worth knowing before
+# editing anything here: re-wrapping that same sentence — identical words, one
+# line break moved — took service from 9/20 to 6/20. About one standard error
+# at n=20, which is the scale of wobble to expect from any edit at all.
+# lca_user_instructions — the user's own instructions, for every surface.
+#
+# config/CONVENTIONS.md was written for aider and reached aider alone, through
+# '--read'. Someone who edits it to say "always use tabs" or "answer in French"
+# is stating how they want THIS STACK to behave, and had to say it three times:
+# once in that file, once in the chat app's settings, and once in every agent
+# task. One file, one place to edit, three consumers.
+#
+# Returns nothing when the file is missing or AIDER_CONVENTIONS is off, so
+# every caller can append unconditionally. The toggle keeps its name: it is
+# what .env.example has always called this, and renaming a setting to widen it
+# would break the files people already have.
+# lca_user_instructions [SURFACE] — the user's instructions for one surface.
+#
+# SURFACE is chat | aider | agent, and defaults to 'agent' because that is the
+# only caller that passes nothing.
+#
+# WHAT THIS FILE COSTS EACH SURFACE, measured rather than assumed, at the sizes
+# this project actually ships (618 tokens of instructions, 577 of base prompt):
+#
+#   chat   4096-token window on the 3b rung. The file DOUBLES the system
+#          prompt, 577 -> 1211 tokens, and that prompt is re-sent on every
+#          message: 30% of the whole window, permanently, before a word is
+#          typed. It is also the surface the content fits worst — the chat has
+#          no filesystem and no tools, so five bash gotchas and "write files
+#          into the working directory you were given" are instructions it
+#          cannot act on. And the prompt is what a sliding window drops first,
+#          which is the "long chat starts sounding generic" symptom PHONE.md
+#          already documents. This is the surface to switch off first.
+#   aider  same 4096 window, but the content is exactly what aider is for, and
+#          it competes with the repo map rather than with chat history.
+#   agent  16384 window against a ~15,200-token prompt, so 618 tokens is over
+#          half of what headroom remains — and it is also where the two newest
+#          rules were added BECAUSE of measured agent failures. Expensive and
+#          load-bearing at the same time; not a switch to flip casually.
+lca_user_instructions() {
+  local surface="${1:-agent}" enabled
+  case "${surface}" in
+    # The chat is the one surface this file is OFF for by default, and the
+    # arithmetic is the reason. Measured on this checkout: CONVENTIONS.md is
+    # 2,472 chars (~618 tokens) and the chat's own product prompt is ~593, so
+    # together they are ~1,211. 'lca check' budgets 15% of the context window
+    # for this stack's own text: at 8192 that cap is 1,228 and it just fits; at
+    # 4096 — the 3b rung, the smallest this project ships — the cap is 614 and
+    # the prompt is DOUBLE it, re-sent on every message, for the life of the
+    # conversation.
+    #
+    # And the chat is the surface that can act on none of it. The file is about
+    # editing files, keeping diffs small and committing cleanly; the chat box
+    # has no filesystem, no shell and no tools, which its own prompt says three
+    # lines above this appendix. aider and the agent both edit files, so both
+    # keep it.
+    #
+    # This was a permanent warning from 'lca check' on every small box — a
+    # decision the project could make, left to the user as a message. Now it is
+    # made, and CONVENTIONS_CHAT=true takes it back.
+    chat)
+      enabled="${CONVENTIONS_CHAT:-false}"
+      # ...and the old single switch still turns all three off at once, which
+      # three gates hold this file to. An explicit CONVENTIONS_CHAT=true does
+      # not survive AIDER_CONVENTIONS=false: off means off.
+      [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || enabled=false
+      ;;
+    aider) enabled="${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" ;;
+    *)     enabled="${CONVENTIONS_AGENT:-${AIDER_CONVENTIONS:-true}}" ;;
+  esac
+  [[ "${enabled}" == "true" ]] || return 0
+  # Defaulted, not bare. This is called from lca_system_prompt, which the login
+  # banner reaches through load_env_readonly — a path that does not apply the
+  # .env defaults — so a bare ${AIDER_CONVENTIONS} is an unbound variable under
+  # 'set -u'. Measured: the banner then computed a prompt WITHOUT this appendix,
+  # compared it to the container's, and reported the chat app out of date on a
+  # machine where nothing had drifted.
+  local f="${REPO_ROOT:-}/config/CONVENTIONS.md"
+  [[ -r "${f}" ]] || return 0
+  # HTML comments are stripped, and that is a feature rather than tidiness.
+  #
+  # Every byte of this file is re-sent on every message, so there was nowhere to
+  # put a note FOR THE EDITOR without charging the user's context for it — and
+  # this file badly needs one: several of its phrases are what the test suite
+  # matches on, and two were broken while trimming it to fit the prompt budget.
+  # Both were caught, but the next person will not know they were load-bearing.
+  #
+  # <!-- ... --> now means "for whoever edits this file, not for the model".
+  #
+  # awk rather than perl: perl is not in this project's declared dependency list
+  # and awk is, so a note in the instructions file must not be the thing that
+  # makes the prompt depend on a package nobody installed.
+  awk '/<!--/ { skip = 1 } skip == 0 { print } /-->/ { skip = 0 }' "${f}"
+}
+
 lca_system_prompt() {
-  cat <<'EOF'
+  # Assembled, then written ONCE. This used to be a bare heredoc followed by a
+  # second printf for the appendix, and that second write is a SIGPIPE waiting
+  # to happen: a reader like 'lca_system_prompt | grep -q' matches inside the
+  # heredoc, exits, and the printf lands on a closed pipe — 141 under pipefail,
+  # which reads as "the prompt does not say that" precisely when it did.
+  # Measured the moment the appendix was added: five gates that had passed for
+  # months went red at once, none of them about the appendix.
+  local base extra
+  base="$(cat <<'EOF'
 You are the assistant for local-code-agent, a private AI stack running entirely
 on the user's own Linux server. Nothing the user types leaves that machine.
 
@@ -777,18 +2411,24 @@ You are a chat box: no filesystem, no shell, no sight of the user's project.
 You have NO tools — never emit a function or tool call, and never claim to be
 performing an action. Answer with text, including complete code to copy.
 
-Only aider writes files, and it runs as the bare word 'lca' — not 'lca ask',
-which prints text and touches no file. When asked to build, create, make or
+Only aider writes files, and it runs as the bare word 'lca' with nothing
+after it — not 'lca ask', which prints text and touches no file. When asked to build, create, make or
 add anything that spans more than one file, do not walk the user through it.
 Open with exactly:
 
+  # in a terminal on the server (SSH in from your phone)
   mkdir -p ~/my-project && cd ~/my-project && lca
 
 Add one line: aider writes those files for you, on this same model. Then offer
 to write any single file's contents here.
 
+Questions about this server itself — backups, logs, speed, disk, a service
+that will not start, an error message — are NOT that. Answer those directly
+with the 'lca' command that does the job, and never send them to aider.
+
 The server manages itself through one command, 'lca':
   lca            start the coding agent (aider) — the ONLY one that writes files
+  lca apply      make the running system match .env edits (needs sudo)
   lca check      full health check
   lca logs       recent logs from Ollama, the chat app and the installer
   lca speed      measure tokens/second and what limits it
@@ -800,6 +2440,42 @@ The server manages itself through one command, 'lca':
   lca status     kill-switch status
 Only mention these when they are actually relevant to the question.
 EOF
+)"
+  extra="$(lca_user_instructions chat)"
+  if [[ -n "${extra}" ]]; then
+    printf '%s\n\n--- the owner of this machine also asked for the following ---\n%s\n' \
+      "${base}" "${extra}"
+  else
+    printf '%s\n' "${base}"
+  fi
+}
+
+# lca_webui_banners — the always-visible notice at the top of every chat, as the
+# JSON list Open WebUI's WEBUI_BANNERS expects.
+#
+# The system prompt above already tells the model it has no filesystem, and it
+# is good at saying so — but it is an INSTRUCTION to a 3b, obeyed most of the
+# time rather than always. The one time it is not obeyed, the user is handed a
+# confident multi-file tutorial, concludes the product cannot code, and stops.
+# That is not a hypothetical: it is the first thing a real user reported.
+#
+# A banner is not an instruction. It is served by Open WebUI itself, from
+# /api/v1/configs/banners, and rendered above the conversation whatever the
+# model does or does not say. Verified against the real image
+# by starting a container from WEBUI_IMAGE with it set and reading it back from
+# note it does NOT appear under 'ui.banners' in /api/config, which is where you
+# would look first and find null.
+#
+# dismissible:false on purpose. The limitation does not go away, and a
+# dismissed banner is exactly what someone would not see on the day they ask it
+# to build something.
+lca_webui_banners() {
+  local content
+  content="This chat cannot read, create or edit files — it is a chat box with no filesystem. For real coding, SSH into the server and run:  lca [project-dir]   (that is aider, on this same private model, and it does write files.)"
+  jq -nc --arg c "${content}" \
+    '[{id: "lca-no-filesystem", type: "warning",
+       title: "This chat cannot touch your files",
+       content: $c, dismissible: false, timestamp: 1}]'
 }
 
 # run_reader PROBE_CMD... -- REAL_CMD... — decide once, with a cheap probe,
@@ -818,13 +2494,41 @@ run_reader() {
     if [[ "${seen}" == "false" ]]; then probe+=( "${arg}" ); else real+=( "${arg}" ); fi
   done
   (( ${#probe[@]} > 0 && ${#real[@]} > 0 )) || return 2
-  if "${probe[@]}" >/dev/null 2>&1; then
+  # The probe is bounded and the real command is not, because they are
+  # different kinds of thing: the probe is a question ("can this be read?")
+  # and the reader's output may legitimately stream for as long as it likes.
+  # Unbounded, the question was the hang: 'lca agent logs' asks
+  # 'docker container inspect' first, and against a daemon that accepts its
+  # socket and never answers that call never returns — so the command sat
+  # there having printed nothing, which is exactly the failure this helper was
+  # written to remove one layer further up.
+  local -a bound=()
+  if have timeout; then bound=(timeout "${LCA_READER_PROBE_TIMEOUT:-5}"); fi
+  if "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
     "${real[@]}"
     return 0
   fi
-  if can_root && as_root "${probe[@]}" >/dev/null 2>&1; then
-    as_root "${real[@]}"
-    return 0
+  # root_for_probe, not a hand-rolled can_root_now / elif can_root pair. The
+  # pair decides INSIDE the function what the comment at the top of this file
+  # says is a property of the CALLER — and it decided "may prompt" for every
+  # caller. 'lca logs' is a reporter: on any account that is not a passwordless
+  # sudoer, the interactive arm ran, and an interactive sudo does not fail, it
+  # WAITS. The announcement below was added when that was first measured, which
+  # made the stall explicable without making it stop.
+  #
+  # The sentence about a password is printed only where a password can actually
+  # be asked for: the caller allows prompting, and sudo -n does not already
+  # work. Root, and a passwordless sudoer, are told nothing because nothing
+  # will be asked of them.
+  if root_for_probe; then
+    if [[ "${LCA_MAY_PROMPT}" == "true" ]] && ! can_root_now; then
+      # stderr, so it cannot land inside a log stream someone is piping.
+      warn "Reading this needs root — sudo may ask for your password."
+    fi
+    if as_root "${bound[@]}" "${probe[@]}" >/dev/null 2>&1; then
+      as_root "${real[@]}"
+      return 0
+    fi
   fi
   return 1
 }
@@ -867,19 +2571,82 @@ webui_responds() {
   curl -fsS --max-time 3 "$(webui_url)/health" >/dev/null 2>&1
 }
 
+# WEBUI_START_TIMEOUT — how long a chat-app start is allowed to take before we
+# stop calling it a start.
+#
+# It was 120s for 'webui.sh start' and 'restart' and 180s for the installer,
+# and all three numbers were guesses. Measured instead, from the container's
+# own log on this box — every real boot it has had, container start to "Started
+# server process":
+#
+#   2026-08-06 02:09:52 -> 02:10:21     29s
+#   2026-08-06 10:13:20 -> 10:17:50   4m30s
+#   2026-08-06 14:48:54 -> 14:50:51   1m57s
+#   2026-08-06 16:22:52 -> 16:23:08     16s
+#   2026-08-07 02:15:48 -> 02:22:43   6m55s
+#
+# Three of five were at or past 120s, and two were past 180s. Open WebUI loads
+# a SentenceTransformer embedding model before it serves, and on a CPU-only
+# box sharing its cores with Ollama that is minutes, not seconds. So on this
+# hardware the common case — the VPS reboots, both services come up together,
+# the owner logs in and follows the banner's advice — ended in:
+#
+#   [FAIL] Container started but no HTTP answer after 120s
+#
+# about a container that was working perfectly and answered four minutes
+# later. The installer's "first start can take ~1 minute" was wrong by 7x.
+#
+# 600s is the measured worst case with headroom. That is only safe because the
+# wait below now watches the container as well as the port: a start that has
+# actually failed is reported in seconds, not at the end of the clock.
+WEBUI_START_TIMEOUT="${WEBUI_START_TIMEOUT:-600}"
+
 # wait_for_webui [TIMEOUT_SECONDS] — poll Open WebUI's /health until it
 # answers. A cold container start takes noticeably longer than 'docker
 # start' returning, so start/restart/install all wait through this.
+#
+#   0  it answered
+#   1  the deadline passed and the container is STILL RUNNING — slow or stuck
+#   2  the container is no longer running, so waiting cannot help
+#
+# The two failures are different problems with different fixes, and a caller
+# that cannot tell them apart has to hedge. Checked every 30s rather than
+# every poll: 'docker inspect' is far more expensive than a loopback curl, and
+# a container that dies is not in a hurry.
+#
+# The progress line matters as much as the timeout. A silent wait through
+# seven minutes is indistinguishable from a hang, and the honest reading of
+# that silence — "this is broken, Ctrl-C it" — is exactly wrong.
 wait_for_webui() {
-  local timeout="${1:-120}" waited=0
+  local timeout="${1:-${WEBUI_START_TIMEOUT}}" waited=0
   while ! webui_responds; do
     if (( waited >= timeout )); then
       return 1
     fi
     sleep 3
     waited=$((waited+3))
+    (( waited % 30 == 0 )) || continue
+    webui_container_running || return 2
+    if (( waited == 30 )); then
+      info "Still starting. Open WebUI loads an embedding model before it answers anything; on a CPU-only box that has taken up to 7 minutes here." >&2
+    else
+      info "  ...still starting (${waited}s, up to ${timeout}s)." >&2
+    fi
   done
   return 0
+}
+
+# webui_wait_or_die TIMEOUT LOGS_HINT — wait for the chat app, or die naming
+# the reason the wait actually had. Shared by every caller so the distinction
+# wait_for_webui draws is never flattened back into one message.
+webui_wait_or_die() {
+  local timeout="$1" logs="$2" rc=0
+  wait_for_webui "${timeout}" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    2) die "The container stopped while we waited for it, so this is not a slow start — something inside it failed. Its log says what: ${logs}" ;;
+    *) die "Open WebUI still was not answering after ${timeout}s, and its container is still running. That is either a start slower than anything measured here or one that is stuck; the log tells them apart: ${logs}" ;;
+  esac
 }
 
 # --- applied state -----------------------------------------------------------
@@ -890,17 +2657,76 @@ wait_for_webui() {
 
 # webui_container_env KEY — the value KEY was baked into the running container
 # with. Non-zero (and prints nothing) when the container or the key is absent.
-webui_container_env() {
-  local env_lines out
+# webui_container_env_list — every environment line the running container was
+# created with, or non-zero when that cannot be read at all.
+#
+# Split out from webui_container_env because the two failures underneath it are
+# NOT the same thing, and treating them as one hid a real bug for the life of
+# this file: "docker cannot be read" is unknown, and "the container has no such
+# variable" is a container built before that setting existed. Every caller here
+# used to see an empty string for both, so every caller had to treat absent as
+# fine — which is precisely the pre-feature install these checks exist to find.
+webui_container_env_list() {
+  local env_lines fmt runner=()
   have docker || return 1
-  env_lines="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null \
-    || { can_root && as_root docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+  # Bounded, because 'docker inspect' is not. The CLI waits for ever on a
+  # daemon that accepts the socket connection and then answers nothing, and
+  # every caller of this function is a REPORTER — 'lca check', 'lca test',
+  # 'lca apply', the login banner. A reporter that hangs is strictly worse
+  # than one that says "cannot tell", and the banner runs on every SSH login:
+  # there, a hang is a machine you cannot get into to fix the daemon.
+  #
+  # Callers that must answer fast lower it (LCA_INSPECT_TIMEOUT=2). Not an
+  # .env key on purpose: it is a property of the caller, not of the install.
+  if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
+  fmt='{{range .Config.Env}}{{println .}}{{end}}'
+  # root_for_probe, and the timeout above is why the default MATTERS here.
+  # 'sudo timeout 15 docker inspect' bounds docker, not sudo: the password
+  # prompt happens before timeout is ever exec'd, so it is outside the bound.
+  # Measured on this box with an account that is not a sudoer: the login
+  # banner printed its first two lines, then sat on "[sudo] password for ..."
+  # for as long as it was left running. Every SSH login, on the one code path
+  # whose comment above says it must never hang. The banner sets nothing, so
+  # it gets the strict default; 'lca apply' opts in and may ask.
+  env_lines="$("${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { root_for_probe && as_root "${runner[@]}" docker inspect -f "${fmt}" "${WEBUI_CONTAINER}" 2>/dev/null; } \
     || true)"
   [[ -n "${env_lines}" ]] || return 1
+  printf '%s\n' "${env_lines}"
+}
+
+# webui_container_env KEY — one value out of that list. Non-zero when the list
+# cannot be read OR when the key is not in it; callers that need to tell those
+# apart ask webui_container_env_list first.
+webui_container_env() {
+  local env_lines out
+  env_lines="$(webui_container_env_list)" || return 1
   out="$(sed -n "s/^$1=//p" <<<"${env_lines}" | head -1)"
   [[ -n "${out}" ]] || return 1
   printf '%s' "${out}"
 }
+
+# LCA_DOCKER_RUNNER — the bound every read-only docker question runs under.
+#
+# 'docker inspect', 'docker info', 'docker ps' and 'docker network inspect'
+# have no client-side deadline against a daemon that accepts its socket and
+# never answers: the call does not run slowly, it never returns. Exactly one
+# probe in this file used to be bounded — webui_container_env_list, whose
+# comment gives the reason in full — and the other eight were not, so every
+# reporting command that asked any of them stopped there for ever. Measured
+# against a docker that accepts and never answers, in the SHIPPED
+# configuration: 'lca check', 'lca webui status', 'lca logs', 'lca agent logs'
+# and 'lca agent status' all sat there.
+#
+# An array rather than a wrapper function, because half of these run through
+# 'as_root' and sudo cannot execute a shell function. Empty when timeout is
+# absent, which expands to nothing.
+#
+# ACTIONS are deliberately not bounded by it: 'docker run', 'docker pull' and
+# 'docker rm' are things the reader asked for and may legitimately take
+# minutes. This is for questions.
+LCA_DOCKER_RUNNER=()
+if have timeout; then LCA_DOCKER_RUNNER=(timeout "${LCA_DOCKER_PROBE_TIMEOUT:-5}"); fi
 
 # docker_daemon_reachable — true when docker commands can actually run here.
 #
@@ -908,10 +2734,45 @@ webui_container_env() {
 # every docker probe collapses into the same non-zero exit. Telling someone
 # their chat app was never created, when the truth is that dockerd is down,
 # sends them to an install command that cannot work either.
+# root_for_probe, not can_root or can_root_now: every caller of this asks the
+# same question and means a different thing by it. 'lca backup' may ask for a
+# password; the login banner may not.
 docker_daemon_reachable() {
   have docker || return 1
-  docker info >/dev/null 2>&1 && return 0
-  can_root && as_root docker info >/dev/null 2>&1
+  # Bounded, exactly like webui_container_env_list six lines above and for the
+  # same reason — which is why this one is worth reading twice: the argument
+  # was already written down in this file and applied to the neighbouring
+  # probe, not to this one. A daemon that accepts its socket and never answers
+  # gives 'docker info' no deadline of its own, so an unbounded call does not
+  # run slowly, it never returns.
+  #
+  # Measured against a docker that accepts and never answers, in the SHIPPED
+  # configuration: 'lca check' printed its Docker heading with nothing under
+  # it, and 'lca webui status', 'lca logs', 'lca agent logs' and 'lca agent
+  # status' all sat there too. This is the probe with thirteen callers.
+  #
+  # Five seconds. 'docker info' on a healthy daemon here is well under one —
+  # this project's boxes run two or three containers — and the cost of being
+  # too tight is not a slow report but a WRONG one: a false "cannot reach the
+  # daemon" refuses to start the agent, and this project has already shipped
+  # the mirror-image bug, a healthy daemon called unusable. Overridable with
+  # LCA_DOCKER_PROBE_TIMEOUT for a box where that is not true.
+  "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 && return 0
+  # The announcement below is here because sudo's own prompt goes to the same
+  # /dev/null as docker's noise, so without it a command that IS allowed to ask
+  # sits on a password prompt with nothing on screen. Measured on 'lca agent
+  # start': RC=124, no output whatsoever. Kept to one line so the guard stays
+  # inside the window sudo_probes_are_guarded looks at.
+  # The bound goes INSIDE the sudo, not around it: the password prompt happens
+  # before timeout is ever exec'd, so it is outside the bound either way — the
+  # same note webui_container_env_list carries. And the comment below it stays
+  # two lines, because sudo_probes_are_guarded reads the call line and the four
+  # above it, and a longer explanation pushes root_for_probe out of that window.
+  root_for_probe || return 1
+  announce_possible_prompt "Reaching the Docker daemon"
+  # The outcome stated rather than fallen through to: both callers ask this
+  # from inside a condition, where errexit does not fire.
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker info >/dev/null 2>&1 || return 1
 }
 
 # webui_container_exists — true when the chat app's container is present, in
@@ -921,8 +2782,1627 @@ docker_daemon_reachable() {
 # project keeps taking out.
 webui_container_exists() {
   have docker || return 1
-  docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
-  can_root && as_root docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1 && return 0
+  root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${WEBUI_CONTAINER}" >/dev/null 2>&1
+}
+
+# webui_container_running — true when the chat app's container is not merely
+# present but actually running, i.e. actually listening on something.
+#
+# webui_container_exists deliberately answers "in any state", which is right
+# for "has it been created". It is the wrong question for exposure: a stopped
+# container accepts no connections, and reporting its port as an unguarded gap
+# would be a finding nothing can clear — 'lca webui stop' does not remove the
+# container, so the port stays in its Config.Env for ever.
+webui_container_running() {
+  have docker || return 1
+  local state
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+           || true)"
+  [[ "${state}" == "true" ]]
+}
+
+# --------------------------------------------------------------------------
+# Long-run supervision for the agent tier
+#
+# OpenHands' V1 documentation does not publish environment variables for an
+# iteration ceiling or for confirmation mode, so this project does not ship
+# any: an env var that may quietly do nothing is the "reported something that
+# did not happen" shape this repo keeps removing. The limits below are ours,
+# enforced from outside the container, and the parts that decide are pure
+# functions so they can be tested without a multi-gigabyte image.
+#
+# agent_failure_signature LINE — the part of a log line worth comparing to the
+# previous one when deciding "same failure again".
+#
+# Digits, hex blobs and quoted strings are dropped, because the interesting
+# case is the SAME error with a new timestamp, pid, container id or path index
+# each round — compare the raw lines and every repeat looks novel, which is how
+# a loop runs to the wall clock instead of the strike count.
+agent_failure_signature() {
+  local line="${1:-}"
+  # Order matters: quoted strings first (they contain digits), then hex, then
+  # bare numbers.
+  line="$(printf '%s' "${line}" | sed -E "s/'[^']*'/'X'/g; s/\"[^\"]*\"/\"X\"/g")"
+  # ANY word containing a digit collapses whole, rather than digits alone.
+  # Digits-only was wrong and measured wrong: a hex id needs a word boundary to
+  # match as hex, so 'x7f3a9b2' kept its letters and became 'xNfNaNbN' while
+  # 'c1d0e5f8' became 'H' — two runs of the SAME failure produced different
+  # signatures, and a stuck detector that cannot see a repeat is decoration.
+  line="$(printf '%s' "${line}" | sed -E 's/[A-Za-z0-9_]*[0-9][A-Za-z0-9_]*/N/g')"
+  # Collapse whitespace so indentation changes are not differences.
+  printf '%s' "${line}" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'
+}
+
+# agent_run_verdict ITERATIONS MAX ELAPSED_S TIMEOUT_MIN STRIKES MAX_STRIKES
+#   -> 'ok' | 'iterations' | 'timeout' | 'stuck'
+#
+# One place that decides whether an unattended run should stop, and why. The
+# caller does the watching; this does the judging, so the policy is testable
+# and the two cannot disagree.
+#
+# A limit of 0 means "no limit" — the same convention BACKUP_KEEP=0 already
+# uses here for "keep everything", so a reader who has met one has met both.
+# A non-numeric limit is also no limit rather than an error: a typo in .env
+# must not stop a run that is going fine.
+agent_run_verdict() {
+  local iters="${1:-0}" max_iters="${2:-0}" elapsed="${3:-0}" \
+        timeout_min="${4:-0}" strikes="${5:-0}" max_strikes="${6:-0}"
+  [[ "${max_iters}" =~ ^[0-9]+$ ]] || max_iters=0
+  [[ "${timeout_min}" =~ ^[0-9]+$ ]] || timeout_min=0
+  [[ "${max_strikes}" =~ ^[0-9]+$ ]] || max_strikes=0
+  [[ "${iters}" =~ ^[0-9]+$ ]] || iters=0
+  [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed=0
+  [[ "${strikes}" =~ ^[0-9]+$ ]] || strikes=0
+  # Wall clock first: it is the one a runaway run is most likely to hit, and
+  # the one the user set to be able to walk away.
+  if (( timeout_min > 0 )) && (( elapsed >= timeout_min * 60 )); then
+    printf 'timeout'; return 0
+  fi
+  if (( max_strikes > 0 )) && (( strikes >= max_strikes )); then
+    printf 'stuck'; return 0
+  fi
+  if (( max_iters > 0 )) && (( iters >= max_iters )); then
+    printf 'iterations'; return 0
+  fi
+  printf 'ok'
+}
+
+# agent_stop_reason VERDICT — what to tell the user, in this project's voice.
+agent_stop_reason() {
+  case "${1:-}" in
+    timeout)    printf 'the wall-clock limit (AGENT_TIMEOUT_MINUTES) was reached — the run was stopped, not finished' ;;
+    iterations) printf 'the step ceiling (AGENT_MAX_ITERATIONS) was reached — the run was stopped, not finished' ;;
+    stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
+    *)          printf 'the run ended on its own' ;;
+  esac
+}
+
+# --- the step ceiling's second source: the agent's own event API -------------
+#
+# The container log cannot support a step ceiling, and that is measured, not
+# suspected: across one 27-minute reasoning turn that ran to 'finished', the
+# sandbox log went from 65 lines to 66, and the one new line was an unrelated
+# cost-calculation warning. Every line the step pattern DOES match is tool
+# initialisation, emitted once when the sandbox comes up. At the default of 100
+# the ceiling can therefore never fire — a limit that cannot trigger, which is
+# worse than no limit because it was believed.
+#
+# The stream that does carry one step per step is the app's event API. These
+# functions read it. They are deliberately tolerant about the response body and
+# deliberately intolerant about guessing: OpenHands publishes the event routes
+# but no schema this project could pin to, and this repo has already been burnt
+# once by writing to an assumed shape — the settings POST that answered 200 and
+# stored nothing. So several plausible envelopes are accepted, and a payload
+# none of them fit yields NOTHING and a non-zero status.
+#
+# That distinction is the whole point. 'unknown' and 'zero' differ by an entire
+# feature: a ceiling fed unknown-as-zero never fires and then reports a clean
+# run, which is exactly the failure the log-based counter turned out to be.
+
+# agent_events_count PAYLOAD — the number of events in an event-API response.
+#
+# Accepts a bare number, a bare array, an object carrying a numeric total, or
+# an object carrying the events themselves under a list key. Returns 1 and
+# prints nothing for anything else, including invalid JSON and an empty body.
+#
+# The bare number is not hypothetical and it is why this function was written
+# tolerantly. Measured against a real OpenHands 1.8 container:
+#
+#   GET /api/v1/conversation/<id>/events/count    -> 0        (one byte)
+#   GET /api/v1/conversation/<id>/events/search   -> {"items":[...],"next_page_id":null}
+#
+# The first version of this refused a bare scalar on purpose, and a gate said
+# so. Against the live API that gate was wrong: it rejected the exact shape the
+# endpoint returns, which would have left the ceiling on its fallback for ever
+# while every unit test passed.
+agent_events_count() {
+  local payload="${1:-}" n
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  # numbers/arrays are jq's type filters, so a null or a string under one of
+  # these keys is skipped rather than becoming a count. Collected into a list
+  # and indexed instead of using first(), which older jq builds lack; '.[0] //
+  # empty' keeps a legitimate 0, since jq's // only rejects null and false.
+  n="$(printf '%s' "${payload}" | jq -r '
+        [ if type == "number" then .
+          elif type == "array" then length
+          elif type == "object" then
+            ( .count, .total, .total_count, .num_events | numbers ),
+            ( .items, .results, .events, .data | arrays | length )
+          else empty end ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${n}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${n}"
+}
+
+# agent_conversation_id PAYLOAD — the conversation to count events for, out of
+# the app's conversation listing.
+#
+# The first entry the server returned, and nothing here re-sorts it: the field
+# that would carry a timestamp is not published either, and inventing one is
+# how the settings write went wrong. A listing, a wrapped listing and a single
+# conversation object are all read.
+#
+# The id is validated before it is returned, and that is a safety property, not
+# tidiness: it is interpolated straight into a URL by the caller.
+agent_conversation_id() {
+  local payload="${1:-}" id
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  id="$(printf '%s' "${payload}" | jq -r '
+        [ ( if type == "array" then .[]
+            elif type == "object" then
+              ( ( .items, .results, .conversations, .data | arrays | .[] ), . )
+            else empty end )
+          | objects | ( .id, .conversation_id ) | strings ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s' "${id}"
+}
+
+# agent_api_base — the agent app's API as the HOST dials it.
+#
+# The live published port when there is one, for the same reason agent_live_port
+# exists at all: editing AGENT_PORT after the container was created leaves the
+# running UI on the old one, and a supervisor polling the new number would find
+# nothing and quietly fall back to a ceiling that cannot fire.
+agent_api_base() {
+  local port
+  port="$(agent_live_port 2>/dev/null || true)"
+  [[ "${port}" =~ ^[0-9]+$ ]] || port="${AGENT_PORT}"
+  printf 'http://127.0.0.1:%s' "${port}"
+}
+
+# agent_conversation_ref — the id of the conversation now running, or rc 1.
+# The search route is FIRST because it is the one that answers. Measured on
+# 1.8: a bare GET /api/v1/app-conversations is a 422 —
+# {"detail":[{"type":"missing","loc":["query","ids"]}]} — it wants the ids you
+# are trying to discover. The other two stay as fallbacks for a build that
+# spells it differently, and cost one refused request each.
+# agent_conversation_pick PAYLOAD SANDBOX — the conversation belonging to a
+# named sandbox, or nothing.
+#
+# "Or nothing" matters: the caller falls back to the first entry only when this
+# cannot answer, and knowing which of the two happened is what lets the watcher
+# say so.
+agent_conversation_pick() {
+  local payload="${1:-}" sandbox="${2:-}" id
+  [[ -n "${payload}" && -n "${sandbox}" ]] || return 1
+  have jq || return 1
+  id="$(printf '%s' "${payload}" | jq -r --arg sb "${sandbox}" '
+        [ ( if type == "array" then .[]
+            elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+            else empty end )
+          | objects | select(.sandbox_id == $sb) | .id | strings ] | .[0] // empty' 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s' "${id}"
+}
+
+# agent_task_suffix — the standing rules a task carries with it.
+#
+# Taken from config/CONVENTIONS.md's two measured rules rather than reworded, so
+# the three surfaces cannot drift: what aider is told, what the chat app is told
+# and what a submitted task is told are one decision.
+# NOT A WORKING CHANNEL on this build, and kept anyway — read the note beside
+# SUFFIX in scripts/agent-task.sh before relying on anything here. The app
+# overwrites system_message_suffix with its own value, so nothing this function
+# returns has ever reached an agent. It is sent because it is free and correct
+# for a build that honours the field; it must not be counted as a second place
+# the rules live. The place they live is agent_task_prompt.
+agent_task_suffix() {
+  printf '%s' "Never write outside the working directory you were given, and never report a task complete without executing what you built — exercise what the task named and paste the real output; never report success on code you have not executed. Before finishing, re-read the task and check each requirement against what you did."
+}
+
+# agent_task_prompt DIR TASK — the text a task is actually submitted as.
+#
+# The belt, and on this build there is no braces. The directory is stated in the
+# PROMPT because that is demonstrably read — the selftest names an absolute path
+# and its file lands there every run, while two runs that named no path wrote to
+# the sandbox root. This prompt is now the ONLY place the rules reach the agent:
+# the system message suffix they were also put in never arrives, because the app
+# overwrites that field with its own "<HOST>...</HOST>" value (measured on the
+# first live run — see the note beside SUFFIX in scripts/agent-task.sh).
+#
+# So the wording here is not one of two safeguards. It is the safeguard, which
+# is the reason it is a function driven by tests rather than a string typed once.
+#
+# A pure function so the wording can be driven by a test instead of read.
+agent_task_prompt() {
+  local dir="${1:-}" task="${2:-}"
+  [[ -n "${dir}" && -n "${task}" ]] || return 1
+  printf 'Working directory: %s\n\n' "${dir}"
+  printf 'Create and edit files ONLY under %s, using absolute paths that start\n' "${dir}"
+  printf 'with %s/. Do not write to /workspace or any directory above %s.\n\n' "${dir}" "${dir}"
+  printf 'Task: %s\n\n' "${task}"
+  # Three prohibitions, and they are prohibitions on purpose. The two runs this
+  # command exists because of were both GIVEN the right behaviour and did the
+  # other thing; what worked in the directory rule was forbidding the
+  # alternative, so all three now name what must not happen. Each one is a
+  # different observed failure from the wordcount run, in the order it failed:
+  #
+  #   it never ran the file        (it quoted the code back and said "you can
+  #                                now use this script"; the first executed
+  #                                line raises NameError — no imports at all)
+  #   it wrote above its directory (/workspace/wordcount.py while working in
+  #                                /workspace/project/TestAppOllama1Coding)
+  #   it never checked the task    (a test file and a shown run were asked for
+  #                                in plain words, and neither was attempted)
+  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Do not report success on code you have not executed."
+  printf '%s\n' "Never write outside ${dir}. Not /workspace, not anywhere above it."
+  printf '%s\n' "Before finishing, re-read the task above and check each stated requirement against what you actually did. If any requirement is untouched, the task is not complete."
+}
+
+# agent_conversation_ids PAYLOAD — every conversation id in a listing, one per
+# line. The building block for identifying a conversation by SET DIFFERENCE:
+# list before submitting, list after, and the new id is the one we just made.
+#
+# That is how 'lca agent task' knows which conversation is its own, and it is
+# deliberate. The POST that starts a task answers with its own start-task id,
+# and the events API returns nothing for that id — measured. Taking the newest
+# sandbox instead is a guess, and it is the guess that attached a watcher to a
+# stale conversation on a real droplet and sat at "5 events" for ever.
+agent_conversation_ids() {
+  local payload="${1:-}"
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    [ ( if type == "array" then .[]
+        elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+        else empty end ) | objects | .id | strings ] | .[]' 2>/dev/null || return 1
+}
+
+# agent_new_conversation BEFORE AFTER — the conversation that appeared between
+# two listings. Three outcomes, and the third is the whole point:
+#
+#   exactly one new id   that is ours — printed, rc 0
+#   none yet             rc 1, so the caller polls again
+#   more than one        rc 2 — something else started a conversation in the
+#                        same moment, and there is NO way to tell which is ours
+#
+# The first version took 'head -1' of the difference. Under a race that picks
+# whichever id sorts first, which is a coin toss dressed as a determination —
+# and it reintroduces the exact failure this mechanism exists to remove: a
+# watcher attached to somebody else's run, reporting its events as yours. This
+# project has already lost a night to that once.
+#
+# Refusing to answer is the honest outcome, because the caller can say so out
+# loud, and a warning the user can act on beats a silent 50% chance.
+agent_new_conversation() {
+  local before="${1:-}" after="${2:-}" new n
+  new="$(comm -13 <(printf '%s\n' "${before}" | grep -E '^[A-Za-z0-9_-]+$' | sort -u) \
+                  <(printf '%s\n' "${after}"  | grep -E '^[A-Za-z0-9_-]+$' | sort -u) \
+         2>/dev/null || true)"
+  n="$(printf '%s' "${new}" | grep -c . || true)"
+  case "${n}" in
+    1) printf '%s' "${new}" ;;
+    0) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Where 'lca agent task' records the conversation it started, so that watching
+# it is a lookup rather than an inference. Per-user, needs no root, and outlives
+# a /tmp sweep.
+AGENT_CONVERSATION_FILE="${AGENT_CONVERSATION_FILE:-${HOME}/.lca-agent-conversation}"
+
+# agent_conversation_record ID — remember which conversation we started.
+agent_conversation_record() {
+  local id="${1:-}"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s\n' "${id}" > "${AGENT_CONVERSATION_FILE}" 2>/dev/null || return 1
+}
+
+# agent_recorded_conversation — the conversation this machine started, if it is
+# still one the app knows about.
+#
+# The liveness test matters: a recorded id from yesterday's run would otherwise
+# outrank a conversation started since, and re-create the exact failure this
+# whole mechanism exists to remove — a watcher attached to a run that is over.
+agent_recorded_conversation() {
+  local id payload
+  [[ -r "${AGENT_CONVERSATION_FILE}" ]] || return 1
+  id="$(head -1 "${AGENT_CONVERSATION_FILE}" 2>/dev/null || true)"
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  payload="$(agent_conversations_payload 2>/dev/null || true)"
+  [[ -n "${payload}" ]] || return 1
+  agent_conversation_ids "${payload}" 2>/dev/null | grep -qxF "${id}" || return 1
+  printf '%s' "${id}"
+}
+
+# agent_conversations_payload — the conversation listing, or nothing. One copy:
+# three call sites had grown their own curl with their own path and timeout.
+agent_conversations_payload() {
+  have curl || return 1
+  curl -fsS --max-time 5 \
+    "$(agent_api_base)/api/v1/app-conversations/search?limit=50" 2>/dev/null
+}
+
+# agent_conversation_count PAYLOAD — how many conversations the app is holding.
+#
+# Only interesting when it is more than one, which is the state that made a real
+# run fail silently: an earlier 'selftest --keep' left a sandbox behind, the
+# watcher attached to that older conversation, and the new task stepped on a
+# different one. It sat at "5 events" for ever and nothing anywhere said why.
+agent_conversation_count() {
+  local payload="${1:-}"
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    [ ( if type == "array" then .[]
+        elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
+        else empty end ) | objects ] | length' 2>/dev/null || return 1
+}
+
+# agent_live_sandboxes — the running sandbox containers, NEWEST FIRST.
+#
+# docker ps already orders by creation time, newest first, which is the one
+# piece of ordering here that is documented and reliable — the conversation
+# listing carries no timestamp this project could sort on.
+# Unprivileged first, then root_for_probe — never a bare as_root. Both callers
+# are read-only questions: 'lca check' listing what could be collected, and
+# 'lca agent gc' deciding what to offer. A bare as_root decided for them, and
+# on any account that is not a passwordless sudoer it printed nothing (sudo's
+# prompt goes to the 2>/dev/null with docker's noise) and waited for ever.
+# Measured with ENABLE_AGENT=true: 'lca check' reached the sandbox question and
+# stopped there, RC=124, the summary never printed.
+#
+# Same defect as select_docker and run_reader, through a different door. Those
+# named can_root, which the gate on that rule scans lib.sh for; this one went
+# straight to as_root and was invisible to it. What catches it now does not
+# read lib.sh at all: the reporting commands are run twice, once with the agent
+# tier off and once with it on. The gate held — for the shipped default only.
+agent_live_sandboxes() {
+  have docker || return 1
+  { "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null; } \
+    || true; } | grep -E '^oh-agent-server-' || true
+}
+
+# agent_reclaimable_sandboxes — running sandboxes whose conversation is over,
+# one per line as "NAME<TAB>why".
+#
+# WHO OWNS A SANDBOX, settled. agent_orphan_sandboxes answers "nothing can
+# reach these" and is correct only while the APP IS DOWN — it returns nothing
+# at all when the app is up, which is deliberate: with the app running, a
+# sandbox may belong to a conversation somebody is still using. The cost of
+# that caution was never stated: while the app stays up, NOTHING collects a
+# sandbox whose conversation ended, and the app stays up for weeks.
+#
+# Measured on this box, with the app up 15 hours: three sandboxes alive, the
+# oldest 15 hours, holding 1,062 MiB of a 7.9 GiB machine — and the live agent
+# run that was supposed to be under test had its model OOM-killed twice while
+# they sat there. That is the whole bug: memory held by finished work, on the
+# rung where memory is the binding constraint.
+#
+# The app can answer the ownership question, and until now nothing asked it:
+# every conversation record names its sandbox_id and carries an
+# execution_status. So a sandbox is reclaimable when the conversation that owns
+# it has stopped, or when no conversation claims it at all.
+#
+# 'idle' is deliberately NOT reclaimable. It means the agent finished its turn
+# and is waiting for a human — a session somebody can still pick up, and the
+# work lives ONLY inside the container (the sandbox has no host mount, measured:
+# 'docker inspect' shows no Mounts at all). Removing one destroys the
+# deliverable. This function is therefore the input to a command a person runs,
+# never to an automatic sweep.
+#
+# Nothing is returned when the listing cannot be read: without it, "dead" is a
+# guess, and a wrong guess here deletes somebody's work.
+agent_reclaimable_sandboxes() {
+  local payload live name status
+  have jq || return 1
+  live="$(agent_live_sandboxes 2>/dev/null || true)"
+  [[ -n "${live}" ]] || return 1
+  payload="$(agent_conversations_payload 2>/dev/null || true)"
+  [[ -n "${payload}" ]] || return 1
+  while read -r name; do
+    [[ -n "${name}" ]] || continue
+    status="$(printf '%s' "${payload}" \
+      | jq -r --arg s "${name}" \
+          '[.. | objects | select(.sandbox_id == $s)] | .[0].execution_status // "none"' \
+          2>/dev/null || true)"
+    case "${status}" in
+      # In use, or a human's to resume. Left alone.
+      running|starting|paused|idle) ;;
+      none) printf '%s\tno conversation refers to it\n' "${name}" ;;
+      "")   ;;
+      *)    printf '%s\tits conversation is %s\n' "${name}" "${status}" ;;
+    esac
+  done <<<"${live}"
+}
+
+# agent_conversation_ref — the conversation this run should be counting.
+#
+# Not simply the first one the listing returns, and that distinction cost a real
+# droplet run: with two conversations alive the watcher attached to the stale
+# one, counted its frozen event total for ever, and gave no sign that anything
+# was wrong. "First" is whatever order the server felt like.
+#
+# So the NEWEST RUNNING SANDBOX decides. It is the container actually doing
+# work, docker orders containers by creation time, and the listing ties each
+# conversation to its sandbox_id — which makes the choice deterministic and
+# about the thing the user just started. The first entry is still the fallback
+# for a build that reports no sandbox_id, and 'watch' says which of the two it
+# used.
+agent_conversation_ref() {
+  local base path payload id sandbox
+  have curl || return 1
+  # A conversation we STARTED outranks anything inferred, because it is known
+  # rather than deduced. 'lca agent task' records its own id; only when nothing
+  # did, or the recorded run is over, does the sandbox heuristic below get a
+  # say. This is the difference between attaching to the right run and
+  # attaching to whichever one looks newest.
+  id="$(agent_recorded_conversation 2>/dev/null || true)"
+  [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
+  base="$(agent_api_base)"
+  sandbox="$(agent_live_sandboxes 2>/dev/null | head -1 || true)"
+  for path in "/api/v1/app-conversations/search?limit=20" \
+              /api/v1/app-conversations /api/v1/conversations; do
+    payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
+    [[ -n "${payload}" ]] || continue
+    if [[ -n "${sandbox}" ]]; then
+      id="$(agent_conversation_pick "${payload}" "${sandbox}" 2>/dev/null || true)"
+      [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
+    fi
+    id="$(agent_conversation_id "${payload}" 2>/dev/null || true)"
+    [[ -n "${id}" ]] && { printf '%s' "${id}"; return 0; }
+  done
+  return 1
+}
+
+# agent_orphan_sandboxes — sandbox containers nothing can drive any more.
+#
+# WHO OWNS A SANDBOX. Decided here and written down in docs/AGENT.md, because
+# until now nothing owned them: a sandbox belongs to a CONVERSATION inside the
+# app container. The app creates it, and the app is the only thing that can send
+# it a message.
+#
+# So when the app is not running, every oh-agent-server-* is an orphan — there
+# is no longer any way to reach it, and it goes on holding memory. Measured on a
+# real 7.8 GiB box: three alive at once, the oldest thirteen hours, none of them
+# reachable by anything.
+#
+# ONLY that case, and the restraint is the point. While the app IS running,
+# deciding that a particular sandbox is idle means trusting a mapping between a
+# container's name and a conversation's sandbox_id, and being wrong about it
+# kills a task somebody is waiting on. That case is reported instead — see
+# agent_conversation_warning — and never acted on.
+agent_orphan_sandboxes() {
+  if agent_container_running; then
+    return 0
+  fi
+  agent_live_sandboxes
+}
+
+# agent_conversation_warning — what is ambiguous about this machine right now,
+# or nothing when it is not.
+#
+# Reported rather than resolved. Two sandboxes may both be legitimate, and a
+# supervisor is not the thing that should decide which of a user's runs to kill.
+agent_conversation_warning() {
+  local sandboxes count payload
+  sandboxes="$(agent_live_sandboxes 2>/dev/null | grep -c . || true)"
+  payload="$(curl -fsS --max-time 5 "$(agent_api_base)/api/v1/app-conversations/search?limit=20" 2>/dev/null || true)"
+  count="$(agent_conversation_count "${payload}" 2>/dev/null || true)"
+  [[ "${sandboxes}" =~ ^[0-9]+$ ]] || sandboxes=0
+  [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+  (( sandboxes > 1 || count > 1 )) || return 1
+  printf 'this machine has %s running sandbox(es) and %s conversation(s)' \
+    "${sandboxes}" "${count}"
+}
+
+# agent_event_steps ID — how many events that conversation has, or rc 1.
+#
+# Three routes are tried because two spellings of the path are in circulation
+# and the search route answers when the count route does not. A limit is passed
+# to the search one; it is far above any ceiling worth setting, so a run that
+# could reach it was stopped long before.
+agent_event_steps() {
+  local id="${1:-}" base path payload n
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  have curl || return 1
+  base="$(agent_api_base)"
+  for path in "/api/v1/conversation/${id}/events/count" \
+              "/api/v1/conversations/${id}/events/count" \
+              "/api/v1/conversation/${id}/events/search?limit=10000"; do
+    payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
+    n="$(agent_events_count "${payload}" 2>/dev/null || true)"
+    [[ "${n}" =~ ^[0-9]+$ ]] && { printf '%s' "${n}"; return 0; }
+  done
+  return 1
+}
+
+# --- reading the event stream as something a person can watch ----------------
+#
+# The same stream the ceiling counts also carries what the agent is thinking,
+# which tool it called with what arguments, what came back and when. Nothing
+# rendered it, so following a run meant cat-ing raw JSON out of a container —
+# which is how the shape below is known, and it is worth being precise about
+# how well it is known.
+#
+# THIS IS SOMEBODY ELSE'S FORMAT AND IT IS NOT A DOCUMENTED INTERFACE. The same
+# caveat AGENT_STEP_PATTERN carries, for the same reason: a field name that
+# silently matches nothing would render an empty screen that looks exactly like
+# a quiet agent. So every accessor below tries the spellings that have been
+# seen, in order — and when none of them match, the event is still printed, raw
+# and whole, rather than dropped. An unreadable event is a thing the watcher
+# says out loud; it is never a thing it hides.
+#
+# jq's '//' is used only where the alternatives are strings. It treats FALSE as
+# absent — the bug that made agent_stored_native_tool_calling a function — so
+# anything boolean or numeric below is tested explicitly.
+
+# agent_event_lines PAYLOAD — one compact JSON object per line.
+#
+# The search route answers {"items":[...]}, the older one answered a bare array,
+# and two more spellings are in circulation. Returns rc 1 for a payload that
+# holds no events at all, so a caller can tell "nothing yet" from "unreadable".
+agent_event_lines() {
+  local payload="${1:-}" out
+  [[ -n "${payload}" ]] || return 1
+  have jq || return 1
+  # Captured, then tested for emptiness, and this is not a style choice. jq
+  # exits 0 for a filter that matches nothing, so the first version returned
+  # SUCCESS with no output for a payload holding no events at all — and the
+  # caller that asked "are there events here?" was told yes and then rendered
+  # an empty screen. An empty screen is what this whole view exists to stop
+  # meaning "nothing happened".
+  #
+  # No 'head' in the pipeline either: a reader that exits early SIGPIPEs jq,
+  # which under pipefail fails the assignment. The search route this reads is
+  # already limited by its own query.
+  out="$(jq -c '
+    ( .. | objects | select(has("items")) | .items ),
+    ( .. | objects | select(has("events")) | .events ),
+    ( .. | objects | select(has("results")) | .results ),
+    ( .. | objects | select(has("data")) | .data ),
+    ( select(type == "array") )
+    | select(type == "array") | .[]' <<<"${payload}" 2>/dev/null)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s\n' "${out}"
+}
+
+# agent_event_at JSON — the event's own time, in epoch seconds, or nothing.
+agent_event_at() {
+  local raw
+  have jq || return 1
+  raw="$(jq -r '[ .timestamp?, .time?, .created_at?, .asctime?,
+                  .event?.timestamp?, .action?.timestamp? ]
+                | map(select(type == "string")) | .[0] // empty' <<<"${1:-}" 2>/dev/null)"
+  [[ -n "${raw}" ]] || return 1
+  # Already epoch seconds in some builds; ISO 8601 in others.
+  if [[ "${raw}" =~ ^[0-9]{9,11}(\.[0-9]+)?$ ]]; then
+    printf '%s' "${raw%%.*}"
+    return 0
+  fi
+  date -d "${raw}" +%s 2>/dev/null || return 1
+}
+
+# agent_event_class JSON — what KIND of thing just happened, in one word.
+#
+# This is the word the status line is built from, so it answers the question a
+# person actually has: is it thinking, is it running something, or has it
+# stopped. Everything unrecognised is 'unknown', which prints rather than
+# vanishing.
+agent_event_class() {
+  local kind
+  have jq || { printf 'unknown'; return 0; }
+  kind="$(jq -r '[ .kind?, .type?, .event_type?, ._type?, .event?.kind? ]
+                 | map(select(type == "string")) | .[0] // ""' <<<"${1:-}" 2>/dev/null)"
+  # Errors first: an error that also matches "observation" must not be filed as
+  # a routine result. Tonight's 300-second failure looked identical to working,
+  # and that is the whole reason this ordering is deliberate.
+  if agent_event_is_error "${1:-}"; then printf 'error'; return 0; fi
+  # A finish is an action, and telling them apart is the difference between a
+  # status line that says "running" for ever and one that says the agent
+  # believes it is done. Which, on this tier, is a claim worth showing rather
+  # than trusting: the measured re-run in docs/AGENT.md finished exactly this
+  # way having executed nothing.
+  case "$(agent_event_tool "${1:-}" 2>/dev/null || true)" in
+    *Finish*|*finish*) printf 'finished'; return 0 ;;
+  esac
+  # The FIRST event of every conversation, and the largest thing in the stream
+  # by a wide margin: a system prompt measured at 14,387 characters plus the
+  # schemas for 26 tools. Unrecognised it fell to the raw fallback, so the very
+  # first thing a viewer printed was tens of thousands of characters of JSON
+  # with the run underneath it. It is worth a class of its own because the ONE
+  # number in it a reader wants — how big the prompt is — is the number that
+  # decides whether it fits the window at all.
+  case "${kind}" in
+    *SystemPrompt*|*system_prompt*) printf 'prompt'; return 0 ;;
+  esac
+  case "${kind}" in
+    *Action*|*action*)        printf 'action' ;;
+    *Observation*|*observation*) printf 'observation' ;;
+    *Message*|*message*)      printf 'message' ;;
+    *Error*|*error*)          printf 'error' ;;
+    *)                        printf 'unknown' ;;
+  esac
+}
+
+# agent_event_tool_label TOOLNAME — the short word a person reads.
+#
+# 'ExecuteBashAction' and 'result of ExecuteBashObservation' are what the wire
+# says; 'bash' is what the reader wants, and the difference between those two
+# is most of why this view exists rather than a cat of the JSON. Unmapped names
+# keep their own spelling minus the Action/Observation suffix, so a tool nobody
+# here has heard of still reads as a tool.
+agent_event_tool_label() {
+  local raw="${1:-}" base="${1:-}"
+  base="${base%Action}"; base="${base%Observation}"; base="${base%Event}"
+  case "${base}" in
+    ExecuteBash|Bash|Terminal|Cmd*) printf 'bash' ;;
+    FileEditor|StrReplaceEditor|Edit*) printf 'edit' ;;
+    Read|View|FileRead)   printf 'read' ;;
+    Write|FileWrite)      printf 'write' ;;
+    Think|Reason*)        printf 'think' ;;
+    TaskTracker|Task*)    printf 'tasks' ;;
+    Finish)               printf 'finish' ;;
+    Browser|Browse*)      printf 'browse' ;;
+    '')                   printf '%s' "${raw}" ;;
+    *)                    printf '%s' "${base}" ;;
+  esac
+}
+
+# agent_event_arg JSON — the short argument that belongs ON the headline: the
+# command, the path, the thing being acted on. Separate from agent_event_body
+# so 'edit · create /workspace/project/wordcount.py' reads as one line instead
+# of a bare 'create' under a heading.
+agent_event_arg() {
+  local out
+  have jq || return 1
+  out="$(jq -r '
+    [ ( if (.action?.command? | type) == "string" and (.action?.path? | type) == "string"
+        then (.action.command + " " + .action.path) else empty end ),
+      .action?.command?, .command?, .action?.path?, .path?, .action?.file_path? ]
+    | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null)"
+  # One line only — a headline that wraps is not a headline.
+  printf '%s' "${out%%$'\n'*}"
+}
+
+# agent_event_is_error JSON — true when this event is a failure.
+#
+# Numeric and boolean fields, so tested explicitly rather than through '//'.
+agent_event_is_error() {
+  have jq || return 1
+  jq -e '
+    ( [ .error?, .error_message?, .exception? ]
+      | map(select(type == "string" and length > 0)) | length > 0 )
+    or ( [ .exit_code?, .observation?.exit_code?, .extras?.exit_code? ]
+         | map(select(type == "number")) | map(select(. != 0)) | length > 0 )
+    or ( .success == false )
+    or ( [ .kind?, .type?, .levelname? ]
+         | map(select(type == "string"))
+         | map(select(test("Error|ERROR|Rejected|Failed"))) | length > 0 )
+  ' <<<"${1:-}" >/dev/null 2>&1
+}
+
+# agent_event_tool JSON — the tool or action name, or nothing.
+agent_event_tool() {
+  have jq || return 1
+  jq -r '[ .action?.kind?, .tool_name?, .action?.name?, .name?,
+           .observation?.kind?, .tool?, .action? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_thought JSON — what it said it was thinking, or nothing.
+agent_event_thought() {
+  have jq || return 1
+  jq -r '[ .thought?, .reasoning_content?, .llm_message?.content?,
+           .message?.content?, .content?, .action?.thought? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_body JSON — the detail worth printing under the headline: the
+# command it ran, the text it wrote, or what came back.
+agent_event_body() {
+  have jq || return 1
+  jq -r '[ .action?.command?, .command?, .action?.code?,
+           .observation?.output?, .output?, .stdout?, .result?, .text?,
+           .observation?.content?, .error?, .error_message?,
+           .action?.path?, .action?.file_text? ]
+         | map(select(type == "string" and length > 0)) | .[0] // empty' \
+    <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_prompt_summary JSON — "N chars · M tools", or nothing.
+#
+# The size, not the content. Reading a 14,387-character system prompt in a
+# terminal is not what anybody is doing here; knowing it is 14,387 against a
+# 16,384-token window is.
+agent_event_prompt_summary() {
+  have jq || return 1
+  jq -r '
+    [ (.system_prompt?.text? // .system_prompt? // .text? | strings | length),
+      ( [ .tools?, .system_prompt?.tools? ] | map(arrays) | .[0] | length )
+    ] as $p
+    | if ($p[0] // null) == null then empty
+      else "\($p[0]) chars" + (if ($p[1] // null) == null then "" else " · \($p[1]) tools" end)
+      end' <<<"${1:-}" 2>/dev/null
+}
+
+# agent_event_headline JSON — one line: what this event IS, at a glance.
+#
+# Falls back through progressively weaker descriptions and never to silence:
+# the last resort names the event's raw kind, and if even that is unreadable it
+# says so. A line a person cannot read is still a line they can see.
+agent_event_headline() {
+  local json="${1:-}" class tool first
+  class="$(agent_event_class "${json}")"
+  tool="$(agent_event_tool "${json}" || true)"
+  local arg label
+  arg="$(agent_event_arg "${json}" 2>/dev/null || true)"
+  label=""
+  [[ -n "${tool}" ]] && label="$(agent_event_tool_label "${tool}")"
+  case "${class}" in
+    action|finished)
+      if [[ -n "${label}" && -n "${arg}" ]]; then printf '%s · %s' "${label}" "${arg}"
+      elif [[ -n "${label}" ]]; then printf '%s' "${label}"
+      else printf 'an action'; fi ;;
+    observation)
+      if [[ -n "${label}" ]]; then printf '%s returned' "${label}"; else printf 'a result'; fi ;;
+    message)   printf 'message' ;;
+    prompt)
+      local size
+      size="$(agent_event_prompt_summary "${json}" 2>/dev/null || true)"
+      if [[ -n "${size}" ]]; then printf 'system prompt · %s' "${size}"
+      else printf 'system prompt'; fi ;;
+    error)
+      if [[ -n "${label}" ]]; then printf 'ERROR from %s' "${label}"; else printf 'ERROR'; fi ;;
+    *)
+      first=""
+      if have jq; then
+        first="$(jq -r '[ .kind?, .type?, .event_type? ]
+                  | map(select(type == "string")) | .[0] // empty' <<<"${json}" 2>/dev/null || true)"
+      fi
+      if [[ -n "${first}" ]]; then printf 'unrecognised event: %s' "${first}"
+      else printf 'unreadable event (printed raw below)'; fi ;;
+  esac
+}
+
+# agent_view_state CLASS SECONDS_SINCE — the one word at the top of the screen.
+#
+# The question this whole view exists to answer is "is it working or stuck",
+# and on this hardware a step takes 10-25 minutes, so silence is normal and
+# indistinguishable from failure by eye. The rule:
+#
+#   the last thing that happened was an ACTION      -> a tool is running
+#   the last thing was a result, a message, nothing -> it is thinking
+#   an error                                        -> error, and it stays said
+#   a finish action                                 -> finished
+#   nothing at all for longer than the stall window -> stalled, said plainly
+#
+# STALL_SECONDS is the one number here that is a judgement rather than a
+# measurement, so it is a parameter with the reasoning attached: the longest
+# single reply measured on this hardware was 901 s, so anything under about
+# twenty minutes is still ordinary. It is not an error, and this does not call
+# it one — it says nothing has arrived, which is a fact.
+agent_view_state() {
+  local class="${1:-unknown}" since="${2:-0}" stall="${3:-1500}"
+  [[ "${since}" =~ ^[0-9]+$ ]] || since=0
+  [[ "${stall}" =~ ^[0-9]+$ ]] || stall=1500
+  case "${class}" in
+    finished) printf 'finished'; return 0 ;;
+    error)    printf 'error';    return 0 ;;
+  esac
+  if (( since > stall )); then printf 'stalled'; return 0; fi
+  case "${class}" in
+    action) printf 'running' ;;
+    *)      printf 'thinking' ;;
+  esac
+}
+
+# agent_view_state_words STATE — what that word means, for the first time a
+# reader sees it. Kept beside the state so the two cannot drift apart.
+agent_view_state_words() {
+  case "${1:-}" in
+    running)  printf 'a tool is running' ;;
+    thinking) printf 'waiting for the model' ;;
+    stalled)  printf 'nothing has arrived for a long time' ;;
+    finished) printf 'the agent says it is done' ;;
+    error)    printf 'the last event was a failure' ;;
+    *)        printf 'no events yet' ;;
+  esac
+}
+
+# agent_stored_native_tool_calling PAYLOAD — 'true' | 'false' | 'unset', out of
+# a settings response.
+#
+# A function rather than a jq expression at two call sites, and the reason is
+# the bug it was written for. Both call sites had
+#
+#   jq -r '.agent_settings.llm.native_tool_calling // "unset"'
+#
+# and jq's // treats FALSE as absent. So the one value this project actually
+# wants stored — false — read back as "unset", and 'lca agent start' warned
+# that the setting had not taken about a container that was holding it
+# correctly. Measured against a live 1.8 container: the API returned
+# native_tool_calling:false and the shipped code called it unset.
+#
+# A warning that fires on the correct configuration is worse than no warning:
+# it is the one people learn to ignore.
+agent_stored_native_tool_calling() {
+  local payload="${1:-}"
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r '
+    .agent_settings.llm
+    | if type == "object" and has("native_tool_calling") and .native_tool_calling != null
+      then (.native_tool_calling | tostring) else "unset" end' 2>/dev/null \
+    || printf 'unset'
+}
+
+# --- the agent's own model ----------------------------------------------------
+#
+# The agent needs a far bigger context than the chat app does — its first prompt
+# on a real run was 15,492 tokens — and OLLAMA_CONTEXT_LENGTH is SERVER-WIDE.
+# Raising it for the agent would raise it for aider and the phone too, and that
+# is not free: measured here, the 3b at 32768 costs 3.4 GB resident against
+# 2.2 GB at 4096, and generates at 4.07 tok/s against 10.41.
+#
+# Per-request num_ctx cannot do it either, and that is measured rather than
+# assumed. Ollama's OpenAI-compatible endpoint — the one the agent speaks —
+# ignores it:
+#
+#   POST /v1/chat/completions {"options":{"num_ctx":8192}} -> loads at 4096
+#   POST /api/chat            {"options":{"num_ctx":8192}} -> loads at 8192
+#
+# What /v1 does honour is a model that carries the setting itself. So the agent
+# gets a DERIVED model — the same weights, one PARAMETER line — and the rest of
+# the stack is untouched.
+#
+# It is derived, not configured: a second model name in .env would be a second
+# source of truth able to drift from the ladder, and the ladder moves on every
+# boot. tune.sh regenerates this whenever the rung changes.
+
+# agent_model_name [BASE] — the derived model's name.
+agent_model_name() {
+  printf '%s-agent' "${1:-${MODEL_NAME}}"
+}
+
+# agent_model_is_derived NAME — true for a name this project generates.
+#
+# It matters at restore: a derived model cannot be PULLED, only re-created, and
+# a restore that tries to pull one fails on a model that was never in a
+# registry.
+agent_model_is_derived() {
+  [[ "${1:-}" == *-agent ]]
+}
+
+# agent_model_context — the context the derived model should carry.
+#
+# Never below the server default: a derived model with a SMALLER window than
+# everything else would be a downgrade wearing the word "agent".
+agent_model_context() {
+  local want="${AGENT_MODEL_CONTEXT:-16384}" base="${OLLAMA_CONTEXT_LENGTH:-4096}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=16384
+  [[ "${base}" =~ ^[0-9]+$ ]] || base=4096
+  (( want >= base )) || want="${base}"
+  printf '%s' "${want}"
+}
+
+# agent_model_loaded_context MODEL — the context Ollama ACTUALLY loads it at,
+# read back from the server after asking it through the same endpoint the agent
+# uses. Non-zero when it cannot be determined.
+#
+# This is the check that matters. A Modelfile that did not take is invisible:
+# the model answers, the agent runs, and it silently truncates at 4096 in the
+# middle of a long task. Creating the model proves nothing; loading it does.
+agent_model_loaded_context() {
+  local model="${1:-}" url ctx
+  [[ -n "${model}" ]] || return 1
+  have curl && have jq || return 1
+  url="$(ollama_url)"
+  curl -fsS --max-time 600 -X POST "${url}/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "$(jq -nc --arg m "${model}" \
+             '{model:$m, max_tokens:1, messages:[{role:"user",content:"hi"}]}')" \
+       >/dev/null 2>&1 || return 1
+  ctx="$(curl -fsS --max-time 10 "${url}/api/ps" 2>/dev/null \
+         | jq -r --arg m "${model}" \
+             '.models[]? | select(.name == $m) | .context_length' 2>/dev/null | head -1)"
+  [[ "${ctx}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${ctx}"
+}
+
+# stale_agent_models — derived models left over from a rung the ladder has
+# moved off, one per line.
+#
+# The ladder re-picks on every boot, so a resize leaves 'qwen2.5-coder:3b-agent'
+# behind while the stack now runs the 7b. Listed rather than deleted here: the
+# caller decides, and 'lca tune' and 'uninstall' want different things.
+stale_agent_models() {
+  local keep
+  have ollama || return 1
+  keep="$(agent_model_name "${MODEL_NAME}")"
+  ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' \
+    | grep -E -- '-agent$' | grep -vxF "${keep}" || true
+}
+
+# agent_model_declared_context MODEL — the num_ctx a model CARRIES, read from
+# its parameters without loading it.
+#
+# The cheap half of the question. agent_model_loaded_context is authoritative
+# and costs a model load — minutes on a CPU box — so it is not something to do
+# on every boot. This answers "does it already say the right thing" for free,
+# and the expensive check stays where it belongs: proving a model that was just
+# built.
+agent_model_declared_context() {
+  local model="${1:-}" out
+  [[ -n "${model}" ]] || return 1
+  have ollama || return 1
+  out="$(ollama show "${model}" --parameters 2>/dev/null || true)"
+  out="$(awk '$1 == "num_ctx" { print $2; exit }' <<<"${out}")"
+  [[ "${out}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${out}"
+}
+
+# agent_model_drift — why the derived model is not what it should be, or
+# non-zero when it is fine.
+#
+# Two answers, because they need different remedies:
+#   absent   there is no derived model for the current rung
+#   context  it exists but Ollama loads it at the wrong window
+agent_model_drift() {
+  local derived want got
+  derived="$(agent_model_name "${MODEL_NAME}")"
+  model_present "${derived}" || { printf 'absent'; return 0; }
+  want="$(agent_model_context)"
+  got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
+  [[ -n "${got}" ]] || return 1
+  [[ "${got}" != "${want}" ]] || return 1
+  printf 'context'
+}
+
+# ensure_agent_model [BASE] — create or refresh the derived model, and prove it
+# took. Prints the model's name on success.
+ensure_agent_model() {
+  local base="${1:-${MODEL_NAME}}" derived want tmp got
+  derived="$(agent_model_name "${base}")"
+  want="$(agent_model_context)"
+  have ollama || return 1
+  model_present "${base}" || return 1
+  tmp="$(mktemp)" || return 1
+  printf 'FROM %s\nPARAMETER num_ctx %s\n' "${base}" "${want}" > "${tmp}"
+  # 'ollama create' over the same weights: the blob is shared on disk, so this
+  # costs a manifest rather than another copy of the model.
+  if ! ollama create "${derived}" -f "${tmp}" >/dev/null 2>&1; then
+    rm -f "${tmp}" || true
+    return 1
+  fi
+  rm -f "${tmp}" || true
+  got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
+  [[ "${got}" == "${want}" ]] || return 2
+  printf '%s' "${derived}"
+}
+
+# --- the Ollama relay -------------------------------------------------------
+#
+# A container's loopback is the container. Ollama sits on 127.0.0.1 by design,
+# so the agent tier reaches this machine as the docker bridge gateway, where
+# nothing is listening — and every task it is given then fails without
+# producing a token while nothing else looks wrong.
+#
+# The two ways out are not equal. Widening OLLAMA_HOST to 0.0.0.0 puts the
+# model server on every interface and leaves the inbound guard as the only
+# thing between it and the internet. The relay keeps Ollama where it is and
+# binds ONE address — the bridge gateway — which is not routable from outside
+# the machine at all.
+
+# ollama_relay_port — the port the relay listens on, or nothing when it is not
+# a port. Not a fallback to a default: an unusable value must not silently
+# become a listening socket somewhere the user did not ask for.
+ollama_relay_port() {
+  valid_port "${OLLAMA_RELAY_PORT}" || return 1
+  printf '%s' "${OLLAMA_RELAY_PORT}"
+}
+
+# ollama_relay_address — where the relay listens, as the HOST writes it.
+ollama_relay_address() {
+  local port
+  port="$(ollama_relay_port)" || return 1
+  printf '%s:%s' "$(docker_bridge_gateway)" "${port}"
+}
+
+# ollama_relay_url — the relay as a CONTAINER dials it.
+#
+# host.docker.internal, not the gateway's literal address: the address is what
+# the relay binds, the name is what a container resolves, and agent.sh's
+# --add-host is what connects the two.
+ollama_relay_url() {
+  local port
+  port="$(ollama_relay_port)" || return 1
+  printf 'http://host.docker.internal:%s' "${port}"
+}
+
+# ollama_relay_healthy — the relay is not merely configured, it answers.
+#
+# Asked through the relay, not of it: a listening socket that forwards nowhere
+# is the failure this exists to catch, and only Ollama's own reply proves the
+# whole path. Same rule as webui_healthy, for the same reason.
+ollama_relay_healthy() {
+  local addr
+  have curl || return 1
+  addr="$(ollama_relay_address)" || return 1
+  curl -fsS --max-time 3 "http://${addr}/api/version" >/dev/null 2>&1
+}
+
+# ollama_relay_unit_address — the address baked into the installed socket unit.
+#
+# It is baked in because a .socket unit cannot compute one, and that is exactly
+# why this function exists: docker's bridge gateway is stable in practice but
+# not guaranteed, and a unit still listening on last week's address is the same
+# drift class as a chat app still serving the old WEBUI_PORT. Reported, not
+# silently repaired.
+ollama_relay_unit_address() {
+  local unit="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.socket"
+  local line
+  [[ -r "${unit}" ]] || return 1
+  line="$(grep -m1 '^ListenStream=' "${unit}" 2>/dev/null || true)"
+  line="${line#ListenStream=}"
+  [[ -n "${line}" ]] || return 1
+  printf '%s' "${line}"
+}
+
+# ollama_relay_drift — the unit's address and the one it should have, when they
+# differ. Nothing, and non-zero, when they agree or when there is no unit.
+ollama_relay_drift() {
+  local want have
+  want="$(ollama_relay_address)" || return 1
+  have="$(ollama_relay_unit_address)" || return 1
+  [[ "${want}" != "${have}" ]] || return 1
+  printf '%s -> %s' "${have}" "${want}"
+}
+
+# refresh_agent_model_after_tune MODEL — make sure the agent's derived model
+# exists for this rung and carries the right window.
+#
+# Called on EVERY tune, not only when the rung moved, and that placement is the
+# fix for a loop with no exit. Inside the "something changed" block, a first-time
+# user who set ENABLE_AGENT=true on a correctly-tuned box ran 'sudo lca tune',
+# was told nothing had changed, and never got the model — so the selftest failed
+# at link 2 telling them to run 'sudo lca tune', which again did nothing.
+#
+# Silent when the agent tier is off: it is the only thing that uses this model.
+# Silent too when the model already declares the right window — read from its
+# parameters, which costs nothing, rather than by loading it, which on a CPU box
+# is minutes and would be paid on every boot. A rung change needs no special
+# case: the name carries its base, so a new rung means a name that does not
+# exist yet.
+refresh_agent_model_after_tune() {
+  local base="$1" derived rc stale have_ctx
+  [[ "${ENABLE_AGENT}" == "true" ]] || return 0
+  derived="$(agent_model_name "${base}")"
+  if have_ctx="$(agent_model_declared_context "${derived}")" \
+     && [[ "${have_ctx}" == "$(agent_model_context)" ]]; then
+    return 0
+  fi
+  info "Building the agent's ${derived} at context $(agent_model_context)..."
+  derived="$(ensure_agent_model "${base}")"; rc=$?
+  case "${rc}" in
+    0) ok "Agent model ${derived} rebuilt and verified at $(agent_model_context) tokens." ;;
+    2) warn "The agent's model was created but Ollama did not load it at $(agent_model_context) tokens, so the agent would silently run at the server default instead. Check it with: lca check" ;;
+    *) warn "Could not rebuild the agent's derived model for ${base}. The agent tier will run at the server-wide context until this is fixed: sudo ${REPO_ROOT}/scripts/tune.sh" ;;
+  esac
+  # A rung change strands the previous one. Named, not deleted: it is several
+  # gigabytes of manifest over shared blobs and the choice is the user's.
+  stale="$(stale_agent_models | tr '\n' ' ')"
+  [[ -z "${stale// /}" ]] \
+    || info "Left behind by earlier rungs: ${stale}— remove with: ollama rm ${stale}"
+}
+
+# agent_prompt_cache_at_risk — true when the agent tier is on and the model is
+# allowed to unload, which is the one setting that decides whether its enormous
+# prompt is paid once or over and over.
+#
+# The agent's first prompt is ~13,800 tokens on the current build (18,353
+# before the skills cut) and almost all of it is OpenHands'
+# own framing, identical on every step of a conversation. Ollama caches the KV
+# prefix of a prompt it has already processed, so that cost is paid ONCE and
+# every later step in the same conversation reads almost nothing. Measured here
+# on one conversation:
+#
+#   first call    13,430 tokens of prompt eval   543 s
+#   later call       171 tokens of prompt eval     3.6 s
+#
+# ...and the cache lives with the LOADED MODEL. Measured directly, same prompt
+# twice with the model resident: 50.2 s, then 0.1 s. When OLLAMA_KEEP_ALIVE
+# expires the model unloads, the cache goes with it, and the next step of a
+# conversation the user is in the middle of pays the whole prompt again — plus
+# the model load. On a small box that is the difference between a reply in
+# seconds and a reply in a quarter of an hour, for a step that changed nothing.
+#
+# -1 is Ollama's "keep it resident for ever", and .env.example already documents
+# it. This does not change the setting: it is the user's RAM.
+# agent_skills_catalogue_fetched — true when the agent will fetch OpenHands'
+# public skills catalogue on this box.
+#
+# It is 4,232 tokens of instructions for skills this tier cannot run, and it is
+# the difference between a prompt that fits its window and one that does not.
+# The default AGENT_EXTENSIONS_REF names a ref that does not exist, so nothing
+# is fetched; pointing it at a real one (main) puts the catalogue back.
+#
+# Worth a check of its own because of what overflow costs HERE. Ollama does not
+# trim to fit: past the window it cuts the prompt to num_ctx/2 + 2 and keeps
+# the tail, which on the run that produced this project's worst result deleted
+# the definition of the terminal tool outright. The model was then asked to
+# execute with the description of the tool that executes removed, and there is
+# no error for that anywhere.
+agent_skills_catalogue_fetched() {
+  [[ "${ENABLE_AGENT:-false}" == "true" ]] || return 1
+  local ref="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  [[ -n "${ref}" ]] || return 1
+  [[ "${ref}" != "lca-public-skills-disabled" ]]
+}
+
+agent_prompt_cache_at_risk() {
+  [[ "${ENABLE_AGENT}" == "true" ]] || return 1
+  [[ "${OLLAMA_KEEP_ALIVE}" != "-1" ]]
+}
+
+# keepalive_plan RAM_GIB AGENT_ON MODEL — "VALUE|WHY", the keep-alive this box
+# should run and the sentence that says why.
+#
+# This was a permanent warning from 'lca check' — a decision the project could
+# make from things it already knows, left to the user as a message. It is made
+# here, and the rule comes out of the measurements rather than out of headroom.
+#
+# WHAT THE MEASUREMENTS ACTUALLY SAY. There are two different costs and only
+# one of them is a timer:
+#
+#   idle expiry   the model unloads while you think, and the next request pays
+#                 a load plus a full prompt re-read. Measured on the agent's
+#                 own prompt: 13,430 prompt tokens on the first call, 171 while
+#                 it stayed resident.
+#   eviction      OLLAMA_MAX_LOADED_MODELS=1, so the OTHER model arriving
+#                 unloads this one, whatever the timer says. Measured on the
+#                 same prompt: 543 s cold, 3.6 s warm.
+#
+# Keep-alive controls the first and CANNOT TOUCH THE SECOND. Pinning one model
+# with -1 does not stop a chat message evicting the agent's model; it only
+# decides what happens when nothing is asking. docs/PERFORMANCE.md is right
+# that pinning moves which model loses rather than solving it — so this rule
+# does not pretend otherwise, and tune says so out loud.
+#
+# WHO IS BEING STARVED, which is what decides it:
+#
+#   agent off   one model exists, nothing evicts anything, and the only cost a
+#               timer controls is one model load. 30m. Pinning would hold RAM
+#               permanently to save a single load — a bad trade on a small box.
+#   agent on    the agent's prompt is ~13,800 tokens and its steps are 10-25
+#               minutes apart, so a 30m timer is a coin-flip on every step and
+#               a certainty across any pause between tasks. It is the surface
+#               whose cold price is 543 s. -1.
+#
+# ...with one headroom caveat, and it is a caveat rather than the rule: -1
+# means the weights stay resident with nothing running, so on a box where the
+# model is most of the RAM that is a permanent cost for an intermittent gain.
+# Below two spare GiB this stays at 30m and says which constraint won.
+keepalive_plan() {
+  local ram="${1:-0}" agent_on="${2:-false}" model="${3:-${MODEL_NAME:-}}" need=""
+  [[ "${ram}" =~ ^[0-9]+$ ]] || ram=0
+  if [[ "${agent_on}" != "true" ]]; then
+    printf '30m|the agent tier is off, so only one model is ever loaded and nothing evicts it — a timer here saves one model load and pinning would hold the RAM for it permanently'
+    return 0
+  fi
+  need="$(model_ram_gb "${model}" 2>/dev/null || true)"
+  if [[ -n "${need}" ]] && awk -v r="${ram}" -v n="${need}" 'BEGIN { exit !(r - n < 2) }'; then
+    printf '30m|the agent tier is on, but %s GB of model in %s GiB of RAM leaves under 2 GiB spare — pinning it resident would cost this box more than the reload saves' \
+      "${need}" "${ram}"
+    return 0
+  fi
+  printf -- '-1|the agent tier is on: its prompt is ~13,800 tokens and its steps are 10-25 minutes apart, so a 30m timer expires mid-task and the next step re-reads the whole prompt (measured 13,430 tokens cold against 171 warm)'
+}
+
+# agent_workspace_dir — where the agent keeps its workspace and settings.
+agent_workspace_dir() {
+  printf '%s/.openhands' "${HOME}"
+}
+
+# agent_backup_decision ENABLED SIZE_MB MAX_MB — 'off' | 'absent' | 'too-big' |
+# 'include'. The rule, once, so backup.sh's message and this project's tests
+# cannot disagree about it.
+#
+# SIZE_MB empty means "could not be measured", which is NOT the same as zero:
+# an unreadable directory must not be reported as an empty one that was
+# faithfully backed up. It is treated as too big, because the safe direction
+# for an unknown size is to skip and say so rather than to swallow it.
+agent_backup_decision() {
+  local enabled="${1:-false}" size="${2:-}" max="${3:-0}"
+  [[ "${enabled}" == "true" ]] || { printf 'off'; return 0; }
+  [[ "${size}" != "absent" ]] || { printf 'absent'; return 0; }
+  [[ "${size}" =~ ^[0-9]+$ ]] || { printf 'too-big'; return 0; }
+  [[ "${max}" =~ ^[0-9]+$ ]] || max=0
+  # 0 is no ceiling, the convention BACKUP_KEEP=0 set here.
+  if (( max > 0 )) && (( size > max )); then
+    printf 'too-big'; return 0
+  fi
+  printf 'include'
+}
+
+# agent_container_running — true when the agent's container is actually
+# running. Same distinction, and for the same reason, as
+# webui_container_running: a stopped container is not an exposure.
+agent_container_running() {
+  have docker || return 1
+  local state
+  state="$("${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null \
+           || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect -f '{{.State.Running}}' "${AGENT_CONTAINER}" 2>/dev/null; } \
+           || true)"
+  [[ "${state}" == "true" ]]
+}
+
+# agent_container_exists — in any state, which is the right question for "has
+# it been created" and the wrong one for "is it exposed".
+agent_container_exists() {
+  have docker || return 1
+  "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1 \
+    || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; }
+}
+
+# agent_live_port — the host port the running agent container really publishes.
+#
+# Read from the port MAPPING, not from an environment variable: unlike the chat
+# app, which runs with --network=host and carries its port in PORT, the agent
+# is published with '-p HOST:3000'. Its container-side port is always 3000; the
+# host side is whatever AGENT_PORT said at creation, so editing AGENT_PORT
+# afterwards leaves the running UI on the old one — the same drift that made
+# 'ENABLE_WEBUI=false' a security hole, and it is answered the same way.
+agent_live_port() {
+  have docker || return 1
+  local spec
+  spec="$("${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker container port "${AGENT_CONTAINER}" 3000 2>/dev/null; } \
+          || true)"
+  # '0.0.0.0:3001' / '[::]:3001' -> 3001. First line only: docker prints one
+  # per address family and they are the same host port.
+  spec="${spec%%$'\n'*}"
+  spec="${spec##*:}"
+  [[ "${spec}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${spec}"
+}
+
+# agent_llm_model MODEL — the model name OpenHands needs for a local Ollama.
+#
+# 'openai/<model>' against a '/v1' base URL, which is what OpenHands' own local
+# LLM guide specifies: it talks to Ollama through its OpenAI-compatible
+# endpoint, not through litellm's 'ollama/' provider. Getting this wrong is a
+# silent 404 inside a container, so it is one function rather than a string
+# spelled out at each call site.
+agent_llm_model() {
+  printf 'openai/%s' "${1:-${MODEL_NAME}}"
+}
+
+# agent_model_for_run — the model the agent should actually be pointed at.
+#
+# The derived one when it exists, because that is the only way this tier gets a
+# context bigger than the chat app's: OLLAMA_CONTEXT_LENGTH is server-wide, and
+# Ollama's OpenAI endpoint — the one the agent speaks — ignores a per-request
+# num_ctx entirely. The plain rung when it does not, so a missing derived model
+# degrades to a small window rather than to a 404 on a model that is not there.
+# 'lca check' says which of the two is in force.
+#
+# It lives HERE, and not in agent.sh where it was written, because two scripts
+# need it and only one of them sourced the file that had it. The first live run
+# of 'lca agent task' died on the second line of its own preconditions:
+#
+#   agent-task.sh: line 85: agent_model_for_run: command not found
+#   [FAIL] The agent holds model 'openai/qwen2.5-coder:3b-agent', not
+#          'openai/qwen2.5-coder:3b' ... Fix it: lca agent restart
+#
+# Both halves of that are worth keeping in view. The command was unusable on
+# every box — the submission path this project built to be the way in could
+# never submit. And the message it died with accused the CONTAINER of holding
+# the wrong model, when the container was right and the caller had substituted
+# an empty string into the comparison; the remedy it named would have changed
+# nothing, twice. A missing function that degrades into a confident, wrong
+# diagnosis is worse than one that stops.
+agent_model_for_run() {
+  local derived
+  derived="$(agent_model_name "${MODEL_NAME}")"
+  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${MODEL_NAME}"; fi
+}
+
+# agent_max_output_tokens — the reply budget to seed, always a usable number.
+#
+# Guarded rather than trusted. A non-number would be sent as JSON null, and a
+# value at or above the window asks for a reply longer than the window can
+# hold. Both fall back to the default instead of being passed on.
+#
+# NOT because it buys prompt room. That claim is retracted: this comment used
+# to say a bad value "reserved the client's own default again — which is the
+# state that truncated 18,313 tokens to 8,194". Measured since, Ollama
+# truncates on prompt > num_ctx whatever the client asks for, and cuts to
+# num_ctx/2 + 2; the 8,194 was that halving, not a reservation. See
+# AGENT_MAX_OUTPUT_TOKENS in load_env and docs/PROMPT-WINDOW.md. The clamp is
+# still worth having — a cap on one reply is a real thing to get right — it
+# just is not what makes the prompt fit.
+# agent_request_timeout — how long the agent waits for ONE model reply.
+#
+# The client default is 300 seconds. On this rung a single step is not close to
+# that, and the failure it produces looks like nothing at all. Measured on the
+# live run, after the truncation above was fixed:
+#
+#   litellm.Timeout: APITimeoutError - Request timed out.
+#     timeout value=300.0, time taken=901.33 seconds. Attempt #1
+#     ... Attempt #2
+#
+# 901 seconds of CPU inference thrown away at 300, then retried, then thrown
+# away again. Ollama finishes the work every time — the answer simply arrives
+# after nobody is listening — so the run neither progresses nor errors: it sat
+# "running" for 38 minutes having executed nothing, which is exactly the shape
+# of the two droplet runs this project has been chasing.
+#
+# 1800 is three times the longest step measured here, because the number that
+# matters is not "generous" but "longer than this machine takes". A box with a
+# GPU will never reach it; a slower box than this one should raise it. Guarded
+# like the token budget: a non-number or a nonsense value falls back rather than
+# quietly restoring the default that does not work.
+agent_request_timeout() {
+  local want="${AGENT_REQUEST_TIMEOUT:-1800}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=1800
+  (( want >= 60 )) || want=1800
+  printf '%s' "${want}"
+}
+
+agent_max_output_tokens() {
+  local want="${AGENT_MAX_OUTPUT_TOKENS:-2048}" ctx="${AGENT_MODEL_CONTEXT:-16384}"
+  [[ "${want}" =~ ^[0-9]+$ ]] || want=2048
+  [[ "${ctx}" =~ ^[0-9]+$ ]] || ctx=16384
+  # Half the window is the most this may claim: past that the reservation is
+  # bigger than what it leaves, which is the shape of the bug it exists to fix.
+  (( want > 0 && want <= ctx / 2 )) || want=2048
+  printf '%s' "${want}"
+}
+
+# agent_llm_base_url — the Ollama endpoint as seen from INSIDE the container.
+#
+# host.docker.internal, not 127.0.0.1: the agent runs in its own network
+# namespace, where loopback is the container. The '--add-host
+# host.docker.internal:host-gateway' flag in agent.sh is what makes this
+# resolve, so the two belong together and both are gated.
+agent_llm_base_url() {
+  local port url
+  # Through the relay when there is one. Ollama itself stays on loopback, so
+  # without the relay this address resolves to a gateway with nothing behind
+  # it — which is a real state a user can be in, and agent.sh says so out loud
+  # rather than this function inventing a working-looking URL.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" ]] && url="$(ollama_relay_url)"; then
+    printf '%s/v1' "${url}"
+    return 0
+  fi
+  port="$(ollama_url)"; port="${port##*:}"
+  printf 'http://host.docker.internal:%s/v1' "${port}"
+}
+
+# agent_sandbox_env — the environment OpenHands injects into every sandbox it
+# creates, in the JSON its OH_AGENT_SERVER_ENV passthrough expects.
+#
+# One variable, and it is here to stop a download that costs 4,232 tokens of
+# every prompt this tier sends.
+#
+# On startup the agent-server clones github.com/OpenHands/extensions into
+# ~/.openhands/cache/skills/public-skills and lists what it finds in a <SKILLS>
+# block in the system prompt. Measured on this box: 59 skills cached, 57 in the
+# prompt, 4,232 tokens — 23% of an 18,353-token prompt against a window that
+# had to fit in 16,384 and did not (see docs/PROMPT-WINDOW.md). They are
+# release-notes, linear, datadog, discord, azure-devops, bitbucket and the
+# like — capabilities this tier is not for, on a rung whose model has never
+# successfully emitted a native tool call.
+#
+# Not "none of them can run": this box has a GitHub token registered, so the
+# GitHub-shaped ones had a credential. The reason to drop them is that they
+# cost 23% of a prompt that did not fit, not that they were all impossible.
+#
+# There is no setting for it. agent_context.load_public_skills is false in this
+# stack's own settings and it makes no difference: the app server calls its
+# skill loader with load_public=True hardcoded
+# (app_conversation_service_base.py:143), overriding what the user asked for.
+# The filter that is supposed to narrow the catalogue is broken upstream too —
+# marketplace_path defaults to 'marketplaces/default.json', that file is not in
+# the repository, and a marketplace that cannot be read is treated as no filter
+# at all, so the default loads EVERYTHING.
+#
+# So the lever is the ref. EXTENSIONS_REF is read by the SDK and passed to git;
+# pointed at a ref that does not resolve, the clone fails, load_public_skills
+# returns an empty list by contract ("Returns empty list if loading fails"),
+# and the <SKILLS> block disappears. Nothing else in the conversation changes.
+#
+# Named rather than random so it is self-explaining in a log, and overridable
+# so that a box which DOES want the catalogue can have it back with one line in
+# .env rather than a patch.
+agent_sandbox_env() {
+  printf '{"EXTENSIONS_REF":"%s"}' "${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+}
+
+# docker_bridge_gateway — the host's address ON the default docker bridge, i.e.
+# the one thing 'host.docker.internal' resolves to inside a container.
+#
+# The agent needs this because its traffic runs BOTH ways. It publishes its UI
+# for a human, and separately every sandbox container it starts must call back
+# into it — the MCP server it lists its tools from, and the webhook it reports
+# events to. Sandboxes are put on the default bridge by OpenHands itself (its
+# DockerSandboxService offers host networking or the default bridge and nothing
+# else), so the callback address can only be this gateway.
+#
+# Read from docker rather than assumed to be 172.17.0.1: that is merely the
+# usual value, and a host with a customised bip or an occupied 172.17/16 gets a
+# different one. The usual value is the fallback, not the answer.
+docker_bridge_gateway() {
+  local gw=""
+  if have docker; then
+    gw="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null \
+          || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null; } \
+          || true)"
+  fi
+  # One address, even if docker ever reports several IPAM entries.
+  gw="${gw%%$'\n'*}"; gw="${gw%% *}"
+  [[ "${gw}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || gw="172.17.0.1"
+  printf '%s' "${gw}"
+}
+
+# docker_bridge_interface — the NAME of the default docker bridge, for the one
+# place that needs an interface rather than an address: the inbound guard.
+#
+# Docker names it 'docker0' unless the daemon was told otherwise, and it says
+# which in the network's own options, so that is asked first and the usual
+# answer is only the fallback. A name is all nft needs; an interface that does
+# not exist simply never matches, so a wrong guess here cannot break a ruleset.
+docker_bridge_interface() {
+  local name=""
+  if have docker; then
+    name="$("${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null \
+            || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null; } \
+            || true)"
+  fi
+  name="${name%%$'\n'*}"
+  # Only a plain interface name. Anything else — empty, '<no value>', a word
+  # with a quote in it — would be interpolated straight into an nft ruleset.
+  [[ "${name}" =~ ^[A-Za-z0-9_.-]+$ ]] || name="docker0"
+  printf '%s' "${name}"
+}
+
+# agent_web_url — the agent app's address as its own SANDBOXES must dial it.
+#
+# Not a cosmetic setting: OpenHands builds the sandbox's MCP URL from this, and
+# when it is unset it guesses 'http://host.docker.internal:3000' from the port
+# INSIDE the container, which knows nothing about the -p mapping. On this stack
+# host port 3000 is Open WebUI, so the guess sends every sandbox to the chat
+# app, which accepts the connection and never speaks MCP — a 30 s hang, then
+# MCPTimeoutError in agent init, before the model is asked for one token.
+agent_web_url() {
+  printf 'http://host.docker.internal:%s' "${AGENT_PORT}"
+}
+
+# --- what the docs promise, against what is actually listening ---------------
+#
+# A service can be up, healthy, guarded and answering on this machine while
+# being unreachable from the one place the documentation tells you to open it.
+#
+# That is not hypothetical. 'lca agent url' has always printed
+# http://<tailscale-ip>:3001 and docs/AGENT.md calls it "the address to open on
+# your phone", while the container published 127.0.0.1 and the docker bridge
+# and nothing else. Every check passed, because every check asked the host —
+# where loopback answers and everything looks right. From the phone it refused,
+# and it had never once worked.
+#
+# The gap is invisible from the machine that has it, so the promise itself has
+# to be the thing under test.
+
+# tailscale_ip4 — this machine's Tailscale IPv4 address, or nothing (rc 1).
+# One copy: agent.sh and check-system.sh had each grown their own.
+tailscale_ip4() {
+  local ip
+  have tailscale || return 1
+  ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  [[ "${ip}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+  printf '%s' "${ip}"
+}
+
+# host_listeners — the listening TCP sockets, as 'ss -ltn' prints them. Split
+# out from the reader below so the reader can be driven with a fixture: the
+# whole point of this check is addresses a developer's box does not have.
+host_listeners() {
+  have ss || return 1
+  ss -ltn 2>/dev/null
+}
+
+# port_open_at ADDR PORT LISTENERS — true when something in LISTENERS would
+# accept a connection to ADDR:PORT.
+#
+# The cases are the kernel's, not a guess about them:
+#   0.0.0.0 / *   every IPv4 address on this machine
+#   ::            dual-stack, so IPv4 connections land on it too
+#   an address    that address ALONE, which is the case that bit us
+port_open_at() {
+  local addr="${1:-}" port="${2:-}" listeners="${3:-}" la lp
+  [[ -n "${addr}" && -n "${port}" ]] || return 1
+  while read -r la; do
+    [[ -n "${la}" ]] || continue
+    lp="${la##*:}"
+    [[ "${lp}" == "${port}" ]] || continue
+    la="${la%:*}"
+    la="${la#\[}"; la="${la%\]}"
+    case "${la}" in
+      "0.0.0.0"|"*"|"::"|"${addr}") return 0 ;;
+    esac
+  done < <(printf '%s\n' "${listeners}" | awk '$1 == "LISTEN" { print $4 }')
+  return 1
+}
+
+# tailscale_promised_ports — every port this project's own messages send the
+# user to at their Tailscale address, as "description port" lines.
+#
+# Intent, not sockets: a tier that is switched off promises nothing. The
+# reachability question is asked separately, by the caller.
+tailscale_promised_ports() {
+  if [[ "${ENABLE_WEBUI}" == "true" ]] && valid_port "${WEBUI_PORT}"; then
+    printf 'the chat app %s\n' "${WEBUI_PORT}"
+  fi
+  if [[ "${ENABLE_AGENT}" == "true" ]] && valid_port "${AGENT_PORT}"; then
+    printf "the agent's UI %s\n" "${AGENT_PORT}"
+  fi
+  return 0
+}
+
+# tailscale_promise_gaps TSIP LISTENERS — the promised ports that are NOT
+# reachable at the Tailscale address. Empty output is the good answer.
+tailscale_promise_gaps() {
+  local tsip="${1:-}" listeners="${2:-}" name port line
+  [[ -n "${tsip}" ]] || return 1
+  while read -r line; do
+    [[ -n "${line}" ]] || continue
+    port="${line##* }"
+    name="${line% *}"
+    port_open_at "${tsip}" "${port}" "${listeners}" \
+      || printf '%s %s\n' "${name}" "${port}"
+  done < <(tailscale_promised_ports)
+  return 0
+}
+
+# webui_volume_has_data — true when the chat app's volume exists AND has
+# something in it, i.e. there is something in there to lose.
+#
+# A third answer, for the same reason webui_container_exists is distinct from
+# webui_drift: "no volume", "an empty volume" and "a volume holding every
+# account and chat" are three different states, and restore.sh is about to
+# 'rm -rf' whichever one it finds.
+#
+# A volume can only be read from inside a container, so this needs the image.
+# Every way of failing — no docker, no daemon, image missing, run refused —
+# answers "no data", on purpose: the only caller uses this to decide whether to
+# ASK, and a question nobody can answer is worse than no question. Nothing is
+# decided by it that could lose data on its own; the destructive step validates
+# the archive before it clears anything either way.
+webui_volume_has_data() {
+  have docker || return 1
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker volume inspect open-webui >/dev/null 2>&1 || return 1
+  local listing
+  listing="$(as_root docker run --rm --entrypoint sh -v open-webui:/v:ro \
+               "${WEBUI_IMAGE}" -c 'ls -A /v' 2>/dev/null || true)"
+  [[ -n "${listing}" ]]
 }
 
 # webui_drift — echo the .env keys whose value has not reached the running
@@ -933,23 +4413,38 @@ webui_container_exists() {
 # left people believing they had closed their chat app when they had not.
 webui_drift() {
   local drifted=() live want
+  # Read the whole environment ONCE, and fail closed on a container that cannot
+  # be read at all: an unanswerable question must not become a list of things
+  # to re-create. Everything below therefore knows the list WAS readable, which
+  # is what makes "this variable is not in it" mean something.
+  #
+  # It means: a container built before that setting existed. Until this line
+  # existed, an absent value was read as agreement — so a chat app created
+  # before this project had a system prompt reported no drift, 'lca apply' said
+  # it already matched .env, and the assistant ran with no instructions at all.
+  # That is the state in which it invents tool calls and claims it edited your
+  # files, which this repo has documented and had already fixed once. Measured
+  # here on a real container built without those variables: drift reported only
+  # the banner and the signup flag, and stayed silent about both the missing
+  # system prompt and the missing starter questions.
+  webui_container_env_list >/dev/null 2>&1 || return 1
   live="$(webui_container_env PORT || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
+  [[ "${live}" == "${WEBUI_PORT}" ]] || drifted+=("WEBUI_PORT")
   live="$(webui_container_env DEFAULT_MODELS || true)"
-  [[ -z "${live}" || "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
+  [[ "${live}" == "${MODEL_NAME}" ]] || drifted+=("MODEL_NAME")
   live="$(webui_container_env ENABLE_SIGNUP || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
+  [[ "${live}" == "${WEBUI_ENABLE_SIGNUP}" ]] || drifted+=("WEBUI_ENABLE_SIGNUP")
   # Not cosmetic, and the worst of the set: this is how the chat app reaches
   # Ollama. docs/TROUBLESHOOTING.md tells people to move OLLAMA_HOST to another
   # port and re-run install_ollama.sh — which does not touch the container — so
   # following our own instructions leaves the phone talking to a port nothing
   # listens on, with the drop-in perfectly correct and no error anywhere.
   live="$(webui_container_env OLLAMA_BASE_URL || true)"
-  [[ -z "${live}" || "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
+  [[ "${live}" == "$(ollama_url)" ]] || drifted+=("OLLAMA_HOST")
   # Cosmetic, but the same silence: renaming the app in .env appears to do
   # nothing at all.
   live="$(webui_container_env WEBUI_NAME || true)"
-  [[ -z "${live}" || "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  [[ "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
   # The assistant's own instructions, and the starter questions beside them.
   # Neither is an .env key — they live in lib.sh and config/ — which is exactly
   # why they were missed: the gate below scanned install_webui.sh for lines
@@ -963,23 +4458,244 @@ webui_drift() {
   # been bitten by.
   #
   # Both are skipped without jq, because without jq the installer never baked
-  # them in either; there is nothing to differ from.
+  # them in either; there is nothing to differ from. The prompt comparison
+  # itself is webui_prompt_drifted, one function down — the login banner asks
+  # that question alone and must not pay for the six values above to do it.
   if have jq; then
-    want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
-    live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
-    # A value we could not compute is not evidence of a difference.
-    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
-      || drifted+=("SYSTEM_PROMPT")
+    if webui_prompt_drifted; then drifted+=("SYSTEM_PROMPT"); fi
     want=""
     if [[ -r "${REPO_ROOT}/config/prompt-suggestions.json" ]]; then
       want="$(jq -c . "${REPO_ROOT}/config/prompt-suggestions.json" 2>/dev/null || true)"
     fi
     live="$(webui_container_env DEFAULT_PROMPT_SUGGESTIONS || true)"
-    [[ -z "${want}" || -z "${live}" || "${live}" == "${want}" ]] \
+    [[ -z "${want}" || "${live}" == "${want}" ]] \
       || drifted+=("PROMPT_SUGGESTIONS")
+    # The banner is baked in at creation like everything else here, so an
+    # install that predates it keeps a container with no banner at all and
+    # nothing would say so. That is the state the first real user was in.
+    want="$(lca_webui_banners 2>/dev/null || true)"
+    live="$(webui_container_env WEBUI_BANNERS || true)"
+    [[ -z "${want}" || "${live}" == "${want}" ]] || drifted+=("WEBUI_BANNERS")
   fi
   (( ${#drifted[@]} )) || return 1
   printf '%s\n' "${drifted[@]}"
+}
+
+# webui_prompt_drifted — true ONLY when the assistant's own instructions baked
+# into the running container are DIFFERENT from this repo's.
+#
+# Its own predicate so a caller can ask that one question with a single docker
+# inspect instead of the seven webui_drift needs. The login banner is that
+# caller, and it runs on every SSH login.
+#
+# Positive answers only, the same asymmetry as motd.sh's model_missing: no jq,
+# no container, an unreadable value — all of them are "cannot tell" and return
+# non-zero. A banner that cried "out of date" whenever it could not look would
+# be ignored inside a week, and being ignored is the one failure mode that
+# makes the line worthless.
+webui_prompt_drifted() {
+  local want live
+  have jq || return 1
+  want="$(lca_system_prompt | jq -Rsc '{system: .}' 2>/dev/null || true)"
+  [[ -n "${want}" ]] || return 1
+  # Readable-but-absent is drift, and it is the most important case here: a
+  # container created before this project had a system prompt has no
+  # DEFAULT_MODEL_PARAMS at all, and reading that as "matches" is how an
+  # assistant with NO instructions was reported as up to date.
+  webui_container_env_list >/dev/null 2>&1 || return 1
+  live="$(webui_container_env DEFAULT_MODEL_PARAMS || true)"
+  [[ "${live}" != "${want}" ]]
+}
+
+# webui_prompt_comparable — true when webui_drift could actually compare the
+# assistant prompt and starter questions. It skips both without jq, and when
+# either side cannot be read; a caller that reports "matches" without knowing
+# this is claiming a check it never made.
+webui_prompt_comparable() {
+  have jq || return 1
+  [[ -n "$(lca_system_prompt 2>/dev/null || true)" ]] || return 1
+  [[ -n "$(webui_container_env DEFAULT_MODEL_PARAMS 2>/dev/null || true)" ]] || return 1
+  return 0
+}
+
+# --- the inbound guard's idea of .env vs .env's ------------------------------
+#
+# The guard bakes the ports in when it is applied, so it is drift in exactly
+# the same way the ollama drop-in and the WebUI container are: change a port
+# in .env and the guard goes on protecting the old one while the service
+# listens on the new one, unauthenticated, on every interface.
+#
+# One copy of the rule on purpose. 'lca check' reports this and 'lca apply'
+# fixes it, and two copies of a coverage rule is how one of them ends up
+# calling a port safe that the other knows is exposed.
+
+# valid_bool VALUE — exactly the two words every switch in .env is documented
+# to take. Everything here compares against the literal string "true", so any
+# other spelling silently means false: AUTO_TUNE=yes turns the headline feature
+# off and nothing says so.
+valid_bool() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
+
+# boolean_settings — the .env keys that ARE switches, read out of .env.example
+# rather than listed here, so a new one is covered the day it ships.
+#
+# Commented lines too, and that is the whole of a measured hole. .env.example
+# does not only SHIP switches, it SUGGESTS them: CONVENTIONS_AIDER and
+# CONVENTIONS_AGENT appear under "leaving these alone changes nothing", as
+# lines a reader is invited to uncomment. They were invisible here, so:
+#
+#   AUTO_TUNE=yes         -> [warn] is not true or false ... this reads as OFF
+#   CONVENTIONS_AIDER=yes -> [ ok ] 12 on/off setting(s) hold true or false
+#
+# ...while lca_user_instructions compares it against the word "true" exactly
+# like every other switch, so 'yes' turned the conventions file off for aider
+# and nothing said so. Measured: 2,527 characters of appendix at 'true', 0 at
+# 'yes'. The only difference between the two settings was which side of a '#'
+# .env.example wrote them on.
+#
+# A suggestion the reader has not taken is not checked — see check-system.sh,
+# which skips any name that is unset. So the shipped machine still counts 12.
+boolean_settings() {
+  [[ -r "${ENV_EXAMPLE}" ]] || return 1
+  grep -oE '^[[:space:]]*#?[[:space:]]*[A-Z_]+=(true|false)$' "${ENV_EXAMPLE}" \
+    | sed -E 's/^[[:space:]]*#?[[:space:]]*//' | cut -d= -f1 | sort -u
+}
+
+# valid_port PORT — a number a service can actually listen on.
+#
+# Not pedantry: netmode's own extractors already refuse a non-numeric
+# WEBUI_PORT and fall back to 3000, while guarded_ports took whatever .env
+# said. Those two disagreeing is what turns a typo into a loop — see below.
+valid_port() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] || return 1
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+# guarded_ports — the service ports .env says must not be publicly reachable,
+# as "Label port" lines. Returns 1 when there is nothing to guard.
+guarded_ports() {
+  local oport out=()
+  oport="$(ollama_url)"; oport="${oport##*:}"
+  # Port 22 is never guarded: netmode.sh refuses to put SSH in the drop set so
+  # the guard can never lock anyone out. A service parked there is therefore
+  # not a gap either — reporting it would be an unfixable failure, which is
+  # worse than saying nothing.
+  # Only ports that could BE guarded. A value that is not a port number is not
+  # a gap in the guard, it is a broken setting — and treating it as a gap is
+  # worse than saying nothing, because it cannot be closed. Measured with
+  # WEBUI_PORT=abc: netmode's extractor falls back to 3000 and guards that,
+  # this list asked for "WebUI abc", and inbound_guard_uncovered therefore
+  # reported the guard stale for ever. 'lca check' said "run sudo lca apply",
+  # apply re-applied the same guard and reported success, and the next check
+  # said it again — a loop with no exit, and never once the word "abc".
+  # check-system.sh names the real fault; this function stays quiet about it.
+  if [[ "${ENABLE_WEBUI}" == "true" && "${WEBUI_PORT}" != "22" ]] \
+     && valid_port "${WEBUI_PORT}"; then
+    out+=("WebUI ${WEBUI_PORT}")
+  fi
+  if [[ "${oport}" != "22" ]] && valid_port "${oport}"; then
+    out+=("Ollama ${oport}")
+  fi
+  # The agent's UI, by the same rule as the WebUI above: it is a port this
+  # machine offers to the network, and it is the most dangerous one here — a
+  # browser session on it can run anything on the box. Intent first...
+  if [[ "${ENABLE_AGENT}" == "true" && "${AGENT_PORT}" != "22" ]] \
+     && valid_port "${AGENT_PORT}"; then
+    out+=("Agent ${AGENT_PORT}")
+  fi
+  # The relay, by the same rule. It binds ONE address — the docker bridge
+  # gateway — which is not routable from outside this machine, so it is not an
+  # exposure the way the two above are. It is listed anyway: the guard's job is
+  # to know every port this stack opens, and a port it has never heard of is
+  # one nobody notices when a future change moves it somewhere routable.
+  if [[ "${ENABLE_OLLAMA_RELAY}" == "true" && "${OLLAMA_RELAY_PORT}" != "22" ]] \
+     && valid_port "${OLLAMA_RELAY_PORT}"; then
+    out+=("Ollama relay ${OLLAMA_RELAY_PORT}")
+  fi
+  # The port the container is REALLY on, when that is not the one .env names.
+  #
+  # Open WebUI's port is baked in at creation and it runs with --network=host,
+  # so editing WEBUI_PORT leaves the running chat app listening on the old port
+  # on every interface. The guard is rebuilt from .env — by a reboot, or by
+  # 'harden' on its own — and covers the NEW port, leaving the old one, which
+  # is the one actually accepting connections, reachable from the public IP.
+  #
+  # Reporting it does not create an unfixable failure: 'lca apply' re-creates
+  # the container before it reconciles the guard, so by the time apply looks
+  # here the live port and .env agree again. Where docker cannot be read at
+  # all this yields nothing, which is the right answer to a question we cannot
+  # ask.
+  #
+  # Deduplicated against what is ALREADY in the list, not against WEBUI_PORT,
+  # and that distinction is the whole of a security hole. With
+  # ENABLE_WEBUI=false the first branch above adds nothing, so 'live == WEBUI_PORT'
+  # suppressed the only entry there was — and a chat app that .env says is off
+  # but that is still running went unlisted. Measured on this box with
+  # ENABLE_WEBUI=false, the container untouched and answering:
+  #
+  #   guarded_ports:  Ollama 11434                 (3000 simply absent)
+  #   curl 127.0.0.1:3000/health -> {"status":true}
+  #   lca apply --dry-run: "apply the inbound guard ... to Ollama 11434"
+  #   lca check:           "no public service ports to guard"
+  #
+  # Turning a feature OFF in .env made the box more exposed, not less: before
+  # the edit port 3000 was in the guard, after it the two commands that decide
+  # what the guard covers both said there was nothing there. netmode.sh's own
+  # renderer never agreed — it guards WEBUI_PORT regardless of ENABLE_WEBUI —
+  # so this was three answers to one question, and the two that drive 'lca
+  # check' and 'lca apply' were the wrong ones.
+  #
+  # ENABLE_WEBUI is a statement of intent. A listening socket is a fact.
+  #
+  # ...and only while it is RUNNING. A stopped container listens on nothing, so
+  # its port is not an exposure — and reporting it would be a gap nothing can
+  # close, because 'lca webui stop' leaves the container (and its baked-in
+  # PORT) in place. That is the "unfixable failure" this function's own header
+  # says is worse than saying nothing.
+  local live already=0 entry
+  if webui_container_running; then
+    live="$(webui_container_env PORT 2>/dev/null || true)"
+  fi
+  if [[ "${live:-}" =~ ^[0-9]+$ && "${live}" != "22" ]]; then
+    for entry in ${out[@]+"${out[@]}"}; do
+      [[ "${entry}" == *" ${live}" ]] && already=1
+    done
+    (( already )) || out+=("live WebUI ${live}")
+  fi
+  # ...and the agent's real published port, on the same terms. Deduplicated
+  # against what is already in the list rather than against AGENT_PORT — the
+  # distinction the WebUI comment above spells out, and the whole of why
+  # turning a feature off in .env once made this box more exposed.
+  local alive=""
+  if agent_container_running; then
+    alive="$(agent_live_port 2>/dev/null || true)"
+  fi
+  if [[ "${alive}" =~ ^[0-9]+$ && "${alive}" != "22" ]]; then
+    already=0
+    for entry in ${out[@]+"${out[@]}"}; do
+      [[ "${entry}" == *" ${alive}" ]] && already=1
+    done
+    (( already )) || out+=("live Agent ${alive}")
+  fi
+  (( ${#out[@]} )) || return 1
+  printf '%s\n' "${out[@]}"
+}
+
+# inbound_guard_uncovered DUMP — given the output of
+# 'nft list table inet lca_inbound', print the guarded_ports it does NOT drop.
+# Returns 1 when the guard covers everything (or there is nothing to cover).
+inbound_guard_uncovered() {
+  local dump="$1" entry port gaps=()
+  while read -r entry; do
+    [[ -n "${entry}" ]] || continue
+    port="${entry##* }"
+    # Anchored on word boundaries: a guard covering 11434 must not be read as
+    # covering 1143.
+    if ! grep -qE "dport \{[^}]*\b${port}\b" <<<"${dump}"; then
+      gaps+=("${entry}")
+    fi
+  done < <(guarded_ports || true)
+  (( ${#gaps[@]} )) || return 1
+  printf '%s\n' "${gaps[@]}"
 }
 
 # installed_backup_schedule — the OnCalendar the backup timer is really on.
@@ -993,6 +4709,126 @@ installed_backup_schedule() {
     | sed -n 's/.*OnCalendar=\(.*\) ; next_elapse=.*/\1/p' | head -1)"
   [[ -n "${out}" ]] || return 1
   printf '%s' "${out}"
+}
+
+# --- what a boot unit will actually try to run ------------------------------
+#
+# 'systemctl is-enabled' is a statement about a symlink. It keeps answering
+# "enabled" long after the checkout the unit points into was moved, renamed or
+# deleted — every one of our three units bakes an absolute path from the
+# installing checkout into ExecStart — and the breakage only surfaces at the
+# next boot. For the netmode guard that means the WebUI and Ollama ports go
+# public while 'lca check' reports the boot service as healthy; for the timer
+# it means backups that silently never ran, discovered when one is needed.
+# Reading the path back is the only way to see any of it coming.
+
+# show_execstart_program — parse 'systemctl show -p ExecStart --value' (stdin).
+# systemd renders it as '{ path=/x/y.sh ; argv[]=... ; ... }', so the capture
+# has to stop at the ' ; ' — the same trap installed_backup_schedule documents.
+show_execstart_program() {
+  sed -n 's/.*path=\(.*\) ; argv\[\]=.*/\1/p' | head -1
+}
+
+# execstart_program FILE — the program named by a unit FILE's ExecStart. We
+# write these ourselves as 'ExecStart="/path/to/script.sh" [args]', so the
+# quoted form is what matters; the unquoted form is handled for units written
+# by an older version of this repo. Reading the file is also the only source
+# on a machine where systemd is installed but not running.
+execstart_program() {
+  local out
+  [[ -r "$1" ]] || return 1
+  out="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p;s/^ExecStart=\([^" ]*\).*/\1/p' "$1" \
+           | head -1)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# unit_boot_program UNIT — the program that unit will execute, or nothing
+# (exit 1) when it cannot be determined. systemd is asked first because a
+# drop-in can override ExecStart and it is the authority on what will really
+# run; the unit file is the fallback.
+#
+# SYSTEMD_UNIT_DIR is a seam for the tests, which cannot write to
+# /etc/systemd/system; nothing sets it in normal use.
+unit_boot_program() {
+  local out=""
+  if systemd_available; then
+    out="$(systemctl show -p ExecStart --value "$1" 2>/dev/null | show_execstart_program)"
+  fi
+  [[ -n "${out}" ]] \
+    || out="$(execstart_program "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" || true)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
+# lca_link_state LINK EXPECTED — classify the 'lca' command on PATH.
+#
+# 'lca' is a symlink into a checkout, so moving or renaming that directory
+# leaves it dangling — and the first thing anyone does about a stack that
+# stopped working is type 'lca check', which is then the one command that
+# cannot run. The copy in the checkout still can, so it should say so.
+#
+#   ok       a symlink to EXPECTED
+#   broken   a symlink whose target cannot be executed (the moved checkout)
+#   foreign  a symlink to a different checkout — 'lca check' would run other
+#            code than the health check the reader is looking at right now
+#   other    something else lives at that path; not ours to judge
+#   absent   not installed (a rootless install never creates it)
+lca_link_state() {
+  local link="$1" want="$2" target
+  # Resolve BOTH sides the same way before comparing. SCRIPT_DIR is built with
+  # 'cd && pwd', which keeps a symlinked path, while readlink -f returns the
+  # physical one — so a checkout reached through a symlinked parent (a /tmp on
+  # macOS, a symlinked /opt, a bind-mounted home) would compare unequal and
+  # report 'foreign': a frightening message about a perfectly healthy machine.
+  want="$(readlink -f "${want}" 2>/dev/null || printf '%s' "${want}")"
+  if [[ -L "${link}" ]]; then
+    # readlink -f fails outright when a NON-final component is missing, which
+    # is exactly the moved-checkout case; -x catches the rest.
+    target="$(readlink -f "${link}" 2>/dev/null || true)"
+    if [[ -z "${target}" || ! -x "${target}" ]]; then
+      printf 'broken'
+    elif [[ "${target}" == "${want}" ]]; then
+      printf 'ok'
+    else
+      printf 'foreign'
+    fi
+    return 0
+  fi
+  if [[ -e "${link}" ]]; then
+    printf 'other'
+    return 0
+  fi
+  printf 'absent'
+}
+
+# reenable_hint UNIT INSTALLER — the command that will actually put UNIT back.
+# 'systemctl enable' can only enable a unit file that exists, and the most
+# likely reason a unit is not enabled is that nothing ever wrote it — so
+# offering it unconditionally names a command that fails in the common case.
+# INSTALLER is the heavier thing that writes the file.
+reenable_hint() {
+  if [[ -f "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" ]]; then
+    # Deliberately not '--now': that would run the unit immediately, and for
+    # auto-tune that can mean an unasked-for model download. The question was
+    # about the next boot.
+    printf 'sudo systemctl enable %s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+# stale_boot_program UNIT — echo the program a unit will try to run at boot,
+# but only when that program is no longer there. Prints nothing and returns 1
+# when the unit is fine AND when we could not work out what it runs: an answer
+# we cannot compute is not evidence of a fault, and a health check that cries
+# wolf about its own blind spot is worse than one that stays quiet.
+stale_boot_program() {
+  local prog
+  prog="$(unit_boot_program "$1" || true)"
+  [[ -n "${prog}" ]] || return 1
+  [[ -x "${prog}" ]] && return 1
+  printf '%s' "${prog}"
 }
 
 # resync_dropin_if_drifted — re-render the ollama drop-in and restart when the
@@ -1038,11 +4874,24 @@ netmode_state() {
   fi
 }
 
+# net_blocked — true when the kill switch is engaged, so no download can work.
+#
+# The predicate half of net_guard, for callers that must not die. net_guard
+# die()s, which is exactly right for an installer: one that cannot download
+# cannot install, and there is nothing else for it to do. It is wrong for a
+# RECOVERY, where the download is one step among several and the others are
+# still worth having — restore.sh died inside the WebUI volume step and took
+# the model re-pull, the 'lca apply' reconciliation and the machine advice down
+# with it, on a machine whose kill switch was doing exactly what it is for.
+net_blocked() {
+  [[ "$(netmode_state)" == "offline" ]]
+}
+
 # net_guard WHAT — die early with a helpful message when the netmode kill
 # switch is engaged, instead of letting downloads time out confusingly.
 net_guard() {
   local what="${1:-This step}"
-  if [[ "$(netmode_state)" == "offline" ]]; then
+  if net_blocked; then
     die "${what} needs internet access, but netmode is OFFLINE. Run: sudo ${REPO_ROOT}/netmode.sh online — then retry."
   fi
 }
