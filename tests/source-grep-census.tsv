@@ -17,6 +17,32 @@
 #   H   a helper, not a gate: it extracts source for a gate to judge. Its debt,
 #       if any, belongs to the gate that calls it.
 #
+# HOW THIS CENSUS IS MADE, and how far the detector may be trusted.
+#
+# The census is made BY READING. source_grep_gates is a tripwire, not a
+# source of truth, and the difference is measured rather than asserted:
+#
+#   DETECTOR RECALL: 236 of 312
+#
+# That is how many A/B/FP rows source_grep_gates finds on its own. The other
+# 76 it cannot see, and the reasons are structural rather than bugs — checked
+# one at a time. Most read repo source through a HELPER (the agent_* gates go
+# through agent_docker_argv, the apply gates through apply_run_failing), and a
+# per-function text matcher cannot follow a call. A few name the repo without
+# naming a path: 'cd "${REPO}" && git ls-files' reads the tree while matching
+# nothing that looks like "${REPO}/".
+#
+# So new_source_greps_are_justified checks one direction only — every gate the
+# detector FINDS must have a row or a justification. It cannot check the other,
+# because a detector at 76% recall would reject a quarter of this file. Do not
+# build an enforcement on this detector that assumes it sees everything.
+#
+# The number above is DERIVED, not typed: the_detector_recall_is_the_one_stated
+# re-computes it and fails if this line drifts from it. Written down because a
+# sibling session found its own shared lexer misreading 17 places and its
+# classifier jumping from 221 gates to 305 once fixed — a detector whose recall
+# nobody has measured gets trusted as if it were 100%.
+#
 # Format: LABEL <TAB> function <TAB> what it actually does.
 # The A rows are the debt and may only go down. Converting one means moving its
 # row to FP, not deleting it.
@@ -612,3 +638,5 @@ H	absence_shaped_functions	lists every function in this file that passes on an e
 B	every_absence_rule_is_registered	the subject IS which functions have that shape, checked against the registry
 FP	every_absence_rule_notices_an_empty_world	runs each registered rule against a world with nothing in it and reads what it did
 B	counted_sections_do_not_contradict_themselves	the subject IS a counted heading and the prose under it, in this project's own documentation
+H	detector_recall_now	counts how many census rows source_grep_gates finds on its own
+B	the_detector_recall_is_the_one_stated	the subject IS the recall figure in this file's header, re-derived and compared

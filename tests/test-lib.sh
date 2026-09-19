@@ -23940,6 +23940,50 @@ new_source_greps_are_justified() {
 check "a new gate that greps source says why it cannot drive instead" \
   new_source_greps_are_justified
 
+# ...and the census header's claim about how far that detector can be trusted.
+#
+# The gate above checks ONE direction: everything source_grep_gates finds must
+# have a row or a justification. It cannot check the other, because the
+# detector does not find everything — it is a per-function text matcher, and
+# most of what it misses reads repo source through a HELPER, which no amount of
+# pattern work fixes. A few more name the repo without naming a path:
+# 'cd "${REPO}" && git ls-files' reads the tree and matches nothing shaped like
+# a path.
+#
+# That is why this census is made by reading. What would not be fine is leaving
+# the gap unmeasured, because an unmeasured detector gets trusted as if it were
+# perfect — a sibling session found its shared lexer misreading 17 places, and
+# its classifier went from 221 gates to 305 once fixed. So the recall is stated
+# in the census header and DERIVED here: if the file drifts and the header does
+# not, this fails.
+#
+# SOURCE-GREP: the subject IS a number written in the census header, compared
+# with the same number re-derived from the census and the detector.
+detector_recall_now() {   # -> "FOUND of TOTAL" over the A/B/FP rows
+  local rows found hit total
+  rows="$(grep -vE '^#' "${CENSUS}" | grep -P '\t' | grep -vP '^H\t' | cut -f2 | sort -u)"
+  found="$(source_grep_gates "${TESTS_DIR}/test-lib.sh")"
+  hit="$(comm -12 <(printf '%s\n' "${rows}") <(printf '%s\n' "${found}") | grep -c . || true)"
+  total="$(printf '%s\n' "${rows}" | grep -c . || true)"
+  printf '%s of %s' "${hit}" "${total}"
+}
+the_detector_recall_is_the_one_stated() {
+  local stated now
+  stated="$(sed -n 's/^#[[:space:]]*DETECTOR RECALL:[[:space:]]*//p' "${CENSUS}" | head -1)"
+  [[ -n "${stated}" ]] || {
+    echo 'the census header no longer states the detector recall, so nothing says how far it may be trusted' >&2
+    return 1
+  }
+  now="$(detector_recall_now)"
+  [[ "${stated}" == "${now}" ]] || {
+    printf 'the census header says the detector finds %s; it now finds %s. A recall nobody re-derives is a recall nobody can trust.\n' \
+      "${stated}" "${now}" >&2
+    return 1
+  }
+}
+check "...and the census header states the recall that detector really has" \
+  the_detector_recall_is_the_one_stated
+
 # A census whose rows have stopped naming real functions is a census of
 # nothing, and every count below it would be a count of nothing.
 # SOURCE-GREP: it reads a checked-in table and the suite's own definitions.
@@ -24409,8 +24453,15 @@ absence_shaped_functions() {   # -> every function that passes on an empty searc
     inb { body = body "\n" $0 }
   ' "${TESTS_DIR}/test-lib.sh" | sort -u
 }
+# The detector behind this gate has a recall gap too, and it is named rather
+# than left to be discovered. A rule whose file list arrives as "$@" names no
+# repo path, so absence_shaped_functions cannot see it — no_unannounced_long_wait
+# is exactly that, and it is registered by hand. Listing the gap here means a
+# SECOND invisible rule fails this gate instead of quietly going undriven,
+# which is the whole difference between a measured detector and a trusted one.
+ABSENCE_DETECTOR_MISSES='no_unannounced_long_wait'
 every_absence_rule_is_registered() {
-  local fn bad=0 n=0
+  local fn bad=0 n=0 miss
   while read -r fn; do
     [[ -n "${fn}" ]] || continue
     n=$(( n + 1 ))
@@ -24422,6 +24473,16 @@ every_absence_rule_is_registered() {
   done < <(absence_shaped_functions)
   (( n >= 30 )) || {
     printf 'only %s absence-shaped functions were found — this stopped watching\n' "${n}" >&2
+    bad=1
+  }
+  # ...and the other direction: every registered rule the detector CANNOT see
+  # must be one this file already knows about.
+  # shellcheck disable=SC2086  # the registry IS a whitespace-separated list; splitting is the point
+  miss="$(comm -13 <(absence_shaped_functions) \
+                   <(printf '%s\n' ${ABSENCE_RULES} | sort -u))"
+  [[ "${miss}" == "${ABSENCE_DETECTOR_MISSES}" ]] || {
+    printf 'the rules this detector cannot see are now [%s], not [%s] — a registered rule went invisible, or one came back\n' \
+      "$(tr '\n' ' ' <<<"${miss}")" "${ABSENCE_DETECTOR_MISSES}" >&2
     bad=1
   }
   return "${bad}"

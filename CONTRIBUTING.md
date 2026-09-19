@@ -353,6 +353,44 @@ that as "refuses"; with the suite's real globals set, it passes on nothing. The
 product's own run is the one that counts, and that is the third time this week
 it has disagreed with a harness of mine.
 
+### A detector's recall is part of its output
+
+A sibling session found its shared lexer misreading `$(…)` in 17 places — real
+gates read as data, awk programs read as code — and its source-grep classifier
+went from **221 gates to 305** once fixed. It then refused to build absence-rule
+enforcement on a detector with 70% recall, and wrote the recall into the header
+instead. Asked of this side, the same question gives the same answer.
+
+`source_grep_gates` finds **236 of the 312** A/B/FP rows. That is 76% recall,
+and the 76 it misses were checked one at a time rather than assumed:
+
+- **most read repo source through a helper.** The `agent_*` gates go through
+  `agent_docker_argv`; the apply gates through `apply_run_failing`. A
+  per-function text matcher cannot follow a call, and no pattern work fixes
+  that.
+- **a few name the repo without naming a path.** `cd "${REPO}" && git ls-files`
+  reads the whole tree while matching nothing shaped like `"${REPO}/"`.
+- **none were parse bugs.** Two candidates that looked like bugs were one-line
+  definitions that my *checking* helper ran past — the same defect
+  `source_grep_gates` records having fixed in itself.
+
+So `new_source_greps_are_justified` checks one direction only, and that is
+correct: everything the detector FINDS must have a row or a justification.
+Requiring the reverse would reject a quarter of the census. **The census is made
+by reading; the detector is a tripwire.**
+
+The recall is in the census header and `the_detector_recall_is_the_one_stated`
+re-derives it, so it cannot rot. It proved that immediately: adding the gate's
+own two census rows moved the figure from 235/311 to 236/312, and the gate
+failed until the header caught up.
+
+One more number was re-checked and **the published one was right**: CONTRIBUTING
+says 52 CI run-steps, 15 with pipefail, 37 without. A quick recount said 16,
+because `grep -c 'shell: bash'` counts the line
+`# shell: bash is REQUIRED. This job runs in container:` — a comment. Eighth
+instrument error of the month, and the same one `source_grep_gates` warns about
+in its own comments: *prose classified the thing.*
+
 ### Which harnesses to distrust, and which are fine
 
 "Distrust your own instruments" is too broad to act on. A week of being wrong
@@ -1670,8 +1708,17 @@ nothing about whether anything reaches them.**
 This project has already been bitten by exactly that, once, and did not
 generalise it: `banner_ready` returns early when the model is missing, so a
 check on the rows below that return was checking code that never ran in the
-configuration under test. Same defect, and there are roughly seventeen gates
-shaped to permit it. Their FP label is not *wrong* — they do drive their
+configuration under test. Same defect, and **at least 16 FP gates are shaped to
+permit it**, reaching their evidence through one of 16 helpers that lift a
+block out of a script and run it — `agent_docker_argv`, `aider_argv_with`,
+`seeded_settings_payload`, `settings_verdict`, `drift_verdict`,
+`placement_verdict_for` and the rest.
+
+*At least*, not exactly: that list was built by a detector, and the detector
+missed `agent_docker_argv` itself because its `awk` call puts the filename on a
+later line. It was added by hand. A floor derived in September 2026 from a
+matcher with known blind spots is worth more than a round number, and worth
+less than a reading. Their FP label is not *wrong* — they do drive their
 subject — but FP covers two different strengths of evidence and nothing said
 so. It says so now, and the inert clone is how you tell them apart.
 
