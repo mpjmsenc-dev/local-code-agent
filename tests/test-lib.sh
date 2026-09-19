@@ -7193,11 +7193,16 @@ check "a failed render leaves the previous Ollama settings in place" \
   dropin_survives_a_failed_render
 # ...and nothing may go back to piping straight at a root-owned file.
 no_tee_into_a_root_file() {
-  local hits
-  hits="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
-            "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
-          | grep -vE ':[0-9]+:[[:space:]]*#' \
-          | grep -v 'write_root_file() {' || true)"
+  local raw hits rc=0
+  # grep's status is read, not swallowed: 1 is no match, 2 is a file it could
+  # not open — and a glob that matched nothing hands it exactly that, which
+  # '2>/dev/null || true' used to turn into a clean tree.
+  raw="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+            "${REPO}"/deploy/*.sh "${REPO}/bin/lca")" || rc=$?
+  (( rc <= 1 )) || {
+    printf 'could not read the scripts this scans (grep exit %s), and an unread tree is not a clean one\n' "${rc}" >&2
+    return 1; }
+  hits="$(grep -vE ':[0-9]+:[[:space:]]*#' <<<"${raw}" | grep -v 'write_root_file() {' || true)"
   # lib.sh's own implementation is the one legitimate use: it tees into the
   # TEMP, which is the whole point.
   # '[$]{tmp}' rather than the literal, so this line is not itself an
@@ -12118,11 +12123,12 @@ example_value() {  # KEY — the value .env.example ships, unquoted, comment-fre
     | sed -E "s/^$1=//; s/[[:space:]]+#.*\$//; s/^\"//; s/\"\$//"
 }
 defaults_agree_on_values() {
-  local key libval exval mismatch=0
+  local key libval exval mismatch=0 compared=0
   while IFS='=' read -r key libval; do
     [[ -n "${key}" ]] || continue
     # Key-only parity is the two checks above; here, only shared keys matter.
     grep -qE "^${key}=" "${REPO}/.env.example" || continue
+    compared=$(( compared + 1 ))
     exval="$(example_value "${key}")"
     if [[ "${libval}" != "${exval}" ]]; then
       printf 'default disagrees for %s: lib.sh falls back to %q, .env.example ships %q\n' \
@@ -12131,6 +12137,11 @@ defaults_agree_on_values() {
     fi
   done < <(sed -n '/^load_env()/,/^}/p' "${REPO}/scripts/lib.sh" \
              | sed -nE 's/^[[:space:]]*([A-Z_]+)="\$\{[A-Z_]+:-(.*)\}"$/\1=\2/p')
+  # A floor: with lib.sh unreadable the loop above runs zero times and nothing
+  # disagrees. More than thirty defaults are shared today.
+  (( compared >= 20 )) || {
+    printf 'only %s defaults were compared — this stopped reading load_env\n' "${compared}" >&2
+    return 1; }
   return "${mismatch}"
 }
 check "lib.sh's fallback and .env.example agree on every value" \
@@ -22942,8 +22953,12 @@ every_path_stub_survives_sudo() {
   # 3. ...and nothing built a front-load by hand, which would bypass 1 and 2
   # entirely. Assembled from pieces because this gate greps the file it lives
   # in, and a contiguous literal here would match itself.
-  local pat='PATH="[^"]*'":\${PATH}\""
-  hand="$(grep -nH "${pat}" "${TESTS_DIR}"/*.sh || true)"
+  local pat='PATH="[^"]*'":\${PATH}\"" rc=0
+  # Status read, not swallowed: exit 2 is a test file it could not open.
+  hand="$(grep -nH "${pat}" "${TESTS_DIR}"/*.sh)" || rc=$?
+  (( rc <= 1 )) || {
+    printf 'could not read the test files this scans (grep exit %s), and an unread file is not a clean one\n' "${rc}" >&2
+    bad=1; }
   [[ -z "${hand}" ]] || {
     printf 'a PATH front-load was built by hand instead of through stub_path, so its sudo pass-through is never checked:\n%s\n' \
       "${hand}" >&2
@@ -25800,6 +25815,36 @@ plant_census_row_for_a_missing_function() {
     >> "$1/tests/absence-rule-census.tsv"
   echo tests/absence-rule-census.tsv
 }
+plant_tee_into_a_root_file() {
+  printf '\nprintf x | as_root tee /etc/planted-by-the-harness >/dev/null\n' >> "$1/setup.sh"; echo setup.sh
+}
+plant_clean_environment_without_the_host_root() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\nout="$(%s -i PATH=/usr/bin bash -c true)"\n' env >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_hand_built_stub_path() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\nPATH="/planted/stubs:%s"\n' '${PATH}' >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_docker_hidden_through_the_environment() {
+  printf '\nexport %s=unix:///planted.sock\n' "DOCKER""_HOST" >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_promised_setting_not_applied() {
+  sed -i '/-e "\{0,1\}DO_NOT_TRACK=/d' "$1/scripts/install_webui.sh"; echo scripts/install_webui.sh
+}
+plant_background_start_copies_a_setting() {
+  sed -i '/^start_ollama_bg() {$/a\  export OLLAMA_NO_CLOUD=1' "$1/scripts/lib.sh"; echo scripts/lib.sh
+}
+plant_default_wider_than_shipped() {
+  sed -i '/^load_env()/,/^}/ s|:-127\.0\.0\.1:11434}"|:-0.0.0.0:11434}"|' "$1/scripts/lib.sh"; echo scripts/lib.sh
+}
+plant_pending_rule_dropped_from_the_order() {
+  local first
+  first="$(grep -m1 -nE '^#     [a-z_][a-z0-9_]*$' "$1/tests/absence-rule-census.tsv" | cut -d: -f1)"
+  [[ -n "${first}" ]] || return 0
+  sed -i "${first}d" "$1/tests/absence-rule-census.tsv"
+  echo tests/absence-rule-census.tsv
+}
 plant_unlisted_absence_rule() {
   cat >> "$1/tests/test-lib.sh" <<'PLANT'
 
@@ -25829,7 +25874,7 @@ PLANT
 ABSENCE_CENSUS="${REPO}/tests/absence-rule-census.tsv"
 # The pending count, exactly. Moving a row to PROVED means lowering this in the
 # same change; adding a PENDING row means raising it, in a diff somebody reads.
-ABSENCE_PENDING=137
+ABSENCE_PENDING=130
 
 absence_census_rows() {   # -> STATUS<TAB>NAME<TAB>REASON, comments and blank lines dropped
   grep -vE '^(#|[[:space:]]*$)' "${ABSENCE_CENSUS}"
@@ -25903,6 +25948,37 @@ every_absence_candidate_is_in_the_census() {
 check "every function shaped like an absence rule is in the census" \
   every_absence_candidate_is_in_the_census
 
+# ...and the order the census publishes has to cover the rows it orders. The
+# order is what makes the debt shrink by cost instead of arbitrarily; a PENDING
+# row dropped from it is a row nobody reaches, and a tier heading whose count is
+# not the names under it is the header disagreement this project keeps finding.
+# SOURCE-GREP: the subject IS the order in the census's own header, checked
+# against the rows under it. There is no behaviour to drive.
+absence_order_covers_every_pending_row() {
+  local ordered rows dupes only_order only_rows tiers heading want got bad=0
+  ordered="$(sed -n 's/^#     \([a-z_][a-z0-9_]*\)$/\1/p' "${ABSENCE_CENSUS}" | sort)"
+  [[ -n "${ordered}" ]] || {
+    echo 'the absence census no longer publishes an order — this gate stopped watching' >&2; return 1; }
+  rows="$(absence_census_rows | awk -F'\t' '$1 == "PENDING" { print $2 }' | sort)" || return 1
+  dupes="$(uniq -d <<<"${ordered}")"
+  [[ -z "${dupes}" ]] || { printf 'these are in the published order more than once:\n%s\n' "${dupes}" >&2; bad=1; }
+  only_order="$(comm -23 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  only_rows="$(comm -13 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  [[ -z "${only_order}" ]] || { printf 'the order names rules that are not PENDING:\n%s\n' "${only_order}" >&2; bad=1; }
+  [[ -z "${only_rows}" ]] || { printf 'these PENDING rules are in no tier, so nobody will reach them:\n%s\n' "${only_rows}" >&2; bad=1; }
+  tiers="$(awk '/^# TIER [0-9]/ { if (h != "") printf "%s\t%s\t%d\n", h, w, n
+                                  h = $0; w = $0; sub(/.*\(/, "", w); sub(/\).*/, "", w); n = 0; next }
+                /^#     [a-z_][a-z0-9_]*$/ { n++ }
+                END { if (h != "") printf "%s\t%s\t%d\n", h, w, n }' "${ABSENCE_CENSUS}")" || return 1
+  [[ -n "${tiers}" ]] || { echo 'the published order has no tier headings' >&2; return 1; }
+  while IFS=$'\t' read -r heading want got; do
+    [[ "${want}" == "${got}" ]] || { printf '%s — the heading says %s and lists %s\n' "${heading}" "${want}" "${got}" >&2; bad=1; }
+  done <<<"${tiers}"
+  return "${bad}"
+}
+check "...and the order it publishes covers every pending rule once, each tier counted right" \
+  absence_order_covers_every_pending_row
+
 # The detector, shown both answers: an absence rule it must see, and a behaviour
 # test and an unrun function it must not.
 ABSENCE_FIXTURE="${SANDBOX}/absence-fixture.sh"
@@ -25955,6 +26031,14 @@ ABSENCE_RULES=(
   'every_test_script_has_a_way_in|every_test_script_has_a_way_in|plant_script_with_no_way_in'
   'every_absence_candidate_is_in_the_census|every_absence_candidate_is_in_the_census|plant_unlisted_absence_rule'
   'absence_census_is_well_formed|absence_census_is_well_formed|plant_census_row_for_a_missing_function'
+  'absence_order_covers_every_pending_row|absence_order_covers_every_pending_row|plant_pending_rule_dropped_from_the_order'
+  'no_tee_into_a_root_file|no_tee_into_a_root_file|plant_tee_into_a_root_file'
+  'every_clean_environment_moves_the_host|every_clean_environment_moves_the_host|plant_clean_environment_without_the_host_root'
+  'every_path_stub_survives_sudo|every_path_stub_survives_sudo|plant_hand_built_stub_path'
+  'no_test_breaks_docker_through_the_environment|no_test_breaks_docker_through_the_environment|plant_docker_hidden_through_the_environment'
+  'every_promised_setting_is_applied|every_promised_setting_is_applied|plant_promised_setting_not_applied'
+  'start_bg_reads_the_file_rather_than_copying_it|start_bg_reads_the_file_rather_than_copying_it|plant_background_start_copies_a_setting'
+  'defaults_agree_on_values|defaults_agree_on_values|plant_default_wider_than_shipped'
 )
 for ar_row in "${ABSENCE_RULES[@]}"; do
   IFS='|' read -r ar_name ar_cmd ar_plant <<<"${ar_row}"

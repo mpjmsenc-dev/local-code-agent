@@ -5,7 +5,8 @@
 #
 #   PROVED   shown able to fail by rows in ABSENCE_RULES: it passes an untouched
 #            copy of the tree, and fails a stripped one and a planted one
-#   PENDING  an absence rule nothing has yet shown able to fail — the debt
+#   PENDING  an absence rule nothing has yet shown able to fail — the debt,
+#            ordered below by what a silent lapse would let through
 #   NOT      flagged by tests/absence-candidates.awk; a reader found it is not
 #            an absence rule, and says what it is instead
 #
@@ -14,6 +15,418 @@
 # reading of every other function the detector flagged, twice as it was widened.
 # Moving a row to PROVED means adding its rows to ABSENCE_RULES and lowering
 # ABSENCE_PENDING in tests/test-lib.sh, in the same change.
+#
+# ---------------------------------------------------------------------------
+# THE ORDER FOR THE PENDING RULES, by what a silent lapse would let through.
+#
+# Placed on 2026-09-14 by one reading of each rule's body: what regression it
+# catches, and what that would cost somebody using this. (?) marks a placement
+# the reader was unsure of. Work a tier to completion before the next, top
+# first. A rule leaves this list in the same change that moves its row to
+# PROVED; absence_order_covers_every_pending_row holds the list to the rows,
+# and each tier's count to the names under it.
+#
+# TIER 1  EXPOSURE  (0)
+#   a port past loopback, the inbound guard weakened, the suite writing the
+#   real machine, or data leaving the box
+#
+#
+# TIER 2  LOSS  (7)
+#   work or data destroyed, or silently not kept
+#
+#     work_is_saved_before_the_sandbox_is_destroyed
+#         an agent stop/gc path runs docker rm -f on a sandbox without
+#         agent_preserve_workspace; the agent's work is deleted
+#     view_cannot_touch_the_run
+#         the read-only 'lca agent --live' viewer gains docker rm/kill/stop or
+#         POST; watching a run can end it
+#     actions_opt_in_to_prompting
+#         backup.sh/restore.sh drop LCA_MAY_PROMPT=true: a sudoer's backup
+#         silently omits chat history, found out at restore
+#     shared_probes_let_the_caller_decide
+#         (?) a docker probe hardwires strict root, so opted-in backups still
+#         skip volumes; or LCA_MAY_PROMPT defaults true
+#     self_rewriting_scripts_exit_explicitly
+#         (?) update/install/do-user-data replace themselves mid-run and bash
+#         executes new text at a stale offset, as root
+#     no_runtime_artefact_is_tracked
+#         .env, logs, locks or pid files get committed; a git update
+#         overwrites a user's .env or ships stale state
+#     no_ollama_lookup_matches_a_shell
+#         (?) pkill -f/pgrep -f in code or docs matches the calling shell:
+#         kills the user's session or finds a phantom server
+#
+# TIER 3  FALSE ALL-CLEAR  (34)
+#   a report, a verdict or a gate saying fine when it is not; a false green
+#   hides every other tier
+#
+#     one_copy_of_the_coverage_rule
+#         (?) a hand-copied guard-coverage matcher in check-system/apply
+#         drifts, reporting ports 3000/3001 guarded when they are not
+#     every_baked_setting_is_compared
+#         a setting baked into the chat container (e.g. signup) is never
+#         drift-compared; .env edits unapplied, status says clean
+#     every_drift_key_is_reported
+#         webui_drift reports a key webui.sh has no sentence for; 'lca webui
+#         status' falls through to the healthy line
+#     no_unbounded_listing_is_piped_into_grep_q
+#         ss/ps/docker ps piped into grep -q: SIGPIPE 141 reads a present
+#         listener or container as absent
+#     no_variable_is_piped_into_an_early_exiting_reader
+#         printf of a big variable into head/grep -q SIGPIPEs above 64KiB;
+#         product checks read found as not-found
+#     no_commandless_exec_redirects_the_shell
+#         a command-less 'exec 2>/dev/null' silences stderr for the rest of
+#         every lca command; failures vanish
+#     setup_uses_verdict
+#         setup.sh hardcodes its finish line instead of setup_verdict;
+#         installer can declare success decoupled from step failures
+#     selftest_uses_the_verdict
+#         selftest.sh prints a hardcoded 'SELF-TEST PASSED' instead of
+#         selftest_verdict; 'lca test' green despite failures
+#     setup_skips_only_what_it_already_proved
+#         setup passes check-system --quick without a real generation; install
+#         verdict skips proving the model answers
+#     seed_uses_a_diff_and_reads_it_back
+#         agent settings POST accepted-and-ignored still prints 'settings
+#         seeded'; agent runs with wrong model and ends empty
+#     watch_judges_on_time_not_only_on_output
+#         watcher blocks on a silent agent so the wall clock never fires, or
+#         declares a live agent stopped
+#     prompt_check_is_not_claimed_when_skipped
+#         'lca check'/'lca test' claim the assistant prompt matches when the
+#         comparison was skipped (no jq)
+#     setup_runs_every_installer
+#         a scripts/install_*.sh is never invoked by setup.sh, yet setup
+#         completes as if that component were installed
+#     apply_does_not_read_ollama_ps
+#         lca apply compares ollama ps's live allocation, not the configured
+#         context; a setting change is judged already applied
+#     no_conditional_caller_relies_on_errexit
+#         a lib function called from if/&&: its failed as_root/rm/docker/tar
+#         step is ignored and it returns success
+#     no_script_calls_an_unreachable_helper
+#         a script calls a helper defined in a file it doesn't source; 127
+#         inside a condition reads as false
+#     disk_check_uses_the_shared_helpers
+#         check-system's own df rounds up on the wrong filesystem; passes free
+#         disk that pull_model then refuses
+#     disk_check_names_a_directory_that_exists
+#         free-disk lines name an unchecked MODELS_DIR guess; the report
+#         describes a filesystem models don't live on
+#     drift_decision_is_shared
+#         (?) a script hand-reads the Ollama drop-in to judge drift; its
+#         verdict disagrees with ollama_dropin_matches
+#     submit_waits_longer_than_the_measured_lag
+#         (?) identification gives up under 120s: user told task NOT submitted
+#         while its sandbox starts and runs unwatched
+#     same_group_branch_kills_nothing
+#         (?) stop_followers signals its own process group on exit, killing
+#         the watcher before its final run report prints
+#     no_gate_is_satisfied_by_a_comment
+#         a gate's literal survives only in a comment; the gate passes after
+#         the code it guards is deleted
+#     no_gate_passes_on_its_own_definition
+#         a gate greps the file defining a function for its name; passes with
+#         every caller deleted
+#     no_unsourced_subshell_calls_lib
+#         a bash -c gate calls lib.sh functions without sourcing; command-not-
+#         found turns a negated assertion into a pass
+#     no_pipe_into_grep_q_in_the_suite
+#         a suite '${var} | grep -q' SIGPIPEs under pipefail; gates read a
+#         real finding as not found
+#     no_file_read_piped_into_awk
+#         a suite 'sed ... | awk' whose awk exits early kills the writer; the
+#         gate's result flips silently
+#     every_bash_script_is_linted
+#         a tracked bash script falls outside Makefile SCRIPTS; syntax errors
+#         never reach shellcheck or bash -n
+#     root_docs_are_swept_or_exempt
+#         a new root .md is read by no prose gate and not exempted; every doc
+#         rule silently skips it
+#     every_dispatch_target_is_checked
+#         a new bin/lca dispatch target has no --help test; its --help could
+#         act unobserved
+#     config_census_matches_the_fixtures
+#         a switch recorded as driven at BOTH values was only ever run at one;
+#         the untested path counts as covered
+#     every_switch_is_in_the_config_census
+#         a new true/false switch in .env.example gets no coverage row; nobody
+#         decides whether its other value is tested
+#     config_blindness_has_not_grown
+#         SHIPPED-ONLY switches (other value never driven) grow back past zero
+#         unnoticed
+#     group_a_debt_has_not_grown
+#         count of weak source-grep (Group A) gates climbs past 74 unnoticed
+#     census_names_real_gates
+#         source-grep census keeps rows for deleted gates, unknown labels or
+#         blank reasons; shrinkage hides
+#
+# TIER 4  WRONG ADVICE  (75)
+#   a command, path, flag or port that does not exist or does the wrong
+#   thing. Hangs and loud install failures fit no tier and sit at the top of
+#   this one
+#
+#     banner_network_probes_bound_themselves
+#         a login-banner curl loses --max-time; on a host without timeout(1)
+#         every SSH login hangs
+#     every_docker_question_is_bounded
+#         an unbounded docker info/ps/inspect: a daemon that accepts and never
+#         answers hangs lca check, webui status
+#     no_helper_decides_for_its_caller
+#         (?) a lib helper calls can_root itself, so reporters and the login
+#         banner stall waiting for a sudo password
+#     no_sourced_script_declares_for_its_caller
+#         (?) a sourced script sets LCA_MAY_PROMPT=true at top level, turning
+#         its sourcing reporter into a password prompt
+#     sudo_asks_out_loud
+#         (?) select_docker/run_reader open an interactive sudo prompt before
+#         trying sudo -n, or without saying why
+#     sudo_probes_are_guarded
+#         (?) an 'as_root docker info' probe without can_root/root_for_probe
+#         dies or prompts mid-report
+#     uninstall_removals_can_reach_root
+#         a bare rm on a root-owned path aborts uninstall; later units,
+#         models, link are left and restart at boot
+#     no_restart_as_apply_instruction
+#         messages/docs offer docker/webui restart to apply a setting;
+#         container keeps old baked env, change silently not applied
+#     no_installer_as_apply_instruction
+#         docs tell readers to rerun an install_*.sh after editing .env
+#         instead of 'lca apply'
+#     no_status_command_sends_you_to_an_installer
+#         messages in lca-dispatched scripts pair a .env edit with rerunning
+#         an installer instead of 'lca apply'
+#     drift_messages_name_apply
+#         a drift warning in check-system/webui omits 'lca apply', leaving no
+#         working fix
+#     faq_does_not_overclaim_offline
+#         FAQ again promises offline mode physically cannot reach the
+#         internet, though DNS/STUN/WireGuard stay open
+#     pull_advice_checks_the_kill_switch
+#         an offline-mode box is told 'ollama pull' with no mention the kill
+#         switch blocks it
+#     pin_is_sized_before_the_pull
+#         'lca model X' downloads gigabytes before model_fits_ram rejects the
+#         model for this RAM
+#     listing_flags_models_that_do_not_fit
+#         --list-recommended lists models under 'fit this machine' that
+#         tune.sh's model_fits_ram rejects
+#     perf_vram_within_the_computed_maximum
+#         PERFORMANCE.md calls a model comfortable at a VRAM size where
+#         largest_model_for_vram says it doesn't fit
+#     ladder_agrees_with_tune
+#         check-system keeps its own RAM staircase and recommends a model
+#         auto-tune would not choose
+#     no_hardcoded_ladder
+#         check-system.sh hardcodes a TUNE_MODEL tag, recommending a model the
+#         real ladder no longer picks
+#     readme_ram_ladder_matches_the_code
+#         README RAM table gives a model/context that choose_for_ram does not
+#         give at that RAM
+#     readme_family_table_matches_the_code
+#         README MODEL_FAMILY table advertises size rungs auto-tune never
+#         selects
+#     gpu_doc_vram_table_matches_the_code
+#         GPU.md VRAM table promises a largest model that
+#         largest_model_for_vram disagrees with
+#     docs_repeat_the_ladder_correctly
+#         INSTALL/TROUBLESHOOTING pair a RAM size with a context length the
+#         ladder doesn't use
+#     no_script_blames_ram_on_its_own
+#         a silent model is blamed on RAM by hand instead of the measured
+#         model_silence_reason
+#     example_env_is_valid
+#         .env.example gains a line load_env rejects; a fresh .env copy makes
+#         every command die
+#     env_keys_and_defaults_agree
+#         (?) a .env.example key has no load_env default (or reverse); older
+#         .env files silently run it empty
+#     unbacked_settings
+#         a .env.example key gains no lib.sh default; a .env predating it runs
+#         with an empty value
+#     undocumented_settings
+#         load_env defaults a key .env.example never shows; a behaviour-
+#         changing setting nobody can find
+#     readme_documents_every_setting
+#         README settings table lists a removed key or a wrong default;
+#         setting it does nothing
+#     every_numeric_setting_is_guarded
+#         a numeric .env setting goes unvalidated by check-system; a typo
+#         fails later as something unrelated
+#     docker_advice_is_conditional
+#         a host without systemd is told 'systemctl start docker', or messages
+#         hardcode it instead of docker_start_hint
+#     ollama_advice_is_conditional
+#         no-systemd hosts told journalctl -u ollama / systemctl restart
+#         ollama, commands that cannot work there
+#     no_script_hardcodes_docker_remedies
+#         user who cannot reach a healthy daemon told to start it or join the
+#         docker group
+#     every_setup_stop_names_a_command
+#         an agent-setup 'blocked' stop names no command to run next
+#     apt_failure_checks_sudo_first
+#         apt failure blamed on the dpkg lock or network when sudo could not
+#         run at all
+#     root_scripts_are_advised_with_sudo
+#         a message advises running setup.sh or an install_*.sh without sudo;
+#         it fails as non-root
+#     advice_paths_are_absolute
+#         messages or usage say ./x.sh, scripts/x.sh or bare x.sh, which only
+#         resolve inside the checkout
+#     doc_blocks_establish_their_directory
+#         doc code blocks run ./script.sh without a cd, or prose says run x.sh
+#         (not on PATH)
+#     every_advised_path_exists
+#         a message sends the reader to ${SCRIPT_DIR}/${REPO_ROOT} path that
+#         no longer exists
+#     every_advised_flag_is_real
+#         docs or messages advise 'x.sh --flag' that the script's help doesn't
+#         document
+#     advice_names_only_documented_commands
+#         advice sends users to the internal --install-service flag
+#     help_commands_all_real
+#         'lca help' advertises a subcommand bin/lca does not dispatch
+#     prompt_commands_all_real
+#         the model's system prompt names an lca subcommand that doesn't
+#         exist; the assistant recommends it
+#     doc_section_references_resolve
+#         a message points at docs/X.md (section) that doesn't exist or is
+#         built from a variable
+#     script_doc_references_resolve
+#         a script names a .md file absent from repo root, docs/ or config/
+#     md_anchor_links_resolve
+#         a tracked doc links to a missing file or #anchor
+#     every_caller_uses_the_deciding_wrapper
+#         a script calls wait_for_webui directly; a stopped container is
+#         reported as merely slow
+#     speed_measures_reading_separately
+#         'lca speed' reports a cached prompt-read rate, overstating reading
+#         speed and edit cost
+#     every_reporter_classifies_the_placement
+#         a script prints ollama ps placement raw; a CPU-only box is shown a
+#         CPU/GPU split
+#     no_reader_uses_the_false_swallowing_form
+#         jq '//' turns stored native_tool_calling=false into the default;
+#         agent/selftest misreport the setting
+#     asks_before_it_concludes
+#         backups search runs before a readability check; an unreadable
+#         backups dir is reported as no backups
+#     no_message_sends_the_user_into_a_self_match
+#         a message tells users to run ps | grep, which always matches itself;
+#         a dead process looks alive
+#     docs_read_backups_safely
+#         docs glob several backup archives into one tar command, which fails
+#         or reads the wrong one
+#     docs_copy_one_backup_not_all
+#         docs scp a remote backup-*.tar.gz glob, copying every retained
+#         archive
+#     readme_supply_chain_matches_the_code
+#         README names a different open-webui tag than lib.sh pulls, or
+#         misstates root-piped vendor installers
+#     chmod_lists_agree
+#         setup/update/docs chmod different directories; bin/lca or scripts
+#         left non-executable after update
+#     setup_only_dies_on_core_steps
+#         (?) a non-core setup step runs bare; its failure aborts the whole
+#         install
+#     optional_installers_are_not_fatal
+#         (?) an installer with a SKIP_/ENABLE_ switch runs untested in setup;
+#         its failure aborts the install
+#     remote_installers_retry
+#         (?) curl | sh vendor installer has no retry loop; one network blip
+#         fails the install
+#     cache_writes_cannot_abort
+#         (?) bare mkdir/write under ~/.cache/local-code-agent aborts lca
+#         ask/speed/run-agent/uninstall silently under set -e
+#     no_bare_set_env_var
+#         a script calls set_env_var directly; a failed .env write exits or
+#         continues with no explanation
+#     banner_states_are_documented
+#         the login banner can print a state TROUBLESHOOTING.md never explains
+#     no_aider_collision
+#         a .env key shares a name with an aider env var; aider silently picks
+#         up our value (skips without aider)
+#     both_reporters_ask_lib
+#         install_git/check-system read git config themselves; under sudo
+#         root's identity is reported, not the user's
+#     no_script_asks_who_by_hand
+#         a script hand-writes SUDO_USER:-$(id -un); wrong account named,
+#         chowned or added to docker group
+#     retention_is_described_once
+#         a retention sentence prints raw BACKUP_KEEP instead of
+#         retention_desc, misdescribing how many backups are kept
+#     docs_show_the_prompt_recipe
+#         a doc teaches a 'cd ... && lca' handover recipe the system prompt no
+#         longer emits
+#     printed_recipe_matches_the_prompt
+#         a script prints a 'my-project && ' recipe that differs from the
+#         prompt's
+#     ask_keeps_its_answer_stream_clean
+#         lca ask writes info/ok/step lines to stdout, corrupting an answer
+#         piped or redirected
+#     no_silent_ollama_start
+#         ensure_ollama_up >/dev/null: up to 60s of silence while Ollama
+#         starts looks like a hang
+#     dispatched_commands_are_all_documented
+#         bin/lca dispatches a subcommand 'lca help' never mentions
+#     model_flags_are_discoverable
+#         update-model.sh accepts a flag 'lca help' never mentions
+#     readme_documents_every_command
+#         a command in 'lca help' is missing from the README command table
+#     every_job_count_claim_is_the_real_one
+#         README/CONTRIBUTING/pre-push state the wrong CI job count,
+#         understating what a local push leaves unchecked
+#     perf_baseline_is_stated_once
+#         PERFORMANCE.md prose quotes a bold speed that differs from its
+#         measured table
+#     perf_measured_figures_match_the_table
+#         PERFORMANCE.md presents a second untilded tokens/second figure for a
+#         model the table answers
+#
+# TIER 5  STYLE  (14)
+#   duplication and wording; a lapse costs maintainability, not users
+#
+#     image_is_named_once
+#         (?) the open-webui image literal is written a second time outside
+#         lib.sh, free to drift
+#     ollama_bg_log_path_is_named_once
+#         .ollama-serve.log is spelled out again instead of OLLAMA_BG_LOG
+#     venv_python_is_the_only_source
+#         a script builds .venv/bin/python|pip|aider by hand instead of
+#         venv_python/aider_bin
+#     installer_does_not_reteach_next_steps
+#         install.sh repeats next-step commands after setup.sh already printed
+#         them
+#     no_script_recites_the_formula
+#         a message recites the '0.6 GB per billion' sizing formula instead of
+#         the computed answer
+#     not_stock
+#         chat start screen ships Open WebUI's stock suggestions (Roman
+#         empire, kids' art) instead of coding prompts
+#     every_honoured_setting_is_accounted_for
+#         lib.sh honours an env name that is neither in .env.example nor
+#         listed internal
+#     usage_on_an_error_path_goes_to_stderr
+#         a failing path prints usage to stdout instead of stderr
+#     readme_tree_lists_every_script
+#         a scripts/*.sh file is never mentioned in the README
+#     contributing_names_things_that_exist
+#         CONTRIBUTING.md names functions or files that no longer exist
+#     makefile_header_matches_targets
+#         Makefile header lists make targets that don't exist, or omits real
+#         ones
+#     counted_headings_match_their_lists
+#         a CONTRIBUTING.md heading's stated count ('Eleven ...') disagrees
+#         with its numbered list
+#     census_order_covers_every_a_row
+#         source-grep census's published work order misses or duplicates Group
+#         A rows
+#     no_tracked_path_is_hostile_to_a_glob
+#         a tracked path starting with '-' or containing whitespace, misparsed
+#         by tree-walking tools
+#
+# ---------------------------------------------------------------------------
 PROVED	absence_census_is_well_formed	in ABSENCE_RULES: a census row for a function that does not exist
 PROVED	every_absence_candidate_is_in_the_census	in ABSENCE_RULES: an absence rule nobody listed, appended to test-lib.sh
 PROVED	every_scanned_file_lexes_to_its_end	in ABSENCE_RULES: an unterminated string appended to speed.sh
@@ -42,7 +455,7 @@ PENDING	config_blindness_has_not_grown	passes with its subject deleted, and noth
 PENDING	config_census_matches_the_fixtures	passes with its subject deleted, and nothing plants a violation
 PENDING	contributing_names_things_that_exist	fails when its subject is gone, but nothing plants a violation
 PENDING	counted_headings_match_their_lists	found by the second reading, fails when awk finds a miscounted heading in CONTRIBUTING.md; guarded
-PENDING	defaults_agree_on_values	passes with its subject deleted, and nothing plants a violation
+PROVED	defaults_agree_on_values	in ABSENCE_RULES: load_env's OLLAMA_HOST default widened to 0.0.0.0
 PENDING	disk_check_names_a_directory_that_exists	found by the second reading, mixed, presence-heavy: fails if a message names raw MODELS_DIR
 PENDING	disk_check_uses_the_shared_helpers	found by the second reading, mixed: fails if check-system.sh code runs its own df; presence clauses too
 PENDING	dispatched_commands_are_all_documented	passes with its subject deleted, and nothing plants a violation
@@ -61,15 +474,15 @@ PENDING	every_advised_path_exists	fails when its subject is gone, but nothing pl
 PENDING	every_baked_setting_is_compared	passes with its subject deleted, and nothing plants a violation
 PENDING	every_bash_script_is_linted	a partial floor only, and nothing plants a violation
 PENDING	every_caller_uses_the_deciding_wrapper	a partial floor only, and nothing plants a violation
-PENDING	every_clean_environment_moves_the_host	fails when its subject is gone, but nothing plants a violation
+PROVED	every_clean_environment_moves_the_host	in ABSENCE_RULES: an env -i harness without LCA_HOST_ROOT appended to a test
 PENDING	every_dispatch_target_is_checked	passes with its subject deleted, and nothing plants a violation
 PENDING	every_docker_question_is_bounded	a partial floor only, and nothing plants a violation
 PENDING	every_drift_key_is_reported	fails when its subject is gone, but nothing plants a violation
 PENDING	every_honoured_setting_is_accounted_for	fails when its subject is gone, but nothing plants a violation
 PENDING	every_job_count_claim_is_the_real_one	fails when its subject is gone, but nothing plants a violation
 PENDING	every_numeric_setting_is_guarded	fails when its subject is gone, but nothing plants a violation
-PENDING	every_path_stub_survives_sudo	passes with its subject deleted, and nothing plants a violation
-PENDING	every_promised_setting_is_applied	fails when its subject is gone, but nothing plants a violation
+PROVED	every_path_stub_survives_sudo	in ABSENCE_RULES: a PATH front-load built by hand in a test
+PROVED	every_promised_setting_is_applied	in ABSENCE_RULES: DO_NOT_TRACK dropped from install_webui.sh
 PENDING	every_reporter_classifies_the_placement	fails when its subject is gone, but nothing plants a violation
 PENDING	every_setup_stop_names_a_command	found by the second reading, fails on a 'blocked "' line in agent-setup.sh naming no command; guarded
 PENDING	every_switch_is_in_the_config_census	fails when its subject is gone, but nothing plants a violation
@@ -109,8 +522,8 @@ PENDING	no_script_recites_the_formula	passes with its subject deleted, and nothi
 PENDING	no_silent_ollama_start	passes with its subject deleted, and nothing plants a violation
 PENDING	no_sourced_script_declares_for_its_caller	fails when its subject is gone, but nothing plants a violation
 PENDING	no_status_command_sends_you_to_an_installer	passes with its subject deleted, and nothing plants a violation
-PENDING	no_tee_into_a_root_file	passes with its subject deleted, and nothing plants a violation
-PENDING	no_test_breaks_docker_through_the_environment	fails when its subject is gone, but nothing plants a violation
+PROVED	no_tee_into_a_root_file	in ABSENCE_RULES: 'as_root tee' into /etc appended to setup.sh
+PROVED	no_test_breaks_docker_through_the_environment	in ABSENCE_RULES: DOCKER_HOST exported in a test
 PENDING	no_tracked_path_is_hostile_to_a_glob	plants a violation of half its matcher; not shown against a stripped tree
 PENDING	no_unbounded_listing_is_piped_into_grep_q	passes with its subject deleted, and nothing plants a violation
 PENDING	no_unsourced_subshell_calls_lib	fails when its subject is gone, but nothing plants a violation
@@ -149,7 +562,7 @@ PENDING	setup_skips_only_what_it_already_proved	found by the second reading, mix
 PENDING	setup_uses_verdict	found by the second reading, mixed: ! grep hardcoded verdict line in setup.sh; setup_verdict presence
 PENDING	shared_probes_let_the_caller_decide	found by the second reading, mixed: fails if a probe body contains can_root; presence clauses too
 PENDING	speed_measures_reading_separately	found by the second reading, mixed: ! grep cached counters off response in speed.sh; presence too
-PENDING	start_bg_reads_the_file_rather_than_copying_it	found by the second reading, mixed: ! grep hand-copied OLLAMA_ settings in start_ollama_bg
+PROVED	start_bg_reads_the_file_rather_than_copying_it	in ABSENCE_RULES: OLLAMA_NO_CLOUD hand-copied into start_ollama_bg
 PENDING	submit_waits_longer_than_the_measured_lag	found by the third reading, mixed: fails when any 'seq 1 N' loop waits under 120s; presence guards
 PENDING	sudo_asks_out_loud	a partial floor only, and nothing plants a violation
 PENDING	sudo_probes_are_guarded	fails when its subject is gone, but nothing plants a violation
@@ -206,3 +619,4 @@ NOT	unreadable_is_not_reported_as_empty	presence: both files must contain readab
 NOT	unrequested_edits_are_documented	presence: section, 'unrequested changes', 'git diff HEAD~', 'git revert' must be present
 NOT	value_options_explain_a_missing_value	behaviour: runs each script with a value flag missing its value
 NOT	verdict_line_is_consistent	presence: SETUP_DONE_LINE must appear in three named files
+PROVED	absence_order_covers_every_pending_row	in ABSENCE_RULES: a pending rule dropped from the published order
