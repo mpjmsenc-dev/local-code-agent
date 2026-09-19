@@ -25887,6 +25887,30 @@ plant_self_rewriting_script_that_runs_on() {
 plant_runtime_artefact_into_the_tree() {
   printf 'planted by the harness\n' > "$1/agent.log"; echo agent.log
 }
+plant_setup_hardcodes_its_finish_line() {
+  printf '\necho "SETUP FINISHED WITH ERRORS"\n' >> "$1/setup.sh"; echo setup.sh
+}
+plant_selftest_hardcodes_its_verdict() {
+  printf '\necho "SELF-TEST PASSED"\n' >> "$1/scripts/selftest.sh"; echo scripts/selftest.sh
+}
+plant_apply_reads_the_live_allocation() {
+  sed -i '/^apply_ollama() {$/a\  ollama ps >/dev/null' "$1/scripts/apply.sh"
+  echo scripts/apply.sh
+}
+plant_installer_setup_never_runs() {
+  printf '#!/usr/bin/env bash\ntrue\n' > "$1/scripts/install_planted.sh"
+  echo scripts/install_planted.sh
+}
+plant_disk_check_measures_it_again() {
+  printf '\ndf -h /\n' >> "$1/check-system.sh"; echo check-system.sh
+}
+plant_seed_sends_the_legacy_key() {
+  printf '\nbody="llm_model: x"\n' >> "$1/agent.sh"; echo agent.sh
+}
+plant_watcher_reads_status_after_a_negated_read() {
+  printf '\nif ! IFS= read -r line; then :; fi\n' >> "$1/scripts/agent-watch.sh"
+  echo scripts/agent-watch.sh
+}
 plant_unlisted_absence_rule() {
   cat >> "$1/tests/test-lib.sh" <<'PLANT'
 
@@ -25916,7 +25940,7 @@ PLANT
 ABSENCE_CENSUS="${REPO}/tests/absence-rule-census.tsv"
 # The pending count, exactly. Moving a row to PROVED means lowering this in the
 # same change; adding a PENDING row means raising it, in a diff somebody reads.
-ABSENCE_PENDING=123
+ABSENCE_PENDING=116
 
 absence_census_rows() {   # -> STATUS<TAB>NAME<TAB>REASON, comments and blank lines dropped
   grep -vE '^(#|[[:space:]]*$)' "${ABSENCE_CENSUS}"
@@ -26088,6 +26112,13 @@ ABSENCE_RULES=(
   'shared_probes_let_the_caller_decide|shared_probes_let_the_caller_decide|plant_probe_that_decides_for_its_caller'
   'self_rewriting_scripts_exit_explicitly|self_rewriting_scripts_exit_explicitly|plant_self_rewriting_script_that_runs_on'
   'no_runtime_artefact_is_tracked|no_runtime_artefact_is_tracked|plant_runtime_artefact_into_the_tree'
+  'setup_uses_verdict|setup_uses_verdict|plant_setup_hardcodes_its_finish_line'
+  'selftest_uses_the_verdict|selftest_uses_the_verdict|plant_selftest_hardcodes_its_verdict'
+  'apply_does_not_read_ollama_ps|apply_does_not_read_ollama_ps|plant_apply_reads_the_live_allocation'
+  'setup_runs_every_installer|setup_runs_every_installer|plant_installer_setup_never_runs'
+  'disk_check_uses_the_shared_helpers|disk_check_uses_the_shared_helpers|plant_disk_check_measures_it_again'
+  'seed_uses_a_diff_and_reads_it_back|seed_uses_a_diff_and_reads_it_back|plant_seed_sends_the_legacy_key'
+  'watch_judges_on_time_not_only_on_output|watch_judges_on_time_not_only_on_output|plant_watcher_reads_status_after_a_negated_read'
 )
 for ar_row in "${ABSENCE_RULES[@]}"; do
   IFS='|' read -r ar_name ar_cmd ar_plant <<<"${ar_row}"

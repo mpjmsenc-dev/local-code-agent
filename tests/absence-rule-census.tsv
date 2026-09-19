@@ -35,7 +35,7 @@
 #   work or data destroyed, or silently not kept
 #
 #
-# TIER 3  FALSE ALL-CLEAR  (34)
+# TIER 3  FALSE ALL-CLEAR  (27)
 #   a report, a verdict or a gate saying fine when it is not; a false green
 #   hides every other tier
 #
@@ -57,39 +57,18 @@
 #     no_commandless_exec_redirects_the_shell
 #         a command-less 'exec 2>/dev/null' silences stderr for the rest of
 #         every lca command; failures vanish
-#     setup_uses_verdict
-#         setup.sh hardcodes its finish line instead of setup_verdict;
-#         installer can declare success decoupled from step failures
-#     selftest_uses_the_verdict
-#         selftest.sh prints a hardcoded 'SELF-TEST PASSED' instead of
-#         selftest_verdict; 'lca test' green despite failures
 #     setup_skips_only_what_it_already_proved
 #         setup passes check-system --quick without a real generation; install
 #         verdict skips proving the model answers
-#     seed_uses_a_diff_and_reads_it_back
-#         agent settings POST accepted-and-ignored still prints 'settings
-#         seeded'; agent runs with wrong model and ends empty
-#     watch_judges_on_time_not_only_on_output
-#         watcher blocks on a silent agent so the wall clock never fires, or
-#         declares a live agent stopped
 #     prompt_check_is_not_claimed_when_skipped
 #         'lca check'/'lca test' claim the assistant prompt matches when the
 #         comparison was skipped (no jq)
-#     setup_runs_every_installer
-#         a scripts/install_*.sh is never invoked by setup.sh, yet setup
-#         completes as if that component were installed
-#     apply_does_not_read_ollama_ps
-#         lca apply compares ollama ps's live allocation, not the configured
-#         context; a setting change is judged already applied
 #     no_conditional_caller_relies_on_errexit
 #         a lib function called from if/&&: its failed as_root/rm/docker/tar
 #         step is ignored and it returns success
 #     no_script_calls_an_unreachable_helper
 #         a script calls a helper defined in a file it doesn't source; 127
 #         inside a condition reads as false
-#     disk_check_uses_the_shared_helpers
-#         check-system's own df rounds up on the wrong filesystem; passes free
-#         disk that pull_model then refuses
 #     disk_check_names_a_directory_that_exists
 #         free-disk lines name an unchecked MODELS_DIR guess; the report
 #         describes a filesystem models don't live on
@@ -409,7 +388,9 @@
 PROVED	absence_census_is_well_formed	in ABSENCE_RULES: a census row for a function that does not exist
 PROVED	absence_order_covers_every_pending_row	in ABSENCE_RULES: a pending rule dropped from the published order
 PROVED	actions_opt_in_to_prompting	in ABSENCE_RULES: LCA_MAY_PROMPT=true planted in check-system.sh, a script that only reports
+PROVED	apply_does_not_read_ollama_ps	in ABSENCE_RULES: 'ollama ps' planted inside apply_ollama, a live allocation read as a setting
 PROVED	defaults_agree_on_values	in ABSENCE_RULES: load_env's OLLAMA_HOST default widened to 0.0.0.0
+PROVED	disk_check_uses_the_shared_helpers	in ABSENCE_RULES: check-system.sh's own df planted back
 PROVED	every_absence_candidate_is_in_the_census	in ABSENCE_RULES: an absence rule nobody listed, appended to test-lib.sh
 PROVED	every_clean_environment_moves_the_host	in ABSENCE_RULES: an env -i harness without LCA_HOST_ROOT appended to a test
 PROVED	every_path_stub_survives_sudo	in ABSENCE_RULES: a PATH front-load built by hand in a test
@@ -426,14 +407,18 @@ PROVED	no_test_breaks_docker_through_the_environment	in ABSENCE_RULES: DOCKER_HO
 PROVED	no_test_function_is_defined_and_never_run	in ABSENCE_RULES: a dead function appended to test-agent-watch.sh
 PROVED	no_test_function_is_defined_twice	in ABSENCE_RULES: a duplicate appended to test-netmode.sh
 PROVED	no_unannounced_long_wait	in ABSENCE_RULES: bare, announced-only, comment-above and start-in-data waits
+PROVED	seed_uses_a_diff_and_reads_it_back	in ABSENCE_RULES: the legacy llm_model key planted in agent.sh
 PROVED	self_rewriting_scripts_exit_explicitly	in ABSENCE_RULES: a line appended past update.sh's main-and-exit, so the tail runs on
+PROVED	selftest_uses_the_verdict	in ABSENCE_RULES: a hardcoded 'SELF-TEST PASSED' planted in selftest.sh
+PROVED	setup_runs_every_installer	in ABSENCE_RULES: an install_*.sh planted that setup.sh never invokes
+PROVED	setup_uses_verdict	in ABSENCE_RULES: a hardcoded finish line planted in setup.sh, beside setup_verdict
 PROVED	shared_probes_let_the_caller_decide	in ABSENCE_RULES: can_root planted inside docker_daemon_reachable, deciding the caller question
 PROVED	start_bg_reads_the_file_rather_than_copying_it	in ABSENCE_RULES: OLLAMA_NO_CLOUD hand-copied into start_ollama_bg
 PROVED	view_cannot_touch_the_run	in ABSENCE_RULES: a write verb (docker kill) planted in the read-only viewer
+PROVED	watch_judges_on_time_not_only_on_output	in ABSENCE_RULES: a negated read planted in agent-watch.sh, whose status is a tick
 PROVED	work_is_saved_before_the_sandbox_is_destroyed	in ABSENCE_RULES: a second sandbox-removal site planted with nothing saving the workspace above it
 PENDING	advice_names_only_documented_commands	passes with its subject deleted, and nothing plants a violation
 PENDING	advice_paths_are_absolute	passes with its subject deleted, and nothing plants a violation
-PENDING	apply_does_not_read_ollama_ps	fails when its subject is gone, but nothing plants a violation
 PENDING	apt_failure_checks_sudo_first	found by the third reading, mixed: ordering fails when 'held the lock' line precedes sudo_would_block; presence greps
 PENDING	ask_keeps_its_answer_stream_clean	found by the second reading, fails on any ask.sh status line not sent to stderr; lib.sh presence rider
 PENDING	asks_before_it_concludes	fails when its subject is gone, but nothing plants a violation
@@ -449,7 +434,6 @@ PENDING	config_census_matches_the_fixtures	passes with its subject deleted, and 
 PENDING	contributing_names_things_that_exist	fails when its subject is gone, but nothing plants a violation
 PENDING	counted_headings_match_their_lists	found by the second reading, fails when awk finds a miscounted heading in CONTRIBUTING.md; guarded
 PENDING	disk_check_names_a_directory_that_exists	found by the second reading, mixed, presence-heavy: fails if a message names raw MODELS_DIR
-PENDING	disk_check_uses_the_shared_helpers	found by the second reading, mixed: fails if check-system.sh code runs its own df; presence clauses too
 PENDING	dispatched_commands_are_all_documented	passes with its subject deleted, and nothing plants a violation
 PENDING	doc_blocks_establish_their_directory	passes with its subject deleted, and nothing plants a violation
 PENDING	doc_section_references_resolve	a partial floor only, and nothing plants a violation
@@ -538,12 +522,8 @@ PENDING	root_docs_are_swept_or_exempt	passes with its subject deleted, and nothi
 PENDING	root_scripts_are_advised_with_sudo	fails when its subject is gone, but nothing plants a violation
 PENDING	same_group_branch_kills_nothing	found by the second reading, ! grep kill/pkill command in the extracted arm; non-empty guard
 PENDING	script_doc_references_resolve	a partial floor only, and nothing plants a violation
-PENDING	seed_uses_a_diff_and_reads_it_back	found by the second reading, mixed: ! grep 'llm_model:' in agent.sh; presence clauses too
-PENDING	selftest_uses_the_verdict	found by the second reading, mixed: ! grep 'SELF-TEST PASSED' in selftest.sh; verdict call presence
 PENDING	setup_only_dies_on_core_steps	found by the second reading, fails on a bare non-core step line in setup.sh; count==2 guard
-PENDING	setup_runs_every_installer	fails when its subject is gone, but nothing plants a violation
 PENDING	setup_skips_only_what_it_already_proved	found by the second reading, mixed: ! grep literal --quick on invocation; awk presence clauses
-PENDING	setup_uses_verdict	found by the second reading, mixed: ! grep hardcoded verdict line in setup.sh; setup_verdict presence
 PENDING	speed_measures_reading_separately	found by the second reading, mixed: ! grep cached counters off response in speed.sh; presence too
 PENDING	submit_waits_longer_than_the_measured_lag	found by the third reading, mixed: fails when any 'seq 1 N' loop waits under 120s; presence guards
 PENDING	sudo_asks_out_loud	a partial floor only, and nothing plants a violation
@@ -553,7 +533,6 @@ PENDING	undocumented_settings	passes with its subject deleted, and nothing plant
 PENDING	uninstall_removals_can_reach_root	found by the second reading, fails on a bare rm not behind as_root; escalated>=8 guard
 PENDING	usage_on_an_error_path_goes_to_stderr	fails when its subject is gone, but nothing plants a violation
 PENDING	venv_python_is_the_only_source	passes with its subject deleted, and nothing plants a violation
-PENDING	watch_judges_on_time_not_only_on_output	found by the second reading, mixed: ! grep negated read in agent-watch.sh; read -t presence
 NOT	a_real_answer_still_works	behaviour: runs ask.sh with stubs; greps its output for the answer
 NOT	absence_rule_can_fail	helper: the absence harness itself; no check line runs it
 NOT	aider_privacy_settings_reach_aider	presence: --config arg, conf file, 'analytics/check-update: false' lines, README claim must exist
