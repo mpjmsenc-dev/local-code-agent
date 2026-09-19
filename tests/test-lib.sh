@@ -3875,12 +3875,23 @@ check "...and only one command at a time starts the server" \
 # Generalised past that one name. Runtime state belongs to a machine, not to
 # the repository, and the next such file will have some other suffix.
 no_runtime_artefact_is_tracked() {
-  local tracked
+  local files tracked n
+  # The repository's own list where there is one, and the tree on disk where
+  # there is not: absence_tree hands this rule a copy with no .git, and
+  # 'ls-files 2>/dev/null || true' there returned nothing and read as a clean
+  # tree — the rule passed with its whole subject deleted. Measured on
+  # 2026-09-19; it is why this row sat PENDING.
+  files="$(git -C "${REPO}" ls-files 2>/dev/null)" || files=""
+  [[ -n "${files}" ]] || files="$(cd "${REPO}" && find . -type f -not -path './.git/*' | sed 's|^\./||')"
+  n="$(grep -c . <<<"${files}")"
+  # A floor, so an unlistable tree cannot pass as an empty one. 85 files today.
+  (( n >= 40 )) || {
+    printf 'only %s files could be listed — this rule stopped reading the tree\n' "${n}" >&2
+    return 1; }
   # '.env' anchored, so the tracked '.env.example' template it is generated
   # from is not swept up with it — the first draft of this matched that and
   # failed on a clean tree.
-  tracked="$(git -C "${REPO}" ls-files 2>/dev/null \
-    | grep -E '(^|/)\.env$|(^|/)\.ollama-serve|\.(log|lock|pid|sock)$' || true)"
+  tracked="$(grep -E '(^|/)\.env$|(^|/)\.ollama-serve|\.(log|lock|pid|sock)$' <<<"${files}" || true)"
   [[ -z "${tracked}" ]] || {
     printf 'runtime state is committed to the repository:\n%s\n' "${tracked}" >&2
     return 1; }
@@ -25845,6 +25856,37 @@ plant_pending_rule_dropped_from_the_order() {
   sed -i "${first}d" "$1/tests/absence-rule-census.tsv"
   echo tests/absence-rule-census.tsv
 }
+plant_reporter_that_opts_into_prompting() {
+  # A script that only reports, opted into a password prompt. Built from
+  # pieces: written out, this line would be that setting, in this file.
+  printf '\n%s=%s\n' 'LCA_MAY_PROMPT' 'true' >> "$1/check-system.sh"; echo check-system.sh
+}
+plant_viewer_that_can_stop_the_run() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\ndocker %s "${name}"\n' 'kill' >> "$1/scripts/agent-view.sh"
+  echo scripts/agent-view.sh
+}
+plant_sandbox_removed_without_saving() {
+  # A second removal site, with nothing copying the workspace out above it.
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\ndocker rm -f "${name}"\n' >> "$1/agent.sh"; echo agent.sh
+}
+plant_ollama_lookup_that_matches_a_shell() {
+  # From pieces: this rule reads every *.sh in the tree, this file included.
+  printf '\n%s %s ollama\n' 'pkill' '-f' >> "$1/scripts/speed.sh"; echo scripts/speed.sh
+}
+plant_probe_that_decides_for_its_caller() {
+  sed -i '/^docker_daemon_reachable() {$/a\  can_root || return 1' "$1/scripts/lib.sh"
+  echo scripts/lib.sh
+}
+plant_self_rewriting_script_that_runs_on() {
+  # The exit no longer ends the line that invokes main, so a replacement's
+  # tail is read at the stale offset and runs on.
+  printf '\n%s\n' 'echo done' >> "$1/update.sh"; echo update.sh
+}
+plant_runtime_artefact_into_the_tree() {
+  printf 'planted by the harness\n' > "$1/agent.log"; echo agent.log
+}
 plant_unlisted_absence_rule() {
   cat >> "$1/tests/test-lib.sh" <<'PLANT'
 
@@ -25874,7 +25916,7 @@ PLANT
 ABSENCE_CENSUS="${REPO}/tests/absence-rule-census.tsv"
 # The pending count, exactly. Moving a row to PROVED means lowering this in the
 # same change; adding a PENDING row means raising it, in a diff somebody reads.
-ABSENCE_PENDING=130
+ABSENCE_PENDING=123
 
 absence_census_rows() {   # -> STATUS<TAB>NAME<TAB>REASON, comments and blank lines dropped
   grep -vE '^(#|[[:space:]]*$)' "${ABSENCE_CENSUS}"
@@ -26039,6 +26081,13 @@ ABSENCE_RULES=(
   'every_promised_setting_is_applied|every_promised_setting_is_applied|plant_promised_setting_not_applied'
   'start_bg_reads_the_file_rather_than_copying_it|start_bg_reads_the_file_rather_than_copying_it|plant_background_start_copies_a_setting'
   'defaults_agree_on_values|defaults_agree_on_values|plant_default_wider_than_shipped'
+  'actions_opt_in_to_prompting|actions_opt_in_to_prompting|plant_reporter_that_opts_into_prompting'
+  'view_cannot_touch_the_run|view_cannot_touch_the_run|plant_viewer_that_can_stop_the_run'
+  'work_is_saved_before_the_sandbox_is_destroyed|work_is_saved_before_the_sandbox_is_destroyed|plant_sandbox_removed_without_saving'
+  'no_ollama_lookup_matches_a_shell|no_ollama_lookup_matches_a_shell|plant_ollama_lookup_that_matches_a_shell'
+  'shared_probes_let_the_caller_decide|shared_probes_let_the_caller_decide|plant_probe_that_decides_for_its_caller'
+  'self_rewriting_scripts_exit_explicitly|self_rewriting_scripts_exit_explicitly|plant_self_rewriting_script_that_runs_on'
+  'no_runtime_artefact_is_tracked|no_runtime_artefact_is_tracked|plant_runtime_artefact_into_the_tree'
 )
 for ar_row in "${ABSENCE_RULES[@]}"; do
   IFS='|' read -r ar_name ar_cmd ar_plant <<<"${ar_row}"

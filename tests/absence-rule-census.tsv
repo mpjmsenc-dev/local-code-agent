@@ -31,30 +31,9 @@
 #   real machine, or data leaving the box
 #
 #
-# TIER 2  LOSS  (7)
+# TIER 2  LOSS  (0)
 #   work or data destroyed, or silently not kept
 #
-#     work_is_saved_before_the_sandbox_is_destroyed
-#         an agent stop/gc path runs docker rm -f on a sandbox without
-#         agent_preserve_workspace; the agent's work is deleted
-#     view_cannot_touch_the_run
-#         the read-only 'lca agent --live' viewer gains docker rm/kill/stop or
-#         POST; watching a run can end it
-#     actions_opt_in_to_prompting
-#         backup.sh/restore.sh drop LCA_MAY_PROMPT=true: a sudoer's backup
-#         silently omits chat history, found out at restore
-#     shared_probes_let_the_caller_decide
-#         (?) a docker probe hardwires strict root, so opted-in backups still
-#         skip volumes; or LCA_MAY_PROMPT defaults true
-#     self_rewriting_scripts_exit_explicitly
-#         (?) update/install/do-user-data replace themselves mid-run and bash
-#         executes new text at a stale offset, as root
-#     no_runtime_artefact_is_tracked
-#         .env, logs, locks or pid files get committed; a git update
-#         overwrites a user's .env or ships stale state
-#     no_ollama_lookup_matches_a_shell
-#         (?) pkill -f/pgrep -f in code or docs matches the calling shell:
-#         kills the user's session or finds a phantom server
 #
 # TIER 3  FALSE ALL-CLEAR  (34)
 #   a report, a verdict or a gate saying fine when it is not; a false green
@@ -428,16 +407,30 @@
 #
 # ---------------------------------------------------------------------------
 PROVED	absence_census_is_well_formed	in ABSENCE_RULES: a census row for a function that does not exist
+PROVED	absence_order_covers_every_pending_row	in ABSENCE_RULES: a pending rule dropped from the published order
+PROVED	actions_opt_in_to_prompting	in ABSENCE_RULES: LCA_MAY_PROMPT=true planted in check-system.sh, a script that only reports
+PROVED	defaults_agree_on_values	in ABSENCE_RULES: load_env's OLLAMA_HOST default widened to 0.0.0.0
 PROVED	every_absence_candidate_is_in_the_census	in ABSENCE_RULES: an absence rule nobody listed, appended to test-lib.sh
+PROVED	every_clean_environment_moves_the_host	in ABSENCE_RULES: an env -i harness without LCA_HOST_ROOT appended to a test
+PROVED	every_path_stub_survives_sudo	in ABSENCE_RULES: a PATH front-load built by hand in a test
+PROVED	every_promised_setting_is_applied	in ABSENCE_RULES: DO_NOT_TRACK dropped from install_webui.sh
 PROVED	every_scanned_file_lexes_to_its_end	in ABSENCE_RULES: an unterminated string appended to speed.sh
 PROVED	every_test_script_has_a_way_in	in ABSENCE_RULES: a tests/ script nothing calls
 PROVED	new_source_greps_are_justified	in ABSENCE_RULES: an unexcused source grep appended to test-lib.sh
 PROVED	no_host_path_outside_lib	in ABSENCE_RULES: a literal /etc path written into setup.sh
+PROVED	no_ollama_lookup_matches_a_shell	in ABSENCE_RULES: a command-line process match planted in speed.sh
+PROVED	no_runtime_artefact_is_tracked	in ABSENCE_RULES: a .log planted in the tree — and the rule reads the tree it is handed, having passed with its subject deleted until 2026-09-19
 PROVED	no_skip_goes_uncounted	in ABSENCE_RULES: an uncounted skip echoed in test-netmode.sh
+PROVED	no_tee_into_a_root_file	in ABSENCE_RULES: 'as_root tee' into /etc appended to setup.sh
+PROVED	no_test_breaks_docker_through_the_environment	in ABSENCE_RULES: DOCKER_HOST exported in a test
 PROVED	no_test_function_is_defined_and_never_run	in ABSENCE_RULES: a dead function appended to test-agent-watch.sh
 PROVED	no_test_function_is_defined_twice	in ABSENCE_RULES: a duplicate appended to test-netmode.sh
 PROVED	no_unannounced_long_wait	in ABSENCE_RULES: bare, announced-only, comment-above and start-in-data waits
-PENDING	actions_opt_in_to_prompting	passes with its subject deleted, and nothing plants a violation
+PROVED	self_rewriting_scripts_exit_explicitly	in ABSENCE_RULES: a line appended past update.sh's main-and-exit, so the tail runs on
+PROVED	shared_probes_let_the_caller_decide	in ABSENCE_RULES: can_root planted inside docker_daemon_reachable, deciding the caller question
+PROVED	start_bg_reads_the_file_rather_than_copying_it	in ABSENCE_RULES: OLLAMA_NO_CLOUD hand-copied into start_ollama_bg
+PROVED	view_cannot_touch_the_run	in ABSENCE_RULES: a write verb (docker kill) planted in the read-only viewer
+PROVED	work_is_saved_before_the_sandbox_is_destroyed	in ABSENCE_RULES: a second sandbox-removal site planted with nothing saving the workspace above it
 PENDING	advice_names_only_documented_commands	passes with its subject deleted, and nothing plants a violation
 PENDING	advice_paths_are_absolute	passes with its subject deleted, and nothing plants a violation
 PENDING	apply_does_not_read_ollama_ps	fails when its subject is gone, but nothing plants a violation
@@ -455,7 +448,6 @@ PENDING	config_blindness_has_not_grown	passes with its subject deleted, and noth
 PENDING	config_census_matches_the_fixtures	passes with its subject deleted, and nothing plants a violation
 PENDING	contributing_names_things_that_exist	fails when its subject is gone, but nothing plants a violation
 PENDING	counted_headings_match_their_lists	found by the second reading, fails when awk finds a miscounted heading in CONTRIBUTING.md; guarded
-PROVED	defaults_agree_on_values	in ABSENCE_RULES: load_env's OLLAMA_HOST default widened to 0.0.0.0
 PENDING	disk_check_names_a_directory_that_exists	found by the second reading, mixed, presence-heavy: fails if a message names raw MODELS_DIR
 PENDING	disk_check_uses_the_shared_helpers	found by the second reading, mixed: fails if check-system.sh code runs its own df; presence clauses too
 PENDING	dispatched_commands_are_all_documented	passes with its subject deleted, and nothing plants a violation
@@ -474,15 +466,12 @@ PENDING	every_advised_path_exists	fails when its subject is gone, but nothing pl
 PENDING	every_baked_setting_is_compared	passes with its subject deleted, and nothing plants a violation
 PENDING	every_bash_script_is_linted	a partial floor only, and nothing plants a violation
 PENDING	every_caller_uses_the_deciding_wrapper	a partial floor only, and nothing plants a violation
-PROVED	every_clean_environment_moves_the_host	in ABSENCE_RULES: an env -i harness without LCA_HOST_ROOT appended to a test
 PENDING	every_dispatch_target_is_checked	passes with its subject deleted, and nothing plants a violation
 PENDING	every_docker_question_is_bounded	a partial floor only, and nothing plants a violation
 PENDING	every_drift_key_is_reported	fails when its subject is gone, but nothing plants a violation
 PENDING	every_honoured_setting_is_accounted_for	fails when its subject is gone, but nothing plants a violation
 PENDING	every_job_count_claim_is_the_real_one	fails when its subject is gone, but nothing plants a violation
 PENDING	every_numeric_setting_is_guarded	fails when its subject is gone, but nothing plants a violation
-PROVED	every_path_stub_survives_sudo	in ABSENCE_RULES: a PATH front-load built by hand in a test
-PROVED	every_promised_setting_is_applied	in ABSENCE_RULES: DO_NOT_TRACK dropped from install_webui.sh
 PENDING	every_reporter_classifies_the_placement	fails when its subject is gone, but nothing plants a violation
 PENDING	every_setup_stop_names_a_command	found by the second reading, fails on a 'blocked "' line in agent-setup.sh naming no command; guarded
 PENDING	every_switch_is_in_the_config_census	fails when its subject is gone, but nothing plants a violation
@@ -509,11 +498,9 @@ PENDING	no_hardcoded_ladder	passes with its subject deleted, and nothing plants 
 PENDING	no_helper_decides_for_its_caller	a partial floor only, and nothing plants a violation
 PENDING	no_installer_as_apply_instruction	passes with its subject deleted, and nothing plants a violation
 PENDING	no_message_sends_the_user_into_a_self_match	passes with its subject deleted, and nothing plants a violation
-PENDING	no_ollama_lookup_matches_a_shell	a partial floor only, and nothing plants a violation
 PENDING	no_pipe_into_grep_q_in_the_suite	passes with its subject deleted, and nothing plants a violation
 PENDING	no_reader_uses_the_false_swallowing_form	passes with its subject deleted, and nothing plants a violation
 PENDING	no_restart_as_apply_instruction	passes with its subject deleted, and nothing plants a violation
-PENDING	no_runtime_artefact_is_tracked	passes with its subject deleted, and nothing plants a violation
 PENDING	no_script_asks_who_by_hand	a partial floor only, and nothing plants a violation
 PENDING	no_script_blames_ram_on_its_own	fails when its subject is gone, but nothing plants a violation
 PENDING	no_script_calls_an_unreachable_helper	fails when its subject is gone, but nothing plants a violation
@@ -522,8 +509,6 @@ PENDING	no_script_recites_the_formula	passes with its subject deleted, and nothi
 PENDING	no_silent_ollama_start	passes with its subject deleted, and nothing plants a violation
 PENDING	no_sourced_script_declares_for_its_caller	fails when its subject is gone, but nothing plants a violation
 PENDING	no_status_command_sends_you_to_an_installer	passes with its subject deleted, and nothing plants a violation
-PROVED	no_tee_into_a_root_file	in ABSENCE_RULES: 'as_root tee' into /etc appended to setup.sh
-PROVED	no_test_breaks_docker_through_the_environment	in ABSENCE_RULES: DOCKER_HOST exported in a test
 PENDING	no_tracked_path_is_hostile_to_a_glob	plants a violation of half its matcher; not shown against a stripped tree
 PENDING	no_unbounded_listing_is_piped_into_grep_q	passes with its subject deleted, and nothing plants a violation
 PENDING	no_unsourced_subshell_calls_lib	fails when its subject is gone, but nothing plants a violation
@@ -554,15 +539,12 @@ PENDING	root_scripts_are_advised_with_sudo	fails when its subject is gone, but n
 PENDING	same_group_branch_kills_nothing	found by the second reading, ! grep kill/pkill command in the extracted arm; non-empty guard
 PENDING	script_doc_references_resolve	a partial floor only, and nothing plants a violation
 PENDING	seed_uses_a_diff_and_reads_it_back	found by the second reading, mixed: ! grep 'llm_model:' in agent.sh; presence clauses too
-PENDING	self_rewriting_scripts_exit_explicitly	fails when its subject is gone, but nothing plants a violation
 PENDING	selftest_uses_the_verdict	found by the second reading, mixed: ! grep 'SELF-TEST PASSED' in selftest.sh; verdict call presence
 PENDING	setup_only_dies_on_core_steps	found by the second reading, fails on a bare non-core step line in setup.sh; count==2 guard
 PENDING	setup_runs_every_installer	fails when its subject is gone, but nothing plants a violation
 PENDING	setup_skips_only_what_it_already_proved	found by the second reading, mixed: ! grep literal --quick on invocation; awk presence clauses
 PENDING	setup_uses_verdict	found by the second reading, mixed: ! grep hardcoded verdict line in setup.sh; setup_verdict presence
-PENDING	shared_probes_let_the_caller_decide	found by the second reading, mixed: fails if a probe body contains can_root; presence clauses too
 PENDING	speed_measures_reading_separately	found by the second reading, mixed: ! grep cached counters off response in speed.sh; presence too
-PROVED	start_bg_reads_the_file_rather_than_copying_it	in ABSENCE_RULES: OLLAMA_NO_CLOUD hand-copied into start_ollama_bg
 PENDING	submit_waits_longer_than_the_measured_lag	found by the third reading, mixed: fails when any 'seq 1 N' loop waits under 120s; presence guards
 PENDING	sudo_asks_out_loud	a partial floor only, and nothing plants a violation
 PENDING	sudo_probes_are_guarded	fails when its subject is gone, but nothing plants a violation
@@ -571,9 +553,7 @@ PENDING	undocumented_settings	passes with its subject deleted, and nothing plant
 PENDING	uninstall_removals_can_reach_root	found by the second reading, fails on a bare rm not behind as_root; escalated>=8 guard
 PENDING	usage_on_an_error_path_goes_to_stderr	fails when its subject is gone, but nothing plants a violation
 PENDING	venv_python_is_the_only_source	passes with its subject deleted, and nothing plants a violation
-PENDING	view_cannot_touch_the_run	found by the second reading, fails when grep finds write verbs in agent-view.sh; curl presence rider
 PENDING	watch_judges_on_time_not_only_on_output	found by the second reading, mixed: ! grep negated read in agent-watch.sh; read -t presence
-PENDING	work_is_saved_before_the_sandbox_is_destroyed	found by the third reading, mixed: fails on docker rm site lacking preserve, or ~/.openhands workspace claim
 NOT	a_real_answer_still_works	behaviour: runs ask.sh with stubs; greps its output for the answer
 NOT	absence_rule_can_fail	helper: the absence harness itself; no check line runs it
 NOT	aider_privacy_settings_reach_aider	presence: --config arg, conf file, 'analytics/check-update: false' lines, README claim must exist
@@ -619,4 +599,3 @@ NOT	unreadable_is_not_reported_as_empty	presence: both files must contain readab
 NOT	unrequested_edits_are_documented	presence: section, 'unrequested changes', 'git diff HEAD~', 'git revert' must be present
 NOT	value_options_explain_a_missing_value	behaviour: runs each script with a value flag missing its value
 NOT	verdict_line_is_consistent	presence: SETUP_DONE_LINE must appear in three named files
-PROVED	absence_order_covers_every_pending_row	in ABSENCE_RULES: a pending rule dropped from the published order
