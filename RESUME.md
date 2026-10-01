@@ -1,5 +1,67 @@
 # RESUME.md — the agent tier's first run on real hardware
 
+## ⏩ IN PROGRESS 2026-10-01: migration to the 64 GB ESXi VM — read this first
+
+A Claude Code session was migrating this stack from the 8 GB droplet to a new
+VM. Upgrading the VM from Ubuntu 22.04 to 24.04 needs a reboot, which ends that
+session, so this is the handoff. Pick up at **Remaining** below.
+
+**Machine:** ESXi VM `jmurynubnt`. 8 vCPU Xeon E5-2680 v2: AVX, but **no AVX2/FMA**,
+so expect slow CPU inference. 62 GiB RAM, no GPU. One 300 G virtual disk: LVM,
+`/` is 292 G. The owner says the backing store is **RAID 0 with no
+redundancy**. The VM can't see it (one virtual disk, empty `/proc/mdstat`),
+so it's host-level. A backup kept on this disk does not survive a drive failure.
+
+### Done before the reboot
+- `~/.bashrc` for jmuryn: the last line was `export PATH="$HOME/.local/bin"`,
+  which removed /usr/bin and /bin from PATH. It now adds `.local/bin` to the
+  existing PATH (guarded). Original saved as `~/.bashrc.bak-20261001`.
+- `lca check` on 22.04: 34 PASS / 4 WARN / 1 FAIL. The FAIL is real: the agent
+  container was not running, so nothing listened on Tailscale :3001. The FAIL
+  message itself was scrambled; fixed in 6ad04c8 (check-system.sh split the
+  gap line at the first space instead of the last). With root, `--quick` gives
+  36 / 3 / 1. That 1 is the same agent FAIL.
+- **14b confirmed loaded.** The resident model is `qwen2.5-coder:14b-agent`. It uses the
+  same weights blob as `qwen2.5-coder:14b` (`sha256-ac9bc7a…`, 14.8B Q4_K_M),
+  plus `num_ctx 16384`. Ollama shows 8566 MiB weights + 3072 MiB KV, about 12 GB,
+  100% CPU, keep-alive forever. Also installed: 7b and 3b (fallbacks, unused).
+- Backup taken before the upgrade, verified by backup.sh:
+  `backups/local-code-agent-backup-20261001-172341.tar.gz` (964M).
+  **The owner took an ESXi snapshot before the upgrade.**
+- LVM: `lvextend -r -l +100%FREE` grew `/` from 98 G to 292 G (240 G free).
+- Temporary sudo rule `/etc/sudoers.d/jmuryn` (`NOPASSWD:ALL`) was created for
+  the session. **It must be deleted at the end** (step 8).
+
+### Remaining (in order)
+1. **Finish the upgrade.** It ran as the `lca-release-upgrade` transient unit, with
+   output in `/var/log/lca-release-upgrade.log`. Check `lsb_release -d` = 24.04 and
+   `sudo tail -50 /var/log/dist-upgrade/main.log`.
+2. **Re-enable the third-party apt sources** that the upgrade disables, pointing them at noble:
+   `/etc/apt/sources.list.d/docker.list` and `tailscale.list` (`jammy` → `noble`;
+   the upgrade may rename them `*.distUpgrade` or comment them out). For Tailscale
+   use a fresh keyring and list from `https://pkgs.tailscale.com/stable/ubuntu/noble.*`.
+   Then `sudo apt update && sudo apt full-upgrade`.
+3. **Rebuild the venv.** It was built on Python 3.10; 24.04 ships 3.12.
+   `sudo /opt/local-code-agent/scripts/install_python.sh` detects that pip is unusable
+   and rebuilds it. Confirm with `/opt/local-code-agent/.venv/bin/aider --version`.
+4. `lca check`. Fix everything; commit fixes as you go (repo is root-owned:
+   `sudo git -c user.name=jmuryn -c user.email=mpjmsenc@gmail.com commit …`).
+   Re-confirm the 14b weights are resident: `ollama ps` + `ollama show --modelfile`.
+5. `lca agent setup`, then `lca agent selftest`. Record the real timings.
+   `lca speed` gives tok/s. Setup installs the relay (clears that WARN) and
+   starts the container on Tailscale :3001 (clears the FAIL).
+6. `sudo /opt/local-code-agent/backup.sh --install-timer`: daily at 03:30,
+   keep 7 (`BACKUP_SCHEDULE`, `BACKUP_KEEP` in .env). Check with `systemctl list-timers`.
+7. **Off-box copy.** Because of the RAID 0, local backups are not enough. Pick a
+   destination (another host over Tailscale, or object storage) and copy
+   `backups/*.tar.gz` there; ideally after each timer run.
+8. `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` should be refused.
+9. Optional: `git config --global user.name/user.email` for jmuryn (lca check WARN).
+   Once you trust the upgraded VM, delete the ESXi snapshot; snapshots grow and slow the disk.
+
+---
+
+
 Branch: `agent-live-verify`, based on `claude/local-code-agent-build-dd13qw`
 (PR #28). Machine: the DigitalOcean droplet — 4 vCPU, 7.8 GiB RAM, 138 GB free,
 Ubuntu 24.04.4, `qwen2.5-coder:3b`.
