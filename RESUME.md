@@ -89,6 +89,21 @@ Pending because no safe suite run is possible:
   root, so the owner can't list or copy them. Lint is clean, the suite has not
   run, and it's verified only by a real systemd-run backup (see below).
 
+### State at shutdown (2026-10-01 ~21:20 UTC, VM powered off on request)
+- On 24.04.5 / 6.8.0-146. `lca check` is clean apart from items fixed since:
+  the git identity is set, and `lca agent setup` installed the relay and
+  started the agent (Tailscale :3001 answers).
+- Backup timer installed: 03:30 UTC daily, keeps 7, Persistent=true.
+- **`lca agent selftest` was interrupted by the shutdown** at stage 6/6 (real
+  task, about 25 min in, no result). Rerun it with nothing else loading the
+  CPU, then run `lca speed`.
+- Still open: verify the uncommitted `backup_owner` fix with one
+  `sudo systemctl start local-code-agent-backup.service` (backups/ and the new
+  archive must stay owned by jmuryn); the owner to decide on writing
+  `make gates-container`; the Mac pull at `~jmuryn/lca-offbox/lca-pull-backups.sh`
+  (written, not yet tested: test the rrsync key path locally first);
+  delete `/etc/sudoers.d/jmuryn` (**still present**).
+
 ### Remaining (in order)
 1. **Run the upgrade.** The 22.04 updates are installed (kernel -191 → -198) and
    `/var/run/reboot-required` is set, so **reboot first** (`sudo reboot`);
