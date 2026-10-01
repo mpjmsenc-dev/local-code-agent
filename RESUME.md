@@ -33,9 +33,15 @@ so it's host-level. A backup kept on this disk does not survive a drive failure.
   the session. **It must be deleted at the end** (step 8).
 
 ### Remaining (in order)
-1. **Finish the upgrade.** It ran as the `lca-release-upgrade` transient unit, with
-   output in `/var/log/lca-release-upgrade.log`. Check `lsb_release -d` = 24.04 and
-   `sudo tail -50 /var/log/dist-upgrade/main.log`.
+1. **Run the upgrade.** The 22.04 updates are installed (kernel -191 → -198) and
+   `/var/run/reboot-required` is set, so **reboot first** (`sudo reboot`);
+   `do-release-upgrade` refuses to run until you do. 24.04.5 is offered (checked).
+   After the reboot, start it detached so it doesn't depend on the session:
+   `sudo systemd-run --unit=lca-release-upgrade -p StandardOutput=append:/var/log/lca-release-upgrade.log -p StandardError=append:/var/log/lca-release-upgrade.log env DEBIAN_FRONTEND=noninteractive do-release-upgrade -f DistUpgradeViewNonInteractive`
+   Follow it with `sudo tail -f /var/log/lca-release-upgrade.log`. The non-interactive
+   view does not reboot on its own. When it finishes, check
+   `sudo tail -50 /var/log/dist-upgrade/main.log`, then `sudo reboot`, then
+   `lsb_release -d` should show 24.04.
 2. **Re-enable the third-party apt sources** that the upgrade disables, pointing them at noble:
    `/etc/apt/sources.list.d/docker.list` and `tailscale.list` (`jammy` → `noble`;
    the upgrade may rename them `*.distUpgrade` or comment them out). For Tailscale
