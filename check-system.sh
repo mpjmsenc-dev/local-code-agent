@@ -690,8 +690,13 @@ if have tailscale; then
       if [[ -z "${GAPS}" ]]; then
         p_pass "every address the docs send you to answers on ${TSIP}"
       else
-        while read -r gap_name gap_port; do
-          [[ -n "${gap_port}" ]] || continue
+        # Split on the LAST space, as tailscale_promise_gaps builds the line:
+        # the names have spaces in them ("the agent's UI"), so 'read -r name
+        # port' put "the" in the name and "agent's UI 3001" in the port.
+        while IFS= read -r gap_line; do
+          [[ -n "${gap_line}" ]] || continue
+          gap_port="${gap_line##* }"
+          gap_name="${gap_line% *}"
           p_fail "${gap_name} is documented at http://${TSIP}:${gap_port} but nothing is listening on that address — from your phone it will refuse. It is up on this machine, which is why nothing else reports it. Restart it so it publishes there: lca agent restart (or, for the chat app, sudo lca apply)"
         done <<<"${GAPS}"
       fi
