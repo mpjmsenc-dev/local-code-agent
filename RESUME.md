@@ -43,6 +43,52 @@ so it's host-level. A backup kept on this disk does not survive a drive failure.
 - **Next:** reboot into 6.8, check `uname -r` and that ollama, docker,
   tailscaled and open-webui came back, **then continue at step 4**.
 
+### BUGS FOUND 2026-10-01: the unit suite touches the host it runs on
+
+**Rule from the owner: run the suite only via `make gates-container`, never
+directly on a host.** The previous time it ran on a real box it rewrote boot
+units and left the firewall down for 4.5 hours. **`make gates-container` does
+not exist yet.** It isn't in the Makefile, any origin branch, or git history
+(checked 21:15 after a fetch). Until it does, the suite has no safe way to run.
+
+On 2026-10-01 a Claude session ran `bash tests/test-lib.sh` on this VM four
+times (20:19–21:04 UTC; the last run was stopped part-way) and
+`tests/test-netmode.sh` once. Passwordless sudo was active
+(`/etc/sudoers.d/jmuryn`). The journal (`journalctl _COMM=sudo`) gives the
+full list of what escalated:
+
+1. **Host motd rewritten, 18 times.** The sandboxed-setup test
+   (`tests/test-lib.sh` ~5235–5267: real `setup.sh` in `${SANDBOX}/setupsb`,
+   `install_*.sh` stubbed) still runs `scripts/motd.sh --install`, which runs
+   `as_root ln -sfn ${SCRIPT_DIR}/motd.sh /etc/update-motd.d/99-local-code-agent`.
+   `MOTD_FILE` is fixed in `scripts/lib.sh:63`, and nothing stubs `as_root` or
+   sudo. The host banner was left pointing at a deleted
+   `/tmp/tmp.*/setupsb/scripts/motd.sh`. **Restored 21:13**
+   (`-> /opt/local-code-agent/scripts/motd.sh`, banner verified).
+   Wherever sudo works without a password, this test writes the real `/etc`.
+   That's the same class of bug as the earlier boot-unit/firewall incident.
+   Nothing else escalated: `nft --check` only validates, `nft list` only reads,
+   and the chown/chmod calls were inside `/tmp` sandboxes. The firewall table
+   was intact afterwards.
+2. **Test-isolation bug: "the running server's launch environment is read out
+   of /proc"** (`bg_env_is_read_from_the_running_server`, `tests/test-lib.sh`
+   ~23480). It starts a fake `ollama` process on the host and finds it with
+   `pgrep -x ollama`. `ollama_bg_env` takes the first PID, which here is the
+   host's real systemd server, so the test reads a real process's
+   `/proc/PID/environ`. As jmuryn the test fails; as root it would read the
+   real server's settings. It also puts an `ollama`-named process on the host
+   for 30 s, where the host's own tools (`pgrep -x ollama` in speed.sh and
+   apply.sh) can see it. It's a bug, not expected noise. A fix needs the
+   reader to target the stand-in's PID (or a PID namespace), not "any process
+   named ollama".
+
+Pending because no safe suite run is possible:
+- **Uncommitted in the working tree, and live:** `backup.sh` `backup_owner()`
+  plus a test (`a scheduled backup stays with the owner of backups/, not
+  root`). Without it, the root-run timer chowns `backups/` and each archive to
+  root, so the owner can't list or copy them. Lint is clean, the suite has not
+  run, and it's verified only by a real systemd-run backup (see below).
+
 ### Remaining (in order)
 1. **Run the upgrade.** The 22.04 updates are installed (kernel -191 → -198) and
    `/var/run/reboot-required` is set, so **reboot first** (`sudo reboot`);
