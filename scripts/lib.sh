@@ -1109,7 +1109,11 @@ backups_to_prune() {
   local keep="${1:-}"
   [[ "${keep}" =~ ^[0-9]+$ ]] || return 0
   (( keep > 0 )) || return 0
-  sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
+  # LC_ALL=C, or the byte order unique_backup_path's '_' suffix relies on is
+  # not the order sort uses: en_US.UTF-8 collation (Ubuntu's default, and what
+  # systemd hands the backup timer) sorts '..._2.tar.gz' BEFORE the plain
+  # name, so retention deleted the newer of two same-second backups.
+  LC_ALL=C sort | awk -v k="${keep}" '{a[NR]=$0} END{for (i = 1; i <= NR - k; i++) print a[i]}'
 }
 
 # retention_desc — how to describe BACKUP_KEEP to a human.
