@@ -3456,6 +3456,35 @@ no_ollama() { ! bash -c '
     ollama_processor qwen2.5-coder:7b
   ' _ "${REPO}/scripts/lib.sh" 2>/dev/null; }
 check "no ollama binary reports nothing rather than guessing" no_ollama
+# A sibling tag holding the SAME weights is the model, loaded. The agent tier's
+# qwen2.5-coder:14b-agent is FROM the 14b's blob; with it resident, 'lca check'
+# called the 14b "not loaded" while 12 GB of it sat in RAM.
+op_siblings() {   # MODEL PS_OUTPUT — :7b and :7b-agent share a blob, :7b-instruct does not
+  PSOUT="$2" bash -c '
+    set -uo pipefail
+    source "$1"
+    have() { [[ "$1" == "ollama" ]]; }
+    ollama() {
+      if [[ "$1" == "ps" ]]; then printf "%s\n" "${PSOUT}"; return 0; fi
+      case "$3" in
+        qwen2.5-coder:7b|qwen2.5-coder:7b-agent) printf "FROM /blobs/sha256-aaa\nPARAMETER num_ctx 16384\n" ;;
+        qwen2.5-coder:7b-instruct)               printf "FROM /blobs/sha256-bbb\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    ollama_processor "$2" || printf "(none)"
+  ' _ "${REPO}/scripts/lib.sh" "$1" 2>/dev/null
+}
+PS_AGENT_TAG='NAME                      ID              SIZE      PROCESSOR    CONTEXT    UNTIL
+qwen2.5-coder:7b-agent    4f2f873084d6    5.1 GB    100% CPU     16384      Forever'
+PS_INSTRUCT_TAG='NAME                         ID              SIZE      PROCESSOR    CONTEXT    UNTIL
+qwen2.5-coder:7b-instruct    a1b2c3d4e5f6    5.1 GB    100% CPU     4096       4 minutes from now'
+check "a resident tag with the same weights reports the model as loaded" \
+  test "$(op_siblings qwen2.5-coder:7b "${PS_AGENT_TAG}")" = "100% CPU"
+check "a resident tag with different weights does not stand in for it" \
+  test "$(op_siblings qwen2.5-coder:7b "${PS_INSTRUCT_TAG}")" = "(none)"
+check "nothing resident still reports nothing" \
+  test "$(op_siblings qwen2.5-coder:7b "${PS_EMPTY}")" = "(none)"
 
 echo "# aider output quality: edit format per model size, repo map scaled to the window"
 ef() { aider_edit_format "$1"; }

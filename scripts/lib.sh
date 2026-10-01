@@ -1865,11 +1865,47 @@ processor_from_ps() {
   printf '%s\n' "${proc}"
 }
 
+# model_weights_blob MODEL — the weights file MODEL is built FROM, per
+# 'ollama show --modelfile'. Two tags with the same blob are the same weights.
+# No 'exit' in the awk, for the 141-under-pipefail reason processor_from_ps
+# gives.
+model_weights_blob() {
+  local blob
+  [[ -n "${1:-}" ]] || return 1
+  blob="$(ollama show --modelfile "$1" 2>/dev/null \
+            | awk '$1 == "FROM" && !seen { f = $2; seen = 1 } END { if (seen) print f }' || true)"
+  [[ -n "${blob}" ]] || return 1
+  printf '%s\n' "${blob}"
+}
+
 # ollama_processor MODEL — processor_from_ps against the live server. Empty when
 # the model is not currently loaded (nothing has used it recently).
+#
+# Falls back to a resident tag that shares MODEL's weights. The agent tier's
+# model is a Modelfile over the chat model — qwen2.5-coder:14b-agent is FROM
+# the same blob as qwen2.5-coder:14b, plus num_ctx — and Ollama serves either
+# tag from whichever runner holds those weights, listing it under the tag that
+# loaded it. 'lca check' loads the -agent tag itself before it reaches this, so
+# on the 64 GB VM it printed "model 'qwen2.5-coder:14b' is not loaded right
+# now" with 12 GB of exactly those weights resident, and a generation against
+# the plain tag answering in 2.4s from that runner. Matched by blob rather
+# than by tag prefix: a prefix would also pair :7b with :7b-instruct, which
+# processor_from_ps's own comment records as two different models.
 ollama_processor() {
   have ollama || return 1
-  ollama ps 2>/dev/null | processor_from_ps "$1"
+  local listing proc want name
+  listing="$(ollama ps 2>/dev/null || true)"
+  if proc="$(processor_from_ps "$1" <<<"${listing}")"; then
+    printf '%s\n' "${proc}"
+    return 0
+  fi
+  want="$(model_weights_blob "$1")" || return 1
+  while read -r name _; do
+    [[ -n "${name}" && "${name}" != "NAME" && "${name}" != "$1" ]] || continue
+    [[ "$(model_weights_blob "${name}" || true)" == "${want}" ]] || continue
+    processor_from_ps "${name}" <<<"${listing}" && return 0
+  done <<<"${listing}"
+  return 1
 }
 
 # model_params_b MODEL — billions of parameters implied by an Ollama tag
