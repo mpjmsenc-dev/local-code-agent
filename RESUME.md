@@ -32,6 +32,17 @@ so it's host-level. A backup kept on this disk does not survive a drive failure.
 - Temporary sudo rule `/etc/sudoers.d/jmuryn` (`NOPASSWD:ALL`) was created for
   the session. **It must be deleted at the end** (step 8).
 
+### Progress after the upgrade (2026-10-01 ~20:15 UTC)
+- Steps 1–3 below are **done except the final reboot**. `do-release-upgrade` exited
+  Result=success at 20:07: `lsb_release` = 24.04.5, no ERROR/WARNING in
+  `/var/log/dist-upgrade/main.log`, `dpkg --audit` clean, target kernel 6.8.0-146.
+- docker.list and tailscale.list are on `noble` (fresh Tailscale keyring; the
+  `*.distUpgrade` copies were removed). The noble Docker builds of 29.8.2 are
+  installed, `apt update` is clean, and nothing is left to upgrade.
+- venv rebuilt: Python 3.12.3, aider 0.86.2.
+- **Next:** reboot into 6.8, check `uname -r` and that ollama, docker,
+  tailscaled and open-webui came back, **then continue at step 4**.
+
 ### Remaining (in order)
 1. **Run the upgrade.** The 22.04 updates are installed (kernel -191 → -198) and
    `/var/run/reboot-required` is set, so **reboot first** (`sudo reboot`);
