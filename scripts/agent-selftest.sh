@@ -173,6 +173,7 @@ link_task() {
     if sandbox_has_file "${TASK_FILE}"; then
       ok "The agent wrote /workspace/project/${TASK_FILE} after $(human_duration "${elapsed}")."
       SELFTEST_SECONDS="${elapsed}"
+      SELFTEST_CID="${cid:-$(agent_conversation_ref 2>/dev/null || true)}"
       return 0
     fi
     [[ -n "${cid:-}" ]] || cid="$(agent_conversation_ref 2>/dev/null || true)"
@@ -187,6 +188,37 @@ link_task() {
     fi
     sleep 15
   done
+}
+
+# stop_selftest_conversation — end the run this test started, and its sandbox.
+#
+# The file appearing is when this test is satisfied, not when the agent is
+# done. It used to stop there and leave the conversation running. On the ESXi
+# VM that conversation went on calling the model every 70 seconds for 25
+# minutes after "works end to end", and it reloaded the 14b in the middle of
+# the next command's model switch. The speed numbers below were also being
+# measured while it ran. So it is ended here, before them: the conversation
+# through the app's own API, then its sandbox, by id rather than "the first
+# oh-agent-server" (that could be a run of the user's).
+stop_selftest_conversation() {
+  local base sid
+  base="$(agent_api_base)"
+  [[ -n "${SELFTEST_CID:-}" ]] || { warn "Could not tell which conversation was this test's, so it may still be running. See: lca agent watch --live"; return 0; }
+  sid="$(curl -fsS --max-time 10 "${base}/api/v1/app-conversations/search?limit=50" 2>/dev/null \
+         | jq -r --arg c "${SELFTEST_CID}" '.items[]? | select(.id == $c) | .sandbox_id // empty' 2>/dev/null || true)"
+  curl -fsS --max-time 30 -X DELETE "${base}/api/v1/app-conversations/${SELFTEST_CID}" >/dev/null 2>&1 || true
+  if [[ -n "${sid}" ]]; then
+    curl -fsS --max-time 30 -X DELETE "${base}/api/v1/sandboxes/${sid}" >/dev/null 2>&1 || true
+    # The API's word is not the end of it: a sandbox still up still calls the model.
+    if as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${sid}"; then
+      as_root docker stop "${sid}" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ -n "${sid}" ]] && as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${sid}"; then
+    warn "This test's sandbox ${sid} is still running. Stop it with: sudo docker stop ${sid}"
+  else
+    ok "Stopped this test's conversation${sid:+ and its sandbox}."
+  fi
 }
 
 # report_speed — this machine's numbers, so "usable here?" gets an answer.
@@ -229,14 +261,15 @@ main() {
   link_settings
   link_channel
   link_task
-  report_speed
   if [[ "${keep}" == "false" ]]; then
     # The workspace is the user's, so only this test's own file is taken back.
     local sb
     sb="$(as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' | head -1 || true)"
     [[ -z "${sb}" ]] \
       || as_root docker exec "${sb}" sh -c "rm -f /workspace/project/${TASK_FILE}" >/dev/null 2>&1 || true
+    stop_selftest_conversation
   fi
+  report_speed
   ok "The agent tier works on this machine, end to end."
 }
 
