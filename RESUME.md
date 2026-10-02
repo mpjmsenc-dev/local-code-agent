@@ -1,141 +1,118 @@
 # RESUME.md — the agent tier's first run on real hardware
 
-## ⏩ IN PROGRESS 2026-10-01: migration to the 64 GB ESXi VM — read this first
+## ✅ DONE 2026-10-02: the 64 GB ESXi VM is the machine now — read this first
 
-A Claude Code session was migrating this stack from the 8 GB droplet to a new
-VM. Upgrading the VM from Ubuntu 22.04 to 24.04 needs a reboot, which ends that
-session, so this is the handoff. Pick up at **Remaining** below.
+The migration from the 8 GB droplet is finished. The story of the move is in
+[docs/MIGRATE.md](docs/MIGRATE.md) ("What actually happened"); what the box is
+good for is in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). This section is the
+state, the decisions, and what is left.
 
-**Machine:** ESXi VM `jmurynubnt`. 8 vCPU Xeon E5-2680 v2: AVX, but **no AVX2/FMA**,
-so expect slow CPU inference. 62 GiB RAM, no GPU. One 300 G virtual disk: LVM,
-`/` is 292 G. The owner says the backing store is **RAID 0 with no
-redundancy**. The VM can't see it (one virtual disk, empty `/proc/mdstat`),
-so it's host-level. A backup kept on this disk does not survive a drive failure.
+**Machine:** ESXi VM `jmurynubnt`, Ubuntu 24.04.5, kernel 6.8.0-146. Xeon
+E5-2680 v2 (AVX, **no AVX2**), **16 vCPUs as 2 sockets × 8 cores**, so 2 NUMA
+nodes. 62 GiB RAM, no GPU. 300 GB virtual disk, `/` grown to 292 G. The
+backing store is **host-level RAID 0**, so backups must leave the box.
 
-### Done before the reboot
-- `~/.bashrc` for jmuryn: the last line was `export PATH="$HOME/.local/bin"`,
-  which removed /usr/bin and /bin from PATH. It now adds `.local/bin` to the
-  existing PATH (guarded). Original saved as `~/.bashrc.bak-20261001`.
-- `lca check` on 22.04: 34 PASS / 4 WARN / 1 FAIL. The FAIL is real: the agent
-  container was not running, so nothing listened on Tailscale :3001. The FAIL
-  message itself was scrambled; fixed in 6ad04c8 (check-system.sh split the
-  gap line at the first space instead of the last). With root, `--quick` gives
-  36 / 3 / 1. That 1 is the same agent FAIL.
-- **14b confirmed loaded.** The resident model is `qwen2.5-coder:14b-agent`. It uses the
-  same weights blob as `qwen2.5-coder:14b` (`sha256-ac9bc7a…`, 14.8B Q4_K_M),
-  plus `num_ctx 16384`. Ollama shows 8566 MiB weights + 3072 MiB KV, about 12 GB,
-  100% CPU, keep-alive forever. Also installed: 7b and 3b (fallbacks, unused).
-- Backup taken before the upgrade, verified by backup.sh:
-  `backups/local-code-agent-backup-20261001-172341.tar.gz` (964M).
-  **The owner took an ESXi snapshot before the upgrade.**
-- LVM: `lvextend -r -l +100%FREE` grew `/` from 98 G to 292 G (240 G free).
-- Temporary sudo rule `/etc/sudoers.d/jmuryn` (`NOPASSWD:ALL`) was created for
-  the session. **It must be deleted at the end** (step 8).
+### Configuration, and why
 
-### Progress after the upgrade (2026-10-01 ~20:15 UTC)
-- Steps 1–3 below are **done except the final reboot**. `do-release-upgrade` exited
-  Result=success at 20:07: `lsb_release` = 24.04.5, no ERROR/WARNING in
-  `/var/log/dist-upgrade/main.log`, `dpkg --audit` clean, target kernel 6.8.0-146.
-- docker.list and tailscale.list are on `noble` (fresh Tailscale keyring; the
-  `*.distUpgrade` copies were removed). The noble Docker builds of 29.8.2 are
-  installed, `apt update` is clean, and nothing is left to upgrade.
-- venv rebuilt: Python 3.12.3, aider 0.86.2.
-- **Next:** reboot into 6.8, check `uname -r` and that ollama, docker,
-  tailscaled and open-webui came back, **then continue at step 4**.
+| | value | why |
+|---|---|---|
+| chat, aider, agent | `qwen2.5-coder:14b` (agent: `14b-agent`) | 3/3 graded tasks on the first try. 32b: 3/3 at ~2× the time. 7b: 1/3. |
+| `AUTO_TUNE` | `true` | the CPU-aware tune picks 14b here by itself (predicts 13.7 tok/s reading) |
+| `OLLAMA_CONTEXT_LENGTH` / `AGENT_MODEL_CONTEXT` | 16384 / 16384 | equal windows mean chat and agent share one runner: no eviction |
+| Ollama | under `numactl --interleave=all` (managed drop-in) | 2 NUMA nodes; 32b writing went 1.0 → 2.0 tok/s |
+| on disk, not default | `qwen2.5-coder:32b`, `7b`, `3b` | 32b for a manual `lca ask -m qwen2.5-coder:32b` on something hard |
 
-### BUGS FOUND 2026-10-01: the unit suite touches the host it runs on
+Measured here (16 vCPUs, idle):
 
-**Rule from the owner: run the suite only via `make gates-container`, never
-directly on a host.** The previous time it ran on a real box it rewrote boot
-units and left the firewall down for 4.5 hours. **`make gates-container` does
-not exist yet.** It isn't in the Makefile, any origin branch, or git history
-(checked 21:15 after a fetch). Until it does, the suite has no safe way to run.
+| | reading | writing | `lca agent selftest` |
+|---|---|---|---|
+| 14b | 13.2–13.3 tok/s | 4.3–4.5 tok/s | **pass, 24 min** (three runs: 24, 23 at 32768, 24) |
+| 32b | 5.6 tok/s | 2.0 tok/s (1.0 before the NUMA fix) | pass, 50 min; first step outran the 30-min request timeout and finished on a cached retry |
+| 7b | 27.0 tok/s | 8.4 tok/s | not run; failed 2 of 3 coding tasks |
+| 14b at 8 threads (the old 8-vCPU size, stood in for) | 6.7 tok/s | 3.4 tok/s | — |
 
-On 2026-10-01 a Claude session ran `bash tests/test-lib.sh` on this VM four
-times (20:19–21:04 UTC; the last run was stopped part-way) and
-`tests/test-netmode.sh` once. Passwordless sudo was active
-(`/etc/sudoers.d/jmuryn`). The journal (`journalctl _COMM=sudo`) gives the
-full list of what escalated:
+No `lca speed` was ever run at 8 vCPUs, so the 8-thread row was measured
+on the 16-vCPU VM with `num_thread=8`.
 
-1. **Host motd rewritten, 18 times.** The sandboxed-setup test
-   (`tests/test-lib.sh` ~5235–5267: real `setup.sh` in `${SANDBOX}/setupsb`,
-   `install_*.sh` stubbed) still runs `scripts/motd.sh --install`, which runs
-   `as_root ln -sfn ${SCRIPT_DIR}/motd.sh /etc/update-motd.d/99-local-code-agent`.
-   `MOTD_FILE` is fixed in `scripts/lib.sh:63`, and nothing stubs `as_root` or
-   sudo. The host banner was left pointing at a deleted
-   `/tmp/tmp.*/setupsb/scripts/motd.sh`. **Restored 21:13**
-   (`-> /opt/local-code-agent/scripts/motd.sh`, banner verified).
-   Wherever sudo works without a password, this test writes the real `/etc`.
-   That's the same class of bug as the earlier boot-unit/firewall incident.
-   Nothing else escalated: `nft --check` only validates, `nft list` only reads,
-   and the chown/chmod calls were inside `/tmp` sandboxes. The firewall table
-   was intact afterwards.
-2. **Test-isolation bug: "the running server's launch environment is read out
-   of /proc"** (`bg_env_is_read_from_the_running_server`, `tests/test-lib.sh`
-   ~23480). It starts a fake `ollama` process on the host and finds it with
-   `pgrep -x ollama`. `ollama_bg_env` takes the first PID, which here is the
-   host's real systemd server, so the test reads a real process's
-   `/proc/PID/environ`. As jmuryn the test fails; as root it would read the
-   real server's settings. It also puts an `ollama`-named process on the host
-   for 30 s, where the host's own tools (`pgrep -x ollama` in speed.sh and
-   apply.sh) can see it. It's a bug, not expected noise. A fix needs the
-   reader to target the stand-in's PID (or a PID namespace), not "any process
-   named ollama".
+Model switching, warm page cache: a load costs 20–25 s (14b) or ~42 s (32b),
+but the real cost is the lost prompt cache: the agent's 13.2k-token prompt is
+~22 min to re-read on 14b. With chat and agent on the same model and window,
+switching between them costs nothing (measured: agent prefix 1.8 s before and
+1.9 s after a chat message). At an agent window of 32768 the same chat message
+costs 27 s of load plus 515 s of re-reading a 5.9k prompt.
 
-Pending because no safe suite run is possible:
-- **Uncommitted in the working tree, and live:** `backup.sh` `backup_owner()`
-  plus a test (`a scheduled backup stays with the owner of backups/, not
-  root`). Without it, the root-run timer chowns `backups/` and each archive to
-  root, so the owner can't list or copy them. Lint is clean, the suite has not
-  run, and it's verified only by a real systemd-run backup (see below).
+### Done this session (commits on `claude/local-code-agent-build-dd13qw`)
 
-### State at shutdown (2026-10-01 ~21:20 UTC, VM powered off on request)
-- On 24.04.5 / 6.8.0-146. `lca check` is clean apart from items fixed since:
-  the git identity is set, and `lca agent setup` installed the relay and
-  started the agent (Tailscale :3001 answers).
-- Backup timer installed: 03:30 UTC daily, keeps 7, Persistent=true.
-- **`lca agent selftest` was interrupted by the shutdown** at stage 6/6 (real
-  task, about 25 min in, no result). Rerun it with nothing else loading the
-  CPU, then run `lca speed`.
-- Still open: verify the uncommitted `backup_owner` fix with one
-  `sudo systemctl start local-code-agent-backup.service` (backups/ and the new
-  archive must stay owned by jmuryn); the owner to decide on writing
-  `make gates-container`; the Mac pull at `~jmuryn/lca-offbox/lca-pull-backups.sh`
-  (written, not yet tested: test the rrsync key path locally first);
-  delete `/etc/sudoers.d/jmuryn` (**still present**).
+- `a710a83` MIGRATE.md: the ESXi section (PATH bug, LVM, RAID 0, sudo rule,
+  22.04 → 24.04, 2×8 vCPUs and NUMA, the /32 Tailscale route to the ESXi host).
+- `e51a276` backup: a scheduled run keeps `backups/` with its owner. Verified
+  twice: `systemctl start local-code-agent-backup.service` at 00:05, and the
+  real 03:30 timer run. Both archives stayed jmuryn's.
+- `24db418` + `312f1df` agent selftest: ends its own conversation and sandbox
+  once the file appears. Without that it kept calling the model for 25 minutes
+  after "works end to end". Verified live at 07:21: no sandbox and no
+  conversation left. The self-test no longer prints a "writing" rate timed
+  over 2 tokens.
+- `543a24d` test isolation: the `/proc` environment test reads a renamed
+  stand-in by PID (`ollama_server_pids` is stubbable), so it no longer finds
+  the host's real Ollama or puts a fake one on the host.
+- `c92967d` tune: the CPU caps the RAM rung (cores × K ÷ params, K = 12
+  without AVX2, 36 with; budget 300 s of reading per aider edit). Here: 14b.
+  This VM at 8 vCPUs: 7b. The 8 GB droplet: 3b, as before. Plus the NUMA
+  interleave in the managed drop-in.
+- `ccaa7ef` PERFORMANCE.md: the graded tasks, the agent-window measurement,
+  CPU and NUMA.
+- The eval harness is **not** in the repo: `~/projects/lca-eval` (`seed/`,
+  hidden `grade/`, `run.sh`, `eval-all.sh`, `results.tsv`, per-run logs in `work/`).
 
-### Remaining (in order)
-1. **Run the upgrade.** The 22.04 updates are installed (kernel -191 → -198) and
-   `/var/run/reboot-required` is set, so **reboot first** (`sudo reboot`);
-   `do-release-upgrade` refuses to run until you do. 24.04.5 is offered (checked).
-   After the reboot, start it detached so it doesn't depend on the session:
-   `sudo systemd-run --unit=lca-release-upgrade -p StandardOutput=append:/var/log/lca-release-upgrade.log -p StandardError=append:/var/log/lca-release-upgrade.log env DEBIAN_FRONTEND=noninteractive do-release-upgrade -f DistUpgradeViewNonInteractive`
-   Follow it with `sudo tail -f /var/log/lca-release-upgrade.log`. The non-interactive
-   view does not reboot on its own. When it finishes, check
-   `sudo tail -50 /var/log/dist-upgrade/main.log`, then `sudo reboot`, then
-   `lsb_release -d` should show 24.04.
-2. **Re-enable the third-party apt sources** that the upgrade disables, pointing them at noble:
-   `/etc/apt/sources.list.d/docker.list` and `tailscale.list` (`jammy` → `noble`;
-   the upgrade may rename them `*.distUpgrade` or comment them out). For Tailscale
-   use a fresh keyring and list from `https://pkgs.tailscale.com/stable/ubuntu/noble.*`.
-   Then `sudo apt update && sudo apt full-upgrade`.
-3. **Rebuild the venv.** It was built on Python 3.10; 24.04 ships 3.12.
-   `sudo /opt/local-code-agent/scripts/install_python.sh` detects that pip is unusable
-   and rebuilds it. Confirm with `/opt/local-code-agent/.venv/bin/aider --version`.
-4. `lca check`. Fix everything; commit fixes as you go (repo is root-owned:
-   `sudo git -c user.name=jmuryn -c user.email=mpjmsenc@gmail.com commit …`).
-   Re-confirm the 14b weights are resident: `ollama ps` + `ollama show --modelfile`.
-5. `lca agent setup`, then `lca agent selftest`. Record the real timings.
-   `lca speed` gives tok/s. Setup installs the relay (clears that WARN) and
-   starts the container on Tailscale :3001 (clears the FAIL).
-6. `sudo /opt/local-code-agent/backup.sh --install-timer`: daily at 03:30,
-   keep 7 (`BACKUP_SCHEDULE`, `BACKUP_KEEP` in .env). Check with `systemctl list-timers`.
-7. **Off-box copy.** Because of the RAID 0, local backups are not enough. Pick a
-   destination (another host over Tailscale, or object storage) and copy
-   `backups/*.tar.gz` there; ideally after each timer run.
-8. `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` should be refused.
-9. Optional: `git config --global user.name/user.email` for jmuryn (lca check WARN).
-   Once you trust the upgraded VM, delete the ESXi snapshot; snapshots grow and slow the disk.
+**None of the code changes has been through the unit suite.** The owner's rule
+is `make gates-container` only, and **that target still does not exist**. The
+new code was checked by hand, against reference solutions and live runs, and
+lint (`bash -n`) is clean. Running the suite is the first thing to do once
+`gates-container` exists. Expect a few tests that grep the code to need
+updating, e.g. the one that now looks for `pgrep -x ollama` in
+`ollama_server_pids`.
+
+### Still open
+
+1. **`make gates-container`**: decide on it and write it. Until then nothing
+   here can be run through the suite.
+2. **Test bug still unfixed:** the sandboxed-setup test (`tests/test-lib.sh`
+   ~5235) runs the real `motd.sh --install`, which writes
+   `/etc/update-motd.d/99-local-code-agent` through `as_root` wherever sudo needs
+   no password (it did, 18 times, on 2026-10-01). Fix it the same way as the
+   Ollama one: make the target stubbable, and never let the test reach `/etc`.
+3. **The Mac pull** (`~jmuryn/lca-offbox/lca-pull-backups.sh`, not in the repo).
+   Tested on this VM end to end: pull, gzip verify, prune. The key was
+   confirmed read-only: no writes, no shell, nothing outside `backups/`, no
+   port forwarding. Testing found and fixed one bug: a first run failed with
+   "Host key verification failed", because `BatchMode=yes` cannot accept a new
+   host key. It now passes `StrictHostKeyChecking=accept-new`. On the Mac:
+   ```bash
+   scp jmuryn@100.114.175.107:lca-offbox/lca-pull-backups.sh ~/   # password login over Tailscale
+   bash ~/lca-pull-backups.sh key        # prints ONE authorized_keys line
+   # on the VM: append that line to ~/.ssh/authorized_keys (it is empty now; keep it 0600)
+   bash ~/lca-pull-backups.sh pull       # first pull: ~1 GB per archive, verified
+   bash ~/lca-pull-backups.sh install    # daily 09:30 via launchd
+   bash ~/lca-pull-backups.sh status
+   ```
+   If the Mac's rsync is Apple's `openrsync` and `rrsync` rejects it,
+   `brew install rsync` and run again. Not tested from a Mac: only from this VM.
+4. **Delete `/etc/sudoers.d/jmuryn`** (still present, kept until this session
+   ended): `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` must be refused.
+5. **Push.** See the end of the session report for whether it went up.
+6. Delete the ESXi snapshot from before the upgrade, once you trust the VM.
+7. Optional: if a long agent run hits the context warning, raise
+   `AGENT_MODEL_CONTEXT` to 32768 (`sudo lca agent setup`) and keep chat and
+   agent in separate blocks of time. See PERFORMANCE.md.
+
+### Earlier: the 2026-10-01 bugs found while the suite ran on this host
+
+`bash tests/test-lib.sh` was run directly on this VM four times on 2026-10-01
+with passwordless sudo active. It rewrote the host motd 18 times (restored
+21:13; open item 2 above), and the `/proc` environment test read the real
+Ollama server's environment (fixed in `543a24d`). Neither will recur if the
+suite only ever runs through `make gates-container`.
 
 ---
 
