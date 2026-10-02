@@ -3303,6 +3303,30 @@ backup_ownership_is_consistent() {
 }
 check "a backup belongs to the human who asked for it, not to root" \
   backup_ownership_is_consistent
+# ...and the timer, which runs as root with no SUDO_USER, keeps both with
+# whoever owns backups/ (install_timer gives it to the human). It used to chown
+# the directory AND the archive to root, so after the first scheduled run the
+# owner could not list, let alone copy, their own backups.
+backup_timer_keeps_the_owner() {
+  local out tarball calls
+  # stat is stubbed for the owner query only: the sandbox directory belongs to
+  # whoever runs the suite, and the claim is about the directory owner, so it
+  # names one that is neither that account nor root.
+  # shellcheck disable=SC2016  # the shim is code for the backup's shell, run by its eval
+  out="$(backup_run_in timer 'invoking_user() { printf "root\n"; }
+    stat() { if [[ "$1" == "-c" && "$2" == "%U" ]]; then printf "nobody\n"; else command stat "$@"; fi; }')"
+  grep -q 'RC=0' <<<"${out}" || { printf 'the timer-mode backup failed:\n%s\n' "${out}" >&2; return 1; }
+  tarball="$(backup_archive_in timer)" || { echo 'the timer-mode backup wrote no archive' >&2; return 1; }
+  calls="$(backup_as_root_calls timer)"
+  grep -qx "chown nobody ${SANDBOX}/backup-timer/backups" <<<"${calls}" || {
+    printf 'backups/ was not left with its owner. What it escalated for:\n%s\n' "${calls}" >&2; return 1; }
+  grep -qx "chown nobody ${tarball}" <<<"${calls}" || {
+    printf 'the archive was not given to the owner of backups/. What it escalated for:\n%s\n' "${calls}" >&2; return 1; }
+  ! grep -q '^chown root ' <<<"${calls}" || {
+    printf 'the timer still gave something to root:\n%s\n' "${calls}" >&2; return 1; }
+}
+check "a scheduled backup stays with the owner of backups/, not root" \
+  backup_timer_keeps_the_owner
 # The docker-group branch is the one with a consequence, so it is asserted on
 # its own: it must key off invoking_user, not off a second reading of EUID.
 group_check_asks_about_the_reader() {

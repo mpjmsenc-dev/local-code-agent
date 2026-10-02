@@ -68,6 +68,24 @@ acquire_backup_lock() {
     || die "Another backup has held the lock for over ${wait_s}s, and flock releases even on kill -9 — so that really is a running process, not a stale lock file. Find it with: sudo fuser -v ${BACKUP_DIR}/.backup.lock   (or read the scheduled run: journalctl -u local-code-agent-backup.service -n 50)"
 }
 
+# backup_owner — who backups/ and the archives in it are given to.
+#
+# invoking_user, except when that is root: the timer runs as root with no
+# SUDO_USER, so there is no human to name, and handing everything to root
+# undid install_timer — which gives backups/ to the human on purpose. The
+# first 03:30 run took the directory back (root, 0700) and wrote a root-owned
+# 0600 archive into it, so its owner could neither list nor copy their own
+# backups, and an off-box pull over SSH got nothing. With no human to ask,
+# whoever already owns backups/ keeps it.
+backup_owner() {
+  local who
+  who="$(invoking_user)"
+  if [[ "${who}" == "root" ]]; then
+    who="$(stat -c %U "${BACKUP_DIR}" 2>/dev/null || printf 'root')"
+  fi
+  printf '%s\n' "${who}"
+}
+
 do_backup() {
   step "Creating backup"
   local stamp tarball
@@ -91,7 +109,7 @@ do_backup() {
   # archive must agree; it counted chowns across the whole file, so it never
   # noticed that no single path performs both.
   if can_root; then
-    as_root chown "$(invoking_user)" "${BACKUP_DIR}" 2>/dev/null || true
+    as_root chown "$(backup_owner)" "${BACKUP_DIR}" 2>/dev/null || true
   fi
   # ...and the archives inside it, which the directory mode alone was covering.
   local tightened
@@ -377,11 +395,10 @@ do_backup() {
   # machine (e.g. scp)". A backup you cannot copy is the same problem as one
   # you cannot restore.
   #
-  # The timer, which has no human to attribute anything to, still gets root:
-  # invoking_user falls back to 'id -un' with no SUDO_USER set, so that path is
-  # unchanged.
+  # The timer, which has no human to attribute anything to, gives it to
+  # whoever owns backups/ — see backup_owner.
   if can_root; then
-    as_root chown "$(invoking_user)" "${tarball}" 2>/dev/null || true
+    as_root chown "$(backup_owner)" "${tarball}" 2>/dev/null || true
   fi
 
   # A backup you cannot restore is not a backup. Read the archive back and
