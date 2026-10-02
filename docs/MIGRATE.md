@@ -94,7 +94,7 @@ wanted the one you just took.
 
 The steps above are the plan. This is the record of the first real run, from
 the 8 GB droplet to an ESXi VM (`jmurynubnt`): Xeon E5-2680 v2, 62 GiB RAM,
-no GPU, one 300 GB virtual disk on host-level **RAID 0**. Everything below went
+no GPU, one 300 GB virtual disk on host-level **RAID 5**. Everything below went
 wrong or needed a decision the plan above did not mention.
 
 ### The PATH bug in `~/.bashrc`
@@ -130,13 +130,16 @@ sudo lvextend -r -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
 
 `/` went from 98 G to 292 G, online, with no reboot.
 
-### RAID 0 underneath: backups have to leave the box
+### RAID 5 underneath: what the backups do and do not cover
 
-The owner said the datastore is RAID 0. The VM can't see that (one virtual
-disk, empty `/proc/mdstat`), so no guest-side check will warn you. A backup
-on the same disk dies with it. The backup timer (`backup.sh --install-timer`)
-covers the schedule. The off-box copy is a pull from the Mac over Tailscale,
-using a key that can only read `backups/` (`rrsync -ro`); see RESUME.md.
+The datastore is RAID 5. (This section first said RAID 0; that was wrong.) The
+VM can't see it (one virtual disk, empty `/proc/mdstat`), so no guest-side
+check will tell you either way. RAID 5 survives one failed disk. It is not a
+backup: a backup on the same virtual disk goes with it if the datastore, the
+host or the VM's disk is lost, and RAID copies a deletion or a corruption as
+faithfully as anything else. The backup timer (`backup.sh --install-timer`)
+covers the schedule. An off-box pull to the Mac was built and then dropped by
+the owner (2026-10-02), so every backup is on this VM; see RESUME.md.
 
 ### Passwordless sudo for the Claude session
 

@@ -32,7 +32,9 @@ state, the decisions, and what is left.
 **Machine:** ESXi VM `jmurynubnt`, Ubuntu 24.04.5, kernel 6.8.0-146. Xeon
 E5-2680 v2 (AVX, **no AVX2**), **16 vCPUs as 2 sockets × 8 cores**, so 2 NUMA
 nodes. 62 GiB RAM, no GPU. 300 GB virtual disk, `/` grown to 292 G. The
-backing store is **host-level RAID 0**, so backups must leave the box.
+backing store is **host-level RAID 5** (first recorded here as RAID 0, which
+was wrong): it survives one failed disk, and it is not a backup. Every backup
+lives on this VM's disk; the off-box pull was dropped (open item 3).
 
 ### Configuration, and why
 
@@ -65,7 +67,7 @@ costs 27 s of load plus 515 s of re-reading a 5.9k prompt.
 
 ### Done this session (commits on `claude/local-code-agent-build-dd13qw`)
 
-- `a710a83` MIGRATE.md: the ESXi section (PATH bug, LVM, RAID 0, sudo rule,
+- `a710a83` MIGRATE.md: the ESXi section (PATH bug, LVM, RAID (5; recorded there as 0), sudo rule,
   22.04 → 24.04, 2×8 vCPUs and NUMA, the /32 Tailscale route to the ESXi host).
 - `e51a276` backup: a scheduled run keeps `backups/` with its owner. Verified
   twice: `systemctl start local-code-agent-backup.service` at 00:05, and the
@@ -104,25 +106,19 @@ updating, e.g. the one that now looks for `pgrep -x ollama` in
    `/etc/update-motd.d/99-local-code-agent` through `as_root` wherever sudo needs
    no password (it did, 18 times, on 2026-10-01). Fix it the same way as the
    Ollama one: make the target stubbable, and never let the test reach `/etc`.
-3. **The Mac pull** (`~jmuryn/lca-offbox/lca-pull-backups.sh`, not in the repo).
-   Tested on this VM end to end: pull, gzip verify, prune. The key was
-   confirmed read-only: no writes, no shell, nothing outside `backups/`, no
-   port forwarding. Testing found and fixed one bug: a first run failed with
-   "Host key verification failed", because `BatchMode=yes` cannot accept a new
-   host key. It now passes `StrictHostKeyChecking=accept-new`. On the Mac:
-   ```bash
-   scp jmuryn@100.114.175.107:lca-offbox/lca-pull-backups.sh ~/   # password login over Tailscale
-   bash ~/lca-pull-backups.sh key        # prints ONE authorized_keys line
-   # on the VM: append that line to ~/.ssh/authorized_keys (it is empty now; keep it 0600)
-   bash ~/lca-pull-backups.sh pull       # first pull: ~1 GB per archive, verified
-   bash ~/lca-pull-backups.sh install    # daily 09:30 via launchd
-   bash ~/lca-pull-backups.sh status
-   ```
-   If the Mac's rsync is Apple's `openrsync` and `rrsync` rejects it,
-   `brew install rsync` and run again. Not tested from a Mac: only from this VM.
+3. ~~**The Mac pull**~~ — **dropped by the owner, 2026-10-02.** Its first
+   run from the Mac failed: macOS ships Apple's `openrsync` as
+   `/usr/bin/rsync`, and the VM's `rrsync -ro` rejected the server command it
+   sends ("invalid rsync-command syntax or options"). Rather than fix it, the
+   pull was dropped. Both `lca-backup-pull` keys (`@Mac`, and `@jmurynubnt`,
+   made on this VM by mistake) are out of `~/.ssh/authorized_keys`, which is
+   empty again; the launchd job is removed on the Mac. Left in place, unused:
+   `~/lca-offbox/lca-pull-backups.sh` and the key pair `~/.ssh/lca_backup_pull*`
+   on this VM. The VM's own 03:30 backup timer is unchanged.
 4. **Delete `/etc/sudoers.d/jmuryn`** (still present, kept until this session
    ended): `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` must be refused.
-5. ~~**Push: not done.**~~ Done: the credential helper works, and the merged branch is pushed. Previously: 17 commits (8 from 2026-10-01, 9 from this session) are waiting on `claude/local-code-agent-build-dd13qw`: `git log origin/claude/local-code-agent-build-dd13qw..HEAD`.
+5. ~~**Push: not done.**~~ Done: the merged branch is pushed, with root's stored
+   GitHub credentials (`sudo`); `jmuryn` still has none. Previously: 17 commits (8 from 2026-10-01, 9 from this session) are waiting on `claude/local-code-agent-build-dd13qw`: `git log origin/claude/local-code-agent-build-dd13qw..HEAD`.
 6. Delete the ESXi snapshot from before the upgrade, once you trust the VM.
 7. Optional: if a long agent run hits the context warning, raise
    `AGENT_MODEL_CONTEXT` to 32768 (`sudo lca agent setup`) and keep chat and
