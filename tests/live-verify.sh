@@ -239,7 +239,7 @@ sect "4. the derived model — stubs return canned num_ctx strings"
 # test-lib.sh:3132 stubs ollama() to print 'num_ctx 16384'. This asks ollama.
 # =============================================================================
 
-AMODEL="$(agent_model_name "${MODEL_NAME}")"
+AMODEL="$(agent_model_name "$(agent_base_model)")"
 if model_present "${AMODEL}" 2>/dev/null; then
   t_ok "the derived model ${AMODEL} exists"
   DECL="$(agent_model_declared_context "${AMODEL}" 2>/dev/null || true)"

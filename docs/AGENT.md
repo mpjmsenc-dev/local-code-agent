@@ -549,6 +549,34 @@ server default stays 4096 for everything else. The cost is honest and worth
 knowing: it is a second entry in Ollama's loader, so if both are hot at once
 the box holds two copies of the weights.
 
+### A different model for the agent: `AGENT_MODEL`
+
+By default the derived model is built over the ladder's `MODEL_NAME`, so chat,
+`lca` and the agent run one model. `AGENT_MODEL` in `.env` pins the agent
+alone to another one:
+
+```bash
+ollama pull qwen2.5-coder:32b          # it must be on disk first
+sudo sed -i 's/^AGENT_MODEL=.*/AGENT_MODEL=qwen2.5-coder:32b/' /opt/local-code-agent/.env
+sudo lca agent setup                   # builds qwen2.5-coder:32b-agent and proves its window
+sudo lca apply                         # re-renders Ollama's settings: two models resident
+lca agent restart && lca agent status
+```
+
+`sudo lca apply` matters. `config/ollama.env` ships
+`OLLAMA_MAX_LOADED_MODELS=1`, and with one slot a pinned agent and chat evict
+each other on every switch. With a pin set, the agent tier on, and RAM for both
+models' weights plus `TWO_MODEL_HEADROOM_GB` (16), the rendered value is 2
+(`ollama_two_models_fit`).
+
+Emptying it puts the agent back on the ladder. A pin is not a second ladder:
+`tune` never moves it. It also gives up what the shared model buys, which is
+measured in docs/PERFORMANCE.md. That means two sets of weights resident, two
+runners competing for the CPU when chat and the agent are both busy, and a
+chat message no longer warming the agent's prompt cache. On the 16-vCPU VM the
+32b passed `lca agent selftest` in 50 minutes against the 14b's 24. One step
+ran past the 1800-second `AGENT_REQUEST_TIMEOUT`, so raise that with it.
+
 ---
 
 ## The tool-call channel, and why the default is `false`

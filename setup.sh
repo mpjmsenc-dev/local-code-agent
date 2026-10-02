@@ -240,7 +240,7 @@ main() {
   # model, and an install that has just pulled a working one must not be
   # reported as failed over it.
   if [[ "${have_model}" == "true" ]]; then
-    refresh_agent_model_after_tune "${MODEL_NAME}" || true
+    refresh_agent_model_after_tune "$(agent_base_model)" || true
   fi
 
   if [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]]; then

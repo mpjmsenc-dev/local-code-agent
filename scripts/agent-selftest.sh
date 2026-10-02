@@ -61,7 +61,7 @@ link_relay() {
 link_model() {
   local want got model
   step "2/6  The model"
-  model="$(agent_model_name "${MODEL_NAME}")"
+  model="$(agent_model_name "$(agent_base_model)")"
   want="$(agent_model_context)"
   case "$(agent_model_drift 2>/dev/null || printf ok)" in
     absent)
@@ -94,7 +94,7 @@ link_settings() {
   local url got_model got_native want_model
   step "4/6  The settings"
   url="$(agent_api_base)/api/v1/settings"
-  want_model="$(agent_llm_model "$(agent_model_name "${MODEL_NAME}")")"
+  want_model="$(agent_llm_model "$(agent_model_name "$(agent_base_model)")")"
   got_model="$(curl -fsS --max-time 10 "${url}" 2>/dev/null | jq -r '.agent_settings.llm.model // ""' 2>/dev/null || true)"
   [[ -n "${got_model}" ]] \
     || fail "The agent's settings API answered nothing at ${url}. Without settings the first task dies inside the app on an assertion, not with a message. Re-create it: ${REPO_ROOT}/bin/lca agent restart"
@@ -114,7 +114,7 @@ link_settings() {
 link_channel() {
   local resp calls body
   step "5/6  The tool-call channel"
-  body="$(jq -nc --arg m "$(agent_model_name "${MODEL_NAME}")" \
+  body="$(jq -nc --arg m "$(agent_model_name "$(agent_base_model)")" \
     '{model:$m, temperature:0, max_tokens:64,
       messages:[{role:"user",content:"Create /tmp/x.py containing print(1). Use the tool."}],
       tools:[{type:"function",function:{name:"file_editor",description:"Create or edit a file.",
@@ -236,7 +236,7 @@ report_speed() {
   local resp p_c p_ns e_c e_ns
   step "This machine"
   resp="$(curl -fsS --max-time 1800 -X POST "$(ollama_url)/api/generate" \
-          -d "$(jq -nc --arg m "$(agent_model_name "${MODEL_NAME}")" --arg p "$(read_probe_prompt)" \
+          -d "$(jq -nc --arg m "$(agent_model_name "$(agent_base_model)")" --arg p "$(read_probe_prompt)" \
                 '{model:$m, prompt:$p, stream:false, options:{num_predict:40}}')" 2>/dev/null || true)"
   if [[ -z "${resp}" ]]; then
     warn "Could not measure this machine's speed; the task result above stands."

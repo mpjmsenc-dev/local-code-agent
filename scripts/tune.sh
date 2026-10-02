@@ -265,7 +265,7 @@ install_service() {
 tune_exit_refresh() {
   local rc=$?
   (( rc == 0 )) || return 0
-  refresh_agent_model_after_tune "${MODEL_NAME}" || true
+  refresh_agent_model_after_tune "$(agent_base_model)" || true
 }
 
 main() {

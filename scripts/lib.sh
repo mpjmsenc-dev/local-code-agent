@@ -642,6 +642,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # where the ladder put it; only the agent gets this. Never applied below the
   # server default — see agent_model_context.
   AGENT_MODEL_CONTEXT="${AGENT_MODEL_CONTEXT:-16384}"
+  # The base model the agent tier runs. Empty — the default — means the ladder's
+  # MODEL_NAME, so chat, lca and the agent share one model and one runner. Set,
+  # it pins the agent alone; see agent_base_model.
+  AGENT_MODEL="${AGENT_MODEL:-}"
   # Which ref of the public skills repository the agent's sandboxes may load
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
@@ -2214,9 +2218,43 @@ human_duration() {
 # said it starts Ollama "with the same environment the systemd drop-in would
 # apply", which is exactly the promise a second hand-written copy breaks.
 ollama_extra_env() {
-  local extra_env="${REPO_ROOT}/config/ollama.env"
+  local extra_env="${REPO_ROOT}/config/ollama.env" lines
   [[ -f "${extra_env}" ]] || return 0
-  grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true
+  lines="$(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${extra_env}" || true)"
+  # The one value this computes rather than copies, and it is computed HERE so
+  # the drop-in and the systemd-less start still read one answer. See
+  # ollama_two_models_fit.
+  if ollama_two_models_fit; then
+    lines="$(awk -F= '$1 == "OLLAMA_MAX_LOADED_MODELS" { $0 = "OLLAMA_MAX_LOADED_MODELS=2" } { print }' <<<"${lines}")"
+  fi
+  [[ -z "${lines}" ]] || printf '%s\n' "${lines}"
+}
+
+# TWO_MODEL_HEADROOM_GB — RAM, in GiB, that must be left over once both models'
+# weights are counted before two are kept resident. Weights are only part of a
+# loaded model: the KV cache for its window comes on top (about 8 GB for a 32b
+# at 32768), and Open WebUI, the agent's containers and the OS need the rest.
+TWO_MODEL_HEADROOM_GB=16
+
+# ollama_two_models_fit — true when Ollama should keep TWO models resident:
+# the agent tier is on, AGENT_MODEL pins it to a model chat does not use, and
+# this box's RAM holds both with TWO_MODEL_HEADROOM_GB to spare.
+#
+# config/ollama.env ships OLLAMA_MAX_LOADED_MODELS=1, and on one shared model
+# that is right: a second slot buys nothing and an 8 GB box cannot afford one.
+# A pinned agent model is the case it gets wrong. With a slot for one, every
+# chat message evicts the agent's model and every agent step evicts chat's,
+# and each reload costs a cold load plus re-reading the whole prompt.
+ollama_two_models_fit() {
+  local agent ram a b
+  [[ "${ENABLE_AGENT:-false}" == "true" && -n "${AGENT_MODEL:-}" ]] || return 1
+  agent="$(agent_base_model)"
+  [[ "${agent}" != "${MODEL_NAME}" ]] || return 1
+  ram="$(detect_ram_gib 2>/dev/null)" || return 1
+  a="$(model_ram_gb "${MODEL_NAME}" 2>/dev/null)" || return 1
+  b="$(model_ram_gb "${agent}" 2>/dev/null)" || return 1
+  awk -v r="${ram}" -v a="${a}" -v b="${b}" -v h="${TWO_MODEL_HEADROOM_GB}" \
+    'BEGIN { exit !(r - a - b >= h) }'
 }
 
 # render_ollama_dropin_content — print the drop-in the current .env implies,
@@ -4204,13 +4242,22 @@ agent_stored_native_tool_calling() {
 # gets a DERIVED model — the same weights, one PARAMETER line — and the rest of
 # the stack is untouched.
 #
-# It is derived, not configured: a second model name in .env would be a second
-# source of truth able to drift from the ladder, and the ladder moves on every
-# boot. tune.sh regenerates this whenever the rung changes.
+# Its BASE follows the ladder by default: the derived model is built over
+# MODEL_NAME, and tune.sh regenerates it whenever the rung changes. AGENT_MODEL
+# is the one exception, and it is an explicit pin rather than a second ladder:
+# set, the agent runs that model and tune never moves it. The cost is the one
+# the default avoids — two models resident, two runners, and a chat message no
+# longer warms the agent's prompt cache — so it is off unless somebody asks.
+
+# agent_base_model — the model the agent's derived model is built over:
+# AGENT_MODEL when it is set, the ladder's MODEL_NAME when it is not.
+agent_base_model() {
+  printf '%s' "${AGENT_MODEL:-${MODEL_NAME}}"
+}
 
 # agent_model_name [BASE] — the derived model's name.
 agent_model_name() {
-  printf '%s-agent' "${1:-${MODEL_NAME}}"
+  printf '%s-agent' "${1:-$(agent_base_model)}"
 }
 
 # agent_model_is_derived NAME — true for a name this project generates.
@@ -4267,7 +4314,7 @@ agent_model_loaded_context() {
 stale_agent_models() {
   local keep
   have ollama || return 1
-  keep="$(agent_model_name "${MODEL_NAME}")"
+  keep="$(agent_model_name "$(agent_base_model)")"
   ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' \
     | grep -E -- '-agent$' | grep -vxF "${keep}" || true
 }
@@ -4298,7 +4345,7 @@ agent_model_declared_context() {
 #   context  it exists but Ollama loads it at the wrong window
 agent_model_drift() {
   local derived want got
-  derived="$(agent_model_name "${MODEL_NAME}")"
+  derived="$(agent_model_name "$(agent_base_model)")"
   model_present "${derived}" || { printf 'absent'; return 0; }
   want="$(agent_model_context)"
   got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
@@ -4310,7 +4357,7 @@ agent_model_drift() {
 # ensure_agent_model [BASE] — create or refresh the derived model, and prove it
 # took. Prints the model's name on success.
 ensure_agent_model() {
-  local base="${1:-${MODEL_NAME}}" derived want tmp got
+  local base="${1:-$(agent_base_model)}" derived want tmp got
   derived="$(agent_model_name "${base}")"
   want="$(agent_model_context)"
   have ollama || return 1
@@ -4539,6 +4586,17 @@ keepalive_plan() {
     return 0
   fi
   need="$(model_ram_gb "${model}" 2>/dev/null || true)"
+  # A pinned AGENT_MODEL is a second set of weights resident beside the chat
+  # model's, and pinning holds both.
+  if [[ -n "${need}" && -n "${AGENT_MODEL:-}" && "${AGENT_MODEL}" != "${model}" ]]; then
+    local agent_need
+    agent_need="$(model_ram_gb "${AGENT_MODEL}" 2>/dev/null || true)"
+    if [[ -n "${agent_need}" ]]; then
+      need="$(awk -v a="${need}" -v b="${agent_need}" 'BEGIN { printf "%g", a + b }')"
+    else
+      need=""
+    fi
+  fi
   if [[ -n "${need}" ]] && awk -v r="${ram}" -v n="${need}" 'BEGIN { exit !(r - n < 2) }'; then
     printf '30m|the agent tier is on, but %s GB of model in %s GiB of RAM leaves under 2 GiB spare — pinning it resident would cost this box more than the reload saves' \
       "${need}" "${ram}"
@@ -4651,9 +4709,10 @@ agent_llm_model() {
 # nothing, twice. A missing function that degrades into a confident, wrong
 # diagnosis is worse than one that stops.
 agent_model_for_run() {
-  local derived
-  derived="$(agent_model_name "${MODEL_NAME}")"
-  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${MODEL_NAME}"; fi
+  local base derived
+  base="$(agent_base_model)"
+  derived="$(agent_model_name "${base}")"
+  if model_present "${derived}"; then printf '%s' "${derived}"; else printf '%s' "${base}"; fi
 }
 
 # agent_max_output_tokens — the reply budget to seed, always a usable number.

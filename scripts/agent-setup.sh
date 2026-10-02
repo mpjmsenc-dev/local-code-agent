@@ -116,7 +116,15 @@ step "3/7  The base model"
 if ! wait_for_ollama 3; then
   blocked "Ollama is not answering at $(ollama_url) — start it: $(ollama_restart_hint)"
 fi
-if model_present "${MODEL_NAME}"; then
+if [[ -n "${AGENT_MODEL}" ]]; then
+  # Pinned: the agent's base is AGENT_MODEL, not the ladder's, and only that
+  # one is this step's business.
+  if model_present "${AGENT_MODEL}"; then
+    ok "${AGENT_MODEL} is present (AGENT_MODEL — the agent's own; chat and lca stay on ${MODEL_NAME})."
+  else
+    blocked "AGENT_MODEL=${AGENT_MODEL} is not on this machine. $(pull_advice "${AGENT_MODEL}")   (or empty AGENT_MODEL in .env to follow the ladder's ${MODEL_NAME})"
+  fi
+elif model_present "${MODEL_NAME}"; then
   ok "${MODEL_NAME} is present."
 else
   blocked "the model ${MODEL_NAME} is not on this machine. $(pull_advice "${MODEL_NAME}")   (or let the ladder choose it for you: sudo lca tune)"
@@ -128,14 +136,14 @@ fi
 # tier is on, so a machine tuned while ENABLE_AGENT was false is "already tuned"
 # for ever and has no agent model at all.
 step "4/7  The agent's own model"
-DERIVED="$(agent_model_name "${MODEL_NAME}")"
+DERIVED="$(agent_model_name "$(agent_base_model)")"
 WANT_CTX="$(agent_model_context)"
 if drift="$(agent_model_drift 2>/dev/null)"; then
   if [[ "${DRY_RUN}" == "true" ]]; then
     would "build ${DERIVED} at ${WANT_CTX} tokens (${drift})"
   else
     info "Building ${DERIVED} at ${WANT_CTX} tokens (${drift}). It is a manifest over weights you already have, so this is quick."
-    built="$(ensure_agent_model "${MODEL_NAME}")" && rc=0 || rc=$?
+    built="$(ensure_agent_model "$(agent_base_model)")" && rc=0 || rc=$?
     case "${rc}" in
       0) fixed "built ${built} at ${WANT_CTX} tokens" ;;
       2) warn "${DERIVED} was created but Ollama did not load it at ${WANT_CTX} tokens, so the agent would silently run at the server default. Check it: lca check" ;;

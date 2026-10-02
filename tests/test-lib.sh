@@ -4679,9 +4679,9 @@ echo "# the agent's own derived model: a bigger window for one tier, not for all
 # the agent speaks — ignores a per-request num_ctx. Measured:
 #   /v1 {"options":{"num_ctx":8192}} -> loads at 4096
 #   /api/chat same body              -> loads at 8192
-# So the agent gets a derived model instead. It is DERIVED, never configured: a
-# second model name in .env would be a second source of truth able to drift
-# from a ladder that re-picks on every boot.
+# So the agent gets a derived model instead, built over the ladder's model by
+# default. AGENT_MODEL is the one explicit pin that changes the base; the
+# agent_base_model gates below drive both answers.
 check "the derived name is built from the rung" \
   test "$(agent_model_name qwen2.5-coder:3b)" = qwen2.5-coder:3b-agent
 check "...and defaults to the current one" \
@@ -24411,6 +24411,87 @@ agent_run_model_prefers_the_derived_one() {
 }
 check "the agent runs the derived model when it is there, the base one when it is not" \
   agent_run_model_prefers_the_derived_one
+
+# AGENT_MODEL: empty follows the ladder, set pins the agent alone. Both answers,
+# because the empty one is what every machine runs and the set one is what the
+# 64 GB VM runs: chat and lca on the 14b, the agent on the 32b.
+# shellcheck disable=SC2016  # every stub here is code for the child shell
+agent_model_pin_moves_the_agent_and_nothing_else() {
+  local out bad=0
+  out="$(lib_probe 'MODEL_NAME=m:14b; AGENT_MODEL=' 'agent_base_model; echo; agent_model_name')"
+  [[ "${out}" == $'m:14b\nm:14b-agent' ]] || {
+    printf 'with AGENT_MODEL empty the agent did not follow the ladder: %q\n' "${out}" >&2; bad=1; }
+  out="$(lib_probe 'MODEL_NAME=m:14b; AGENT_MODEL=m:32b' 'agent_base_model; echo; agent_model_name')"
+  [[ "${out}" == $'m:32b\nm:32b-agent' ]] || {
+    printf 'AGENT_MODEL=m:32b did not become the agent base: %q\n' "${out}" >&2; bad=1; }
+  out="$(lib_probe 'MODEL_NAME=m:14b; AGENT_MODEL=m:32b
+                    model_present() { [[ "$1" == m:32b-agent ]]; }' 'agent_model_for_run')"
+  [[ "${out}" == "m:32b-agent" ]] || {
+    printf 'pinned, the run would use %q rather than m:32b-agent\n' "${out}" >&2; bad=1; }
+  out="$(lib_probe 'MODEL_NAME=m:14b; AGENT_MODEL=m:32b
+                    model_present() { return 1; }' 'agent_model_for_run')"
+  [[ "${out}" == "m:32b" ]] || {
+    printf 'pinned with no derived model, the run would use %q rather than the pinned base\n' "${out}" >&2; bad=1; }
+  # The chat side is untouched by the pin: lca and the chat app read MODEL_NAME.
+  out="$(lib_probe 'MODEL_NAME=m:14b; AGENT_MODEL=m:32b' 'printf %s "${MODEL_NAME}"')"
+  [[ "${out}" == "m:14b" ]] || {
+    printf 'the pin moved the chat model to %q\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "AGENT_MODEL pins the agent's model, and an empty one follows the ladder" \
+  agent_model_pin_moves_the_agent_and_nothing_else
+
+# Pinned, the ladder's own derived model is the one nothing uses any more.
+# shellcheck disable=SC2016  # the stub is code for the child shell
+stale_agent_models_follow_the_pin() {
+  local out
+  out="$(lib_probe 'ollama() { printf "NAME\tID\nm:14b-agent\ta\nm:32b-agent\tb\n"; }
+                    MODEL_NAME=m:14b; AGENT_MODEL=m:32b' 'stale_agent_models')"
+  [[ "${out}" == "m:14b-agent" ]] || {
+    printf 'pinned to m:32b, the stale list was %q rather than m:14b-agent alone\n' "${out}" >&2; return 1; }
+}
+check "...and the derived model it replaced is named as unused, the pinned one is not" \
+  stale_agent_models_follow_the_pin
+
+# Pinned resident is two models' worth of RAM, not one. 20 GiB holds a 14b
+# (9.4 GB) with room to pin; it does not hold that plus a 32b (20.2 GB).
+keepalive_counts_both_models_when_pinned() {
+  local alone pinned
+  alone="$(lib_probe 'AGENT_MODEL=' 'keepalive_plan 20 true m:14b')"
+  pinned="$(lib_probe 'AGENT_MODEL=m:32b' 'keepalive_plan 20 true m:14b')"
+  [[ "${alone%%|*}" == "-1" && "${pinned%%|*}" == "30m" ]] || {
+    printf 'keep-alive was %q alone and %q with a 32b agent beside the 14b; want -1 and 30m\n' \
+      "${alone%%|*}" "${pinned%%|*}" >&2
+    return 1; }
+}
+check "...and keep-alive counts both models' RAM when the agent is pinned to another" \
+  keepalive_counts_both_models_when_pinned
+
+# Pinned to its own model with one slot, chat and the agent evict each other on
+# every switch. Two slots only where that is the case AND the RAM holds both:
+# 62 GiB holds a 14b and a 32b with the headroom; 32 GiB does not.
+# shellcheck disable=SC2016  # the stubs are code for the child shell
+two_slots_only_for_a_pinned_agent_that_fits() {
+  local w='ENABLE_AGENT=true; MODEL_NAME=m:14b; AGENT_MODEL=m:32b; detect_ram_gib() { echo 62; }' bad=0
+  lib_probe "${w}" 'ollama_two_models_fit' || {
+    echo 'a 14b chat and a 32b agent on 62 GiB were not given two slots' >&2; bad=1; }
+  ! lib_probe "${w}"'; detect_ram_gib() { echo 32; }' 'ollama_two_models_fit' || {
+    echo 'two slots on 32 GiB, which cannot hold a 14b and a 32b with their caches' >&2; bad=1; }
+  ! lib_probe "${w}"'; AGENT_MODEL=' 'ollama_two_models_fit' || {
+    echo 'two slots with no pin, where chat and the agent share one model' >&2; bad=1; }
+  ! lib_probe "${w}"'; AGENT_MODEL=m:14b' 'ollama_two_models_fit' || {
+    echo 'two slots for a pin naming the chat model itself' >&2; bad=1; }
+  ! lib_probe "${w}"'; ENABLE_AGENT=false' 'ollama_two_models_fit' || {
+    echo 'two slots with the agent tier off' >&2; bad=1; }
+  # ...and the answer reaches what both start paths read.
+  grep -qx 'OLLAMA_MAX_LOADED_MODELS=2' <<<"$(lib_probe "${w}" 'ollama_extra_env')" || {
+    echo 'two slots were decided, and ollama_extra_env still says otherwise' >&2; bad=1; }
+  grep -qx 'OLLAMA_MAX_LOADED_MODELS=1' <<<"$(lib_probe "${w}"'; AGENT_MODEL=' 'ollama_extra_env')" || {
+    echo 'without a pin ollama_extra_env no longer carries the shipped single slot' >&2; bad=1; }
+  return "${bad}"
+}
+check "Ollama keeps two models resident only for a pinned agent model that fits beside chat's" \
+  two_slots_only_for_a_pinned_agent_that_fits
 
 systemd_needs_systemctl_and_a_running_systemd() {
   # A host with no systemctl cannot have systemd, whatever else is true. This

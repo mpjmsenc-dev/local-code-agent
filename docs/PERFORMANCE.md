@@ -304,7 +304,9 @@ What to do about it:
   the sensible speed/quality point. Chasing q2 saves little and costs noticeably
   in output quality — on a small local model you cannot spare it.
 - **Running two models at once.** `OLLAMA_MAX_LOADED_MODELS=1` is set on purpose;
-  a second resident model competes for the same RAM and cores.
+  a second resident model competes for the same RAM and cores. The one
+  exception is computed: an agent pinned to its own model (`AGENT_MODEL`) on a
+  box with RAM for both gets two slots (`ollama_two_models_fit`).
 - **`OLLAMA_KEEP_ALIVE=-1`, as a fix for the section above.** It is not one, and
   it is worth being exact about why: keep-alive decides what happens when
   *nothing is asking*. Eviction happens when the *other model arrives*. Pinning
