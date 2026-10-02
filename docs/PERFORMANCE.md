@@ -101,6 +101,70 @@ comparable across model sizes in a way that tokens/second is not.
 `./check-system.sh` and `lca test` report CPU vs GPU placement too, as part of
 their wider checks.
 
+## What this hardware is actually good for — three real tasks, graded
+
+Measured 2026-10-02 on the ESXi VM: Xeon E5-2680 v2 (AVX, no AVX2), 16 vCPUs
+as 2 × 8, 62 GiB, no GPU, Ollama under `numactl --interleave=all`. Each task
+went through `lca` (aider, default settings: diff edit format, auto-commits,
+the conventions file) in a fresh git repo with `--message`, and was graded by
+hidden unit tests the model never saw. A failed try got one retry, with the
+failing test output pasted back the way a person would. Times are wall clock
+for the whole `lca` run: reading, writing, aider's lint round and the commit
+message. The harness is in `~/projects/lca-eval` on that VM.
+
+| Task | 7b | **14b** | 32b |
+|---|---|---|---|
+| **A.** Write one function from a spec, plus its tests (`parse_duration("1h30m")`, 11 invalid forms) | ✗ after 2 tries, 61 min | **✓ 1st try, 16 min** (two runs: 978 s, 975 s) | ✓ 1st try, 35 min |
+| **B.** Find and fix a planted bug in a 3-module package, tests untouched (`>` vs `>=` at a discount threshold) | ✓ 2nd try, 9 min | **✓ 1st try, 9 min** | ✓ 1st try, 20 min |
+| **C.** One feature across 3 files plus its tests (sales tax: model field, billing, report line) | ✗ after 2 tries, 28 min | **✓ 1st try, 36 min** | ✓ 1st try, 63 min |
+
+How the failures failed, because that is what you would be debugging:
+
+- **7b, task A:** the first try never stopped writing. It read the 3.8k-token
+  prompt in 2.6 minutes and then generated about 3,900 tokens, against the 600
+  a correct answer takes, until aider's 600 s request timeout. aider retried,
+  and the same thing happened three times. The retry wrote a stub
+  (`pass`) and then tried to edit the grader's test file, which it had only
+  seen named in the pasted output. Its SEARCH/REPLACE blocks did not match.
+- **7b, task B:** the first try changed the rounding instead of the comparison.
+  The second fixed `>` to `>=`, and also swapped integer `// 10` for float
+  arithmetic, so the discount now comes back as `100.0`. The tests pass
+  because `100.0 == 100`. That is an unrequested regression a review would
+  have to catch.
+- **7b, task C:** the code was right, but it did not update the existing report
+  test it was told to update, so its own suite failed. The retry produced
+  three edits in a row that aider rejected as malformed.
+- **14b and 32b** each needed one internal lint round on C: the first edit used
+  `tax()` in `report.py` without importing it, aider's linter caught it, and the
+  same request fixed it. Neither needed a retry anywhere.
+
+**So, on this box:**
+
+- **Good for: well-specified, single-sitting changes with 14b.** One function
+  from a precise spec, a bug a failing test points at, a change across a few
+  small files. It gets them right the first time, and you wait 10–35 minutes,
+  with about 4 of each 16 spent just reading aider's prompt. Hand it the task,
+  do something else, and review the commit.
+- **Not good for: interactive pairing.** Nothing here comes back in seconds.
+  A one-line fix is 9 minutes.
+- **Not good for: large files or wide changes.** Every request re-reads the
+  whole chat: task C's two requests sent 10k tokens for a 17-line diff. Reading
+  is ~13 tok/s, so a 30k-token context is 40 minutes before the first word.
+- **32b is not better on work this size, only slower.** Same results, every
+  task, at about twice the time, and its first agent step outruns the agent's
+  30-minute request timeout. It may still earn its keep on harder problems than
+  these. That has not been measured, so it stays on disk for
+  `lca ask -m qwen2.5-coder:32b` and is not the default.
+- **The 7b is not a cheaper 14b.** It failed two of three, and its failures are
+  the expensive kind: an hour of runaway generation, a stub, a quiet float
+  regression. Use it only where a fast wrong answer is acceptable.
+- **The agent tier works, slowly.** `lca agent selftest` (one file, six links)
+  passes in 24 minutes on 14b and 50 on 32b.
+
+Three tasks and one run each (two for 14b on A) is a small sample, and every
+task here was well specified. The ranking was the same on every task, though,
+and the gaps are big: 0/3 vs 3/3 on first tries, and 2× in time.
+
 ## The one change that matters most: a GPU
 
 Nothing else is close. A model that fits entirely in VRAM runs roughly an order
@@ -214,6 +278,22 @@ What to do about it:
 
 - **Use them in blocks**, not alternating. Finish with the chat, then work with
   the agent.
+- **Or make them one model.** Ollama decides "is this the same model?" by
+  weights *and* window. When `OLLAMA_CONTEXT_LENGTH` equals
+  `AGENT_MODEL_CONTEXT` (the ≥24 GiB rungs: both 16384), `<model>` and
+  `<model>-agent` share one runner, and nothing is evicted at all. Measured on
+  the 64 GB ESXi VM with 14b, a ~5.9k-token agent prompt, then a chat message,
+  then the agent prompt again:
+
+  | | agent prompt, warm | chat message | agent prompt, after the chat |
+  |---|---|---|---|
+  | both at 16384 | 1.8 s | 1.5 s, no load | **1.9 s** |
+  | agent at 32768 | 1.8 s | 3.7 s + 21.6 s load | **515.5 s + 26.9 s load** |
+
+  The agent's real prompt is 13.2k tokens, so on that box one chat message costs
+  the next agent step about 22 minutes once the two windows differ. Raising
+  only the agent's window is therefore not free even where RAM is plentiful:
+  see "Does a bigger agent window pay?" below.
 - **`OLLAMA_KEEP_ALIVE` does not help here.** It controls the idle timer, and
   this eviction is the other model *arriving*, not the timer expiring.
 - If you only ever use one surface, nothing above applies to you.
@@ -377,3 +457,51 @@ window this stack actually uses it generates at 8.5. What is left is memory: the
 run `lca agent selftest` with a 7b on that hardware. Anyone who wants the ladder
 changed should do exactly that and bring the number — which is now a
 twenty-minute experiment rather than an argument.
+
+## Does a bigger agent window pay? Measured on 64 GB: not by default
+
+With 62 GiB, RAM no longer limits the agent's window, so 32768 was tried
+against the default 16384 for `qwen2.5-coder:14b-agent` on the ESXi VM:
+
+| | 16384 | 32768 |
+|---|---|---|
+| reading, 600-token probe | 13.3 tok/s | 13.4 tok/s |
+| reading, ~5.9k-token prompt | 515 s | 513 s |
+| resident size (`ollama ps`) | 12 GB | 15 GB |
+| `lca agent selftest` | 24 min | 23 min |
+| a chat message in the middle of an agent session | nothing: shared runner, cache kept | **reload + full re-read of the agent prompt (~22 min at 13.2k tokens)** |
+
+The window itself costs nothing per token: attention work grows with the
+tokens actually in it, not with the allocation. What 32768 changes is that the
+agent's model no longer matches the chat model, so Ollama runs them as two
+models and evicts one for the other (see
+[the eviction section](#why-it-randomly-gets-slow-the-two-models-evict-each-other)).
+
+So 16384 stays. What 32768 would buy is room: the agent's own prompt is about
+13.2k tokens, so at 16384 a run has roughly 3k tokens for its whole
+conversation, which is a few tool calls and their output. The self-test fits.
+A long multi-file task may not, and it will say so: the agent warns at
+`AGENT_CONTEXT_WARN_PERCENT`. If you hit that, raise `AGENT_MODEL_CONTEXT` to
+32768 in `.env` and run `sudo lca agent setup`, and keep the agent and chat
+in separate blocks of time.
+
+## The CPU decides the rung too, and NUMA decides writing speed
+
+Auto-tune picks a rung by RAM, then steps down while this CPU would take more
+than 300 s to read one aider edit's prompt (`cap_for_cpu` in `scripts/tune.sh`).
+Reading is compute-bound and fits one constant per machine: tokens/second ≈
+cores × K ÷ billions of parameters, with K ≈ 12 on the AVX-only Xeon
+E5-2680 v2 and 36 assumed with AVX2. On the ESXi VM it predicted 13.7 / 27.4
+tok/s for 14b / 7b at 16 cores against 13.2 / 27.0 measured. `lca tune
+--dry-run` prints the estimate, and `LCA_CPU_CORES=8 LCA_CPU_AVX2=false lca
+tune --dry-run` answers "what would a smaller VM get?" (here: 7b, because 14b
+would read at ~7 tok/s).
+
+Writing is memory-bound, and on a machine with more than one NUMA node it
+depends on *where* the weights sit. Ollama copies the weights into its own
+memory, and the kernel puts those pages wherever there is room. On the ESXi VM
+(2 sockets × 8 vCPUs) that left the 32b's weights mostly on one node, and
+writing was **1.0 tok/s at 8, 12 and 16 threads alike**: memory-bound, not
+compute-bound. Under `numactl --interleave=all` it was 2.0, and 14b stayed at
+4.3. The managed systemd drop-in now starts Ollama that way whenever there are
+two or more nodes and `numactl` is installed. Check with `lscpu | grep NUMA`.
