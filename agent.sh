@@ -41,6 +41,9 @@ Commands:
             'watch --live' is the read-only view instead: each turn as it
             lands — thoughts, tool calls, results, and the clock on the
             current step, which is how you tell working from stuck here
+  project   Build a project from one spec file with no input from you: it
+            plans PLAN.md, then runs, verifies and commits each step under
+            systemd ('lca agent project --help')
   selftest  Run one small real task end to end, assert a file appeared, and
             report the timing — the honest answer to "is this usable here?"
 
@@ -196,7 +199,13 @@ start_agent() {
     warn "No Tailscale address yet, so the agent is being published on this machine only. Your phone will not reach it until Tailscale is up and you run: lca agent restart"
   fi
 
-  local extra_env=()
+  local extra_env=() mount_kv
+  # Project mode's one host directory, mounted into every sandbox the app
+  # makes. OH_SANDBOX_MOUNTS_0_* is the nested config this build reads; the
+  # bare SANDBOX_VOLUMES sits in the branch OH_SANDBOX_KIND turns off.
+  while IFS= read -r mount_kv; do
+    [[ -n "${mount_kv}" ]] && extra_env+=( -e "${mount_kv}" )
+  done < <(project_mount_env)
   if [[ -n "${instructions}" ]]; then
     # LLM_SYSTEM_PROMPT_SUFFIX is not a documented OpenHands variable, so this
     # does not pretend it is one: the file is also mounted where the agent can
@@ -513,6 +522,7 @@ main() {
     # what makes them true and says which one was not.
     setup)   exec "${SCRIPT_DIR}/scripts/agent-setup.sh" "$@" ;;
     task)    exec "${SCRIPT_DIR}/scripts/agent-task.sh" "$@" ;;
+    project) exec "${SCRIPT_DIR}/scripts/agent-project.sh" "$@" ;;
     start)   start_agent ;;
     stop)
       require_cmd docker

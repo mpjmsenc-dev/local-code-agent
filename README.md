@@ -199,6 +199,11 @@ the failing runs wrote outside the repo they were given:
 lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
 ```
 
+For a whole project from one spec, `lca agent project` plans it into PLAN.md and
+runs each step as its own conversation, verifying and committing as it goes,
+under systemd. It needs `AGENT_PROJECTS_DIR`. The details are in
+[docs/AGENT.md](docs/AGENT.md#project-mode-a-spec-in-a-built-project-out).
+
 And **"the 3b is too small" is a hypothesis, not a measurement** — one that got
 weaker, not stronger. Part of what looked like a model-size ceiling was a prompt
 with its front cut off, and removing that moved every one of the three
@@ -390,6 +395,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/selftest.sh` | Live end-to-end acceptance test (`make smoke`): model + aider + WebUI round-trip |
 | `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
 | `scripts/agent-task.sh` | `lca agent task` — submits a task with the working directory named explicitly, and returns the conversation id |
+| `scripts/agent-project.sh` | `lca agent project` — builds a project from one spec: plans it, then runs, verifies and commits each step under systemd |
 | `scripts/agent-setup.sh` | `lca agent setup` — brings the agent tier up from wherever it is, in dependency order, and says what it changed |
 | `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
 | `scripts/agent-view.sh` | `lca agent watch --live` — the read-only view of a run in progress: thoughts, tool calls, results, and the clock on the current step |
@@ -424,6 +430,10 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PORT` | `3001` | agent UI port (not 3000 — that is the chat app's) |
 | `AGENT_MODEL_CONTEXT` | `16384` | context for the agent's own derived model, without raising it server-wide |
 | `AGENT_MODEL` | *(empty)* | pin the agent alone to another model (e.g. `qwen2.5-coder:32b`); empty follows the ladder's `MODEL_NAME` |
+| `AGENT_PROJECTS_DIR` | *(empty)* | host directory mounted into every agent sandbox at `/workspace/projects`; empty turns project mode off |
+| `AGENT_PROJECT_AUTONOMY` | `ask` | project mode, when the agent asks: `ask` stops, `self` decides and records why, `answerer` has a second model answer |
+| `AGENT_PROJECT_ANSWERER` | *(empty)* | the answerer model; empty means `MODEL_NAME` |
+| `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its verification before the project run stops |
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |
 | `AGENT_NATIVE_TOOL_CALLING` | `false` | use the model's native tool-call channel; `false` parses tool calls from the text, which is what `qwen2.5-coder` needs |

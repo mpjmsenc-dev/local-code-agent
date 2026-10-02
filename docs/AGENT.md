@@ -579,6 +579,93 @@ ran past the 1800-second `AGENT_REQUEST_TIMEOUT`, so raise that with it.
 
 ---
 
+## Project mode: a spec in, a built project out
+
+```bash
+lca agent project ~/specs/myapp.md --dir ~/projects/myapp --autonomy answerer
+lca agent watch --live                        # follows each step's conversation
+lca agent project --dir ~/projects/myapp --status
+```
+
+It builds a project from one spec file with nobody at the keyboard.
+
+1. **Planning.** The agent reads the spec (copied to `.lca-project/spec.md`)
+   and writes `PLAN.md`: a numbered checklist of small steps, each with a
+   `Verify:` command that exits 0 only when the step works. It also writes a
+   short summary of the spec and an empty `DECISIONS.md`. A plan with a step
+   nothing can verify, or with misnumbered steps, is sent back.
+2. **Execution.** Each unticked step runs as its own fresh conversation through
+   `lca agent task`, with the directory named. The task text carries the spec
+   summary, `PLAN.md`, `DECISIONS.md` and that one step. A fresh conversation
+   per step is what keeps a long project inside the window: the agent's own
+   prompt is about 13k tokens before the step says a word.
+3. **Verification, then commit.** The step's command runs in a throwaway
+   container from the agent's own image, with the network off and the project
+   at the path the agent saw. Pass: the step is ticked in `PLAN.md` and
+   committed. Fail: the step is retried with the failure output in hand,
+   `AGENT_PROJECT_RETRIES` (2) times. Then the run **stops** instead of
+   building on a broken base.
+
+### When the agent asks instead of finishing
+
+`--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`):
+
+| mode | what happens |
+|---|---|
+| `ask` | the run stops and reports the question; answer it with `--resume --answer "..."` |
+| `self` | the agent is told: *"Decide yourself using the spec, record the decision and reason in DECISIONS.md, and continue."* |
+| `answerer` | a second model (`AGENT_PROJECT_ANSWERER`, default the chat model) answers as project lead, given the spec summary, `PLAN.md` and `DECISIONS.md`; the answer is logged in `DECISIONS.md` |
+
+**In every mode** the run stops and reports instead of deciding three things:
+credentials or tokens, anything outside the project directory, and deleting
+data. It checks the question, and the answerer's reply (which may only say
+`ESCALATE` to those). It also checks what the step did, before committing
+anything:
+
+- a file changed under `AGENT_PROJECTS_DIR` but outside this project;
+- a tracked file deleted;
+- something in the diff that looks like a credential (a private key block, a
+  cloud or forge token, a literal password).
+
+Each of those stops the run with nothing committed. The matching is wide on
+purpose: a false stop costs one look, a missed one is the thing this mode must
+never do.
+
+### Where the files are, and why it needs a setting
+
+An agent sandbox has no host mount (see above), so a step's work would die with
+its sandbox. `AGENT_PROJECTS_DIR` is mounted into **every** sandbox at
+`/workspace/projects`, through `OH_SANDBOX_MOUNTS_0_*`, and a project directory
+must be inside it. It is empty by default, which keeps the old behaviour of no
+host mount at all. Set it, then `lca agent restart`: the mount is fixed when the
+app container starts.
+
+The sandbox writes as uid 10001. Before and after every step the runner makes
+the project yours and group 10001's, group-writable, so you can edit and git
+can commit what the sandbox wrote, and the next sandbox can edit what was
+committed. The runner commits; the agent is told not to run git.
+
+### Unattended, and resumable
+
+`lca agent project` installs `local-code-agent-project@<dir>.service`, a
+systemd instance running as you, and enables it. It does not need your SSH
+session, and after a reboot it carries on. The state is all in the project
+directory: `.lca-project/state`, `PLAN.md`'s ticks, and git. An attempt that
+was cut off starts again from the top. A run that ends, by finishing, failing
+or stopping for a person, exits cleanly, so systemd does not retry into the
+same wall.
+
+`--status` shows where it is, `--stop` stops it and stops it resuming at boot,
+and `--resume` carries on, optionally with `--answer`. At the end,
+`.lca-project/SUMMARY.md` says how many steps were done, which one failed,
+which decisions were taken without you, and what to review.
+
+Limits that apply per step: `AGENT_TIMEOUT_MINUTES` and `AGENT_MAX_ITERATIONS`.
+The step's sandbox is removed when it ends, because the app allows five at once
+and a project would otherwise fill them.
+
+---
+
 ## The tool-call channel, and why the default is `false`
 
 The first live run of this tier produced correct FizzBuzz and an empty

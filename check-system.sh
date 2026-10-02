@@ -131,13 +131,13 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT AGENT_PROJECT_RETRIES; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
     # "keep everything" for BACKUP_KEEP and "no limit" for the three agent
     # limits, which is the convention agent_run_verdict already implements.
-    BACKUP_KEEP|AGENT_MAX_ITERATIONS|AGENT_TIMEOUT_MINUTES|AGENT_STUCK_STRIKES|BACKUP_AGENT_MAX_MB)
+    BACKUP_KEEP|AGENT_MAX_ITERATIONS|AGENT_TIMEOUT_MINUTES|AGENT_STUCK_STRIKES|BACKUP_AGENT_MAX_MB|AGENT_PROJECT_RETRIES)
       [[ "${value}" =~ ^[0-9]+$ ]] && continue ;;
     *)           [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} > 0 )) && continue ;;
   esac
@@ -170,6 +170,8 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_warn "AGENT_MAX_OUTPUT_TOKENS='${value}' is not a positive number, so the agent falls back to 2048. It caps ONE reply — it does not make room in the prompt, and a bad value is sent as JSON null. What decides whether the prompt fits is its size against the window (docs/PROMPT-WINDOW.md). Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     AGENT_REQUEST_TIMEOUT)
       p_warn "AGENT_REQUEST_TIMEOUT='${value}' is not a positive number, so the agent falls back to 1800 seconds. Too low and every step is discarded mid-generation: at the client default of 300 this hardware, measured at 901 s per reply, threw away every step and sat 'running' having executed nothing. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
+    AGENT_PROJECT_RETRIES)
+      p_warn "AGENT_PROJECT_RETRIES='${value}' is not a whole number, so 'lca agent project' refuses to start at all. Set how many times a failing step is retried (0 for none, on purpose) in ${ENV_FILE}." ;;
     # No catch-all arm on purpose: a setting added to the loop above without a
     # message here prints nothing at all, which is the silent failure this whole
     # section exists to remove. The gate that guards this loop checks only that
@@ -186,6 +188,10 @@ case "${AGENT_STEP_SOURCE}" in
   auto|events|log) ;;
   *) p_warn "AGENT_STEP_SOURCE='${AGENT_STEP_SOURCE}' is not one of auto, events or log, so 'lca agent watch' treats it as auto. Nothing is broken by that; it just is not what you asked for. Fix it in ${ENV_FILE}." ;;
 esac
+# Project mode refuses a mode it does not know rather than guessing one, so a
+# typo here is a project that will not start; said before that happens.
+project_autonomy_valid "${AGENT_PROJECT_AUTONOMY}" \
+  || p_warn "AGENT_PROJECT_AUTONOMY='${AGENT_PROJECT_AUTONOMY}' is not one of ask, self or answerer, so 'lca agent project' refuses to start without --autonomy. Fix it in ${ENV_FILE}."
 
 # The chat app's system prompt is this project's text plus config/CONVENTIONS.md,
 # and that file belongs to the user. A long one is a legitimate choice and it is

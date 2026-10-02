@@ -344,6 +344,9 @@ main() {
   done
   clear_status
   info "Conversation ${conv_id} — this is read-only; nothing here can stop or change the run."
+  local project_now project_shown=""
+  project_now="$(project_progress_line 2>/dev/null || true)"
+  if [[ -n "${project_now}" ]]; then info "${project_now}"; project_shown="${project_now}"; fi
   local ambiguity
   if ambiguity="$(agent_conversation_warning 2>/dev/null)"; then
     warn "More than one run is alive here — ${ambiguity}. This is showing ${conv_id}."
@@ -381,6 +384,22 @@ main() {
     VIEW_TICKS=$((VIEW_TICKS+1))
     if (( since_poll >= interval )); then
       since_poll=0
+      # Project mode runs every step as a NEW conversation. A view that stayed
+      # on the first one would show a finished step for the rest of the
+      # project, so the recorded conversation is re-read and followed.
+      local now_ref
+      now_ref="$(agent_recorded_conversation 2>/dev/null || true)"
+      if [[ -n "${now_ref}" && "${now_ref}" != "${conv_id}" ]]; then
+        clear_status
+        info "Next conversation: ${now_ref} (${conv_id} is over)."
+        conv_id="${now_ref}"; seen=0; last_event_at="$(date +%s)"
+      fi
+      project_now="$(project_progress_line 2>/dev/null || true)"
+      if [[ -n "${project_now}" && "${project_now}" != "${project_shown}" ]]; then
+        clear_status
+        info "${project_now}"
+        project_shown="${project_now}"
+      fi
       payload="$(fetch_events "${conv_id}" 2>/dev/null || true)"
       if [[ -n "${payload}" ]]; then
         render_payload "${payload}" "${seen}"

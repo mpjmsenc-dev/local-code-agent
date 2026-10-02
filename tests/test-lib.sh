@@ -9465,9 +9465,14 @@ script_doc_references_resolve() {
   (( ${#scripts[@]} > 0 )) || {
     echo "could not list tracked scripts (not a git checkout?)" >&2; return 1; }
   local f ref bad=0 found root
+  # Files project mode writes into the USER's project, not documents of this
+  # repository. Exact basenames, so a real reference that merely ends the same
+  # way (docs/PLAN-B.md, say) is still checked.
+  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md "
   for f in "${scripts[@]}"; do
     while IFS= read -r ref; do
       [[ -n "${ref}" ]] || continue
+      [[ "${project_files}" != *" ${ref##*/} "* ]] || continue
       found=no
       for root in "" docs/ config/; do
         [[ -e "${REPO}/${root}${ref}" ]] && { found=yes; break; }
@@ -9476,7 +9481,9 @@ script_doc_references_resolve() {
         printf '%s names %s, which is not a file in the repo, docs/ or config/\n' \
           "${f}" "${ref}" >&2
         bad=1; }
-    done < <(sed 's/#.*//' "${REPO}/${f}" \
+    # printf escapes first: '\nPLAN.md' in a format string is a newline and
+    # PLAN.md, and was read as a file called nPLAN.md.
+    done < <(sed 's/#.*//; s/\\[nt]/ /g' "${REPO}/${f}" \
                | grep -ohE '[A-Za-z][A-Za-z0-9_/-]*\.md' | sort -u)
   done
   return "${bad}"
@@ -24492,6 +24499,175 @@ two_slots_only_for_a_pinned_agent_that_fits() {
 }
 check "Ollama keeps two models resident only for a pinned agent model that fits beside chat's" \
   two_slots_only_for_a_pinned_agent_that_fits
+
+echo "# project mode: the decisions, driven without a model"
+# lca agent project runs unattended for hours, so every judgement it makes is a
+# pure function in lib.sh and is driven here: what a plan is, when a step is
+# done, when the agent is asking, and the three things no mode may decide.
+PROJECT_SB="${SANDBOX}/project"
+mkdir -p "${PROJECT_SB}"
+
+project_plan_is_read_as_written() {
+  local plan="${PROJECT_SB}/plan-fixture.txt" out
+  cat > "${plan}" <<'PLAN'
+# Plan
+
+- [x] 1. Create the package skeleton
+  Verify: `python3 -c "import toy"`
+- [ ] 2. Add the add() function with tests
+  - Verify: `python3 -m pytest -q tests/test_add.py`
+- [ ] 3. A command-line entry point
+  Verify: `python3 -m toy 2 3 | grep -qx 5`
+PLAN
+  out="$(project_plan_steps "${plan}")"
+  [[ "$(grep -c . <<<"${out}")" == 3 ]] || { printf 'three steps, read as:\n%s\n' "${out}" >&2; return 1; }
+  [[ "$(sed -n 1p <<<"${out}")" == $'1\t1\tCreate the package skeleton\tpython3 -c "import toy"' ]] || {
+    printf 'the done step was read as: %q\n' "$(sed -n 1p <<<"${out}")" >&2; return 1; }
+  [[ "$(sed -n 2p <<<"${out}" | cut -f2,4)" == $'0\tpython3 -m pytest -q tests/test_add.py' ]] || {
+    printf 'a "- Verify:" line was read as: %q\n' "$(sed -n 2p <<<"${out}")" >&2; return 1; }
+  [[ "$(sed -n 3p <<<"${out}" | cut -f4)" == 'python3 -m toy 2 3 | grep -qx 5' ]] || {
+    printf 'a verify command with a pipe was read as: %q\n' "$(sed -n 3p <<<"${out}" | cut -f4)" >&2; return 1; }
+}
+check "project mode reads PLAN.md's steps, ticks and verify commands as written" \
+  project_plan_is_read_as_written
+
+# shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
+project_plan_problems_are_named() {
+  local plan="${PROJECT_SB}/bad-plan.txt" bad=0
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n- [ ] 2. Two, unverifiable\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}")" == *'step 2'*'Verify'* ]] || {
+    echo 'a step with no Verify line was not refused' >&2; bad=1; }
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n- [ ] 3. Three\n  Verify: `true`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}")" == *'in order'* ]] || {
+    echo 'steps numbered 1, 3 were not refused' >&2; bad=1; }
+  printf '# Plan\n\nJust prose, no checklist.\n' > "${plan}"
+  [[ -n "$(project_plan_problem "${plan}")" ]] || { echo 'a plan with no steps was accepted' >&2; bad=1; }
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n' > "${plan}"
+  ! project_plan_problem "${plan}" >/dev/null || { echo 'a good one-step plan was refused' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and refuses a plan with an unverifiable, missing or misnumbered step" \
+  project_plan_problems_are_named
+
+# shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
+project_mark_done_ticks_one_step() {
+  local plan="${PROJECT_SB}/tick.txt"
+  printf -- '- [ ] 1. One\n  Verify: `true`\n- [ ] 2. Two\n  Verify: `true`\n- [ ] 12. Twelve\n  Verify: `true`\n' > "${plan}"
+  project_plan_mark_done "${plan}" 2 || { echo 'ticking step 2 failed' >&2; return 1; }
+  [[ "$(project_plan_steps "${plan}" | cut -f1,2 | tr '\t\n' ':,')" == '1:0,2:1,12:0,' ]] || {
+    printf 'after ticking step 2 the plan reads: %s\n' "$(project_plan_steps "${plan}" | cut -f1,2 | tr '\t\n' ':,')" >&2; return 1; }
+  ! project_plan_mark_done "${plan}" 7 || { echo 'ticking a step that does not exist reported success' >&2; return 1; }
+}
+check "...and ticks exactly the step that passed" project_mark_done_ticks_one_step
+
+project_turns_are_classified() {
+  local bad=0 k
+  k="$(project_turn_kind $'Created toy/add.py and tests; pytest passes.\nSTEP DONE')"
+  [[ "${k}" == "done" ]] || { echo "a turn ending STEP DONE was '${k}'" >&2; bad=1; }
+  k="$(project_turn_kind 'Should the CLI accept floats as well as integers?')"
+  [[ "${k}" == question ]] || { echo "a turn ending on a question was '${k}'" >&2; bad=1; }
+  k="$(project_turn_kind 'I can use argparse or click. Please confirm which one you prefer.')"
+  [[ "${k}" == question ]] || { echo "a turn asking for confirmation was '${k}'" >&2; bad=1; }
+  k="$(project_turn_kind 'I wrote the function.')"
+  [[ "${k}" == unclear ]] || { echo "a turn with neither marker nor question was '${k}', not unclear" >&2; bad=1; }
+  # The bash slice that clips this to its tail returns NOTHING for a string
+  # shorter than the slice; a short question must still be one.
+  k="$(project_turn_kind 'Floats?')"
+  [[ "${k}" == question ]] || { echo "a four-letter question was '${k}'" >&2; bad=1; }
+  return "${bad}"
+}
+check "...and tells a finished step from a question from neither" project_turns_are_classified
+
+project_hard_stops_are_never_decided() {
+  local bad=0 c
+  c="$(project_hard_stop 'Can you provide the GitHub token so I can push?')"
+  [[ "${c}" == credentials ]] || { echo "a request for a token was '${c:-not stopped}'" >&2; bad=1; }
+  c="$(project_hard_stop 'Should I install it system-wide with sudo apt install?')"
+  [[ "${c}" == outside ]] || { echo "a system-wide install was '${c:-not stopped}'" >&2; bad=1; }
+  c="$(project_hard_stop 'Shall I delete the old data/ directory first?')"
+  [[ "${c}" == delete ]] || { echo "deleting a directory was '${c:-not stopped}'" >&2; bad=1; }
+  ! project_hard_stop 'Should the tokenizer split on whitespace or on commas?' >/dev/null || {
+    echo 'a question about a tokenizer was stopped as a credential' >&2; bad=1; }
+  ! project_hard_stop 'Should add() accept floats?' >/dev/null || {
+    echo 'an ordinary design question was stopped' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and stops, in every mode, for credentials, the outside world and deleting data" \
+  project_hard_stops_are_never_decided
+
+project_secrets_in_a_diff_are_seen() {
+  local bad=0 k='AKIA''ABCDEFGHIJKLMNOP'
+  project_diff_has_secret "+aws_key = \"${k}\"" || { echo 'a cloud access key in a diff was not seen' >&2; bad=1; }
+  project_diff_has_secret $'+-----BEGIN OPENSSH PRIVATE KEY-----' || { echo 'a private key block was not seen' >&2; bad=1; }
+  project_diff_has_secret '+password = "hunter22"' || { echo 'a literal password was not seen' >&2; bad=1; }
+  ! project_diff_has_secret '-password = "hunter22"' || { echo 'a REMOVED line was called a new secret' >&2; bad=1; }
+  ! project_diff_has_secret '+password = os.environ["APP_PASSWORD"]' || { echo 'reading a password from the environment was called a secret' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and refuses to commit what looks like a credential" project_secrets_in_a_diff_are_seen
+
+# shellcheck disable=SC2030,SC2031,SC2034  # each probe sets its own copy, in a subshell, for lib.sh to read
+project_dirs_stay_inside_the_mount() {
+  local bad=0 out
+  out="$(AGENT_PROJECTS_DIR=/home/u/projects; project_sandbox_dir /home/u/projects/toy)"
+  [[ "${out}" == /workspace/projects/toy ]] || { echo "the sandbox path was '${out}'" >&2; bad=1; }
+  ! (AGENT_PROJECTS_DIR=/home/u/projects; project_sandbox_dir /home/u/other) || { echo 'a directory outside the mount was accepted' >&2; bad=1; }
+  ! (AGENT_PROJECTS_DIR=/home/u/projects; project_sandbox_dir /home/u/projects) || { echo 'the mount root itself was accepted as a project' >&2; bad=1; }
+  ! (AGENT_PROJECTS_DIR=/home/u/projects; project_sandbox_dir /home/u/projects/../etc) || { echo 'a path climbing out with .. was accepted' >&2; bad=1; }
+  ! (AGENT_PROJECTS_DIR=/home/u/projects; project_sandbox_dir /home/u/projectsX/toy) || { echo 'a sibling sharing the prefix was accepted' >&2; bad=1; }
+  ! (AGENT_PROJECTS_DIR=''; project_sandbox_dir /home/u/projects/toy) || { echo 'project mode answered with AGENT_PROJECTS_DIR empty' >&2; bad=1; }
+  out="$(AGENT_PROJECTS_DIR=/home/u/projects/; project_mount_env)"
+  [[ "${out}" == $'OH_SANDBOX_MOUNTS_0_HOST_PATH=/home/u/projects\nOH_SANDBOX_MOUNTS_0_CONTAINER_PATH=/workspace/projects\nOH_SANDBOX_MOUNTS_0_MODE=rw' ]] || {
+    printf 'the mount the agent is started with was:\n%s\n' "${out}" >&2; bad=1; }
+  [[ -z "$(AGENT_PROJECTS_DIR=''; project_mount_env)" ]] || { echo 'something was mounted with project mode off' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and a project must be inside the one directory the sandboxes can see" \
+  project_dirs_stay_inside_the_mount
+
+project_step_task_carries_one_step() {
+  local t bad=0
+  t="$(project_step_task /workspace/projects/toy 2 3 'Add add()' 'python3 -m pytest -q' \
+        'A toy adder.' $'- [x] 1. Skeleton\n- [ ] 2. Add add()' '# Decisions' 'E   assert 4 == 5')"
+  for want in 'step 2 of 3: Add add()' 'Spec summary:' 'A toy adder.' '- [x] 1. Skeleton' '# Decisions' \
+              'python3 -m pytest -q' 'STEP DONE' 'do not run git' 'FAILED verification' 'assert 4 == 5'; do
+    grep -qF -- "${want}" <<<"${t}" || { printf 'the step task does not carry: %s\n' "${want}" >&2; bad=1; }
+  done
+  t="$(project_step_task /workspace/projects/toy 1 3 'Skeleton' 'true' s p d)"
+  ! grep -q 'FAILED' <<<"${t}" || { echo 'a first attempt was told it had failed' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and a step's task carries the summary, the plan, the decisions and that step only" \
+  project_step_task_carries_one_step
+
+project_answerer_asks_as_lead_without_reloading() {
+  local p
+  p="$(project_answerer_payload m:14b 'sum' 'plan' 'dec' 'Floats or ints?')"
+  [[ "$(jq -r '.model' <<<"${p}")" == m:14b ]] || { echo 'the answerer was not the model asked for' >&2; return 1; }
+  jq -e '.messages[0].content | test("project lead") and test("ESCALATE")' <<<"${p}" >/dev/null || {
+    echo 'the answerer is not told it is the project lead, or how to refuse' >&2; return 1; }
+  jq -e '.messages[1].content | test("Floats or ints\\?")' <<<"${p}" >/dev/null || {
+    echo 'the question did not reach the answerer' >&2; return 1; }
+  # A num_ctx here would reload the chat model at another window — the cost
+  # the answerer being the chat model exists to avoid.
+  ! jq -e '.options.num_ctx? // empty' <<<"${p}" >/dev/null || { echo 'the answerer asks for its own window, which reloads the model' >&2; return 1; }
+}
+check "...and the answerer is asked as project lead, at the server's own window" \
+  project_answerer_asks_as_lead_without_reloading
+
+# shellcheck disable=SC2030,SC2031,SC2034  # set for this probe's subshell only, for lib.sh to read
+project_answerer_defaults_to_chat() {
+  [[ "$(MODEL_NAME=m:14b; AGENT_PROJECT_ANSWERER=''; project_answerer_model)" == m:14b ]] \
+    && [[ "$(MODEL_NAME=m:14b; AGENT_PROJECT_ANSWERER=m:7b; project_answerer_model)" == m:7b ]]
+}
+check "...and answers with the chat model unless told otherwise" project_answerer_defaults_to_chat
+
+project_autonomy_modes_are_the_three() {
+  project_autonomy_valid ask && project_autonomy_valid self && project_autonomy_valid answerer \
+    && ! project_autonomy_valid yolo && ! project_autonomy_valid ''
+}
+check "...and the autonomy modes are ask, self and answerer, and nothing else" \
+  project_autonomy_modes_are_the_three
 
 systemd_needs_systemctl_and_a_running_systemd() {
   # A host with no systemctl cannot have systemd, whatever else is true. This

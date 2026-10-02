@@ -80,6 +80,10 @@ NETMODE_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-netmode.service"
 BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.service"
 # shellcheck disable=SC2034
 BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.timer"
+# The template project mode's runner is installed as (one instance per project
+# directory, escaped). See the project-mode section below.
+# shellcheck disable=SC2034
+PROJECT_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-project@.service"
 # The 'lca' command setup.sh links onto PATH, and the directory it lives in.
 # shellcheck disable=SC2034
 LCA_LINK="${LCA_HOST_ROOT:-}/usr/local/bin/lca"
@@ -134,6 +138,7 @@ MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT:-}/etc/update-motd.d/99-local-code-a
 lca_host_paths() {
   printf '%s\n' \
     "${TUNE_SERVICE}" "${NETMODE_SERVICE}" "${BACKUP_SERVICE}" "${BACKUP_TIMER}" \
+    "${PROJECT_SERVICE}" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service" \
     "${SYSTEMD_UNIT_DIR}/multi-user.target.wants" \
@@ -646,6 +651,16 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # MODEL_NAME, so chat, lca and the agent share one model and one runner. Set,
   # it pins the agent alone; see agent_base_model.
   AGENT_MODEL="${AGENT_MODEL:-}"
+  # Project mode (lca agent project). The host directory mounted into every
+  # sandbox; empty, the default, mounts nothing and project mode is off.
+  AGENT_PROJECTS_DIR="${AGENT_PROJECTS_DIR:-}"
+  # What happens when the agent stops to ask: ask (stop and report), self (it
+  # decides and records why), answerer (a second model answers as project lead).
+  AGENT_PROJECT_AUTONOMY="${AGENT_PROJECT_AUTONOMY:-ask}"
+  # The answerer; empty means the chat model.
+  AGENT_PROJECT_ANSWERER="${AGENT_PROJECT_ANSWERER:-}"
+  # Retries for a step that fails its verification, before the run stops.
+  AGENT_PROJECT_RETRIES="${AGENT_PROJECT_RETRIES:-2}"
   # Which ref of the public skills repository the agent's sandboxes may load
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
@@ -4884,6 +4899,292 @@ docker_bridge_interface() {
 # MCPTimeoutError in agent init, before the model is asked for one token.
 agent_web_url() {
   printf 'http://host.docker.internal:%s' "${AGENT_PORT}"
+}
+
+# --- project mode: a spec in, a built project out ------------------------------
+#
+# 'lca agent project SPEC --dir DIR' plans a project into PLAN.md, then runs each
+# step as its own fresh conversation, verifies it, commits it and moves on. The
+# loop is scripts/agent-project.sh; the decisions it makes are here, as pure
+# functions, so the suite can drive them without a model.
+#
+# WHERE THE FILES ARE. A sandbox has no host mount by default (docs/AGENT.md),
+# so a step's work would die with its sandbox and the next step would start
+# from nothing. AGENT_PROJECTS_DIR is mounted into every sandbox the app makes,
+# at PROJECT_SANDBOX_ROOT, through OH_SANDBOX_MOUNTS_0_* (the nested config
+# OpenHands reads, unlike the bare SANDBOX_VOLUMES it ignores here). A project
+# directory has to live under it, and that is the whole of what the agent can
+# reach on the host.
+
+PROJECT_SANDBOX_ROOT=/workspace/projects
+# Which project the runner on this machine is working on, for 'watch --live'.
+PROJECT_POINTER_FILE="${HOME}/.lca-agent-project"
+# shellcheck disable=SC2034  # read by scripts/agent-project.sh
+# What the agent answers in 'self' mode. Fixed text, on purpose: the whole
+# point of the mode is that nobody had to think about the reply.
+PROJECT_SELF_REPLY="Decide yourself using the spec, record the decision and reason in DECISIONS.md, and continue."
+
+# project_autonomy_valid MODE — one of the three this runner implements.
+project_autonomy_valid() {
+  case "${1:-}" in ask|self|answerer) return 0 ;; *) return 1 ;; esac
+}
+
+# project_answerer_model — who answers in 'answerer' mode: the chat model unless
+# AGENT_PROJECT_ANSWERER says otherwise. With the agent pinned to the 32b this
+# is the 14b that is already resident for chat, so answering loads nothing.
+project_answerer_model() {
+  printf '%s' "${AGENT_PROJECT_ANSWERER:-${MODEL_NAME}}"
+}
+
+# project_dir_rel DIR — DIR's path below AGENT_PROJECTS_DIR, or rc 1 when it is
+# not strictly inside it. Textual on purpose, after normalising both: the
+# directory may not exist yet, and realpath on a missing path answers nothing.
+project_dir_rel() {
+  local dir="${1%/}" root="${AGENT_PROJECTS_DIR:-}"
+  root="${root%/}"
+  [[ -n "${root}" && "${root}" == /* && "${dir}" == /* ]] || return 1
+  [[ "${dir}" == "${root}/"* ]] || return 1
+  local rel="${dir#"${root}"/}"
+  [[ -n "${rel}" && "/${rel}/" != *"/../"* && "/${rel}/" != *"/./"* ]] || return 1
+  printf '%s' "${rel}"
+}
+
+# project_sandbox_dir DIR — where the agent sees DIR.
+project_sandbox_dir() {
+  local rel
+  rel="$(project_dir_rel "$1")" || return 1
+  printf '%s/%s' "${PROJECT_SANDBOX_ROOT}" "${rel}"
+}
+
+# project_mount_env — the docker -e arguments that mount AGENT_PROJECTS_DIR into
+# every sandbox, one per line; nothing when it is unset.
+project_mount_env() {
+  [[ -n "${AGENT_PROJECTS_DIR:-}" ]] || return 0
+  printf '%s\n' \
+    "OH_SANDBOX_MOUNTS_0_HOST_PATH=${AGENT_PROJECTS_DIR%/}" \
+    "OH_SANDBOX_MOUNTS_0_CONTAINER_PATH=${PROJECT_SANDBOX_ROOT}" \
+    "OH_SANDBOX_MOUNTS_0_MODE=rw"
+}
+
+# project_plan_steps PLAN_FILE — one line per step, NUMBER<TAB>DONE<TAB>TITLE<TAB>VERIFY.
+#
+# The format the planner is told to write, and nothing looser:
+#
+#   - [ ] 1. Title of the step
+#     Verify: `a command that exits 0 only when the step works`
+#
+# A step with no Verify line is printed with an empty VERIFY, so the caller can
+# refuse the plan rather than run a step nothing can check.
+project_plan_steps() {
+  [[ -r "${1:-}" ]] || return 1
+  awk '
+    function flush() { if (n != "") printf "%s\t%s\t%s\t%s\n", n, d, t, v; n = ""; v = "" }
+    match($0, /^[[:space:]]*[-*] \[[ xX]\] [0-9]+\.[[:space:]]+/) {
+      flush()
+      d = ($0 ~ /^[[:space:]]*[-*] \[[xX]\]/) ? 1 : 0
+      s = $0; sub(/^[[:space:]]*[-*] \[[ xX]\] /, "", s)
+      n = s; sub(/\..*/, "", n)
+      t = s; sub(/^[0-9]+\.[[:space:]]+/, "", t); gsub(/\t/, " ", t)
+      next
+    }
+    n != "" && /^[[:space:]]*(-[[:space:]]*)?[Vv]erify:/ {
+      s = $0; sub(/^[^:]*:[[:space:]]*/, "", s)
+      if (match(s, /`[^`]+`/)) s = substr(s, RSTART + 1, RLENGTH - 2)
+      gsub(/\t/, " ", s); v = s
+    }
+    END { flush() }
+  ' "$1"
+}
+
+# project_plan_problem PLAN_FILE — why this plan cannot be run, or rc 1 when it
+# can. Checked before the first step, because a step nothing can verify would
+# be committed on the agent's say-so, which is the thing this mode exists to
+# replace.
+project_plan_problem() {
+  local steps n=0 want=1 num title verify
+  steps="$(project_plan_steps "$1" 2>/dev/null)" || { printf 'PLAN.md is missing or unreadable'; return 0; }
+  [[ -n "${steps}" ]] || { printf 'PLAN.md has no steps in the "- [ ] 1. Title" form'; return 0; }
+  while IFS=$'\t' read -r num _ title verify; do
+    n=$(( n + 1 ))
+    [[ "${num}" == "${want}" ]] || { printf 'step numbers are not 1, 2, 3... in order (found %s where %s was due)' "${num}" "${want}"; return 0; }
+    want=$(( want + 1 ))
+    [[ -n "${title}" ]] || { printf 'step %s has no title' "${num}"; return 0; }
+    # shellcheck disable=SC2016  # the backticks are the format being named
+    [[ -n "${verify}" ]] || { printf 'step %s (%s) has no "Verify: `command`" line' "${num}" "${title}"; return 0; }
+  done <<<"${steps}"
+  (( n <= 40 )) || { printf 'PLAN.md has %s steps; a plan this long is a spec to split, not to run' "${n}"; return 0; }
+  return 1
+}
+
+# project_plan_mark_done PLAN_FILE N — tick step N, and nothing else.
+project_plan_mark_done() {
+  local f="${1:-}" n="${2:-}" tmp
+  [[ -w "${f}" && "${n}" =~ ^[0-9]+$ ]] || return 1
+  tmp="$(mktemp)" || return 1
+  awk -v n="${n}" '
+    !hit && match($0, /^[[:space:]]*[-*] \[ \] [0-9]+\./) {
+      s = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", s); sub(/\..*/, "", s)
+      if (s == n) { sub(/\[ \]/, "[x]"); hit = 1 }
+    }
+    { print }
+    END { exit !hit }
+  ' "${f}" > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  cat "${tmp}" > "${f}" && rm -f "${tmp}"
+}
+
+# project_final_text EVENTS_PAYLOAD — what the agent said last: the message of
+# its finish action, or the text of its last message to the user.
+project_final_text() {
+  have jq || return 1
+  agent_event_lines "${1:-}" 2>/dev/null | jq -rs '
+    [ .[] | select((.source? // "") == "agent")
+          | select(.kind? == "MessageEvent" or (.action?.kind? // "") == "FinishAction") ]
+    | last
+    | if . == null then empty
+      elif (.action?.message? | type) == "string" then .action.message
+      else ([.llm_message?.content[]? | .text? // empty] | join("\n"))
+      end' 2>/dev/null
+}
+
+# project_turn_kind TEXT — done | question | unclear.
+#
+# "done" needs the marker the step prompt asks for. A question is a final
+# message that ends on one, or opens like one — the agent stopping to ask
+# rather than finishing. Anything else is unclear, and verification decides.
+project_turn_kind() {
+  local text="${1:-}" tail
+  [[ -n "${text//[[:space:]]/}" ]] || { printf 'unclear'; return 0; }
+  if grep -qE '(STEP|PLAN) DONE' <<<"${text}"; then printf 'done'; return 0; fi
+  tail="$(printf '%s' "${text}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  (( ${#tail} <= 400 )) || tail="${tail: -400}"
+  if [[ "${tail}" == *'?' ]] \
+     || grep -qiE '(^|[.!?] )(should i|shall i|would you|do you want|which (one|option|approach)|can you (confirm|provide)|please (confirm|provide|clarify|let me know))' <<<"${tail}"; then
+    printf 'question'; return 0
+  fi
+  printf 'unclear'
+}
+
+# project_hard_stop TEXT — credentials | outside | delete, or rc 1.
+#
+# The three things no autonomy mode may decide on its own, read off a question
+# or an answer. Deliberately wide: a false stop costs a person reading one
+# question, and a missed one is exactly what this mode must never do unasked.
+project_hard_stop() {
+  local text="${1:-}"
+  if grep -qiE 'password|passphrase|api[ _-]?key|access[ _-]?key|secret|\b(api|access|auth|bearer|github|gitlab|personal access|refresh|session) ?tokens?\b|credential|private key|ssh key|log ?in to|sign ?in|oauth' <<<"${text}"; then
+    printf 'credentials'; return 0
+  fi
+  # shellcheck disable=SC2016  # $HOME is a word to find, not to expand
+  if grep -qiE 'outside (the|this) project|outside of the project|(/etc|/usr|/var|/opt|/root|~|\$HOME)/|home directory|system-wide|globally|sudo|apt(-get)? install' <<<"${text}"; then
+    printf 'outside'; return 0
+  fi
+  if grep -qiE '\b(delete|deleting|remove|removing|rm -rf|drop (table|database)|truncate|wipe|erase|overwrite existing)\b' <<<"${text}"; then
+    printf 'delete'; return 0
+  fi
+  return 1
+}
+
+# project_diff_has_secret DIFF — true when ADDED lines look like a credential:
+# a private key block, a cloud or forge token, or a literal password. The agent
+# may not put one in the tree unasked, in any mode.
+project_diff_has_secret() {
+  grep -E '^\+' <<<"${1:-}" | grep -vE '^\+\+\+ ' \
+    | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}|(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+}
+
+# project_clip TEXT MAX — the last MAX characters of TEXT, said to be clipped.
+# Everything a step prompt carries competes with the agent's own ~13k-token
+# system prompt for one window, so nothing goes in unbounded.
+project_clip() {
+  local text="${1:-}" max="${2:-2000}"
+  if (( ${#text} > max )); then
+    printf '[... %s earlier characters cut ...]\n%s' "$(( ${#text} - max ))" "${text: -max}"
+  else
+    printf '%s' "${text}"
+  fi
+}
+
+# project_planning_task SANDBOX_DIR — the task text for the planning step.
+project_planning_task() {
+  local d="${1:-}"
+  [[ -n "${d}" ]] || return 1
+  cat <<EOF
+PROJECT MODE: PLANNING. Do not write any project code in this step.
+
+Read the spec at ${d}/.lca-project/spec.md, then write exactly three files:
+
+1. ${d}/.lca-project/spec-summary.md: the spec in at most 150 words, keeping every hard requirement (names, interfaces, file names, versions).
+2. ${d}/PLAN.md: a numbered checklist of small steps, in exactly this form:
+
+# Plan
+
+- [ ] 1. Short title of the first step
+  Verify: \`one shell command, run from ${d}, that exits 0 only if this step works\`
+- [ ] 2. ...
+
+Rules for the steps: each is a small piece of work touching at most three files, finishable in under 20 minutes. Order them so each builds on the last. Each Verify is ONE command (for Python, e.g. \`python3 -m pytest -q tests/test_x.py\`). Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv. Three to twelve steps.
+3. ${d}/DECISIONS.md containing only the line: # Decisions
+
+Then check that PLAN.md follows the form exactly, and end your final message with: PLAN DONE
+EOF
+}
+
+# project_step_task SANDBOX_DIR N TOTAL TITLE VERIFY SUMMARY PLAN DECISIONS [PREVIOUS_FAILURE]
+# — the task text for one step. Spec summary, plan, decisions and this step
+# only: the step must not need the whole spec, and the window cannot hold it.
+project_step_task() {
+  local d="$1" n="$2" total="$3" title="$4" verify="$5" summary="$6" plan="$7" decisions="$8" failure="${9:-}"
+  [[ -n "${d}" && -n "${n}" && -n "${title}" ]] || return 1
+  printf 'PROJECT MODE: step %s of %s: %s\n\n' "${n}" "${total}" "${title}"
+  printf 'Project directory: %s. It is a git repository: do not run git, the runner commits after verifying.\n\n' "${d}"
+  printf 'Spec summary:\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
+    "$(project_clip "${summary}" 1500)" "$(project_clip "${plan}" 2500)" "$(project_clip "${decisions}" 1500)"
+  printf 'Do ONLY step %s: %s\n' "${n}" "${title}"
+  printf 'Afterwards the runner verifies it by running, in %s:\n  %s\n' "${d}" "${verify}"
+  printf 'Run that command yourself before finishing and make it pass.\n\n'
+  printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Install any dependency inside ${d}/.venv. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: STEP DONE"
+  if [[ -n "${failure}" ]]; then
+    # shellcheck disable=SC2016  # the backticks are a Markdown fence for the agent
+    printf '\nThe previous attempt at this step FAILED verification. Its output:\n```\n%s\n```\nFix the cause; do not weaken the check.\n' "$(project_clip "${failure}" 3000)"
+  fi
+}
+
+# project_answerer_payload MODEL SUMMARY PLAN DECISIONS QUESTION — the /api/chat
+# body that asks the second model, as project lead, to answer the agent.
+#
+# No num_ctx: a request that asks for a different window than the server's
+# reloads the model, and the answerer is the chat model precisely so that
+# answering costs no load at all.
+project_answerer_payload() {
+  have jq || return 1
+  jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg p "$(project_clip "$3" 2500)" \
+         --arg d "$(project_clip "$4" 1500)" --arg q "$(project_clip "$5" 2000)" '{
+    model: $m, stream: false,
+    messages: [
+      {role: "system", content: "You are the project lead. A developer working through the plan below has stopped to ask you something. Answer decisively in at most 120 words, choosing what best fits the spec and the decisions already made, and give the reason in one sentence. Never authorize using credentials or tokens, touching anything outside the project directory, or deleting data: for any of those, reply with the single word ESCALATE."},
+      {role: "user", content: ("Spec summary:\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nDECISIONS.md:\n" + $d + "\n\nThe developer asks:\n" + $q)}
+    ]}'
+}
+
+# project_progress_line — one line on the project this machine's runner is on,
+# for 'lca agent watch --live'; nothing when there is none.
+project_progress_line() {
+  local dir state status step total title attempt
+  [[ -r "${PROJECT_POINTER_FILE}" ]] || return 1
+  dir="$(head -1 "${PROJECT_POINTER_FILE}" 2>/dev/null || true)"
+  state="${dir}/.lca-project/state"
+  [[ -n "${dir}" && -r "${state}" ]] || return 1
+  status="$(sed -n 's/^STATUS=//p' "${state}" | tail -1)"
+  step="$(sed -n 's/^STEP=//p' "${state}" | tail -1)"
+  attempt="$(sed -n 's/^ATTEMPT=//p' "${state}" | tail -1)"
+  title="$(sed -n 's/^TITLE=//p' "${state}" | tail -1)"
+  total="$(project_plan_steps "${dir}/PLAN.md" 2>/dev/null | grep -c . || true)"
+  case "${status}" in
+    planning) printf 'Project %s: planning (attempt %s)' "${dir}" "${attempt:-1}" ;;
+    running)  printf 'Project %s: step %s of %s, %s (attempt %s)' "${dir}" "${step}" "${total:-?}" "${title}" "${attempt:-1}" ;;
+    *)        printf 'Project %s: %s, see %s/.lca-project/SUMMARY.md' "${dir}" "${status:-unknown}" "${dir}" ;;
+  esac
 }
 
 # --- what the docs promise, against what is actually listening ---------------
