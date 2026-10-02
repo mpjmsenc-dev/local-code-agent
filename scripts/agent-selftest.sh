@@ -201,24 +201,31 @@ link_task() {
 # through the app's own API, then its sandbox, by id rather than "the first
 # oh-agent-server" (that could be a run of the user's).
 stop_selftest_conversation() {
-  local base sid
+  local base sid names waited=0
   base="$(agent_api_base)"
   [[ -n "${SELFTEST_CID:-}" ]] || { warn "Could not tell which conversation was this test's, so it may still be running. See: lca agent watch --live"; return 0; }
   sid="$(curl -fsS --max-time 10 "${base}/api/v1/app-conversations/search?limit=50" 2>/dev/null \
          | jq -r --arg c "${SELFTEST_CID}" '.items[]? | select(.id == $c) | .sandbox_id // empty' 2>/dev/null || true)"
-  curl -fsS --max-time 30 -X DELETE "${base}/api/v1/app-conversations/${SELFTEST_CID}" >/dev/null 2>&1 || true
-  if [[ -n "${sid}" ]]; then
-    curl -fsS --max-time 30 -X DELETE "${base}/api/v1/sandboxes/${sid}" >/dev/null 2>&1 || true
-    # The API's word is not the end of it: a sandbox still up still calls the model.
-    if as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${sid}"; then
-      as_root docker stop "${sid}" >/dev/null 2>&1 || true
+  # Slow on purpose, measured: the app answers a DELETE only after the agent's
+  # in-flight model call returns, which took 50 s on the ESXi VM. A 30 s
+  # limit gave up first, and the conversation went on running.
+  curl -fsS --max-time 180 -X DELETE "${base}/api/v1/app-conversations/${SELFTEST_CID}" >/dev/null 2>&1 || true
+  [[ -n "${sid}" ]] || { ok "Stopped this test's conversation."; return 0; }
+  curl -fsS --max-time 180 -X DELETE "${base}/api/v1/sandboxes/${sid}" >/dev/null 2>&1 || true
+  # Gone means docker said so. A docker ps that failed is no answer at all, and
+  # reading its empty output as "not running" is how this reported success over
+  # a sandbox that was still calling the model.
+  while :; do
+    if ! names="$(as_root docker ps --format '{{.Names}}' 2>/dev/null)"; then
+      warn "Could not ask docker whether this test's sandbox ${sid} stopped. Check with: sudo docker ps"
+      return 0
     fi
-  fi
-  if [[ -n "${sid}" ]] && as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${sid}"; then
-    warn "This test's sandbox ${sid} is still running. Stop it with: sudo docker stop ${sid}"
-  else
-    ok "Stopped this test's conversation${sid:+ and its sandbox}."
-  fi
+    grep -qx "${sid}" <<<"${names}" || { ok "Stopped this test's conversation and its sandbox."; return 0; }
+    (( waited == 60 )) && as_root docker stop "${sid}" >/dev/null 2>&1
+    (( waited >= 120 )) && break
+    sleep 5; waited=$((waited + 5))
+  done
+  warn "This test's sandbox ${sid} is still running. Stop it with: sudo docker stop ${sid}"
 }
 
 # report_speed — this machine's numbers, so "usable here?" gets an answer.
@@ -239,7 +246,14 @@ report_speed() {
   p_ns="$(jq -r '.prompt_eval_duration // 0' <<<"${resp}")"
   e_c="$(jq -r '.eval_count // 0' <<<"${resp}")"
   e_ns="$(jq -r '.eval_duration // 0' <<<"${resp}")"
-  info "Reading: $(tokens_per_second "${p_c}" "${p_ns}" || printf '?') tok/s   Writing: $(tokens_per_second "${e_c}" "${e_ns}" || printf '?') tok/s"
+  # Writing only when there was something to time. The probe asks for a one-word
+  # reply, so most runs time two tokens, and the rate printed for the same 14b
+  # on the same box was 3.7 one run and 8.3 the next. 'lca speed' times 80.
+  local writing="not measured (${e_c} token(s) is too short a sample; lca speed measures it)"
+  if [[ "${e_c}" =~ ^[0-9]+$ ]] && (( e_c >= 20 )); then
+    writing="$(tokens_per_second "${e_c}" "${e_ns}" || printf '?') tok/s"
+  fi
+  info "Reading: $(tokens_per_second "${p_c}" "${p_ns}" || printf '?') tok/s   Writing: ${writing}"
   info "One agent task here: $(human_duration "${SELFTEST_SECONDS:-0}")."
 }
 
