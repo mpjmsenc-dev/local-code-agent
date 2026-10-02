@@ -43,7 +43,9 @@ LEX_CODE && /wait_for_ollama ([1-9][0-9]|[0-9][0-9][0-9])/ && $0 !~ /^[[:space:]
     if (i < 1) continue
     # Comments are not evidence. Skipping this let a mutation through: the
     # comment ABOVE the bare wait explained the announced helper by name, and
-    # the rule read its own prose as proof the server had been started.
+    # the rule read its own prose as proof the server had been started. That
+    # mutation is replayed as the comment_evidence fixture of the gate named
+    # in the header.
     if (hist[i] ~ /^[[:space:]]*#/) continue
     # Data is not evidence either: a 'systemctl start ollama' written into a
     # heredoc is a line this script emits, not one it runs.

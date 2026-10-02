@@ -110,14 +110,21 @@ The container rule stays even with all of that in place. Those four are code,
 and this project's record on code that guards itself is the reason they exist.
 A container costs nothing to lose.
 
-**The gates refuse to start without the memory to finish.** ShellCheck over
-`tests/test-lib.sh` peaks near 3.8 GB. Two full runs on the 7.9 GB droplet were
-killed partway because an Ollama model was resident — each ended in `Killed`,
-exit 2, twenty minutes in, which reads like a failure of the code. `make lint`
-now runs `tests/memory-preflight.sh` first: with too little available it exits 3
-before anything runs, and lists the resident models with the command that
-unloads each, the containers, and the largest processes. Memory it cannot read
-is "could not tell", exit 2, never a pass.
+**The gates refuse to start without the memory to finish, and a run killed
+anyway says so.** ShellCheck over `tests/test-lib.sh` was OOM-killed at 3763 MB
+resident, and a whole container run that finished peaked at 4879 MB. Two full
+runs on the 7.9 GB droplet were killed partway because an Ollama model was
+resident — each ended in `Killed`, exit 2, twenty minutes in, which reads like a
+failure of the code. `tests/in-container.sh` now runs `tests/memory-preflight.sh`
+on the host before docker is asked anything (5000 MB; `LCA_GATES_MIN_MEM_MB`
+overrides it, inside the container too), and `make lint` asks again as ShellCheck
+starts. Too little is exit 3 with nothing run, and a list of the resident models
+with the command that unloads each, the containers, and the largest processes.
+Memory it cannot read is "could not tell", exit 2, never a pass. A run killed
+after it started ends in `RESULT: KILLED — no verdict`, exit 137, quoting the
+kernel's OOM record — matched on the container's id, so a kill elsewhere on the
+machine is not blamed on this run, and a kernel log it cannot read makes the
+cause UNKNOWN rather than memory.
 
 `tests/in-container.sh` copies the working tree as it is on disk — history
 included, uncommitted edits included — so what is tested is what you are about
@@ -154,9 +161,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Ten shell traps that turn a gate into decoration
+## Eleven shell traps that turn a gate into decoration
 
-All ten were shipped here at least once. They matter more in an assertion
+All eleven were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -381,6 +388,35 @@ requires the lexer to reject it. The other three mutations (stop treating `"`
 as a quote, stop treating heredocs as data, lex comments as code) each flip a
 scanner's answer over the fixture and are killed by it; without the
 non-vacuity half, removing the safety net was the one change nothing noticed.
+
+**11. A glob that matches nothing, and an exit status nobody reads.** Two
+defaults, and it takes both. bash leaves a glob that matches nothing as its own
+text, so `"${REPO}"/docs/*.md` over a tree with no docs is one "file" named
+`*.md`. The scanner errors on it — and there the second default takes over:
+`2>/dev/null || true`, `hits="$(awk …)"`, and `! grep` each turn *could not
+read* into *found nothing*. grep exits 1 for no match and 2 for a file it
+cannot open; `!` makes both a success, and `$(…)` in an assignment keeps
+neither. The output is identical to a clean tree's, so nothing downstream can
+tell. An audit of this suite's absence rules found about 110, and roughly half
+still passed with their subject files deleted. The guard written for exactly
+this, `(( ${#DOC_SURFACES[@]} >= 3 ))`, counted array entries — which two fixed
+paths and an unmatched glob keep at three whatever is on disk.
+
+Same family as 5 and 10, one level up: a shell default that turns a scanner into
+a no-op without changing what it prints. And the fix is not a better guard in
+each gate, because a guard is one more thing to get wrong silently. An absence
+rule is a claim that something is *not* there, and over a clean tree it passes
+whether or not it can see anything. So every absence rule is run twice more,
+against a copy of the tree with its subjects stripped and against a copy with a
+violation planted, and must fail both (`absence_rule_can_fail` in
+`tests/test-lib.sh`, which is itself shown a rule that can never fail and must
+reject it). Which functions are absence rules is a census made by reading,
+`tests/absence-rule-census.tsv`: proved, pending, or not a rule and why. The
+pending count is written down beside the harness, so it cannot rise without an
+edit that shows it. A detector refuses a new rule nobody listed — and it is a
+tripwire, not the census. Measured against a reading made without it, it finds
+101 of 108 absence rules; `tests/absence-candidates.awk` names the shapes that
+get past it.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
@@ -923,6 +959,11 @@ suite. The census is a record of debt, not permission.
 
 ### What the census found, from reading all 278 of them
 
+*The totals in this section were counted by a classifier that had no lexer,
+and several do not survive re-measurement — see* Counts taken with a broken
+instrument, re-measured *below. The A, B, FP and H labels are readings and
+stand.*
+
 The list started as 286 grandfathered names with no reason beside any of them.
 Two samples of a dozen each disagreed about how much of it was real debt — four
 of twelve, then eight of twelve — so the whole population was read one gate at a
@@ -983,6 +1024,51 @@ The meta-gate is itself the kind of thing that becomes decoration, so it is
 driven too: its classifier is run over a fixture holding one offending function
 and one justified one, and asserted to tell them apart. Without that, a
 classifier that silently matched nothing would be the same bug, one level up.
+
+### Counts taken with a broken instrument, re-measured
+
+Every count of source-grep gates in this document came out of
+`source_grep_gates`, and that classifier has been wrong three ways in turn.
+With no lexer it counted its own fixture functions and missed gates. The lexer
+added in `207d1dc` lost its place inside `"$(...)"` and hid about a third of the
+suite. And a tool name inside a file extension read as a call to the tool. Each
+number below was re-measured by running the fixed lexer and classifier over that
+commit's own `tests/test-lib.sh`. A pushed commit message cannot be edited; this
+table is its correction.
+
+| commit | what it said | classifier it used | fixed instruments, same tree |
+|---|---|---|---|
+| `4198414` | the corrected scanner finds 303 source-grep gates | no lexer | 307: 11 of its 303 are not source greps, 15 were missed |
+| `7624c1b` | 302 source-grep gates | no lexer | 307: 10 are not (the classifier's own fixture functions among them), 15 missed |
+| `1c84c68` | "the 296" | no lexer | 309: 2 are not, 15 missed |
+| `29540e6`, and the section above | read all 278; 28 of the 296 names the scanner flags are helpers | no lexer | 312: 2 of the 296 are not source greps (`new_source_greps_are_justified`, `recommend_with`), and **18 gates were never flagged, so the reading never saw them**. Of those 18, 12 have census rows now, 3 were deleted and 3 now drive their subject. |
+| `c03bb99` | seventeen gates read source through a variable | no lexer | not reproduced: that classifier, before and after that change on that tree, adds 12 |
+| `207d1dc` to `0126e69` | (the meta-gate's own view) | the lexer that lost its place | `ca3194b`: 209 seen of 302. `0126e69`: 220 of 303. For two weeks `new_source_greps_are_justified` watched about two thirds of the gates. One unjustified gate landed in that window, `host_paths_all_move` in `733b482`; `5dc8933` found and marked it. |
+| `5dc8933` | the classifier went from 221 gates to 305 | fixed lexer, old tool-word rule | 304 under the tool-word rule of `d4d2f7c` |
+
+What stands: the labels, because they were read row by row, and the 28 helpers,
+which is a reading of the 296 and true of them. What does not: every total that
+counts the classifier's output, and the claim that the census read every gate
+that reads repo source — it read every gate the classifier of the day could see.
+
+Eight census rows are gates the fixed classifier still cannot see, because their
+reads happen inside a helper: one A, `sudo_asks_out_loud`, and seven B,
+`new_source_greps_are_justified` itself among them. The meta-gate would not
+notice any of them changing shape. That is a list and not an estimate because
+the census was read.
+
+**The standard this leaves.** Every instrument in this repository has been
+wrong at least once, and the ones trusted longest were wrong longest. So a
+verdict that rests on one detector gets the shape the absence rules now have: a
+census made by reading and checked in; the detector demoted to a tripwire that
+refuses what nobody listed; and the detector's recall measured against a reading
+made without it, written where the detector is. The source-grep census has the
+first two, and now a measurement of the third: against the absence-rule
+readings, which read bodies without it, `source_grep_gates` sees 116 of 147
+gates that read repository text. 25 of the 31 it misses have no census row
+and no marker, so the meta-gate never knew they read source. The shapes are
+written above the classifier, and widening it — which turns each of those into
+an unjustified source grep until it is read — is the next batch.
 
 ### An aggregate nobody could check, replaced by a per-row fact
 

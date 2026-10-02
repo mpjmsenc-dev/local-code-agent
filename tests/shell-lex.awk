@@ -1,6 +1,8 @@
 # tests/shell-lex.awk — where a shell script's own CODE is, and where its DATA
-# is. Included ahead of another awk program, whose rules then read LEX_CODE
-# instead of each re-deriving the answer and each getting it wrong differently:
+# is. Included ahead of another awk program, whose rules then read LEX_CODE (the
+# line STARTS in code) and LEX_ENDS_IN_CODE (it ends there, as the closing line
+# of a multi-line quoted program does) instead of each re-deriving the answer
+# and each getting it wrong differently:
 #
 #   awk -f tests/shell-lex.awk -f tests/duplicate-defs.awk FILE
 #   awk -f tests/shell-lex.awk -e '<program>'              FILE
@@ -29,7 +31,8 @@
 #   justified_gates   accepted a '# SOURCE-GREP:' marker written inside a shim
 #                     as justifying it.
 #
-# So: one lexer, one fixture (tests/quoting-fixture.sh), one place to be wrong.
+# So: one lexer, one fixture (quoting-fixture.sh, which tests/test-lib.sh writes
+# into its sandbox), one place to be wrong.
 #
 # What it tracks, per character, in the states the shell actually has:
 #
@@ -49,18 +52,26 @@
 #                  the lexer inside a single-quoted string for the next sixteen
 #                  lines. <<< is a here-string, not a heredoc, and is excluded.
 #
-# What it does NOT track: command substitution. Inside "$(...)" the shell
-# re-enters an unquoted context, and this lexer stays in the double-quoted one.
-# Both agree on every construct in this suite, because a nested quote pair
-# toggles twice either way and leaves the state where it found it — and where
-# they could disagree, the END rule below turns it into a loud failure rather
-# than the silence that made the original bug worth writing this file over.
+#   substitution   "$(...)" re-enters an unquoted context inside the double
+#                  quotes, so the quotes within it nest; it ends at its own
+#                  matching ')'. $((...)) balances the same way. $'...' is a
+#                  single-quoted string in which a backslash escapes.
+#
+# Command substitution was once left out, on two arguments: that a nested quote
+# pair toggles twice either way and leaves the state where it found it, and that
+# anything else would reach the END rule below and fail loudly. Neither held.
+# model="$(grep -n 'step "4/7' f)" hands a lexer that stays double-quoted an
+# ODD number of quotes; it fell out of step there and came back into step at
+# some later stray quote, long before the end of the file, so the END rule saw
+# nothing. tests/test-lib.sh was read out of step in 17 places — real gates
+# as data, awk programs and shims as code — while every scanner here reported a
+# clean, confident nothing.
 
 BEGIN { LEX_SQ = sprintf("%c", 39); LEX_DQ = sprintf("%c", 34); LEX_BS = sprintf("%c", 92) }
 
 # Two-pass callers (reachable.awk reads the same file twice) must not inherit
 # the first pass's closing state.
-FNR == 1 { lex_sq = 0; lex_dq = 0; lex_hd = 0; lex_hd_tag = ""; lex_hd_dash = 0 }
+FNR == 1 { lex_depth = 0; lex_ctx[0] = "top"; lex_sq = 0; lex_dq = 0; lex_hd = 0; lex_hd_tag = ""; lex_hd_dash = 0 }
 
 {
   # The state at the START of the line decides what the line IS; the scan then
@@ -69,16 +80,23 @@ FNR == 1 { lex_sq = 0; lex_dq = 0; lex_hd = 0; lex_hd_tag = ""; lex_hd_dash = 0 
   LEX_OPENS_HEREDOC = 0
   if (lex_hd) {
     LEX_CODE = 0
+    LEX_ENDS_IN_CODE = 0
     # <<- strips leading TABS from the terminator, and only tabs.
     lex_end = $0
     if (lex_hd_dash) sub(/^\t+/, "", lex_end)
     if (lex_end == lex_hd_tag) { lex_hd = 0; lex_hd_tag = ""; lex_hd_dash = 0 }
   } else {
-    LEX_CODE = (!lex_sq && !lex_dq)
+    # Code is what the shell reads as words: the top level, or inside a $(...)
+    # at any depth. Inside quotes it is data, however deep.
+    LEX_CODE = (lex_ctx[lex_depth] == "top" || lex_ctx[lex_depth] == "sub")
     if (LEX_CODE) lex_open_heredoc($0)
     # Scanned even when LEX_CODE is 0: that is a line in the middle of a
     # multi-line string, and finding where the string ENDS is the whole job.
     lex_scan($0)
+    # A line that STARTS in data can still END in code: the closing line of a
+    # multi-line awk program or shim carries the file it runs on and the pipe
+    # after it. LEX_CODE alone skipped all of that.
+    LEX_ENDS_IN_CODE = (!lex_hd && (lex_ctx[lex_depth] == "top" || lex_ctx[lex_depth] == "sub"))
   }
 }
 
@@ -98,24 +116,37 @@ function lex_open_heredoc(line,   probe, tok) {
   LEX_OPENS_HEREDOC = 1
 }
 
-function lex_scan(line,   i, n, c, prev) {
+# A stack of contexts, because quotes nest inside a substitution inside quotes.
+# lex_sq and lex_dq are kept, derived, for the END rule's message.
+function lex_push(c) { lex_ctx[++lex_depth] = c; lex_paren[lex_depth] = (c == "sub") ? 1 : 0 }
+function lex_pop()   { if (lex_depth > 0) lex_depth-- }
+function lex_scan(line,   i, n, c, nx, prev, top) {
   n = length(line)
   for (i = 1; i <= n; i++) {
-    c = substr(line, i, 1)
-    if (lex_sq) { if (c == LEX_SQ) lex_sq = 0; continue }
-    if (lex_dq) {
+    c = substr(line, i, 1); nx = substr(line, i + 1, 1); top = lex_ctx[lex_depth]
+    if (top == "sq")   { if (c == LEX_SQ) lex_pop(); continue }
+    if (top == "ansi") { if (c == LEX_BS) { i++; continue }; if (c == LEX_SQ) lex_pop(); continue }
+    if (top == "dq") {
       if (c == LEX_BS) { i++; continue }
-      if (c == LEX_DQ) lex_dq = 0
+      if (c == LEX_DQ) { lex_pop(); continue }
+      if (c == "$" && nx == "(") { lex_push("sub"); i++ }
       continue
     }
+    # The top level, or a substitution: the shell is reading words here.
     if (c == LEX_BS) { i++; continue }
-    if (c == LEX_SQ) { lex_sq = 1; continue }
-    if (c == LEX_DQ) { lex_dq = 1; continue }
+    if (c == "$" && nx == LEX_SQ) { lex_push("ansi"); i++; continue }
+    if (c == "$" && nx == "(")    { lex_push("sub"); i++; continue }
+    if (c == LEX_SQ) { lex_push("sq"); continue }
+    if (c == LEX_DQ) { lex_push("dq"); continue }
+    if (top == "sub" && c == "(") { lex_paren[lex_depth]++; continue }
+    if (top == "sub" && c == ")") { if (--lex_paren[lex_depth] == 0) lex_pop(); continue }
     if (c == "#") {
       prev = (i == 1) ? " " : substr(line, i - 1, 1)
-      if (prev == " " || prev == "\t") return
+      if (prev == " " || prev == "\t") break
     }
   }
+  lex_sq = (lex_ctx[lex_depth] == "sq" || lex_ctx[lex_depth] == "ansi")
+  lex_dq = (lex_ctx[lex_depth] == "dq")
 }
 
 # The failure this whole file is about was SILENT: a scanner that stops seeing
@@ -131,9 +162,9 @@ END {
            FILENAME, LEX_SQ, lex_hd_tag, LEX_SQ) > "/dev/stderr"
     exit 2
   }
-  if (lex_sq || lex_dq) {
-    printf("shell-lex.awk: reached the end of %s still inside a %s-quoted string — the scanner stopped seeing code there, and anything it reported after it is worthless\n",
-           FILENAME, (lex_sq ? "single" : "double")) > "/dev/stderr"
+  if (lex_depth > 0) {
+    printf("shell-lex.awk: reached the end of %s still inside %s — the scanner stopped seeing code there, and anything it reported after it is worthless\n",
+           FILENAME, (lex_sq ? "a single-quoted string" : lex_dq ? "a double-quoted string" : "a $(...) substitution")) > "/dev/stderr"
     exit 2
   }
 }

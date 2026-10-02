@@ -1115,8 +1115,9 @@ no_helper_decides_for_its_caller() {
       /^[a-z_][a-z0-9_]*\(\) *\{/ { fn = $0; sub(/\(\).*/, "", fn); inb = 1; hit = 0 }
       inb && /(^|[^a-z_])can_root([^_a-z]|$)/ { hit = 1 }
       inb && /^\}/ { if (hit) printf "%s\t\n", fn; inb = 0 }')
-  # Non-vacuity: the three exempt ones must still be found, or the scanner has
-  # stopped matching and every helper reads as clean.
+  # A floor, not a probe: at least three functions naming can_root must be
+  # found, or the scanner has stopped matching and every helper reads as clean.
+  # Any three count; it does not check that the exempt ones are among them.
   (( seen >= 3 )) || {
     printf 'the escalation scanner found only %s functions naming can_root — it has stopped matching lib.sh\n' \
       "${seen}" >&2
@@ -1271,7 +1272,8 @@ sudo_asks_out_loud() {
     # at the start of the statement. A bare /info |warn / also matches
     # "docker info >/dev/null", which is the first line of select_docker — so
     # that version passed with the announcement deleted, for the wrong reason.
-    # Caught by mutating it; a gate that has not been made to fail is decoration.
+    # Found once by deleting the announcement by hand; nothing in this suite
+    # repeats that, so this gate has not been made to fail since.
     awk '/can_root_now/            { now = 1; next }
          /can_root([^_]|$)/        { if (!now) early = 1; pending = 1 }
          /^[[:space:]]*(info|warn|ok|err) / { said = 1 }
@@ -3983,12 +3985,23 @@ check "...and only one command at a time starts the server" \
 # Generalised past that one name. Runtime state belongs to a machine, not to
 # the repository, and the next such file will have some other suffix.
 no_runtime_artefact_is_tracked() {
-  local tracked
+  local files tracked n
+  # The repository's own list where there is one, and the tree on disk where
+  # there is not: absence_tree hands this rule a copy with no .git, and
+  # 'ls-files 2>/dev/null || true' there returned nothing and read as a clean
+  # tree — the rule passed with its whole subject deleted. Measured on
+  # 2026-09-19; it is why this row sat PENDING.
+  files="$(git -C "${REPO}" ls-files 2>/dev/null)" || files=""
+  [[ -n "${files}" ]] || files="$(cd "${REPO}" && find . -type f -not -path './.git/*' | sed 's|^\./||')"
+  n="$(grep -c . <<<"${files}")"
+  # A floor, so an unlistable tree cannot pass as an empty one. 85 files today.
+  (( n >= 40 )) || {
+    printf 'only %s files could be listed — this rule stopped reading the tree\n' "${n}" >&2
+    return 1; }
   # '.env' anchored, so the tracked '.env.example' template it is generated
   # from is not swept up with it — the first draft of this matched that and
   # failed on a clean tree.
-  tracked="$(git -C "${REPO}" ls-files 2>/dev/null \
-    | grep -E '(^|/)\.env$|(^|/)\.ollama-serve|\.(log|lock|pid|sock)$' || true)"
+  tracked="$(grep -E '(^|/)\.env$|(^|/)\.ollama-serve|\.(log|lock|pid|sock)$' <<<"${files}" || true)"
   [[ -z "${tracked}" ]] || {
     printf 'runtime state is committed to the repository:\n%s\n' "${tracked}" >&2
     return 1; }
@@ -7303,11 +7316,16 @@ check "a failed render leaves the previous Ollama settings in place" \
   dropin_survives_a_failed_render
 # ...and nothing may go back to piping straight at a root-owned file.
 no_tee_into_a_root_file() {
-  local hits
-  hits="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
-            "${REPO}"/deploy/*.sh "${REPO}/bin/lca" 2>/dev/null \
-          | grep -vE ':[0-9]+:[[:space:]]*#' \
-          | grep -v 'write_root_file() {' || true)"
+  local raw hits rc=0
+  # grep's status is read, not swallowed: 1 is no match, 2 is a file it could
+  # not open — and a glob that matched nothing hands it exactly that, which
+  # '2>/dev/null || true' used to turn into a clean tree.
+  raw="$(grep -rn 'as_root tee' "${REPO}"/*.sh "${REPO}"/scripts/*.sh \
+            "${REPO}"/deploy/*.sh "${REPO}/bin/lca")" || rc=$?
+  (( rc <= 1 )) || {
+    printf 'could not read the scripts this scans (grep exit %s), and an unread tree is not a clean one\n' "${rc}" >&2
+    return 1; }
+  hits="$(grep -vE ':[0-9]+:[[:space:]]*#' <<<"${raw}" | grep -v 'write_root_file() {' || true)"
   # lib.sh's own implementation is the one legitimate use: it tees into the
   # TEMP, which is the whole point.
   # '[$]{tmp}' rather than the literal, so this line is not itself an
@@ -8974,8 +8992,8 @@ check "'lca ask' says so when the answer was cut short" ask_reports_a_cut_short_
 #
 # The notice moved to lib.sh's model_load_notice when 'lca' needed the same
 # words, so each arm below now checks it where it lives. All three are kept:
-# relocating a guard is not an excuse to drop one, and the mutation that beat
-# the first version of this check is still the mutation to beat.
+# relocating a guard is not an excuse to drop one. The mutation that beat the
+# first version of this check was run by hand, once; nothing here replays it.
 #
 # Driven. The greps this replaces read model_load_notice for the name of a
 # helper, for a redirect (after joining continuations, because the first
@@ -12238,11 +12256,12 @@ example_value() {  # KEY — the value .env.example ships, unquoted, comment-fre
     | sed -E "s/^$1=//; s/[[:space:]]+#.*\$//; s/^\"//; s/\"\$//"
 }
 defaults_agree_on_values() {
-  local key libval exval mismatch=0
+  local key libval exval mismatch=0 compared=0
   while IFS='=' read -r key libval; do
     [[ -n "${key}" ]] || continue
     # Key-only parity is the two checks above; here, only shared keys matter.
     grep -qE "^${key}=" "${REPO}/.env.example" || continue
+    compared=$(( compared + 1 ))
     exval="$(example_value "${key}")"
     if [[ "${libval}" != "${exval}" ]]; then
       printf 'default disagrees for %s: lib.sh falls back to %q, .env.example ships %q\n' \
@@ -12251,6 +12270,11 @@ defaults_agree_on_values() {
     fi
   done < <(sed -n '/^load_env()/,/^}/p' "${REPO}/scripts/lib.sh" \
              | sed -nE 's/^[[:space:]]*([A-Z_]+)="\$\{[A-Z_]+:-(.*)\}"$/\1=\2/p')
+  # A floor: with lib.sh unreadable the loop above runs zero times and nothing
+  # disagrees. More than thirty defaults are shared today.
+  (( compared >= 20 )) || {
+    printf 'only %s defaults were compared — this stopped reading load_env\n' "${compared}" >&2
+    return 1; }
   return "${mismatch}"
 }
 check "lib.sh's fallback and .env.example agree on every value" \
@@ -12962,9 +12986,17 @@ check "run-agent.sh announces a slow Ollama start" uses_announced_start run-agen
 # than a blanket ban is what stops this being suppressed the first time it is
 # inconvenient.
 no_unannounced_long_wait() {
-  searched_at_least 30 "$@" || return 1
+  # Over the tree, at least 30 files or it has stopped watching (a renamed
+  # scripts/ is silent otherwise). A gate that drives it over one fixture file
+  # says so with LONG_WAIT_FLOOR=1; nothing else lowers it.
+  searched_at_least "${LONG_WAIT_FLOOR:-30}" "$@" || return 1
   local hits
-  hits="$(awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/long-wait.awk" "$@")"
+  # Captured WITH its status: awk exits 2 on a file it cannot open, and a glob
+  # that matched nothing hands it exactly that — which used to read as no hits.
+  hits="$(awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/long-wait.awk" "$@")" || {
+    echo 'the long-wait scanner could not read what it was given (see above), and an unread tree is not a clean one' >&2
+    return 1
+  }
   [[ -z "${hits}" ]] || {
     printf 'these wait a long time for an Ollama nobody started, in silence:\n%s\n' "${hits}" >&2
     return 1
@@ -20220,9 +20252,6 @@ root_docs_are_swept_or_exempt() {
     printf 'add them to DOC_SURFACES, or to DOC_SURFACES_EXEMPT with the reason\n' >&2
     return 1
   }
-  # Non-vacuous: a list that had drifted to nothing would pass the loop above
-  # while checking no document at all.
-  (( ${#DOC_SURFACES[@]} >= 3 ))
 }
 check "a document at the repo root is swept by the prose gates, or exempt on purpose" \
   root_docs_are_swept_or_exempt
@@ -21208,8 +21237,11 @@ echo "# a heading that counts its own list has to count it correctly"
 counted_headings_match_their_lists() {
   local out wrong
   out="$(awk '
+    # Through twenty. It stopped at ten, so the day the trap list reached
+    # eleven its heading stopped being a counted heading at all: num() said 0,
+    # the heading was skipped, and only the floor below noticed.
     function num(w) {
-      split("one two three four five six seven eight nine ten", a, " ")
+      split("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty", a, " ")
       for (i in a) if (tolower(w) == a[i]) return i
       return 0
     }
@@ -21225,7 +21257,7 @@ counted_headings_match_their_lists() {
     END { if (heading != "" && stated != items) printf "%s: says %s, lists %s\n", heading, stated, items }
   ' "${REPO}/CONTRIBUTING.md")"
   # The scan has to have found at least one such heading, or it proves nothing.
-  grep -qE '^## (One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten) ' "${REPO}/CONTRIBUTING.md" || {
+  grep -qE '^## (One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty) ' "${REPO}/CONTRIBUTING.md" || {
     echo 'CONTRIBUTING.md no longer has a heading that counts its own list' >&2; return 1; }
   wrong="${out}"
   [[ -z "${wrong}" ]] || {
@@ -21261,9 +21293,12 @@ counted_sections_do_not_contradict_themselves() {
   # every_absence_rule_notices_an_empty_world, which caught this gate the
   # commit it was written in.
   searched_at_least 1 "${REPO}/CONTRIBUTING.md" || return 1
+  # The same number words as the counting gate above. This one stopped at ten,
+  # and went blind the day a merge made the traps eleven: its non-vacuity check
+  # below is what said so.
   out="$(awk '
     function num(w) {
-      split("one two three four five six seven eight nine ten", a, " ")
+      split("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty", a, " ")
       for (i in a) if (tolower(w) == a[i]) return i
       return 0
     }
@@ -21277,7 +21312,7 @@ counted_sections_do_not_contradict_themselves() {
   # Non-vacuity: there has to BE a counted section with an "All <number>"
   # sentence under it, or this proves nothing.
   seen="$(awk '
-    /^## / { heading = ($2 ~ /^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)$/) ? 1 : 0; next }
+    /^## / { heading = ($2 ~ /^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|Eighteen|Nineteen|Twenty)$/) ? 1 : 0; next }
     heading && /^[Aa]ll [a-z]+ / { n++ }
     END { print n + 0 }
   ' "${REPO}/CONTRIBUTING.md")"
@@ -22828,7 +22863,7 @@ no_commandless_exec_redirects_the_shell() {
             "${REPO}"/tests/*.sh "${REPO}/bin/lca" 2>/dev/null \
           | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
   # An empty hit list is a legitimate pass: this is a prohibition, and there
-  # may simply be no command-less exec in the repo. Proved by mutation.
+  # may simply be no command-less exec in the repo.
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     # Strip the legitimate '{VAR}>target' opening, then see what redirection
@@ -22867,9 +22902,7 @@ check "no command-less 'exec' redirects the shell's own streams" \
 # reading a repo file it has already located.
 #
 # The pattern lives in a variable so this gate does not find ITSELF, the
-# vacuity trap two gates in this file have already fallen into. Anti-vacuity
-# is by mutation, not by a non-empty hit list: a prohibition is proved by
-# planting a violation, not by finding one.
+# vacuity trap two gates in this file have already fallen into.
 no_pipe_into_grep_q_in_the_suite() {
   searched_at_least 5 "${REPO}"/tests/*.sh || return 1
   local hits pat='\$\{[A-Za-z_]+\}[^|]*\|[[:space:]]*grep -q'
@@ -23349,8 +23382,12 @@ every_path_stub_survives_sudo() {
   # 3. ...and nothing built a front-load by hand, which would bypass 1 and 2
   # entirely. Assembled from pieces because this gate greps the file it lives
   # in, and a contiguous literal here would match itself.
-  local pat='PATH="[^"]*'":\${PATH}\""
-  hand="$(grep -nH "${pat}" "${TESTS_DIR}"/*.sh || true)"
+  local pat='PATH="[^"]*'":\${PATH}\"" rc=0
+  # Status read, not swallowed: exit 2 is a test file it could not open.
+  hand="$(grep -nH "${pat}" "${TESTS_DIR}"/*.sh)" || rc=$?
+  (( rc <= 1 )) || {
+    printf 'could not read the test files this scans (grep exit %s), and an unread file is not a clean one\n' "${rc}" >&2
+    bad=1; }
   [[ -z "${hand}" ]] || {
     printf 'a PATH front-load was built by hand instead of through stub_path, so its sudo pass-through is never checked:\n%s\n' \
       "${hand}" >&2
@@ -23984,6 +24021,8 @@ INTERNAL_SETTINGS=(
   CONVENTIONS_AIDER         # shipped as a commented example, with its sibling
   CONVENTIONS_AGENT         # likewise
   WEBUI_IMAGE               # honoured and unshipped; webui_drift watches it — see above
+  LCA_CPU_CORES             # "what would tune pick on box X": a what-if for the CPU cap
+  LCA_CPU_AVX2              # likewise, for the vector width the cap reads
 )
 honoured_settings() {   # -> every user-shaped name lib.sh resolves a default for
   sed 's/#.*//' "${REPO}/scripts/lib.sh" \
@@ -24850,6 +24889,20 @@ check "a restart re-reads the unit first, and refuses to go on when it cannot" \
 
 
 echo "# ...and the rule that stops the list growing back"
+# RECALL, measured against a reading made without it (CONTRIBUTING, "The
+# standard this leaves"). Every one of the 147 absence rules in
+# tests/absence-rule-census.tsv reads repository text, and they were classified
+# by reading bodies, not by this. It sees 116. The 31 it misses, by shape:
+#   13  read through a quoted glob, "${REPO}"/scripts/*.sh — the rule wants ${REPO}/
+#    5  name no repository path in the body: the read is in a helper, or the
+#       file arrives as an argument
+#    4  read through a path variable it does not know, CONFIG_CENSUS among them
+#    2  list the tree with git ls-files
+#    1  has no text-tool word in its body
+#    6  not yet characterised
+# 25 of the 31 have no census row and no SOURCE-GREP marker: the meta-gate has
+# never known they read source. Widening the rule is the next step, and each of
+# them reads as unjustified until somebody reads it.
 # Four gates in two days read source text as evidence of a behaviour, and all
 # four stayed green while the behaviour was gone. The rule is in
 # CONTRIBUTING.md: drive it, or say in a SOURCE-GREP: comment what you cannot
@@ -24875,8 +24928,12 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # that names the fixture, and reading it would classify a gate by the path
     # of the file it writes.
     LEX_OPENS_HEREDOC { next }
-    !LEX_CODE { next }
-    /^[a-z_][a-z0-9_]*\(\) *\{/ {
+    # A line that starts in data but ENDS in code still carries code: the
+    # closing line of a multi-line awk program names the file it reads. Skipping
+    # every line that started in data hid forty-one source greps this way. A
+    # definition and its closing brace still have to start in code.
+    !LEX_CODE && !LEX_ENDS_IN_CODE { next }
+    LEX_CODE && /^[a-z_][a-z0-9_]*\(\) *\{/ {
       fn=$0; sub(/\(\).*/,"",fn); src=0; tool=0
       # A one-line definition opens and closes on the same line. Without this
       # the scanner never saw its "}" and treated the ENTIRE REST OF THE FILE
@@ -24884,7 +24941,7 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
       # first one-liner, this list included. Found by mutating the gate.
       if ($0 ~ /\}[[:space:]]*$/) {
         if (($0 ~ /\$\{REPO\}\// || $0 ~ /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/) \
-          && $0 ~ /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
+          && $0 ~ /(^|[^a-zA-Z_./-])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/) print fn
         inb=0; next
       }
       inb=1; next
@@ -24893,7 +24950,9 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # prose classified the gate: a comment ending "and this still passed."
     # contains "sed", so writing that sentence turned a driven test into a
     # source grep. A classifier that reads text and draws conclusions from it
-    # is the very thing this section exists to stop.
+    # is the very thing this section exists to stop. Nor is a word right after
+    # a dot, slash or dash a tool: cp "${TESTS_DIR}"/*.awk calls nothing that
+    # reads source, and the extension alone made a copy step a source grep.
     inb && /^[[:space:]]*#/ { next }
     # A repo path reached through a VARIABLE counts too. The rule used to be
     # "${REPO}/ appears in the body", and ${APPLY}, ${TESTS_DIR}, ${CENSUS} and
@@ -24903,8 +24962,8 @@ source_grep_gates() {   # FILE -> functions that read repo source with a text to
     # for the name of an applier were among them.
     inb && /\$\{REPO\}\// { src=1 }
     inb && /\$\{(APPLY|TESTS_DIR|CENSUS)\}|\$\{DOC_SURFACES/ { src=1 }
-    inb && /(^|[^a-zA-Z_])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
-    inb && /^\}/ { if (src && tool) print fn; inb=0 }
+    inb && /(^|[^a-zA-Z_./-])(grep|awk|sed|cat|head|tail)([^a-zA-Z_]|$)/ { tool=1 }
+    inb && LEX_CODE && /^\}/ { if (src && tool) print fn; inb=0 }
   ' "$1" | sort -u
 }
 # The marker must be a comment line that BEGINS with it. Anything looser counts
@@ -24973,6 +25032,13 @@ explains_the_rule_but_claims_nothing() {
 reads_the_source_and_says_why() {
   grep -q 'something' "${REPO}/scripts/lib.sh"
 }
+reads_the_source_on_a_closing_line() {
+  awk '/something/ { found = 1 }
+       END { exit !found }' "${REPO}/scripts/lib.sh"
+}
+copies_the_scanner_programs() {
+  cp "${TESTS_DIR}"/*.awk "$1/"
+}
 SGFIX
 check "the classifier sees a gate that reads source" \
   grep -qx 'reads_the_source_with_no_excuse' <<<"$(source_grep_gates "${SG_FIXTURE}")"
@@ -24992,6 +25058,21 @@ one_liner_does_not_swallow_the_file() {
 }
 check "a one-line definition does not swallow the rest of the file" \
   one_liner_does_not_swallow_the_file
+# ...and a repo path on the line that CLOSES a quoted program is code. That line
+# starts inside the awk program's quotes, and a scanner that skipped every such
+# line could not see what file the program reads.
+closing_line_is_read_as_code() {
+  grep -qx 'reads_the_source_on_a_closing_line' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "...nor does a repo path on the closing line of a quoted program go unseen" \
+  closing_line_is_read_as_code
+# ...and a file extension is not a tool. The absence harness copies the scanner
+# programs with a *.awk glob, and the word in the extension made that copy step
+# an unjustified source grep.
+extension_is_not_a_tool() {
+  ! grep -qx 'copies_the_scanner_programs' <<<"$(source_grep_gates "${SG_FIXTURE}")"
+}
+check "...nor is a file named *.awk a call to awk" extension_is_not_a_tool
 prose_does_not_reclassify_a_driven_test() {
   ! grep -qx 'drives_the_behaviour' <<<"$(source_grep_gates "${SG_FIXTURE}")"
 }
@@ -25407,8 +25488,8 @@ no_tracked_path_is_hostile_to_a_glob() {
       "${spaced}" >&2
     bad=1
   }
-  # Non-vacuity: the scanner has to be able to SEE a bad name, or an empty
-  # answer above means nothing. Asked of the matcher, not of the tree — there
+  # Non-vacuity for the leading-dash matcher only; nothing here shows the
+  # whitespace matcher a bad name. Asked of the matcher, not of the tree — there
   # is deliberately no such file to find, and the made-up name must not look
   # like a document either: the gate that checks every doc a script names is a
   # file will go looking for it.
@@ -25524,7 +25605,7 @@ echo "# ...and every rule that passes on an empty search can tell WHY it was emp
 # The second is what makes the first worth anything: a registry nobody drives
 # is a list, and this file has already been taught what a list nobody checks
 # is worth.
-ABSENCE_RULES='advice_names_only_documented_commands advice_paths_are_absolute
+EMPTY_WORLD_RULES='advice_names_only_documented_commands advice_paths_are_absolute
 announcement_avoids_stdout boot_units_parse_as_systemd_units
 cache_writes_cannot_abort counted_headings_match_their_lists
 counted_sections_do_not_contradict_themselves env_keys_and_defaults_agree
@@ -25542,7 +25623,7 @@ relay_units_parse_as_systemd_units remote_installers_retry
 setup_only_dies_on_core_steps shipped_defaults_are_what_lib_resolves
 silent_when_already_up uninstall_removals_can_reach_root
 usage_on_an_error_path_goes_to_stderr venv_python_is_the_only_source
-view_cannot_touch_the_run'
+view_cannot_touch_the_run every_absence_candidate_is_in_the_census'
 # SOURCE-GREP: the subject IS which functions in this file have that shape,
 # which is a property of this file's text.
 absence_shaped_functions() {   # -> every function that passes on an empty search of repo source
@@ -25558,13 +25639,19 @@ absence_shaped_functions() {   # -> every function that passes on an empty searc
   # project of a count in prose that nothing derives, and the first one found
   # in a comment its own author had written the week before. A number that is
   # not derived belongs to the day it was measured, and should say so.
-  awk '
-    /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $0; sub(/\(\).*/, "", fn); body = ""; inb = 1; next }
-    inb && /^\}$/ {
+  #
+  # Through the shared lexer, so a function written inside a quoted heredoc —
+  # the fixtures and planters further down, which exist to look like absence
+  # rules — is data and not a rule nobody registered; and a heredoc's lines are
+  # not part of the body of the function that writes them, or every planter
+  # would read as the rule it plants.
+  awk -f "${TESTS_DIR}/shell-lex.awk" -e '
+    LEX_CODE && /^[a-z_][a-z0-9_]*\(\) \{/ { fn = $0; sub(/\(\).*/, "", fn); body = ""; inb = 1; next }
+    inb && LEX_CODE && /^\}$/ {
       if (body ~ /\[\[ -z "\$\{[a-z_]+\}" \]\] \|\|/ && body ~ /"\$\{REPO\}"?\/[A-Za-z0-9_*.]/) print fn
       inb = 0; next
     }
-    inb { body = body "\n" $0 }
+    inb && !LEX_HEREDOC { body = body "\n" $0 }
   ' "${TESTS_DIR}/test-lib.sh" | sort -u
 }
 # The detector behind this gate has a recall gap too, and it is named rather
@@ -25573,14 +25660,14 @@ absence_shaped_functions() {   # -> every function that passes on an empty searc
 # is exactly that, and it is registered by hand. Listing the gap here means a
 # SECOND invisible rule fails this gate instead of quietly going undriven,
 # which is the whole difference between a measured detector and a trusted one.
-ABSENCE_DETECTOR_MISSES='no_unannounced_long_wait'
+EMPTY_WORLD_DETECTOR_MISSES='no_unannounced_long_wait'
 every_absence_rule_is_registered() {
   local fn bad=0 n=0 miss
   while read -r fn; do
     [[ -n "${fn}" ]] || continue
     n=$(( n + 1 ))
-    grep -qw -- "${fn}" <<<"${ABSENCE_RULES}" || {
-      printf '%s passes when its search comes back empty and is not in ABSENCE_RULES, so nothing checks it can tell an empty world from a clean one\n' \
+    grep -qw -- "${fn}" <<<"${EMPTY_WORLD_RULES}" || {
+      printf '%s passes when its search comes back empty and is not in EMPTY_WORLD_RULES, so nothing checks it can tell an empty world from a clean one\n' \
         "${fn}" >&2
       bad=1
     }
@@ -25593,10 +25680,10 @@ every_absence_rule_is_registered() {
   # must be one this file already knows about.
   # shellcheck disable=SC2086  # the registry IS a whitespace-separated list; splitting is the point
   miss="$(comm -13 <(absence_shaped_functions) \
-                   <(printf '%s\n' ${ABSENCE_RULES} | sort -u))"
-  [[ "${miss}" == "${ABSENCE_DETECTOR_MISSES}" ]] || {
+                   <(printf '%s\n' ${EMPTY_WORLD_RULES} | sort -u))"
+  [[ "${miss}" == "${EMPTY_WORLD_DETECTOR_MISSES}" ]] || {
     printf 'the rules this detector cannot see are now [%s], not [%s] — a registered rule went invisible, or one came back\n' \
-      "$(tr '\n' ' ' <<<"${miss}")" "${ABSENCE_DETECTOR_MISSES}" >&2
+      "$(tr '\n' ' ' <<<"${miss}")" "${EMPTY_WORLD_DETECTOR_MISSES}" >&2
     bad=1
   }
   return "${bad}"
@@ -25616,7 +25703,7 @@ every_absence_rule_notices_an_empty_world() {
   # which a subshell would also do — but a subshell makes every later use of
   # TESTS_DIR in this file read to the linter as a value that might be lost.
   local REPO="${EMPTY_WORLD}" TESTS_DIR="${EMPTY_WORLD}/tests"
-  for r in ${ABSENCE_RULES}; do
+  for r in ${EMPTY_WORLD_RULES}; do
     n=$(( n + 1 ))
     # The globs are handed to every rule; the ones that take no arguments
     # ignore them, and no_unannounced_long_wait reads its file list from them.
@@ -25788,6 +25875,11 @@ wait_for_ollama 60'
 # An apostrophe inside a double-quoted string is not a quote to the shell.
 printf "the harness's own message\n"
 
+# A substitution inside double quotes re-enters an unquoted context, so the
+# quotes inside it nest. A lexer that stays double-quoted counts an odd number
+# on this line and reads what follows upside down: code as data, data as code.
+found="$(grep -n 'step "4/7' "${REPO}/scripts/agent-setup.sh")"
+
 # Nothing calls this one, and reachable.awk must still be able to say so.
 quoting_fixture_never_called() { :; }
 
@@ -25879,7 +25971,7 @@ check "a SOURCE-GREP: marker written inside data justifies nothing" \
   justifier_ignores_a_marker_written_in_data
 
 long_wait_rule_ignores_a_wait_in_data() {
-  no_unannounced_long_wait "${QUOTE_FIXTURE}" 2>/dev/null
+  LONG_WAIT_FLOOR=1 no_unannounced_long_wait "${QUOTE_FIXTURE}" 2>/dev/null
 }
 check "the long-wait rule ignores a bare wait written in data" \
   long_wait_rule_ignores_a_wait_in_data
@@ -25887,7 +25979,7 @@ check "the long-wait rule ignores a bare wait written in data" \
 long_wait_rule_still_fires_on_real_code() {
   local probe="${SANDBOX}/long-wait-probe.sh"
   printf 'do_something\nwait_for_ollama 60\n' > "${probe}"
-  ! no_unannounced_long_wait "${probe}" 2>/dev/null
+  ! LONG_WAIT_FLOOR=1 no_unannounced_long_wait "${probe}" 2>/dev/null
 }
 check "...and still fires on the same line written as code" \
   long_wait_rule_still_fires_on_real_code
@@ -26174,6 +26266,11 @@ check "...and the number of unvaried settings never gets bigger" \
 # 1. Every path lib.sh names for the host really moves with the root. Driven:
 # lib.sh is sourced with a root no real path starts with, and every answer must
 # start with it.
+# SOURCE-GREP: a false positive of the classifier, which could not see this body
+# until the lexer stopped misreading the multi-line child inside "$( )". It
+# SOURCES lib.sh and counts what the child printed; the only thing it takes from
+# ${REPO} is a file to source. What it cannot see is a host path lib.sh builds
+# without going through lca_host_paths.
 host_paths_all_move() {
   local out n bad=0 p
   # The probe root is set INSIDE the child: an assignment in this shell's own
@@ -26236,8 +26333,9 @@ no_host_path_outside_lib() {
     done < <(literal_host_paths_in "${f}")
   done
   (( n >= 5 )) || { printf 'only %s literal paths seen across the product — the extractor stopped matching\n' "${n}" >&2; bad=1; }
-  # Non-vacuity: a write to a new literal must be caught, including as a
-  # ':-' default, which is how every earlier seam was spelled.
+  # Non-vacuity for the extractor only: it must SEE a new literal, including as
+  # a ':-' default, which is how every earlier seam was spelled. Whether the
+  # allow-list then refuses it is not probed.
   # shellcheck disable=SC2016  # the probe's source text, never expanded here
   printf 'X="${X:-/etc/new-thing}"\nprintf x > /usr/local/bin/new-thing\n' > "${probe}"
   [[ "$(literal_host_paths_in "${probe}" | grep -c .)" == 2 ]] || {
@@ -26286,6 +26384,10 @@ no_skip_goes_uncounted() {
   local f bad=0 hits probe="${SANDBOX}/uncounted-skip-probe.sh" sk="sk""ip"
   for f in "${TESTS_DIR}/test-lib.sh" "${TESTS_DIR}/test-netmode.sh" \
            "${TESTS_DIR}/test-agent-watch.sh" "${TESTS_DIR}/live-verify.sh"; do
+    # The helper ends in '|| true', so a file that is not there scans as clean.
+    [[ -r "${f}" ]] || {
+      printf '%s is not there to scan, and an unread file is not a clean one\n' "${f##*/}" >&2
+      bad=1; continue; }
     hits="$(uncounted_skips_in "${f}")"
     [[ -z "${hits}" ]] || {
       printf '%s announces a skip the verdict does not count — use t_skip, or return SKIP_RC from a gate:\n%s\n' \
@@ -26384,6 +26486,557 @@ memory_preflight_refuses_and_says_what_to_unload() {
 }
 check "the gates refuse to start without the memory to finish, and name what to unload" \
   memory_preflight_refuses_and_says_what_to_unload
+
+# ...and a run that is killed anyway has to SAY it was killed. The refusal
+# above covers a box that is short when the gates start; a model loaded twenty
+# minutes in is not something a check at the start can see. What a killed run
+# left behind was "make: *** [Makefile:46: lint] Killed", exit 2 — and the
+# only way to learn it was the machine was to find the kernel's own record by
+# hand. Driven with planted kernel records, including one that names a
+# DIFFERENT container: a kill somewhere else on the box must not be blamed on
+# this run, or the explanation is just a new way to be confidently wrong.
+# SOURCE-GREP: the false positive above, again: it RUNS memory-preflight.sh
+# --killed and greps what it printed. What it cannot check is a live OOM kill;
+# the planted records are the shape of the kernel's real ones from 2026-09-13.
+memory_preflight_names_a_kill_as_a_kill() {
+  local d="${SANDBOX}/killprobe" pf="${TESTS_DIR}/memory-preflight.sh" out rc bad=0
+  local cid=46ad1feb8b9310322873743b1abe6fb2674c37d7dd98ece20cc4804be5357a48
+  rm -rf "${d}"; mkdir -p "${d}"
+  printf 'Running...\nmake: *** [Makefile:46: lint] Killed\n' > "${d}/killed.log"
+  printf 'FAIL - a gate\nmake: *** [Makefile:54: test] Error 1\n' > "${d}/failed.log"
+  # The shape of the real record, from the droplet's journal on 2026-09-13.
+  { printf 'kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=x,mems_allowed=0,global_oom,task_memcg=/system.slice/docker-%s.scope,task=shellcheck,pid=50140,uid=0\n' "${cid}"
+    printf 'kernel: Out of memory: Killed process 50140 (shellcheck) total-vm:1073765996kB, anon-rss:3763000kB, file-rss:256kB, shmem-rss:0kB, UID:0\n'
+  } > "${d}/kern.this"
+  sed "s/docker-${cid}/docker-ffff${cid:4}/" "${d}/kern.this" > "${d}/kern.other"
+
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.this" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || ! grep -q 'RESULT: KILLED' <<<"${out}" \
+     || ! grep -q 'killed shellcheck (pid 50140) at 3674 MB' <<<"${out}"; then
+    printf 'a run the kernel OOM-killed was not named as killed, with the process and its size (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.other" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || grep -q 'ran out of memory' <<<"${out}"; then
+    printf "another container's OOM record was blamed on this run (rc=%s):\n%s\n" "${rc}" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/absent" bash "${pf}" --killed "${d}/killed.log" 2 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 137 )) || ! grep -q 'UNKNOWN' <<<"${out}"; then
+    printf 'a kill with an unreadable kernel log was not reported as cause UNKNOWN (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  # Non-vacuity the other way: an ordinary red run is a verdict on the code,
+  # and must not be excused as the machine's doing.
+  rc=0; out="$(LCA_KERNEL_LOG="${d}/kern.this" bash "${pf}" --killed "${d}/failed.log" 1 "${cid}" 2>&1)" || rc=$?
+  if (( rc != 0 )) || [[ -n "${out}" ]]; then
+    printf 'an ordinary failing run was explained away as a kill (rc=%s):\n%s\n' "${rc}" "${out}" >&2; bad=1
+  fi
+  return "${bad}"
+}
+check "a gates run killed partway says it was killed, and by what, from the kernel's record" \
+  memory_preflight_names_a_kill_as_a_kill
+
+# ...and the container runner asks BEFORE it starts anything. Driven with a
+# docker that records every call: a refusal that still built the image or
+# started the container would be a refusal in name only. The second arm is the
+# proof that the recorder can see a call at all.
+# SOURCE-GREP: the same false positive: it RUNS in-container.sh with a docker
+# that records its calls, and reads the recording. What it cannot check is a
+# real daemon, which is the thing the refusal exists never to reach.
+in_container_refuses_before_docker() {
+  local d="${SANDBOX}/ctrprobe" out rc bad=0
+  rm -rf "${d}"; mkdir -p "${d}/stub"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 3000000 kB\n' > "${d}/low"
+  printf 'MemTotal: 8131748 kB\nMemAvailable: 7000000 kB\n' > "${d}/high"
+  make_stub_dir "${d}/stub"
+  # shellcheck disable=SC2016  # the stub's own text, expanded when it runs
+  printf '#!/bin/sh\necho "docker $*" >> "%s/calls"\nexit 1\n' "${d}" > "${d}/stub/docker"
+  chmod +x "${d}/stub/docker"
+  : > "${d}/calls"
+  rc=0; out="$(PATH="$(stub_path "${d}/stub")" LCA_MEMINFO="${d}/low" LCA_OLLAMA_PS_JSON='{"models":[]}' \
+               LCA_PREFLIGHT_NO_DOCKER=1 LCA_GATES_OUT="${d}/out1" \
+               bash "${TESTS_DIR}/in-container.sh" gates 2>&1)" || rc=$?
+  if (( rc != 3 )) || [[ -s "${d}/calls" ]]; then
+    printf 'too little memory did not stop the container runner before docker (rc=%s, docker calls: %s):\n%s\n' \
+      "${rc}" "$(tr '\n' ';' < "${d}/calls")" "${out}" >&2; bad=1
+  fi
+  rc=0; out="$(PATH="$(stub_path "${d}/stub")" LCA_MEMINFO="${d}/high" LCA_GATES_OUT="${d}/out2" \
+               bash "${TESTS_DIR}/in-container.sh" gates 2>&1)" || rc=$?
+  [[ -s "${d}/calls" ]] || {
+    printf 'with memory to spare the runner never reached docker, so the refusal above proved nothing (rc=%s):\n%s\n' \
+      "${rc}" "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "the container runner refuses before it starts anything, where memory is short" \
+  in_container_refuses_before_docker
+
+# ---------------------------------------------------------------------------
+# Absence rules have to be shown able to fail.
+#
+# An absence rule says something is NOT in the tree: no host path outside
+# lib.sh, no function defined twice, no uncounted skip. Over a clean tree it
+# passes whether or not it can see anything, so a clean pass is not evidence.
+# An audit of this suite found about 110 of them; roughly half still passed
+# with their subject files deleted, and a dozen comments claimed a mutation or
+# a planted probe that nothing ran. CONTRIBUTING, trap 11.
+#
+# So a rule is not trusted on its own report. Each row below runs it three more
+# times, against copies of the tree, with REPO and every path derived from it
+# pointed at the copy:
+#
+#   untouched  it must PASS — the control; failing everywhere proves nothing
+#   stripped   its subject files deleted: it must FAIL
+#   planted    one violation written in: it must FAIL
+#
+# and the planter has to show it changed a file, because a mutation that did
+# not land reads exactly like a rule that cannot fail (CONTRIBUTING, the warning
+# under trap 10). tests/absence-rule-census.tsv lists every absence rule, proved
+# here or still pending; the gates after this section hold the two together.
+ABSENCE_SB="${SANDBOX}/absence"
+
+absence_tree() {   # DIR -> a copy of the repository as it is on disk
+  rm -rf "$1"; mkdir -p "$1"
+  git -C "${REPO}" ls-files -z --cached --others --exclude-standard \
+    | tar -C "${REPO}" --null -T - -cf - 2>/dev/null \
+    | tar -C "$1" -xf -
+  [[ -f "$1/tests/test-lib.sh" && -f "$1/scripts/lib.sh" ]]
+}
+
+absence_stripped() {   # DIR -> the tree's directories, and only the scanners
+  rm -rf "$1"
+  mkdir -p "$1/tests" "$1/scripts" "$1/deploy" "$1/docs" "$1/bin" "$1/config"
+  cp "${TESTS_DIR}"/*.awk "$1/tests/"
+}
+
+absence_run() {   # ROOT COMMAND -> the command's status, run as if ROOT were the repository
+  # The paths are rebound inside eval, in a subshell. Assigned in this file's
+  # own syntax, ShellCheck reads REPO as modified in a subshell and doubts all
+  # six hundred later uses of it.
+  # shellcheck disable=SC2016  # expanded by eval, inside the subshell
+  ( eval 'REPO="$1"; TESTS_DIR="$1/tests"
+          APPLY="$1/scripts/apply.sh"; MOTD="$1/scripts/motd.sh"
+          SUGGESTIONS="$1/config/prompt-suggestions.json"
+          CENSUS="$1/tests/source-grep-census.tsv"; CONFIG_CENSUS="$1/tests/config-coverage.tsv"
+          ABSENCE_CENSUS="$1/tests/absence-rule-census.tsv"
+          DOC_SURFACES=( "$1/README.md" "$1/RESUME.md" "$1"/docs/*.md )
+          eval "$2"' ) >"${ABSENCE_SB}/run.log" 2>&1
+}
+
+absence_rule_can_fail() {   # NAME COMMAND PLANTER -> 0 only if the rule is shown able to fail
+  local name="$1" cmd="$2" planter="$3" root="${ABSENCE_SB}/$1" rc path bad=0
+  mkdir -p "${ABSENCE_SB}"
+  absence_tree "${root}.untouched" || {
+    printf 'could not copy the tree for %s\n' "${name}" >&2; return 1; }
+  rc=0; absence_run "${root}.untouched" "${cmd}" || rc=$?
+  if (( rc != 0 )); then
+    printf '%s fails on an untouched copy of the tree (rc=%s), so failing on a planted one would prove nothing:\n%s\n' \
+      "${name}" "${rc}" "$(<"${ABSENCE_SB}/run.log")" >&2
+    bad=1
+  fi
+  absence_stripped "${root}.stripped"
+  rc=0; absence_run "${root}.stripped" "${cmd}" || rc=$?
+  if (( rc == 0 )); then
+    printf '%s passes with its subject files deleted: it reports a clean tree without having read one\n' "${name}" >&2
+    bad=1
+  fi
+  absence_tree "${root}.planted"
+  path="$("${planter}" "${root}.planted")"
+  if [[ -z "${path}" ]] || cmp -s "${REPO}/${path}" "${root}.planted/${path}"; then
+    printf 'the planter %s changed nothing, so this says nothing about %s\n' "${planter}" "${name}" >&2
+    rm -rf "${root}".untouched "${root}".stripped "${root}".planted
+    return 1
+  fi
+  rc=0; absence_run "${root}.planted" "${cmd}" || rc=$?
+  if (( rc == 0 )); then
+    printf '%s passes with a violation planted in %s: it cannot see the thing it forbids\n' "${name}" "${path}" >&2
+    bad=1
+  fi
+  rm -rf "${root}".untouched "${root}".stripped "${root}".planted
+  return "${bad}"
+}
+
+# The planters. Each writes ONE violation into the copy it is given and prints
+# the path it changed. Every violation is written as a quoted heredoc or from
+# pieces, because this file is itself read by the scanners these planters feed:
+# a planted duplicate spelled out here would be a duplicate here.
+plant_bare_long_wait() {
+  printf '\nwait_for_ollama 60\n' >> "$1/scripts/speed.sh"; echo scripts/speed.sh
+}
+plant_announced_but_unstarted_wait() {
+  cat >> "$1/scripts/speed.sh" <<'PLANT'
+
+info "==> Switching default model"
+wait_for_ollama 60
+PLANT
+  echo scripts/speed.sh
+}
+plant_wait_after_a_comment_about_starting() {
+  cat >> "$1/scripts/speed.sh" <<'PLANT'
+
+# systemctl start ollama, the comment says, and nothing does
+wait_for_ollama 60
+PLANT
+  echo scripts/speed.sh
+}
+plant_wait_after_a_start_written_as_data() {
+  cat >> "$1/scripts/speed.sh" <<'PLANT'
+
+cat <<'NOTE'
+systemctl start ollama
+NOTE
+wait_for_ollama 60
+PLANT
+  echo scripts/speed.sh
+}
+plant_function_defined_twice() {
+  local n="planted"'_twice'
+  printf '\n%s() { :; }\n%s() { :; }\n' "${n}" "${n}" >> "$1/tests/test-netmode.sh"
+  echo tests/test-netmode.sh
+}
+plant_function_nothing_runs() {
+  local n="planted"'_never_called'
+  printf '\n%s() { :; }\n' "${n}" >> "$1/tests/test-agent-watch.sh"
+  echo tests/test-agent-watch.sh
+}
+plant_unterminated_string() {
+  printf '\nunclosed="\n' >> "$1/scripts/speed.sh"; echo scripts/speed.sh
+}
+plant_literal_host_path() {
+  printf '\nprintf x > /et%s\n' 'c/planted-host-path' >> "$1/setup.sh"; echo setup.sh
+}
+plant_unjustified_source_grep() {
+  cat >> "$1/tests/test-lib.sh" <<'PLANT'
+
+planted_reads_source_unexcused() {
+  grep -q something "${REPO}/scripts/lib.sh"
+}
+PLANT
+  echo tests/test-lib.sh
+}
+plant_uncounted_skip() {
+  local sk="sk""ip"
+  printf '\necho "%s - planted"\n' "${sk}" >> "$1/tests/test-netmode.sh"
+  echo tests/test-netmode.sh
+}
+plant_script_with_no_way_in() {
+  printf '#!/usr/bin/env bash\n' > "$1/tests/planted-orphan.sh"; echo tests/planted-orphan.sh
+}
+plant_census_row_for_a_missing_function() {
+  printf 'NOT\t%s\tplanted: a row for a function that does not exist\n' "no_such_function""_anywhere" \
+    >> "$1/tests/absence-rule-census.tsv"
+  echo tests/absence-rule-census.tsv
+}
+plant_tee_into_a_root_file() {
+  printf '\nprintf x | as_root tee /etc/planted-by-the-harness >/dev/null\n' >> "$1/setup.sh"; echo setup.sh
+}
+plant_clean_environment_without_the_host_root() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\nout="$(%s -i PATH=/usr/bin bash -c true)"\n' env >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_hand_built_stub_path() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\nPATH="/planted/stubs:%s"\n' '${PATH}' >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_docker_hidden_through_the_environment() {
+  printf '\nexport %s=unix:///planted.sock\n' "DOCKER""_HOST" >> "$1/tests/test-netmode.sh"; echo tests/test-netmode.sh
+}
+plant_promised_setting_not_applied() {
+  sed -i '/-e "\{0,1\}DO_NOT_TRACK=/d' "$1/scripts/install_webui.sh"; echo scripts/install_webui.sh
+}
+plant_background_start_copies_a_setting() {
+  sed -i '/^start_ollama_bg() {$/a\  export OLLAMA_NO_CLOUD=1' "$1/scripts/lib.sh"; echo scripts/lib.sh
+}
+plant_default_wider_than_shipped() {
+  sed -i '/^load_env()/,/^}/ s|:-127\.0\.0\.1:11434}"|:-0.0.0.0:11434}"|' "$1/scripts/lib.sh"; echo scripts/lib.sh
+}
+plant_pending_rule_dropped_from_the_order() {
+  local first
+  first="$(grep -m1 -nE '^#     [a-z_][a-z0-9_]*$' "$1/tests/absence-rule-census.tsv" | cut -d: -f1)"
+  [[ -n "${first}" ]] || return 0
+  sed -i "${first}d" "$1/tests/absence-rule-census.tsv"
+  echo tests/absence-rule-census.tsv
+}
+plant_reporter_that_opts_into_prompting() {
+  # A script that only reports, opted into a password prompt. Built from
+  # pieces: written out, this line would be that setting, in this file.
+  printf '\n%s=%s\n' 'LCA_MAY_PROMPT' 'true' >> "$1/check-system.sh"; echo check-system.sh
+}
+plant_viewer_that_can_stop_the_run() {
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\ndocker %s "${name}"\n' 'kill' >> "$1/scripts/agent-view.sh"
+  echo scripts/agent-view.sh
+}
+plant_sandbox_removed_without_saving() {
+  # A second removal site, with nothing copying the workspace out above it.
+  # shellcheck disable=SC2016  # the planted line's own text
+  printf '\ndocker rm -f "${name}"\n' >> "$1/agent.sh"; echo agent.sh
+}
+plant_ollama_lookup_that_matches_a_shell() {
+  # From pieces: this rule reads every *.sh in the tree, this file included.
+  printf '\n%s %s ollama\n' 'pkill' '-f' >> "$1/scripts/speed.sh"; echo scripts/speed.sh
+}
+plant_probe_that_decides_for_its_caller() {
+  sed -i '/^docker_daemon_reachable() {$/a\  can_root || return 1' "$1/scripts/lib.sh"
+  echo scripts/lib.sh
+}
+plant_self_rewriting_script_that_runs_on() {
+  # The exit no longer ends the line that invokes main, so a replacement's
+  # tail is read at the stale offset and runs on.
+  printf '\n%s\n' 'echo done' >> "$1/update.sh"; echo update.sh
+}
+plant_runtime_artefact_into_the_tree() {
+  printf 'planted by the harness\n' > "$1/agent.log"; echo agent.log
+}
+plant_setup_hardcodes_its_finish_line() {
+  printf '\necho "SETUP FINISHED WITH ERRORS"\n' >> "$1/setup.sh"; echo setup.sh
+}
+plant_selftest_hardcodes_its_verdict() {
+  printf '\necho "SELF-TEST PASSED"\n' >> "$1/scripts/selftest.sh"; echo scripts/selftest.sh
+}
+plant_apply_reads_the_live_allocation() {
+  sed -i '/^apply_ollama() {$/a\  ollama ps >/dev/null' "$1/scripts/apply.sh"
+  echo scripts/apply.sh
+}
+plant_installer_setup_never_runs() {
+  printf '#!/usr/bin/env bash\ntrue\n' > "$1/scripts/install_planted.sh"
+  echo scripts/install_planted.sh
+}
+plant_disk_check_measures_it_again() {
+  printf '\ndf -h /\n' >> "$1/check-system.sh"; echo check-system.sh
+}
+plant_seed_sends_the_legacy_key() {
+  printf '\nbody="llm_model: x"\n' >> "$1/agent.sh"; echo agent.sh
+}
+plant_watcher_reads_status_after_a_negated_read() {
+  printf '\nif ! IFS= read -r line; then :; fi\n' >> "$1/scripts/agent-watch.sh"
+  echo scripts/agent-watch.sh
+}
+plant_unlisted_absence_rule() {
+  cat >> "$1/tests/test-lib.sh" <<'PLANT'
+
+planted_forbids_a_word() {
+  local hits
+  hits="$(grep -rn 'planted-forbidden' "${REPO}"/scripts/*.sh || true)"
+  [[ -z "${hits}" ]] || return 1
+}
+check "a planted absence rule nobody listed" planted_forbids_a_word
+PLANT
+  echo tests/test-lib.sh
+}
+
+# ...and the census of them. Every absence rule in this suite is a row in
+# tests/absence-rule-census.tsv, read by hand rather than detected:
+#
+#   PROVED   it has rows in ABSENCE_RULES above, and they hold
+#   PENDING  an absence rule nothing has yet shown able to fail — the debt
+#   NOT      a function the detector below flags, which a reader found is not
+#            an absence rule; the reason says what it is instead
+#
+# The detector is a tripwire, not the census. Measured against a full reading
+# it finds 101 of the 108 absence rules the first full reading found, so a new rule shaped
+# like the ones it misses gets past it — tests/absence-candidates.awk says which
+# shapes. What it does do is refuse a new rule of the common shapes that nobody
+# listed, and refuse to let the pending count rise without an edit that shows it.
+ABSENCE_CENSUS="${REPO}/tests/absence-rule-census.tsv"
+# The pending count, exactly. Moving a row to PROVED means lowering this in the
+# same change; adding a PENDING row means raising it, in a diff somebody reads.
+ABSENCE_PENDING=122
+
+absence_census_rows() {   # -> STATUS<TAB>NAME<TAB>REASON, comments and blank lines dropped
+  grep -vE '^(#|[[:space:]]*$)' "${ABSENCE_CENSUS}"
+}
+# SOURCE-GREP: which functions in a file are shaped like absence rules is a
+# property of that file's text. What it cannot see is a rule whose scan happens
+# in a helper; absence-candidates.awk names that shape and the rules it hides.
+absence_candidates_in() {   # FILE -> functions a check runs that are shaped like absence rules
+  awk -f "${TESTS_DIR}/shell-lex.awk" -f "${TESTS_DIR}/absence-candidates.awk" "$1" "$1" | sort -u
+}
+
+# SOURCE-GREP: the census is text about the suite, and whether each row names a
+# function that exists here is a property of the suite's text. What it cannot
+# check is whether a row's status is TRUE — only a reader can.
+absence_census_is_well_formed() {
+  local rows defined status name reason bad=0 n=0 pending=0
+  [[ -r "${ABSENCE_CENSUS}" ]] || { echo 'the absence-rule census is missing' >&2; return 1; }
+  rows="$(absence_census_rows)" || { echo 'the absence-rule census could not be read' >&2; return 1; }
+  defined="$(grep -oE '^[a-z_][a-z0-9_]*\(\)' "${REPO}/tests/test-lib.sh" | sed 's/()$//' | sort -u)"
+  while IFS=$'\t' read -r status name reason; do
+    n=$(( n + 1 ))
+    case "${status}" in
+      PROVED|NOT) ;;
+      PENDING) pending=$(( pending + 1 )) ;;
+      *) printf 'census row %s has the status %q\n' "${name}" "${status}" >&2; bad=1 ;;
+    esac
+    grep -qxF "${name}" <<<"${defined}" || {
+      printf 'the census names %s, which is not a function in tests/test-lib.sh\n' "${name}" >&2; bad=1; }
+    [[ -n "${reason}" ]] || { printf 'the census row for %s gives no reason\n' "${name}" >&2; bad=1; }
+  done <<<"${rows}"
+  (( n >= 150 )) || { printf 'the census has %s rows — it stopped being read\n' "${n}" >&2; bad=1; }
+  (( pending == ABSENCE_PENDING )) || {
+    printf 'the census has %s PENDING rows and ABSENCE_PENDING says %s — change the number in the same edit that changes the rows\n' \
+      "${pending}" "${ABSENCE_PENDING}" >&2
+    bad=1; }
+  return "${bad}"
+}
+check "the absence-rule census names real functions, each with a status and a reason" \
+  absence_census_is_well_formed
+
+# PROVED means proved HERE: a row marked PROVED with nothing in ABSENCE_RULES is
+# the false comment this whole section exists to remove, written in a table.
+proved_rows_are_the_harnessed_rules() {
+  local rows proved harnessed
+  rows="$(absence_census_rows)" || return 1
+  proved="$(awk -F'\t' '$1 == "PROVED" { print $2 }' <<<"${rows}" | sort -u)"
+  harnessed="$(printf '%s\n' "${ABSENCE_RULES[@]}" | cut -d'|' -f1 | sort -u)"
+  [[ "${proved}" == "${harnessed}" ]] || {
+    printf 'PROVED in the census and present in ABSENCE_RULES must be the same list:\n%s\n' \
+      "$(diff <(printf '%s\n' "${proved}") <(printf '%s\n' "${harnessed}"))" >&2
+    return 1; }
+}
+
+# SOURCE-GREP: the subject is the suite's own text — which of its functions are
+# shaped like absence rules. What it cannot see is a rule of a shape the
+# detector misses; absence-candidates.awk names those shapes.
+every_absence_candidate_is_in_the_census() {
+  local found rows missing
+  found="$(absence_candidates_in "${REPO}/tests/test-lib.sh")" || {
+    echo 'the absence detector could not read the suite (see above)' >&2; return 1; }
+  (( $(grep -c . <<<"${found}") >= 100 )) || {
+    printf 'the absence detector found only %s candidates — it stopped matching\n' "$(grep -c . <<<"${found}")" >&2
+    return 1; }
+  rows="$(absence_census_rows)" || { echo 'the absence-rule census could not be read' >&2; return 1; }
+  missing="$(comm -23 <(printf '%s\n' "${found}") <(cut -f2 <<<"${rows}" | sort -u))"
+  [[ -z "${missing}" ]] || {
+    printf 'these are shaped like absence rules and no census row lists them — prove them in ABSENCE_RULES, list them PENDING, or mark them NOT with the reason:\n%s\n' \
+      "${missing}" >&2
+    return 1; }
+}
+check "every function shaped like an absence rule is in the census" \
+  every_absence_candidate_is_in_the_census
+
+# ...and the order the census publishes has to cover the rows it orders. The
+# order is what makes the debt shrink by cost instead of arbitrarily; a PENDING
+# row dropped from it is a row nobody reaches, and a tier heading whose count is
+# not the names under it is the header disagreement this project keeps finding.
+# SOURCE-GREP: the subject IS the order in the census's own header, checked
+# against the rows under it. There is no behaviour to drive.
+absence_order_covers_every_pending_row() {
+  local ordered rows dupes only_order only_rows tiers heading want got bad=0
+  ordered="$(sed -n 's/^#     \([a-z_][a-z0-9_]*\)$/\1/p' "${ABSENCE_CENSUS}" | sort)"
+  [[ -n "${ordered}" ]] || {
+    echo 'the absence census no longer publishes an order — this gate stopped watching' >&2; return 1; }
+  rows="$(absence_census_rows | awk -F'\t' '$1 == "PENDING" { print $2 }' | sort)" || return 1
+  dupes="$(uniq -d <<<"${ordered}")"
+  [[ -z "${dupes}" ]] || { printf 'these are in the published order more than once:\n%s\n' "${dupes}" >&2; bad=1; }
+  only_order="$(comm -23 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  only_rows="$(comm -13 <(printf '%s\n' "${ordered}") <(printf '%s\n' "${rows}"))"
+  [[ -z "${only_order}" ]] || { printf 'the order names rules that are not PENDING:\n%s\n' "${only_order}" >&2; bad=1; }
+  [[ -z "${only_rows}" ]] || { printf 'these PENDING rules are in no tier, so nobody will reach them:\n%s\n' "${only_rows}" >&2; bad=1; }
+  tiers="$(awk '/^# TIER [0-9]/ { if (h != "") printf "%s\t%s\t%d\n", h, w, n
+                                  h = $0; w = $0; sub(/.*\(/, "", w); sub(/\).*/, "", w); n = 0; next }
+                /^#     [a-z_][a-z0-9_]*$/ { n++ }
+                END { if (h != "") printf "%s\t%s\t%d\n", h, w, n }' "${ABSENCE_CENSUS}")" || return 1
+  [[ -n "${tiers}" ]] || { echo 'the published order has no tier headings' >&2; return 1; }
+  while IFS=$'\t' read -r heading want got; do
+    [[ "${want}" == "${got}" ]] || { printf '%s — the heading says %s and lists %s\n' "${heading}" "${want}" "${got}" >&2; bad=1; }
+  done <<<"${tiers}"
+  return "${bad}"
+}
+check "...and the order it publishes covers every pending rule once, each tier counted right" \
+  absence_order_covers_every_pending_row
+
+# The detector, shown both answers: an absence rule it must see, and a behaviour
+# test and an unrun function it must not.
+ABSENCE_FIXTURE="${SANDBOX}/absence-fixture.sh"
+cat > "${ABSENCE_FIXTURE}" <<'AFIX'
+forbids_a_word_in_the_scripts() {
+  local hits
+  hits="$(grep -rn 'forbidden' "${REPO}"/scripts/*.sh || true)"
+  [[ -z "${hits}" ]] || { echo "found: ${hits}" >&2; return 1; }
+}
+check "a fixture absence rule" forbids_a_word_in_the_scripts
+drives_a_script_and_reads_its_output() {
+  local out
+  out="$(bash "${REPO}/scripts/speed.sh" --help)"
+  [[ -n "${out}" ]]
+}
+check "a fixture behaviour test" drives_a_script_and_reads_its_output
+forbids_a_word_but_nothing_runs_it() {
+  local hits
+  hits="$(grep -rn 'forbidden' "${REPO}"/scripts/*.sh || true)"
+  [[ -z "${hits}" ]]
+}
+AFIX
+absence_detector_sees_a_rule_and_only_a_rule() {
+  local found
+  found="$(absence_candidates_in "${ABSENCE_FIXTURE}")" || return 1
+  grep -qx 'forbids_a_word_in_the_scripts' <<<"${found}" || {
+    echo 'the absence detector cannot see an absence rule' >&2; return 1; }
+  ! grep -qx 'drives_a_script_and_reads_its_output' <<<"${found}" || {
+    echo 'the absence detector calls a behaviour test an absence rule' >&2; return 1; }
+  ! grep -qx 'forbids_a_word_but_nothing_runs_it' <<<"${found}" || {
+    echo 'the absence detector flags a function no check runs' >&2; return 1; }
+}
+check "the absence detector sees an absence rule, and not a behaviour test" \
+  absence_detector_sees_a_rule_and_only_a_rule
+
+# NAME|COMMAND|PLANTER. COMMAND is the check line's own invocation, evaluated
+# with the paths rebound; a rule may have several rows, one per shape it forbids.
+# shellcheck disable=SC2016  # evaluated later, with REPO pointed at a copy
+ABSENCE_RULES=(
+  'no_unannounced_long_wait|no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh|plant_bare_long_wait'
+  'no_unannounced_long_wait|no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh|plant_announced_but_unstarted_wait'
+  'no_unannounced_long_wait|no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh|plant_wait_after_a_comment_about_starting'
+  'no_unannounced_long_wait|no_unannounced_long_wait "${REPO}"/*.sh "${REPO}"/scripts/*.sh|plant_wait_after_a_start_written_as_data'
+  'no_test_function_is_defined_twice|no_test_function_is_defined_twice|plant_function_defined_twice'
+  'no_test_function_is_defined_and_never_run|no_test_function_is_defined_and_never_run|plant_function_nothing_runs'
+  'every_scanned_file_lexes_to_its_end|every_scanned_file_lexes_to_its_end|plant_unterminated_string'
+  'no_host_path_outside_lib|no_host_path_outside_lib|plant_literal_host_path'
+  'new_source_greps_are_justified|new_source_greps_are_justified|plant_unjustified_source_grep'
+  'no_skip_goes_uncounted|no_skip_goes_uncounted|plant_uncounted_skip'
+  'every_test_script_has_a_way_in|every_test_script_has_a_way_in|plant_script_with_no_way_in'
+  'every_absence_candidate_is_in_the_census|every_absence_candidate_is_in_the_census|plant_unlisted_absence_rule'
+  'absence_census_is_well_formed|absence_census_is_well_formed|plant_census_row_for_a_missing_function'
+  'absence_order_covers_every_pending_row|absence_order_covers_every_pending_row|plant_pending_rule_dropped_from_the_order'
+  'no_tee_into_a_root_file|no_tee_into_a_root_file|plant_tee_into_a_root_file'
+  'every_clean_environment_moves_the_host|every_clean_environment_moves_the_host|plant_clean_environment_without_the_host_root'
+  'every_path_stub_survives_sudo|every_path_stub_survives_sudo|plant_hand_built_stub_path'
+  'no_test_breaks_docker_through_the_environment|no_test_breaks_docker_through_the_environment|plant_docker_hidden_through_the_environment'
+  'every_promised_setting_is_applied|every_promised_setting_is_applied|plant_promised_setting_not_applied'
+  'start_bg_reads_the_file_rather_than_copying_it|start_bg_reads_the_file_rather_than_copying_it|plant_background_start_copies_a_setting'
+  'defaults_agree_on_values|defaults_agree_on_values|plant_default_wider_than_shipped'
+  'actions_opt_in_to_prompting|actions_opt_in_to_prompting|plant_reporter_that_opts_into_prompting'
+  'view_cannot_touch_the_run|view_cannot_touch_the_run|plant_viewer_that_can_stop_the_run'
+  'work_is_saved_before_the_sandbox_is_destroyed|work_is_saved_before_the_sandbox_is_destroyed|plant_sandbox_removed_without_saving'
+  'no_ollama_lookup_matches_a_shell|no_ollama_lookup_matches_a_shell|plant_ollama_lookup_that_matches_a_shell'
+  'shared_probes_let_the_caller_decide|shared_probes_let_the_caller_decide|plant_probe_that_decides_for_its_caller'
+  'self_rewriting_scripts_exit_explicitly|self_rewriting_scripts_exit_explicitly|plant_self_rewriting_script_that_runs_on'
+  'no_runtime_artefact_is_tracked|no_runtime_artefact_is_tracked|plant_runtime_artefact_into_the_tree'
+  'setup_uses_verdict|setup_uses_verdict|plant_setup_hardcodes_its_finish_line'
+  'selftest_uses_the_verdict|selftest_uses_the_verdict|plant_selftest_hardcodes_its_verdict'
+  'apply_does_not_read_ollama_ps|apply_does_not_read_ollama_ps|plant_apply_reads_the_live_allocation'
+  'setup_runs_every_installer|setup_runs_every_installer|plant_installer_setup_never_runs'
+  'disk_check_uses_the_shared_helpers|disk_check_uses_the_shared_helpers|plant_disk_check_measures_it_again'
+  'seed_uses_a_diff_and_reads_it_back|seed_uses_a_diff_and_reads_it_back|plant_seed_sends_the_legacy_key'
+  'watch_judges_on_time_not_only_on_output|watch_judges_on_time_not_only_on_output|plant_watcher_reads_status_after_a_negated_read'
+)
+for ar_row in "${ABSENCE_RULES[@]}"; do
+  IFS='|' read -r ar_name ar_cmd ar_plant <<<"${ar_row}"
+  check "absence rule ${ar_name} fails stripped, and with ${ar_plant#plant_} planted" \
+    absence_rule_can_fail "${ar_name}" "${ar_cmd}" "${ar_plant}"
+done
+check "...and every rule it calls PROVED is one the harness above runs" \
+  proved_rows_are_the_harnessed_rules
+
+# Non-vacuity for the harness itself: shown a rule that can never fail, it has
+# to say so. Without this, a harness that had stopped running the rule — or
+# that swallowed its status the way the rules it checks once did — would pass
+# every row above.
+absence_fixture_sees_nothing() { return 0; }
+plant_absence_fixture() { printf 'planted\n' >> "$1/README.md"; echo README.md; }
+harness_rejects_a_rule_that_cannot_fail() {
+  ! absence_rule_can_fail absence_fixture_sees_nothing absence_fixture_sees_nothing plant_absence_fixture 2>/dev/null
+}
+check "the absence harness rejects a rule that can never fail" \
+  harness_rejects_a_rule_that_cannot_fail
 
 # 4. The fingerprint recorded at the top, read here, over every path on the
 # product's list. Last, so it covers every harness above it including ones

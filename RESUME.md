@@ -1,5 +1,27 @@
 # RESUME.md — the agent tier's first run on real hardware
 
+## 2026-10-02, later: three branches merged into this one
+
+`origin/agent-live-verify` (the droplet's work) and `origin/absence-rules` are
+merged into `claude/local-code-agent-build-dd13qw`, each diffed from its merge
+base (`f8ce825` for the first, `0126e69` for the second), not between tips. The
+merge commits say what conflicted and how each was resolved. What changes for
+this box:
+
+- **`make gates-container` exists now** and is the only way the suite runs
+  here. `tests/test-lib.sh` refuses to run as root outside a container.
+- **`LCA_HOST_ROOT`** moves every host path the product writes, the motd
+  included, and the suite fingerprints all of them. That is the class open
+  item 2 below belongs to.
+- **Do not `make hooks` in a clone you push from as a non-root user on this
+  box**: the pre-push hook runs `make gates` directly unless it is root, which
+  would put the suite on the host. Push after a green `make gates-container`.
+- The merge was done in a separate clone (`/opt/local-code-agent` is
+  root-owned and is the live install). That checkout is still at the
+  pre-merge commit; update it deliberately, since the systemd units run from it.
+
+---
+
 ## ✅ DONE 2026-10-02: the 64 GB ESXi VM is the machine now — read this first
 
 The migration from the 8 GB droplet is finished. The story of the move is in
@@ -75,9 +97,9 @@ updating, e.g. the one that now looks for `pgrep -x ollama` in
 
 ### Still open
 
-1. **`make gates-container`**: decide on it and write it. Until then nothing
-   here can be run through the suite.
-2. **Test bug still unfixed:** the sandboxed-setup test (`tests/test-lib.sh`
+1. ~~**`make gates-container`**~~: arrived with the merge above; the merged
+   tree has been through it.
+2. **Test bug, addressed by the merge (`LCA_HOST_ROOT`), not re-observed:** the sandboxed-setup test (`tests/test-lib.sh`
    ~5235) runs the real `motd.sh --install`, which writes
    `/etc/update-motd.d/99-local-code-agent` through `as_root` wherever sudo needs
    no password (it did, 18 times, on 2026-10-01). Fix it the same way as the
@@ -100,7 +122,7 @@ updating, e.g. the one that now looks for `pgrep -x ollama` in
    `brew install rsync` and run again. Not tested from a Mac: only from this VM.
 4. **Delete `/etc/sudoers.d/jmuryn`** (still present, kept until this session
    ended): `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` must be refused.
-5. **Push: not done.** `git push` needs a GitHub token on this VM (no credential helper, no `gh`). 17 commits (8 from 2026-10-01, 9 from this session) are waiting on `claude/local-code-agent-build-dd13qw`: `git log origin/claude/local-code-agent-build-dd13qw..HEAD`.
+5. ~~**Push: not done.**~~ Done: the credential helper works, and the merged branch is pushed. Previously: 17 commits (8 from 2026-10-01, 9 from this session) are waiting on `claude/local-code-agent-build-dd13qw`: `git log origin/claude/local-code-agent-build-dd13qw..HEAD`.
 6. Delete the ESXi snapshot from before the upgrade, once you trust the VM.
 7. Optional: if a long agent run hits the context warning, raise
    `AGENT_MODEL_CONTEXT` to 32768 (`sudo lca agent setup`) and keep chat and
@@ -128,7 +150,11 @@ lines.
 
 ---
 
-## STATE RIGHT NOW (2026-09-14, the reconciliation session) — read before running anything
+## THE DROPLET, 2026-09-14 (the reconciliation session) — history, not this VM
+
+> Everything in this section is about the DigitalOcean droplet, which is no
+> longer the machine. Its warnings were turned into code: the suite refuses
+> root outside a container, and `LCA_HOST_ROOT` moves every host path.
 
 **Do not run `tests/test-lib.sh` as root on this machine.** On this box it
 writes the live `/usr/local/bin/lca` link and both boot units

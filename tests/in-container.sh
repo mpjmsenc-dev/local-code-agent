@@ -21,6 +21,11 @@
 #   LCA_GATES_OUT=DIR     where the log goes (default: a new mktemp dir, printed)
 #   LCA_GATES_MEMORY=4g   a memory limit, which is also the RAM the product
 #                         detects inside it (detect_ram_gib reads the cgroup)
+#   LCA_GATES_MIN_MEM_MB  the memory a whole run needs before it may start
+#                         (default 5000: a run that finished peaked at 4879 MB)
+#
+# Exit: the target's status; 3 when too little memory was free and nothing was
+# started; 137 when the run was killed partway and reached no verdict.
 set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +41,18 @@ case "${TARGET}" in
     exit 0 ;;
 esac
 
+# Before docker, before the image, before the clone: a run that cannot finish
+# should not start. The container's memory.peak on a run that finished was
+# 4879 MB, and ShellCheck alone was OOM-killed at 3763 MB resident on this
+# project's 7.9 GB droplet with a model loaded — twice, twenty minutes in.
+# 'lint' inside the container checks again, for ShellCheck, at the moment it
+# starts. tests/memory-preflight.sh names what to unload.
+case "${TARGET}" in
+  gates|lint)
+    rc=0; bash "${TESTS_DIR}/memory-preflight.sh" "${LCA_GATES_MIN_MEM_MB:-5000}" || rc=$?
+    (( rc == 0 )) || exit "${rc}" ;;
+esac
+
 command -v docker >/dev/null 2>&1 || { echo "docker is not installed; the gates cannot run in a container here." >&2; exit 2; }
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
   echo "Building ${IMAGE} from tests/gates.Containerfile (once)..."
@@ -44,6 +61,20 @@ fi
 
 limit=()
 [[ -z "${LCA_GATES_MEMORY:-}" ]] || limit=(--memory "${LCA_GATES_MEMORY}" --memory-swap "${LCA_GATES_MEMORY}")
+# A git worktree's .git is a FILE naming a directory inside the main checkout's
+# .git, which is not under ${REPO}; mounted alone, the clone below fails with
+# "not a git repository" and no gate runs. Mounted read-only at its own path,
+# the pointer resolves. In an ordinary clone this is ${REPO}/.git, already there.
+common_git="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[[ -z "${common_git}" || "${common_git}" == "${REPO}/.git" ]] || limit+=(-v "${common_git}:${common_git}:ro")
+# "I know better" reaches the check inside the container too, or the run the
+# host let through is refused by 'lint' a minute later.
+[[ -z "${LCA_GATES_MIN_MEM_MB:-}" ]] || limit+=(-e "LCA_GATES_MIN_MEM_MB=${LCA_GATES_MIN_MEM_MB}")
+# The container's id, because the kernel's OOM record names the killed task's
+# cgroup by it — that is how a kill is attributed to this run and no other.
+cidfile="${OUT}/container.id"
+rm -f "${cidfile}"
+started="$(date +%s)"
 
 echo "Running 'make ${TARGET}' in ${IMAGE}; log: ${OUT}/gates.log"
 rc=0
@@ -52,7 +83,7 @@ rc=0
 # even to validate a ruleset and is refused without it — three FAILs that were
 # the container, not the rules. It reaches only this container's own network
 # namespace (no --network host here), which the container throws away.
-docker run --rm --cap-add NET_ADMIN "${limit[@]}" \
+docker run --rm --cidfile "${cidfile}" --cap-add NET_ADMIN "${limit[@]}" \
   -v "${REPO}:/src:ro" -v "${OUT}:/out" "${IMAGE}" bash -c '
     set -uo pipefail
     git config --global --add safe.directory "*"
@@ -68,6 +99,17 @@ docker run --rm --cap-add NET_ADMIN "${limit[@]}" \
     exit "${rc}"
   ' _ "${TARGET}" > "${OUT}/gates.log" 2>&1 || rc=$?
 echo "EXIT:${rc}" >> "${OUT}/gates.log"
+# A run killed partway ends in one line, "make: *** [...] Killed", that reads
+# like a failure of the code. Say which it was, from the kernel's record.
+if (( rc != 0 )); then
+  killed=0
+  # Captured, then appended: reading the log and appending to it in one
+  # command is the read-and-write-one-file shape ShellCheck warns about.
+  verdict="$(bash "${TESTS_DIR}/memory-preflight.sh" --killed "${OUT}/gates.log" "${rc}" \
+               "$(cat "${cidfile}" 2>/dev/null)" "${started}" 2>&1)" || killed=$?
+  [[ -z "${verdict}" ]] || printf '%s\n' "${verdict}" >> "${OUT}/gates.log"
+  (( killed != 137 )) || rc=137
+fi
 # The container's record of the run, carried back to this checkout so a commit
 # of the same tree can cite it (.githooks/commit-msg). The container's copy of
 # the repository is gone when it exits; without this the run left no trace.

@@ -1,9 +1,18 @@
 # Every gate in tests/test-lib.sh that reads repo source text, classified.
 #
-# Measured by reading all 278 of them, one at a time, in August 2026 — not
-# sampled and not extrapolated. Two earlier samples disagreed (4 of 12, then
-# 8 of 12), which is what a sample of this population does; the counts below
-# are the census.
+# Measured by reading them one at a time, in August 2026 — not sampled and not
+# extrapolated. Two earlier samples disagreed (4 of 12, then 8 of 12), which is
+# what a sample of this population does; the counts below are the census.
+#
+# "All 278 of them", as this line used to read, overstated what was read. The
+# population came from the classifier of the day, and that classifier had no
+# lexer: it never flagged 18 gates, so the reading never saw them. Of those 18,
+# 12 have rows here now, 3 were deleted and 3 now drive their subject. This
+# file is exhaustive over the suite today by that repair, not by the August
+# read, which can only claim every gate the instrument of the day could see.
+# The labels are readings and stand; the population figure was an instrument's
+# output. CONTRIBUTING, "Counts taken with a broken instrument, re-measured",
+# re-measures every total that came out of that classifier.
 #
 #   A   the gate's claim is a RUNTIME behaviour and its only evidence is that
 #       the source still contains a token or a shape. It cannot tell "the code
@@ -22,7 +31,7 @@
 # The census is made BY READING. source_grep_gates is a tripwire, not a
 # source of truth, and the difference is measured rather than asserted:
 #
-#   DETECTOR RECALL: 236 of 312
+#   DETECTOR RECALL: 239 of 315
 #
 # That is how many A/B/FP rows source_grep_gates finds on its own. The other
 # 76 it cannot see, and the reasons are structural rather than bugs — checked
