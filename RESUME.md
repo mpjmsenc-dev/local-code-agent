@@ -100,7 +100,7 @@ updating, e.g. the one that now looks for `pgrep -x ollama` in
    `brew install rsync` and run again. Not tested from a Mac: only from this VM.
 4. **Delete `/etc/sudoers.d/jmuryn`** (still present, kept until this session
    ended): `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true` must be refused.
-5. **Push.** See the end of the session report for whether it went up.
+5. **Push: not done.** `git push` needs a GitHub token on this VM (no credential helper, no `gh`). 17 commits (8 from 2026-10-01, 9 from this session) are waiting on `claude/local-code-agent-build-dd13qw`: `git log origin/claude/local-code-agent-build-dd13qw..HEAD`.
 6. Delete the ESXi snapshot from before the upgrade, once you trust the VM.
 7. Optional: if a long agent run hits the context warning, raise
    `AGENT_MODEL_CONTEXT` to 32768 (`sudo lca agent setup`) and keep chat and
