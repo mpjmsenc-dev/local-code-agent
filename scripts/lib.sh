@@ -2223,9 +2223,20 @@ ensure_ollama_up() {
 #
 # No pipes: this suite bans 'producer | reader-that-exits-early' outright, and
 # an environ block is small enough that it would have worked by luck.
+# ollama_server_pids — PIDs of processes named exactly 'ollama', one per line.
+#
+# Its own function so a test can hand ollama_bg_env a stand-in's PID. The test
+# used to start a copy of sleep NAMED ollama and rely on pgrep finding it. On a
+# box with a real server, pgrep listed the real server first, so the test read
+# the real server's environment, and for its 30 seconds every
+# 'pgrep -x ollama' on the host (speed.sh, apply.sh) could pick up the fake.
+ollama_server_pids() {
+  have pgrep || return 0
+  pgrep -x ollama 2>/dev/null || true
+}
+
 ollama_bg_env() {
   local key="$1" pids pid environ val
-  have pgrep || return 1
   # -x on the process NAME, not -f on the whole command line. '-f ollama serve'
   # matches any process whose arguments contain that phrase, which includes the
   # shell that is asking — measured here with the server stopped, it returned
@@ -2238,7 +2249,7 @@ ollama_bg_env() {
   #
   # 'ollama serve' runs with comm=ollama, so -x finds it and cannot match a
   # shell. speed.sh already did it this way; this was the copy that drifted.
-  pids="$(pgrep -x ollama 2>/dev/null || true)"
+  pids="$(ollama_server_pids)"
   [[ -n "${pids}" ]] || return 1
   read -r pid <<<"${pids}"
   [[ -n "${pid}" && -r "/proc/${pid}/environ" ]] || return 1

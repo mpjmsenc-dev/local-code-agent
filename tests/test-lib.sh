@@ -20221,9 +20221,12 @@ no_ollama_lookup_matches_a_shell() {
     return 1; }
   # Non-vacuous: the safe form has to actually be what the code uses, or this
   # would keep passing after the lookup was deleted entirely.
-  safe="$(sed -n '/^ollama_bg_env() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  safe="$(sed -n '/^ollama_server_pids() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
   grep -q 'pgrep -x ollama' <<<"${safe}" || {
-    echo 'ollama_bg_env does not look the server up by process name' >&2; return 1; }
+    echo 'ollama_server_pids does not look the server up by process name' >&2; return 1; }
+  safe="$(sed -n '/^ollama_bg_env() {/,/^}/p' "${REPO}/scripts/lib.sh" | sed 's/#.*//')"
+  grep -q 'ollama_server_pids' <<<"${safe}" || {
+    echo 'ollama_bg_env does not find the server through ollama_server_pids' >&2; return 1; }
 }
 check "...and finds it by process name, so it cannot match the calling shell" \
   no_ollama_lookup_matches_a_shell
@@ -23531,23 +23534,27 @@ check "the loaded context is read off the server, for the right model" \
   loaded_context_is_read_from_the_server
 
 bg_env_is_read_from_the_running_server() {
-  # A REAL process called ollama, because that is exactly what this reads: the
-  # launch environment out of /proc. A stub cannot stand in for it, and it does
-  # not have to — a copy of sleep with the right name is a real process with a
-  # real environ.
+  # A REAL process, because that is exactly what this reads: the launch
+  # environment out of /proc. A stub cannot stand in for the process, and it
+  # does not have to: a copy of sleep is a real process with a real environ.
+  #
+  # NOT named ollama, and found by PID rather than by pgrep. Named ollama, it
+  # lost to a real server on any box that has one (pgrep lists that first, so
+  # this read the host's real /proc/PID/environ), and for 30 seconds it was a
+  # fake server that the host's own 'pgrep -x ollama' callers could find.
   local bin="${SANDBOX}/bgenv/bin" pid out rc=0
   rm -rf "${bin}"; mkdir -p "${bin}"
-  cp "$(command -v sleep)" "${bin}/ollama"
-  OLLAMA_CONTEXT_LENGTH=4242 OLLAMA_KEEP_ALIVE=7m "${bin}/ollama" 30 &
+  cp "$(command -v sleep)" "${bin}/lca-bgenv-standin"
+  OLLAMA_CONTEXT_LENGTH=4242 OLLAMA_KEEP_ALIVE=7m "${bin}/lca-bgenv-standin" 30 &
   pid=$!
-  # Give the kernel the moment it needs to have the process visible to pgrep.
   local waited=0
-  while ! pgrep -x ollama >/dev/null 2>&1; do
+  while [[ ! -r "/proc/${pid}/environ" ]]; do
     sleep 0.2; waited=$((waited+1))
-    (( waited < 25 )) || { kill "${pid}" 2>/dev/null; echo 'the stand-in server never appeared to pgrep' >&2; return 1; }
+    (( waited < 25 )) || { kill "${pid}" 2>/dev/null; echo 'the stand-in server never appeared in /proc' >&2; return 1; }
   done
-  out="$(lib_probe ':' 'ollama_bg_env OLLAMA_CONTEXT_LENGTH')" || rc=$?
-  local out2; out2="$(lib_probe ':' 'ollama_bg_env NOT_SET_AT_ALL')" || true
+  local pick="ollama_server_pids() { printf '%s\\n' ${pid}; }"
+  out="$(lib_probe "${pick}" 'ollama_bg_env OLLAMA_CONTEXT_LENGTH')" || rc=$?
+  local out2; out2="$(lib_probe "${pick}" 'ollama_bg_env NOT_SET_AT_ALL')" || true
   kill "${pid}" 2>/dev/null || true
   wait "${pid}" 2>/dev/null || true
   (( rc == 0 )) || { echo 'the launch environment of a running server could not be read' >&2; return 1; }
@@ -23557,6 +23564,9 @@ bg_env_is_read_from_the_running_server() {
   [[ -z "${out2}" ]] || {
     printf 'a variable the server was not launched with came back as %q\n' "${out2}" >&2
     return 1; }
+  # And with no server at all, nothing, rather than whatever else is running.
+  ! lib_probe 'ollama_server_pids() { :; }' 'ollama_bg_env OLLAMA_CONTEXT_LENGTH' >/dev/null || {
+    echo 'with no server running, a launch environment was still reported' >&2; return 1; }
 }
 check "the running server's launch environment is read out of /proc" \
   bg_env_is_read_from_the_running_server
