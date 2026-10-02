@@ -1935,6 +1935,89 @@ tokens_per_second() {
   awk -v c="${count}" -v n="${ns}" 'BEGIN { printf "%.1f\n", c / (n / 1000000000) }'
 }
 
+# --- the CPU, for the ladder ----------------------------------------------------
+#
+# The RAM ladder answers "will it load?". On CPU it does not answer "will it be
+# usable?", and on the ESXi VM those two came apart: 62 GiB said 14b, and an
+# 8-vCPU Xeon E5-2680 v2 (AVX but no AVX2) read a prompt at 6.7 tokens/second
+# with it. That is seven minutes of reading before a small aider edit starts
+# writing.
+#
+# Reading (prompt processing) is compute-bound, so it scales with cores and
+# with the vector unit, and inversely with model size. Measured on that VM, at
+# full context, idle:
+#
+#   14b  8 threads    6.7 tok/s   -> 6.7 * 14.8 / 8  = 12.4 per core per B
+#   14b 16 threads   13.2 tok/s   -> 13.2 * 14.8 / 16 = 12.2
+#   32b 16 threads    5.7 tok/s   -> 5.7 * 32.8 / 16 = 11.7
+#
+# One constant across model size and thread count, which is what makes it
+# usable as a predictor. Checked afterwards on a model it was not fitted to:
+# 7b, predicted 27.4 / 13.7 tok/s at 16 / 8 threads, measured 27.0 / 13.8. AVX2 boxes measured by this project, idle: the 4-vCPU
+# droplet read ~50 tok/s on 3b (~39 per core per B) and a 4-vCPU / 16 GB box
+# 24.4 on 7b (~46). LCA_READ_RATE_* are those, rounded down. Writing is not
+# estimated: it is memory-bandwidth-bound, and bandwidth is not something a
+# script can read off /proc.
+LCA_READ_RATE_NOAVX2=12
+LCA_READ_RATE_AVX2=36
+
+# cpu_cores — physical cores (what Ollama sizes its thread pool to), from
+# /proc/cpuinfo's (physical id, core id) pairs; logical CPUs when those are
+# absent. LCA_CPU_CORES overrides it, for "what would this pick on box X".
+cpu_cores() {
+  if [[ "${LCA_CPU_CORES:-}" =~ ^[0-9]+$ ]]; then printf '%s\n' "${LCA_CPU_CORES}"; return 0; fi
+  local n
+  n="$(awk -F: '/^physical id/ {p=$2} /^core id/ {seen[p "-" $2]=1} END {c=0; for (k in seen) c++; print c}' \
+        /proc/cpuinfo 2>/dev/null || true)"
+  [[ "${n}" =~ ^[1-9][0-9]*$ ]] || n="$(nproc 2>/dev/null || echo 1)"
+  printf '%s\n' "${n}"
+}
+
+# cpu_has_avx2 — true when the CPU has AVX2. LCA_CPU_AVX2=true|false overrides.
+cpu_has_avx2() {
+  case "${LCA_CPU_AVX2:-}" in
+    true) return 0 ;;
+    false) return 1 ;;
+  esac
+  grep -qw avx2 /proc/cpuinfo 2>/dev/null
+}
+
+# cpu_numa_nodes — how many NUMA nodes the kernel sees (1 when unknown).
+cpu_numa_nodes() {
+  local n
+  n="$(find /sys/devices/system/node -maxdepth 1 -name 'node[0-9]*' 2>/dev/null | wc -l)"
+  (( n > 0 )) || n=1
+  printf '%s\n' "${n}"
+}
+
+# est_read_tps MODEL CORES AVX2(true|false) — predicted reading speed in
+# tokens/second, one decimal. Non-zero when MODEL has no parseable size.
+est_read_tps() {
+  local params rate="${LCA_READ_RATE_NOAVX2}"
+  params="$(model_params_b "$1")" || return 1
+  [[ "$3" == "true" ]] && rate="${LCA_READ_RATE_AVX2}"
+  awk -v c="$2" -v r="${rate}" -v p="${params}" 'BEGIN { printf "%.1f\n", c * r / p }'
+}
+
+# ollama_numa_exec — the ExecStart the Ollama unit should use, or nothing when
+# the stock one is right.
+#
+# On a machine with more than one NUMA node, Ollama's copy of the weights lands
+# wherever the kernel finds room. On the ESXi VM (2 sockets x 8 vCPUs) one node
+# was full of page cache, so 18 of the 32b's 25 GB went to the other one, and
+# half the threads read every weight across the socket link. Generation was
+# 1.0 tok/s at 8, 12 and 16 threads alike, which means it was not compute-bound.
+# Under 'numactl --interleave=all' it was 2.0 tok/s. 14b was unchanged at 4.3,
+# so interleaving costs nothing where it does not help.
+ollama_numa_exec() {
+  local numactl ollama
+  (( $(cpu_numa_nodes) > 1 )) || return 0
+  numactl="$(command -v numactl 2>/dev/null || true)"
+  ollama="$(command -v ollama 2>/dev/null || true)"
+  [[ -n "${numactl}" && -n "${ollama}" ]] || return 0
+  printf '%s --interleave=all %s serve\n' "${numactl}" "${ollama}"
+}
+
 # read_probe_prompt — a prompt for measuring how fast this machine READS input,
 # which has to be two things the old benchmark was not: big, and different
 # every time.
@@ -2029,6 +2112,12 @@ render_ollama_dropin_content() {
   echo "# Managed by local-code-agent (scripts/install_ollama.sh and scripts/tune.sh)."
   echo "# Manual edits will be overwritten on the next install or tune run."
   echo "[Service]"
+  local numa_exec
+  numa_exec="$(ollama_numa_exec)"
+  if [[ -n "${numa_exec}" ]]; then
+    echo "ExecStart="
+    echo "ExecStart=${numa_exec}"
+  fi
   echo "Environment=OLLAMA_HOST=${OLLAMA_HOST}"
   echo "Environment=OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
   echo "Environment=OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"

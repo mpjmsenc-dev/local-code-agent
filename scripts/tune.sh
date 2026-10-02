@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/tune.sh — auto-tune the stack to this machine's RAM.
+# scripts/tune.sh — auto-tune the stack to this machine's RAM, then its CPU.
 #
 # This is the "resize the droplet and it adapts" feature: detect total RAM,
 # pick the best model + context length from the ladder below, and apply it.
@@ -13,6 +13,11 @@
 #   16-23   <family>:big     ctx  8192
 #    >=24   <family>:big     ctx 16384   (larger sizes remain a manual choice)
 # Default family qwen2.5-coder => 3b / 7b / 14b.
+#
+# Then the CPU (cap_for_cpu): the rung steps down while this CPU would take
+# longer than TUNE_READ_BUDGET_S (300) to read one aider edit's prompt. Cores
+# and AVX2 decide it. LCA_CPU_CORES / LCA_CPU_AVX2 override the detection, to ask
+# what another box would get:  LCA_CPU_CORES=4 LCA_CPU_AVX2=true lca tune --dry-run
 #
 # Usage:
 #   tune.sh                  detect and apply
@@ -163,6 +168,50 @@ choose_for_ram() {
   fi
 }
 
+# cap_for_cpu CORES AVX2(true|false) — step TUNE_MODEL down the ladder while
+# this CPU would read a small aider edit's prompt slower than the budget.
+#
+# Run after choose_for_ram, never inside it: choose_for_ram is the RAM ladder
+# that the README documents and 'lca check' quotes, and it stays exactly that.
+# This only ever moves DOWN, to a smaller rung of the same family, so it can
+# never ask for a download the RAM ladder would refuse. Context is left as RAM
+# chose it; a smaller model in the same window costs less, not more.
+#
+# The budget is reading time for one aider edit (LCA_EDIT_PROMPT_TOKENS, about
+# 2.8k tokens). 300 s means "a small edit's model time stays around five minutes".
+# On the ESXi VM at 16 vCPUs the 14b predicts 216 s (measured: 13.2 tok/s, 212 s)
+# and keeps it. At 8 vCPUs the same box predicts 430 s for 14b, so it steps to
+# 7b (222 s). Sets TUNE_CPU_NOTE to one line saying what happened and why.
+TUNE_READ_BUDGET_S="${TUNE_READ_BUDGET_S:-300}"
+cap_for_cpu() {
+  local cores="$1" avx2="$2" fam small mid big tps secs from="${TUNE_MODEL}" vec="no AVX2"
+  [[ "${avx2}" == "true" ]] && vec="AVX2"
+  fam="${TUNE_MODEL%%:*}"
+  TUNE_CPU_NOTE=""
+  read -r small mid big <<<"$(family_sizes "${fam}" 2>/dev/null || true)"
+  [[ -n "${small}" ]] || return 0
+  while :; do
+    tps="$(est_read_tps "${TUNE_MODEL}" "${cores}" "${avx2}")" || return 0
+    secs="$(awk -v t="${LCA_EDIT_PROMPT_TOKENS}" -v r="${tps}" 'BEGIN { printf "%d", (r > 0 ? t / r : 999999) }')"
+    (( secs > TUNE_READ_BUDGET_S )) || break
+    # Smallest first: families that repeat a size (llama3.1 is 8b 8b 8b) stop
+    # here instead of stepping to themselves.
+    case "${TUNE_MODEL#*:}" in
+      "${small}") break ;;
+      "${mid}")   TUNE_MODEL="${fam}:${small}" ;;
+      *)          TUNE_MODEL="${fam}:${mid}" ;;
+    esac
+  done
+  if [[ "${TUNE_MODEL}" != "${from}" ]]; then
+    TUNE_CPU_NOTE="CPU: ${cores} cores, ${vec} — RAM allows ${from}, but it would read about $(est_read_tps "${from}" "${cores}" "${avx2}") tok/s; ${TUNE_MODEL} reads about ${tps} (~${secs}s of reading per small edit, budget ${TUNE_READ_BUDGET_S}s)"
+  else
+    TUNE_CPU_NOTE="CPU: ${cores} cores, ${vec} — ${TUNE_MODEL} should read about ${tps} tok/s (~${secs}s of reading per small edit, budget ${TUNE_READ_BUDGET_S}s)"
+  fi
+  if (( secs > TUNE_READ_BUDGET_S )); then
+    TUNE_CPU_NOTE+="; over budget even at the smallest size — this CPU is slow for any model"
+  fi
+}
+
 install_service() {
   if ! systemd_available; then
     warn "systemd is not available here — skipping the on-boot auto-tune service. Run 'lca tune' manually after spec changes."
@@ -261,6 +310,7 @@ main() {
   local ram
   ram="$(detect_ram_gib)"
   choose_for_ram "${ram}"
+  cap_for_cpu "$(cpu_cores)" "$(cpu_has_avx2 && echo true || echo false)"
 
   # Keep-alive is decided here, from the same two facts the ladder already has
   # — how much RAM this box has and which tiers are switched on. It was a
@@ -275,7 +325,14 @@ main() {
   step "Auto-tune: detected ${ram} GiB RAM"
   info "Ladder decision: model=${TUNE_MODEL}  context=${TUNE_CTX}  keep-alive=${ka_want}"
   info "Current config:  model=${MODEL_NAME}  context=${OLLAMA_CONTEXT_LENGTH}  AUTO_TUNE=${AUTO_TUNE}"
-  info "(More vCPUs need no tuning — Ollama automatically uses all cores.)"
+  info "${TUNE_CPU_NOTE}"
+  if (( $(cpu_numa_nodes) > 1 )); then
+    if [[ -n "$(ollama_numa_exec)" ]]; then
+      info "NUMA: $(cpu_numa_nodes) nodes — Ollama runs under 'numactl --interleave=all' (2x generation for 32b on the ESXi VM)."
+    else
+      warn "NUMA: $(cpu_numa_nodes) nodes but numactl is not installed, so Ollama's weights can pile up on one node. Fix: sudo apt install numactl, then: sudo lca tune"
+    fi
+  fi
 
   if [[ "${dry_run}" == "true" ]]; then
     if [[ "${AUTO_TUNE}" != "true" ]]; then

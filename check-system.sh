@@ -510,7 +510,10 @@ FREE_GB="$(free_gb "${MODELS_DIR}")"
 # number this report judges against.
 FAM_NOTE="$(unknown_family_note)" && p_warn "${FAM_NOTE}"
 choose_for_ram "${RAM_GIB}"
+# Then tune.sh's CPU step, so this recommends what tune would actually pick.
+cap_for_cpu "$(cpu_cores)" "$(cpu_has_avx2 && echo true || echo false)"
 info "RAM ladder: ${RAM_GIB} GiB detected → recommended model ${TUNE_MODEL}"
+info "${TUNE_CPU_NOTE}"
 if [[ "${AUTO_TUNE}" != "true" ]]; then
   info "AUTO_TUNE=false — model manually pinned to ${MODEL_NAME}; drift check skipped."
 elif [[ "${MODEL_NAME}" == "${TUNE_MODEL}" ]]; then
