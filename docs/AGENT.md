@@ -361,17 +361,49 @@ visible instead of comfortable.
 
 ## Your instructions reach it too
 
-`config/CONVENTIONS.md` is the one file that steers all three surfaces — aider,
-the chat app, and this agent. The agent gets it two ways, because only one of
-them is guaranteed:
+`config/CONVENTIONS.md` steers **two** of this stack's three surfaces directly,
+and the third gets a distilled subset by a different route. That distinction was
+wrong here for months and is worth stating plainly.
 
-- **Mounted** at `/.openhands/lca-instructions.txt` inside the container, which
-  is a plain bind mount and therefore certain.
-- **Passed** as `LCA_USER_INSTRUCTIONS`, which is *not* a documented OpenHands
-  variable. It costs nothing if the agent ignores it, and this project does not
-  claim it works — the mount is the part that does.
+| surface | how the file reaches it | verified |
+|---|---|---|
+| aider | `--read config/CONVENTIONS.md` on the command line | yes — a real aider flag |
+| the chat app | appended to `lca_system_prompt` | yes — its keyed phrases are in the assembled prompt |
+| **the agent** | **it does not** | the mount and the env var are both inert |
 
-`AIDER_CONVENTIONS=false` switches the file off for all three at once.
+**What this section used to say, and why it was wrong.** It claimed the agent
+got the file two ways, and that the bind mount was "certain". The mount *is*
+certain — the file is genuinely at `/.openhands/lca-instructions.txt` inside the
+container, exactly as described. **Nothing reads it.** `grep -rn
+lca-instructions /app/openhands` is empty, and none of the file's five keyed
+phrases appear anywhere in the agent's first prompt. The mechanism was verified
+and the effect never was, which is the same mistake as `agent_settings.tools`
+and `SANDBOX_STARTUP_GRACE_SECONDS` — see the settings audit below.
+
+**How the rules actually reach the agent:** `agent_task_prompt` writes three
+prohibitions into the task text, and that channel is measured — the submitted
+and received `sha256` match, and all three are present in the `MessageEvent` the
+agent received.
+
+**Why the whole file is not sent that way**, since the channel exists and works.
+Tokenized with the model's own tokenizer:
+
+| | tokens |
+|---|---:|
+| `config/CONVENTIONS.md`, editor note stripped | **680** |
+| the three prohibitions actually sent | **96** |
+| the margin a whole conversation has | **2,601** |
+
+Sending the file would spend **26% of everything a conversation has** on text
+whose agent-relevant part is 96 tokens — and it would be spent on every
+conversation, permanently, against a window this project just built a ceiling
+for. The file is written for humans editing code with aider; the agent needs
+three sentences out of it. So the agent gets the subset, and the subset is
+gated: `tests/test-lib.sh` holds `agent_task_prompt` to the same keyed phrases
+`config/CONVENTIONS.md` is held to, so the two cannot drift apart silently.
+
+`AIDER_CONVENTIONS=false` switches the file off for aider and the chat app. It
+does **not** change what the agent receives, because the agent never had it.
 
 ## Security
 
@@ -959,10 +991,23 @@ CPU box never opens a browser.
 ```
 
 The sandbox then logs `Loaded 22 tools from spec` and sends a byte-identical
-15,225-token prompt. Measured before and after: **0 tokens saved, 57 browser
+prompt. Measured before and after: **0 tokens saved, 57 browser
 mentions either way.** `filter_tools_regex` and `include_default_tools` exist on
 the `Agent` schema and are not on the settings diff at all — posting
 `filter_tools_regex` stores `null`.
+
+> **Re-tested 2026-08-22, post-cut, and it still holds** — the settings still
+> round-trip, the two filters still store `null`, and the `SystemPromptEvent`
+> still carries a tool array byte-identical to a run without the setting.
+>
+> **One correction.** The `Loaded 22 tools from spec` line is written here as
+> something the explicit list *caused*. It is not: 22 is logged with the setting
+> and without it, on both sandboxes measured that day. The gap between it and
+> the 24 in the prompt is `finish` and `think`, appended by the framework after
+> the spec loads — they are the last two entries in the array. So the counts in
+> this repository (22, 24, 25, 26) are four different things and not drift;
+> docs/PROMPT-WINDOW.md tabulates which is which, along with the turn ceiling
+> the surviving tool JSON leaves.
 
 Nothing this project can do closes that; it is upstream. It is written down here
 so nobody spends another evening discovering the setting works and does nothing.
@@ -1179,3 +1224,265 @@ the watcher returns: **before, 1 survivor (reparented to init); after, 0**.
 `tests/test-agent-watch.sh` counts them and fails if one comes back — and also
 fails if the count is clean for the *wrong* reason, because the watcher says out
 loud when it has fallen back to the old pid-by-pid sweep.
+
+---
+
+## `lca agent task` submitted nothing, 5 times out of 23, and said it worked
+
+This is the project's own submission path, and it had the failure shape this
+whole week has been about: it produced nothing, left a container running, and
+exited 0.
+
+### What it looked like
+
+    ==> Submitting the task
+    [info] Working directory: /workspace/project
+    [warn] The task was submitted but its conversation id could not be
+           identified, so 'lca agent watch' will fall back to picking the
+           newest sandbox.
+    [info] Follow it: lca agent watch
+
+Every word of that is wrong except the first line. The task was not submitted,
+there was no conversation to identify, nothing was running, and a sandbox
+container was left up holding about 3 GB on a 7.8 GiB box. Exit status 0.
+
+### What actually happened
+
+The `POST /api/v1/app-conversations` does not return a conversation. It returns
+a **start-task**, and the conversation is created afterwards, asynchronously, by
+a path that can fail. Ours did:
+
+    19:00:31 docker_sandbox_service: Sandbox server not running:
+             http://host.docker.internal:56971 :
+    19:00:31 live_status_app_conversation_service: ERROR Error starting conversation
+    SandboxError: 500: Sandbox entered error state: oh-agent-server-3WNdhl65MHR9ATJhCj9d0p
+
+A race, and a close one. Two sandboxes six minutes apart on this box:
+
+| | container start → "ready to serve" | outcome |
+|---|---:|---|
+| the failed one | **16.55s** | app gave up at 15s |
+| the next one | 12.40s | fine |
+
+OpenHands allows 15 seconds. The sandbox answered 1.55 seconds late, the app
+marked it `ERROR`, and `wait_for_sandbox_running` raises on `ERROR` immediately
+— the 120-second timeout next to it never gets a chance.
+
+**It was not a one-off.** The app keeps every outcome at
+`/api/v1/app-conversations/start-tasks`, and this project had never once asked:
+
+    23 start-tasks:  18 READY, 5 ERROR
+    ERROR on 08-12 (three), 08-17, 08-22 — all "Sandbox entered error state"
+
+**21.7%, silent, for at least ten days.**
+
+### The setting that fixes it is not the one OpenHands documents
+
+`config.py` reads a plain `SANDBOX_STARTUP_GRACE_SECONDS` — but only inside
+`if config.sandbox is None`, the legacy fallback. This stack sets
+`OH_SANDBOX_KIND`, so `config.sandbox` is not `None` and that branch never runs.
+
+Established by experiment, not by reading:
+
+| set to 1 | result |
+|---|---|
+| `SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **succeeded** — the value was never read |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **failed exactly like 08-22** |
+
+This is the same shape as `agent_settings.tools`: a documented setting that is
+silently inert on the path this project actually uses. `AGENT_SANDBOX_GRACE_SECONDS`
+(default **120**) now travels as `OH_SANDBOX_STARTUP_GRACE_SECONDS`.
+
+### And the failure is loud now
+
+`lca agent task` reads the start-task id out of the POST reply instead of
+discarding it, and asks the app how the submission ended. `READY` gives the
+conversation id directly — no set-difference, no three-minute wait. `ERROR`
+gives this, with exit status 1:
+
+    [warn] The sandbox it gave up on is still running: oh-agent-server-4ShlhJFN…
+           Stop it: docker stop oh-agent-server-4ShlhJFN…
+    [FAIL] Your task was NOT submitted. The app failed to start a conversation
+           for it, and said why:
+
+             500: Sandbox entered error state: oh-agent-server-4ShlhJFN…
+
+           Nothing is running it and nothing will. This is almost always the
+           sandbox answering later than the app was willing to wait — OpenHands
+           allows 15 seconds by default and this box has needed 17. Raise the
+           margin and try again:
+
+             AGENT_SANDBOX_GRACE_SECONDS=120   in /opt/local-code-agent/.env
+             /opt/local-code-agent/bin/lca agent restart
+
+Verified end to end: forced the failure with a 1-second grace and got exactly
+that, exit 1; restored 120 and the next submit named its conversation on the
+first poll. The old set-difference path is kept as a fallback for a reply this
+cannot parse.
+
+---
+
+## Which settings actually do anything: the whole list, checked one by one
+
+Three settings turned out to be inert in three separate investigations —
+`agent_settings.tools`, `system_message_suffix`, and
+`SANDBOX_STARTUP_GRACE_SECONDS`. Three is a pattern, so everything this project
+sends into OpenHands was audited the same way: **by changing it and observing
+the result**, never by whether the API accepted it.
+
+### The rule that explains all of them
+
+| how it is spelled | verdict |
+|---|---|
+| `OH_<FIELD>`, `OH_SANDBOX_<FIELD>` | nested config — **works** |
+| bare `SANDBOX_<FIELD>` | read only inside `if config.sandbox is None`, and `OH_SANDBOX_KIND` makes that false — **dead here** |
+| a settings-API field | stored faithfully; honoured **selectively**, and the API cannot tell you which |
+| a name this project invented | nothing reads it, ever |
+
+The second row is the trap: `SANDBOX_STARTUP_GRACE_SECONDS` and
+`SANDBOX_VOLUMES` are both documented, both sit in that branch, and both are
+silently ignored on any stack that configures a sandbox kind — which is every
+stack that works.
+
+### Verified working
+
+| what | how it was proven |
+|---|---|
+| `AGENT_SERVER_IMAGE_REPOSITORY` / `_TAG` | the sandbox runs that exact image |
+| `OH_SANDBOX_KIND` | it is *why* `config.sandbox` is not `None` — the grace experiment proves it |
+| `OH_SANDBOX_HOST_PORT` | arrives in the sandbox as `OH_WEBHOOKS_0_BASE_URL=…:3001/api/v1/webhooks` |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS` | set to 1, the failure reproduced on demand; at 120 it stopped |
+| `OH_WEB_URL` | arrives as `OH_ALLOW_CORS_ORIGINS_0` |
+| `OH_AGENT_SERVER_ENV` → `EXTENSIONS_REF` | present in sandbox env; the 4,232-token catalogue is gone from the prompt |
+| `LOG_ALL_EVENTS` | read at `app_server/utils/logger.py:62` |
+| `llm.model`, `.base_url`, `.native_tool_calling`, `.max_output_tokens`, `.timeout` | all five in the sandbox's own `base_state.json` |
+| `enable_switch_llm_tool` | `switch_llm` is absent from the 24 tools |
+| `initial_message` | byte-identical `sha256` between what was sent and the `MessageEvent` |
+
+### Inert — sent, accepted, and doing nothing
+
+| what | what actually happens |
+|---|---|
+| `agent_settings.tools` | stores verbatim; the prompt's tool array is byte-identical either way |
+| `filter_tools_regex` | posted, stored as `null` |
+| `include_default_tools` | posted, stored as `null` |
+| `agent: "CodeActAgent"` | stored verbatim — but the name appears nowhere in the image except as this field's own default. The SDK ships `Agent` and `ACPAgent`, and `base_state.json` records `agent.kind = "Agent"` regardless |
+| `LCA_USER_INSTRUCTIONS` | a name this project invented; `grep -rn` over `/app/openhands` is empty |
+| `config/CONVENTIONS.md` mounted at `/.openhands/lca-instructions.txt` | never read. None of its five load-bearing phrases appear anywhere in event 0 |
+| `agent.system_message_suffix` | overwritten by the app with its own `<HOST>` value |
+
+**Seven of roughly twenty.** All seven are left in place on purpose — each costs
+one field and would be the natural hook if OpenHands ever honoured it — but each
+is now annotated at the point it is sent, so nobody reasons from its presence.
+
+### The one that matters most
+
+The two rules this project cares about — run what you built, stay in your
+directory — do **not** travel on the instructions mount or the suffix, both of
+which are inert. They reach the model through the **task text** and through
+nothing else. That channel is measured: submitted and received `sha256` match,
+and all three prohibitions are present in the `MessageEvent` the agent got.
+
+If a second channel is ever wanted, `.openhands/microagents/` is what this
+build actually reads (alongside `hooks.json`, `skills`, `setup.sh` and
+`pre-commit.sh`) — and it would cost prompt tokens in `dynamic_context`, which
+after the cut is exactly what there is least of.
+
+---
+
+## The worst bug this project has had: the agent's work was deleted by the command that told you to read it
+
+It ran for weeks, against real work, and every part of it looked fine from the
+outside. It is written up at length because the shape is more useful than the
+fix.
+
+### What the messages claimed
+
+Three of them, in the order a user meets them:
+
+| where | what it said |
+|---|---|
+| `lca agent watch`, on stopping a run | *"Agent stopped. Its workspace is intact in `~/.openhands` — read it, then start again."* |
+| `lca agent stop` | *"Its workspace and settings are kept in `~/.openhands`."* |
+| `lca agent gc` | warned that removing a sandbox *"deletes anything the agent built inside it that you have not copied out"* — and then removed it |
+
+### What actually happened
+
+**The sandbox has no mounts.** Not a misconfigured mount — none:
+
+    docker inspect <sandbox> --format '{{.Mounts}}'   ->   (empty)
+
+Everything the agent writes lives in that container's writable layer and
+nowhere else. `~/.openhands` held settings, a sqlite database and conversation
+event logs, and never a single file the agent produced — confirmed by searching
+the whole host for the deliverables of earlier runs and finding none.
+
+Then the sequence composes:
+
+1. The watcher stops the **app** container. It does not stop the sandbox, so at
+   that moment the agent's files still exist.
+2. It tells you to read them in `~/.openhands`, where they are not, and to
+   *start again*.
+3. `lca agent start` runs `remove_orphan_sandboxes`, which `docker rm -f`s every
+   sandbox.
+
+**Following the advice destroyed the work the advice had just pointed at.** The
+one instruction the message gave was the one action that made recovery
+impossible.
+
+### Why the fix is preservation and not rewording
+
+Rewording was the cheaper fix and it was the wrong one. The message was not
+merely inaccurate — it was answering a real need. Someone stops a run precisely
+*because* they want to look at what it produced. A corrected message that said
+"your work is in a container that is about to be deleted, extract it yourself
+with `docker cp`" would have been honest and would still have left every user
+one forgotten step away from losing everything.
+
+So `agent_preserve_workspace` copies `/workspace` out **before** the container is
+destroyed, at all three moments where that happens: when the watcher stops a run,
+when `lca agent start` collects orphans, and when `lca agent gc` reclaims. The
+promise the messages were making is now a promise the code keeps, which is the
+only version of "fixed" worth having.
+
+### Three follow-on bugs, and the second is the instructive one
+
+**1. The gate found the second removal path.** Written as "preserve, then
+remove", the new gate passed while `lca agent gc` — a completely separate
+removal site — still deleted work outright. It now checks *every* site that
+destroys a sandbox against the lines above it, and fails if fewer than two exist.
+
+**2. Fixing stopped-sandbox collection alone would have made things worse.**
+`agent_orphan_sandboxes` asked `docker ps`, which lists running containers only,
+so an *exited* sandbox was reclaimed by nothing this project ships and held its
+layer for the life of the box. The obvious fix is to look at `docker ps -a`.
+
+That fix, on its own, is a data-loss bug. `agent_preserve_workspace` did its
+work through `docker exec`, and Docker refuses that on a stopped container —
+`container … is not running`. So widening collection would have reached exactly
+the sandboxes whose work could not be saved, and deleted them unread. **The
+tidy-up would have caused the very loss the preservation was written to
+prevent.**
+
+It was caught by calling the preserve function against a stopped container
+rather than assuming it behaved the same as against a running one. Preservation
+now has a `docker cp` fallback, which needs nothing from inside the container.
+
+**3. The fast path failed silently on a different image.** The
+`find -quit` + GNU `tar` route is not universal; a busybox image answers
+neither, and the first version reported *"nothing to save"* about a workspace
+full of work. It now falls through to the fallback instead of returning, because
+**silence about an empty sandbox and silence about an unreadable one must not
+look the same.**
+
+### The lesson, which is the same one as everywhere else in this file
+
+Every one of these was a mechanism that had been verified and an effect that had
+not. The bind mount really was mounted. `docker ps` really did list sandboxes.
+`docker exec` really did copy files. Each check passed, and none of them was a
+check of the thing that mattered.
+
+The question that finds these is never *"is it configured?"* — it is **"what
+would I observe if this did nothing at all, and have I observed otherwise?"**
+For the workspace the answer took one command: look on the host for a file the
+agent wrote. There was never one.

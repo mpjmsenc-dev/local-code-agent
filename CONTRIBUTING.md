@@ -68,6 +68,62 @@ step non-optional rather than remembered.
 | `make dry-run` | preview the auto-tune decision without changing anything |
 | `make check` | full `check-system.sh` health check (degrades gracefully) |
 
+## Where the gates run
+
+**Never as root on a machine this project is installed on. Run them in a
+container: `make gates-container`.** `tests/test-lib.sh` refuses root outside a
+container and says why; `LCA_SUITE_ON_THIS_HOST=yes` overrides it, and you
+should need a reason.
+
+This is a rule because it already cost something. On 2026-09-14 the suite, run
+as root on the development droplet, drove `setup.sh` with the login banner's
+path redirected and nothing else. `setup.sh` wrote the rest of the host for
+real — `/usr/local/bin/lca`, and the netmode and tune boot units — pointing into
+a `mktemp` directory the suite deleted when it finished. An earlier run had done
+the same. At the next boot the netmode unit exited 203/EXEC, **the inbound guard
+was not loaded, and Open WebUI sat on `0.0.0.0:3000` on a public address for
+fifty-five minutes — 00:32 to 01:27 UTC — and one request from the internet
+reached it (`185.218.86.25`, `GET /`, 00:58:23 UTC). No account was created,
+the only account was last active weeks earlier, and Open WebUI logs too few of
+its requests to show that nothing else arrived.** Every report read green: the escape check at the top of
+the suite watched the login banner, and the banner had not moved.
+
+That check covered one instance of a class, which is the shape of most of what
+this document records. What replaced it covers the class:
+
+- **One root for the host.** `LCA_HOST_ROOT` (empty in production) prefixes every
+  path the product reads or writes outside the checkout, each named once in
+  `scripts/lib.sh`. `lca_host_paths` lists them.
+- **No path outside it.** A gate rejects any absolute host path spelled out in a
+  product script that is not one of those names; the few real reads that must
+  stay real (`/etc/os-release`, PATH entries, the docker socket as a mount spec)
+  are listed with their reasons.
+- **Every harness moves it.** The suite exports it, and a gate rejects any
+  `env -i` harness that does not pass it on — `env -i` is the one construction
+  that defeats an export, and the setup harness that did the damage used it.
+- **The escape check watches the product's list.** Every path `lca_host_paths`
+  names is fingerprinted on the real machine before the run and compared after —
+  links by target, files by size, change time and content, directories by their
+  entries. A rewrite that puts back identical bytes still changes the time.
+
+The container rule stays even with all of that in place. Those four are code,
+and this project's record on code that guards itself is the reason they exist.
+A container costs nothing to lose.
+
+**The gates refuse to start without the memory to finish.** ShellCheck over
+`tests/test-lib.sh` peaks near 3.8 GB. Two full runs on the 7.9 GB droplet were
+killed partway because an Ollama model was resident — each ended in `Killed`,
+exit 2, twenty minutes in, which reads like a failure of the code. `make lint`
+now runs `tests/memory-preflight.sh` first: with too little available it exits 3
+before anything runs, and lists the resident models with the command that
+unloads each, the containers, and the largest processes. Memory it cannot read
+is "could not tell", exit 2, never a pass.
+
+`tests/in-container.sh` copies the working tree as it is on disk — history
+included, uncommitted edits included — so what is tested is what you are about
+to commit. `LCA_GATES_MEMORY=4g` also sets the RAM the product detects inside it,
+which is one way to put the suite on a different rung of the ladder.
+
 ## What CI enforces
 
 Every push and PR runs `.github/workflows/ci.yml`:
@@ -98,9 +154,9 @@ These mirror `CLAUDE.md` and are what a reviewer checks for:
   honestly and say why in the PR.
 - New behavior gets a test (`tests/`) where it's unit-testable.
 
-## Nine shell traps that turn a gate into decoration
+## Ten shell traps that turn a gate into decoration
 
-All nine were shipped here at least once. They matter more in an assertion
+All ten were shipped here at least once. They matter more in an assertion
 than in ordinary code, because each one fails *silently in the passing
 direction* — the gate keeps reporting green, or red, for the wrong reason.
 
@@ -268,6 +324,63 @@ the run finish, or edit a copy. It is the same mistake as pushing in the
 background while still editing — the pre-push hook runs this suite, on the file
 your editor is halfway through writing. Two things holding one file, and only
 one of them knows it.
+
+**10. A scanner that works out for itself which lines are code.** Sibling of 5,
+and it reached four tools at once. `tests/duplicate-defs.awk` tracked
+multi-line single-quoted strings by counting apostrophes, skipping comment
+lines first because "an apostrophe in prose is not a quote". That guard was
+written against the right idea and applied to the wrong scope: it covered `#`
+comments and not the far commoner case, an apostrophe inside a double-quoted
+string. So this line —
+
+```bash
+check "...and the suite left the live machine's login banner alone"
+```
+
+— left the scanner believing it was inside a string for the rest of the file.
+It then reported no duplicate functions, because it could no longer see a
+function *definition*. The line was the last in the file, so nothing real
+followed it and nothing real was missed; the only thing that failed was the
+gate's own non-vacuity probe, which appends a known duplicate and demands the
+scanner find it. **That probe is the entire reason this was not silent.**
+
+The other three scanners over these files did not track quoting at all, so a
+definition at column 0 inside a multi-line single-quoted shim — code for
+*another* shell, appended to a sandbox's `lib.sh` — was read as this file's
+own. `reachable.awk` reported it as a function nothing calls, which is a false
+accusation in the one scanner whose header promises it cannot make one;
+`source_grep_gates` called it a gate that reads repo source; `justified_gates`
+accepted a `SOURCE-GREP:` marker written inside a shim as excusing one.
+
+Four tools, four separate answers to one question, three of them wrong. The
+fix is not a better answer in each: it is **one** answer, in
+`tests/shell-lex.awk`, which every scanner is now loaded with —
+
+```bash
+awk -f tests/shell-lex.awk -f tests/duplicate-defs.awk FILE
+```
+
+— and **one** fixture they are all driven over, carrying every shape that got
+through: an apostrophe in a description, in a comment and in a heredoc; a
+function defined twice inside data; a long wait inside data; a marker inside
+data. Each scanner must give *both* answers over it — find the real thing, and
+stay silent about the same thing written as data. A scanner tested only on
+tidy input is a scanner that will be fooled by text about itself again.
+
+The rule that generalises past quoting: **a scanner that has stopped seeing
+code must say so.** Blindness and cleanliness produce identical output — an
+empty, confident answer — and that is what made this survive. `shell-lex.awk`
+exits non-zero when it reaches the end of a file still inside a quote or a
+heredoc, and a gate drives it over every file any scanner here reads.
+
+That end-of-input rule is also the one part of this a mutation sweep cannot
+kill on its own: while the lexer is correct, deleting the rule changes no
+verdict anywhere, and the gate passes either way. It has to be shown *refusing*
+something — the gate writes a file that ends inside a quoted string and
+requires the lexer to reject it. The other three mutations (stop treating `"`
+as a quote, stop treating heredocs as data, lex comments as code) each flip a
+scanner's answer over the fixture and are killed by it; without the
+non-vacuity half, removing the safety net was the one change nothing noticed.
 
 The habit that catches the first three: **mutate the thing under test and
 confirm the test goes red.** A test that has never failed has not been tested.
@@ -748,14 +861,38 @@ the end of `tests/test-lib.sh` drives a Tailscale address off a stubbed
 `confirm`'s refusal through a real terminal via `script`.
 
 **Where driving is genuinely impossible** — a real GPU, a real sudo refusal on
-a suite that runs as root, a live container, a package install — a source grep
-is allowed, and it must say so:
+a suite that runs as root, a live container — a source grep is allowed, and it
+must say so:
 
 ```bash
 # SOURCE-GREP: this needs an NVIDIA card, which no runner here has. What it
 # cannot check is that the parse is right for a real nvidia-smi.
 gpu_probe_reads_the_largest_card() { ... }
 ```
+
+**"It would install something" is not one of those cases, and used to be.**
+That sentence sat in the list above for months, and it kept four gates about
+the entry points reading source: a gate that fails by running `apt-get` as root
+on whoever ran the suite is worse than the bug it guards, so they asserted the
+*shape* that produces the behaviour — a `case` as main()'s first statement, the
+characters `main "$@"` on the last line — and none of them could see an arm
+that never runs, or a refusal below the side effect it was meant to prevent.
+
+The answer is a sandbox that makes acting *observable* rather than impossible.
+`ep_sandbox` in `tests/test-lib.sh` builds one: a throwaway copy of the
+checkout (tracked files only), `env -i` so nothing this suite exports leaks in,
+and `BASH_ENV` — which bash reads before every non-interactive script, and
+every bash that script starts — defining `apt-get`, `docker`, `sudo`, `git
+clone` and the rest as functions that *record what they were asked to do* and
+return 0. Shell functions beat `PATH` lookup, so `sudo apt-get install` is
+caught too, and recording rather than refusing is what lets the failure message
+say everything a broken guard would have done instead of stopping at the first.
+It also keeps acting apart from looking: `systemctl is-active` and `docker
+inspect` are how these scripts ask questions, and a tripwire that called those
+side effects would have to be blunted until it saw nothing.
+
+Nothing about it is specific to installers. If a gate is reading source because
+running the thing would change the machine, this is the shape to reach for.
 
 **Extract-to-drive is not a source grep**, and it is the shape to reach for
 when a script cannot be sourced (`agent.sh` and `check-system.sh` both run
@@ -792,11 +929,15 @@ of twelve, then eight of twelve — so the whole population was read one gate at
 time instead. That read is `tests/source-grep-census.tsv`, and it is checked in
 because a number nobody can re-derive is a number nobody should trust.
 
-| | count | share | what it is |
+| | at the census | now | what it is |
 |---|---|---|---|
-| **A** | **153** | 55% | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
-| B | 97 | 35% | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
-| FP | 28 | 10% | not debt: the gate drives its subject and greps the *result* |
+| **A** | **153** | **145** | the claim is a runtime behaviour and the only evidence is that the source still says so. **This is the debt.** |
+| B | 98 | 98 | the subject genuinely is text — a document, a message, a config value, agreement between two written artefacts, or an exhaustive absence rule over the source itself |
+| FP | 28 | 36 | not debt: the gate drives its subject and greps the *result* |
+
+The "now" column moves only in one direction, and only by conversion: eight so
+far — four in `run-agent.sh`, `check-system.sh` and `uninstall.sh`, and the
+four entry-point gates the sandbox above unblocked.
 
 153 of the suite's 1,239 checks, then — about one in eight — assert a runtime
 behaviour and observe only text. `group_a_debt_has_not_grown` pins that number;
@@ -1090,55 +1231,6 @@ Nothing in a source grep of that function looks wrong.
 |---|---|---|
 | `gpu_state`, `has_nvidia_gpu` **on a real card** | an NVIDIA host — not the droplet | `lca speed` classifies placement as `active`/`split`/`idle` rather than quoting Ollama's string. The suite settles what these do with and without `nvidia-smi`; what it cannot settle is whether the parse is right for a real one. |
 | the no-hang rule for a **sudoer with a password** | a box with a configured sudoers entry — an account is not enough | `sudo -k`, then `lca check`, then the login banner: neither prompts, neither hangs, and both report the firewall / daemon / container as **UNKNOWN** rather than claiming a state they could not read |
-| whether `WEBUI_IMAGE` can be drift-checked | a box with a **real docker daemon** and the chat app running | see the three commands below. The answer decides between two implementations, and guessing wrong makes `lca apply` re-create the chat container on every run |
-
-#### The `WEBUI_IMAGE` question, written out
-
-`WEBUI_IMAGE` is honoured by `lib.sh` and four scripts, its own comment
-anticipates somebody pinning the tag, and `webui_drift` has no key for it.
-Measured against a stubbed docker: with the container on `v0.3.0` and `.env`
-asking for `v9.9.9`, drift reported `[]`. `lca apply` says "already matches
-.env" and the chat app runs the old image for ever — the shape
-`aider_pin_is_watched` records, one setting further on.
-
-It was not fixed here because the fix depends on one fact a stub cannot
-supply. Run this on a machine with a real daemon and the chat app up:
-
-```bash
-docker container inspect -f '{{.Config.Image}}' open-webui   # (1) what was PASSED
-docker container inspect -f '{{.Image}}'        open-webui   # (2) the resolved ID
-docker image     inspect -f '{{.Id}}' "$(. scripts/lib.sh; load_env; echo "${WEBUI_IMAGE}")"
-```
-
-**If (1) prints the tag** — `ghcr.io/open-webui/open-webui:main` — then a plain
-string comparison against `${WEBUI_IMAGE}` is stable, and the implementation is
-four lines in `webui_drift`, in the same shape as the six keys already there:
-
-```bash
-live="$(webui_container_image || true)"
-[[ "${live}" == "${WEBUI_IMAGE}" ]] || drifted+=("WEBUI_IMAGE")
-```
-
-A stock install compares equal, so `lca apply` re-creates the container exactly
-once — when the pin actually changes. What this does **not** catch is the tag
-moving under you: `.Config.Image` is fixed at creation, so a `:main` that
-advanced upstream still reads equal. Say so in the comment rather than implying
-otherwise.
-
-**If (1) prints a digest** — `sha256:…`, or `…@sha256:…` — a plain comparison
-reports drift on every run for every stock install, and `lca apply` re-creates
-the chat container each time. The implementation then has to compare (2)
-against (3): the container's resolved image ID against the ID the configured
-tag resolves to locally. That is strictly better — it catches the moved tag as
-well — but it needs the image present to resolve, so it must degrade to "no
-drift" rather than "drifted" when `docker image inspect` fails, or an offline
-box reports a pin problem it does not have.
-
-Either way the gate is the same: create a container from one tag, point `.env`
-at another, and require `webui_drift` to name `WEBUI_IMAGE`; then leave `.env`
-alone and require it not to. The second half is the one that matters, because
-the failure mode of guessing wrong is a chat container re-created on every
-`lca apply`.
 
 `setpriv` narrowed the second row rather than removing it. Running as somebody
 who is not root needs no real account, no sudo and no droplet:
@@ -1800,6 +1892,32 @@ afternoon of this found five, all invisible as root:
 | `lca webui status` | full report | *nothing at all*, then waits for ever |
 | `lca logs` | full output | ollama section, then waits for ever |
 
+Five is what one afternoon found. It is not the list. The **whole** typed
+surface was later driven the same way — every command in `lca help`, every
+subcommand of the four that have them, and every `--help` — from two throwaway
+accounts (one with no sudo rights, one an ordinary sudoer with a password
+nobody typed), each on a pty, each bounded. Three more came out of it, and the
+fourth was the same defect pointing the other way:
+
+| Command | Was | Why the five-region grep could not see it |
+|---|---|---|
+| `lca check` | seven lines, then waits for ever | `agent_live_sandboxes` used a bare `as_root docker ps`. **`as_root` is the escalation; `can_root` is only one way of deciding to reach it** — the word the gate matches never appears |
+| `lca agent logs` | one line, then waits for ever | bare `as_root docker logs`. `lca logs` was converted to `run_reader`; this is the project's *other* log reader and nothing converted it too |
+| `lca agent status` | `Container 'openhands-app' does not exist` — while it had been up 17 hours | the probe collapses "cannot ask the daemon" into "no" |
+| `lca agent start` | refused in 0.18s, telling an ordinary sudoer to join the docker group | `agent.sh` never set `LCA_MAY_PROMPT=true`, so an ACTION the user typed took the strict answer |
+
+Two lessons that generalise past this rule:
+
+- **Match the escalation, not the decision.** `can_root([^_]|$)` is the right
+  regex for the wrong token. Every one of the hangs above went through
+  `as_root`, and two of them mention `can_root` nowhere at all.
+- **A stub sudo cannot save a gate from the wrong `.env`.** A gate of this
+  shape configured from `.env.example` proves less than it looks like it does:
+  `.env.example` ships `ENABLE_AGENT=false`, so check-system.sh's entire
+  `if [[ "${ENABLE_AGENT}" == "true" ]]` block — where the first hang lived —
+  never executes, and the gate passes over a branch it never ran. Switch every
+  optional tier **on** in the fixture, and assert it is on.
+
 The rule that came out of it, gated in `tests/test-lib.sh`:
 
 - **An action the user asked for** → `can_root`. A password prompt is fair;
@@ -2147,6 +2265,25 @@ against `git show --stat` for that commit. Almost every hit was a false
 positive, because a message legitimately names the subject under test and not
 only the paths it touched. No gate came out of it. Recorded because it was
 asked, and because "we looked and there was nothing" is a result.
+
+### ...and the suite's own verdict, in a commit message
+
+Commit messages here close with a line like `Suite: 1299 checks, all passing.`
+Nothing tied that line to a run. A number carried over from the run before the
+last edit reads exactly like a measured one.
+
+Now `tests/test-lib.sh` appends every run to `.git/lca-suite-runs` — the working
+tree it ran on (hashed through a throwaway index), passed, failed, not run, and
+where — and `tests/in-container.sh` carries the container's record back.
+`.githooks/commit-msg`, installed by `make hooks`, rejects a `Suite: N checks`
+line unless a run on the tree being committed passed N with nothing failed,
+and rejects "all passing" if anything was not run. The gate
+`commit_msg_hook_holds_suite_claims_to_a_run` drives the hook through every way
+a claim can outrun its run.
+
+So: run `make gates-container` on exactly what you are committing, then copy the
+counts from its `recorded -` line. If you edit after the run, run again or drop
+the line.
 
 ## Reviewing a PR
 

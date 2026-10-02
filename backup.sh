@@ -25,8 +25,7 @@ LCA_MAY_PROMPT=true
 load_env
 
 BACKUP_DIR="${REPO_ROOT}/backups"
-BACKUP_SERVICE=/etc/systemd/system/local-code-agent-backup.service
-BACKUP_TIMER=/etc/systemd/system/local-code-agent-backup.timer
+# BACKUP_SERVICE and BACKUP_TIMER are defined in lib.sh, under LCA_HOST_ROOT.
 
 # acquire_backup_lock — hold an exclusive lock for the rest of this process.
 #

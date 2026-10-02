@@ -9,10 +9,18 @@ set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${TESTS_DIR}/.." && pwd)"
+# The same host root tests/test-lib.sh uses, so nothing here that reaches a
+# product path outside the checkout can reach the real one. See lib.sh.
+LCA_HOST_ROOT="$(mktemp -d)"
+export LCA_HOST_ROOT
 
 FAILED=0
-t_ok()   { printf '%s\n' "ok   - $*"; }
+PASSED=0
+SKIPPED=0
+t_ok()   { printf '%s\n' "ok   - $*"; PASSED=$((PASSED+1)); }
 t_fail() { printf '%s\n' "FAIL - $*"; FAILED=$((FAILED+1)); }
+# Counted, and named in the verdict: see t_skip in tests/test-lib.sh.
+t_skip() { printf '%s\n' "SKIP - $*"; SKIPPED=$((SKIPPED+1)); }
 
 # Nothing here may call a command that does not exist — the same rule
 # tests/test-lib.sh carries, and for the same measured reason: a helper defined
@@ -34,7 +42,7 @@ NFT_SHEBANG='#!/usr/sbin/nft -f'
 
 RULES="$(mktemp)"
 INBOUND="$(mktemp)"
-trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${MISSING_CMD_LOG:-}"' EXIT
+trap 'rm -rf "${RULES}" "${INBOUND}" "${SSH_ALL_FILE:-}" "${MISSING_CMD_LOG:-}" "${LCA_HOST_ROOT:-}"' EXIT
 "${REPO}/netmode.sh" render-rules > "${RULES}"
 "${REPO}/netmode.sh" render-inbound > "${INBOUND}"
 
@@ -427,10 +435,26 @@ if command -v nft >/dev/null 2>&1; then
   fi
 fi
 nft_check() {  # desc file
-  if "${NFT[@]}" --check -f "$2"; then t_ok "$1"; else t_fail "$1"; fi
+  local err
+  if err="$("${NFT[@]}" --check -f "$2" 2>&1)"; then t_ok "$1"; return; fi
+  # A kernel that refuses nft a netlink socket never evaluated the ruleset, so
+  # this was not attempted, not failed: a container without NET_ADMIN answers
+  # every check this way, and three FAILs there were the container, not the
+  # rules. Anything else nft says — a syntax error, an unknown keyword — is the
+  # ruleset, and fails.
+  # NOT RUN only when EVERY line of what nft said is that refusal. nft parses
+  # before it asks for the socket, so a syntax error arrives first and the
+  # refusal after it — matched on the refusal alone, a broken ruleset in a
+  # container without the capability was called not attempted.
+  if [[ -n "${err}" ]] && ! grep -qv 'Operation not permitted' <<<"${err}"; then
+    t_skip "$1 — NOT RUN: the kernel refused nft here (${err%%$'\n'*}), so it never saw the ruleset"
+  else
+    printf '%s\n' "${err}" >&2
+    t_fail "$1"
+  fi
 }
 if [[ "${#NFT[@]}" -eq 0 ]]; then
-  echo "skip - nft (as root) not available; content checks above still ran"
+  t_skip "nft --check of the offline and inbound rulesets — nft (as root) not available; the content checks above still ran"
 else
   nft_check "nft --check accepts the offline ruleset" "${RULES}"
   nft_check "nft --check accepts the inbound ruleset" "${INBOUND}"
@@ -697,7 +721,11 @@ fi
 
 echo
 if (( FAILED > 0 )); then
-  echo "RESULT: ${FAILED} test(s) FAILED"
+  echo "RESULT: ${FAILED} test(s) FAILED (${PASSED} passed, ${SKIPPED} NOT RUN)"
   exit 1
 fi
-echo "RESULT: all netmode tests passed"
+if (( SKIPPED > 0 )); then
+  echo "RESULT: ${PASSED} netmode checks passed, ${SKIPPED} NOT RUN — not a clean pass; the kernel never saw these rulesets"
+  exit 0
+fi
+echo "RESULT: all ${PASSED} netmode checks passed, none skipped"

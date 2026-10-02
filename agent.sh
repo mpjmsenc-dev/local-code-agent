@@ -30,7 +30,8 @@ Commands:
   task      Give it a task from here, with the working directory named
             explicitly — the thing two failed runs did not have
   start     Start the agent (pulls the images on first run — several GB)
-  stop      Stop it (its workspace and settings are kept in ~/.openhands)
+  stop      Stop it (settings are kept in ~/.openhands; the agent's workspace
+            is copied to ~/.openhands/workspaces/ when its sandbox is collected)
   restart   Restart it
   status    Container state + HTTP health on port ${AGENT_PORT}
   url       The address to open on your phone, over Tailscale
@@ -102,10 +103,13 @@ start_agent() {
   model="$(agent_llm_model "$(agent_model_for_run)")"
   base_url="$(agent_llm_base_url)"
   bridge_gw="$(docker_bridge_gateway)"
-  # The same instructions file aider reads and the chat app is given, so the
-  # third surface does not become the one place the user's preferences are
-  # ignored. Passed as the agent's default task framing; empty when the file is
-  # absent or AIDER_CONVENTIONS is off, and an empty -e is simply not added.
+  # The same instructions file aider reads — but read what happens to it below
+  # before believing this reaches the agent. It does not: its only destination
+  # is LCA_USER_INSTRUCTIONS, and nothing on the other side reads that name.
+  # This line used to say the agent must not "become the one place the user's
+  # preferences are ignored", and that is exactly what it is; the rules that DO
+  # reach it travel in the task text (agent_task_prompt), measured
+  # sha256-identical on arrival. Kept, and labelled, rather than removed.
   instructions="$(lca_user_instructions)"
   info "Starting the agent on port ${AGENT_PORT}, using ${model} at ${base_url}"
   info "First run downloads several GB of images — this takes a while."
@@ -198,18 +202,52 @@ start_agent() {
     # does not pretend it is one: the file is also mounted where the agent can
     # read it, and docs/AGENT.md says which of the two is guaranteed. An env
     # var that may do nothing is fine only when something else does the job.
+    # INERT, and now known to be. 'grep -rn LCA_USER_INSTRUCTIONS /app/openhands'
+    # is empty: it is a name this project invented, so nothing on the other side
+    # was ever going to read it. Kept because it costs one env var and would be
+    # the natural hook if OpenHands ever grows one -- but nothing may reason
+    # from its presence that the instructions reach the model. They reach it
+    # through agent_task_prompt, which is measured and byte-identical on
+    # arrival, and through nothing else.
     extra_env+=( -e "LCA_USER_INSTRUCTIONS=${instructions}" )
   fi
 
+  # WHICH OF THESE ACTUALLY DO ANYTHING. Audited 2026-08-22, by experiment
+  # rather than by whether the API accepted them, after three settings in a row
+  # turned out to be inert. The rule that came out of it:
+  #
+  #   OH_<FIELD> / OH_SANDBOX_<FIELD>   nested config. WORKS.
+  #   bare SANDBOX_<FIELD>              read only inside `if config.sandbox is
+  #                                     None`, and OH_SANDBOX_KIND makes that
+  #                                     false, so it is DEAD here. This is how
+  #                                     SANDBOX_STARTUP_GRACE_SECONDS fooled us;
+  #                                     SANDBOX_VOLUMES sits in the same branch.
+  #   a name this project invented      nothing reads it. Ever.
+  #
+  # Verified working: AGENT_SERVER_IMAGE_* (the sandbox runs that image),
+  # OH_SANDBOX_HOST_PORT (arrives as OH_WEBHOOKS_0_BASE_URL), OH_WEB_URL
+  # (arrives as OH_ALLOW_CORS_ORIGINS_0), OH_SANDBOX_STARTUP_GRACE_SECONDS
+  # (setting it to 1 reproduced the 08-22 failure on demand), OH_AGENT_SERVER_ENV
+  # (EXTENSIONS_REF reaches the sandbox and the catalogue is gone from the
+  # prompt), LOG_ALL_EVENTS (read at app_server/utils/logger.py:62).
+  #
+  # INERT, and left in place deliberately -- see LCA_USER_INSTRUCTIONS above and
+  # the lca-instructions mount below. docs/AGENT.md carries the whole table.
   as_root docker run -d \
     --name "${AGENT_CONTAINER}" \
     --restart unless-stopped \
     ${extra_env[@]+"${extra_env[@]}"} \
+    `# INERT. Nothing reads this path: 'grep -rl lca-instructions /app/openhands'` \
+    `# is empty, and none of CONVENTIONS.md's five load-bearing phrases appear` \
+    `# anywhere in event 0. What OpenHands DOES read from .openhands is` \
+    `# hooks.json, microagents, skills, setup.sh and pre-commit.sh. The rules` \
+    `# reach the model through the TASK TEXT (agent_task_prompt) and only there.` \
     -v "${REPO_ROOT}/config/CONVENTIONS.md:/.openhands/lca-instructions.txt:ro" \
     -e AGENT_SERVER_IMAGE_REPOSITORY="${AGENT_RUNTIME_IMAGE}" \
     -e AGENT_SERVER_IMAGE_TAG="${AGENT_RUNTIME_TAG}" \
     -e OH_SANDBOX_KIND=DockerSandboxServiceInjector \
     -e OH_SANDBOX_HOST_PORT="${AGENT_PORT}" \
+    -e OH_SANDBOX_STARTUP_GRACE_SECONDS="${AGENT_SANDBOX_GRACE_SECONDS}" \
     -e OH_WEB_URL="$(agent_web_url)" \
     -e OH_AGENT_SERVER_ENV="$(agent_sandbox_env)" \
     -e LLM_MODEL="${model}" \
@@ -351,6 +389,16 @@ seed_agent_settings() {
   # measured live by differencing two runs and subtracting the task-length
   # change — the tool lets the agent switch to another model on a box with one.
   # docs/PROMPT-WINDOW.md has the rest of the tool budget and why it is stuck.
+  # agent:"CodeActAgent" is INERT, and kept only because it is this API's own
+  # default. Measured: the string round-trips, but "CodeActAgent" exists nowhere
+  # in the image except as the default of this very field -- the SDK ships
+  # Agent and ACPAgent, and the conversation's base_state.json records
+  # agent.kind = "Agent" whatever is posted here. Do not read its presence as
+  # "this stack runs CodeActAgent"; nothing resolves the name at all.
+  #
+  # The llm.* fields below are the opposite and were checked the same way: all
+  # five arrive in the sandbox's own base_state.json (model, base_url,
+  # native_tool_calling, max_output_tokens 2048, timeout 1800).
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         --argjson out "$(agent_max_output_tokens)" \
@@ -396,7 +444,7 @@ seed_agent_settings() {
 # containers" is the kind of line that is either reassuring or alarming
 # depending on whether you knew they were there. Nobody knew they were there.
 remove_orphan_sandboxes() {
-  local orphans n name
+  local orphans n name saved
   orphans="$(agent_orphan_sandboxes 2>/dev/null || true)"
   [[ -n "${orphans}" ]] || return 0
   n="$(grep -c . <<<"${orphans}")"
@@ -404,8 +452,17 @@ remove_orphan_sandboxes() {
   info "The app is down, so these cannot be reached by anything any more."
   while read -r name; do
     [[ -n "${name}" ]] || continue
+    # Save the work BEFORE destroying the container that holds it. The sandbox
+    # has no mounts, so 'docker rm -f' is the only thing standing between the
+    # agent's output and oblivion, and this project used to tell people to go
+    # read it afterwards. Best-effort and quiet when there is nothing to save.
+    saved="$(agent_preserve_workspace "${name}" 2>/dev/null || true)"
     if as_root docker rm -f "${name}" >/dev/null 2>&1; then
-      ok "Removed ${name}."
+      if [[ -n "${saved}" ]]; then
+        ok "Removed ${name}. Its workspace was copied to ${saved} first."
+      else
+        ok "Removed ${name}."
+      fi
     else
       warn "Could not remove ${name} — it is still running. Remove it by hand: sudo docker rm -f ${name}"
     fi
@@ -431,10 +488,22 @@ main() {
   # a prompt is fair: the reader typed them. status, url and logs only report,
   # and lib.sh records what happens when a reporter is allowed to ask.
   #
-  # Measured before this line existed, on a box where docker needs root: 'lca
-  # agent start' refused with "Cannot reach the Docker daemon as ..." instead
-  # of asking — the other of the two mistakes lib.sh records, and the one that
-  # made 'lca backup' skip the chat history on a healthy machine.
+  # Both branches of this project found this independently and wrote the same
+  # case line. This file had NEITHER half right, and the two halves were wrong
+  # in opposite directions:
+  #
+  #   the actions never opted in, so every shared probe took the strict answer
+  #     -> 'lca agent start' refused with "Cannot reach the Docker daemon as
+  #        ..." against a daemon that was up and an account that is an
+  #        ordinary sudoer, instead of asking. Refusing where a password would
+  #        have worked is the 'lca backup' regression lib.sh calls the worse
+  #        of the two;
+  #
+  #   the reporters escalated anyway, through bare as_root rather than through
+  #     the shared probes
+  #     -> 'lca agent logs' printed one line and then waited for ever.
+  #
+  # setup and task exec other scripts, which decide for themselves.
   case "${cmd}" in
     start|stop|restart|gc) LCA_MAY_PROMPT=true ;;
   esac
@@ -455,7 +524,14 @@ main() {
       # output at all — which is how the worst of the five stalls presented.
       announce_possible_prompt "Stopping the agent"
       if as_root docker stop "${AGENT_CONTAINER}" >/dev/null 2>&1; then
-        ok "Agent stopped. Its workspace and settings are kept in ${HOME}/.openhands."
+        # Not "its workspace is kept in ~/.openhands" — it never was. Stopping
+        # the app leaves the sandbox up, so at this moment the agent's files are
+        # still inside that container; they reach ~/.openhands/workspaces only
+        # when the sandbox is collected, which is what 'lca agent start' does.
+        ok "Agent stopped; its settings are kept in ${HOME}/.openhands."
+        if [[ -n "$(agent_live_sandboxes 2>/dev/null || true)" ]]; then
+          info "Its sandbox is still running and still holds the agent's files. They are copied to ${HOME}/.openhands/workspaces when it is collected: lca agent start"
+        fi
       else
         warn "The agent container was not running."
       fi
@@ -479,7 +555,7 @@ main() {
     # it. --yes is there for a script that has already decided.
     gc)
       require_cmd docker
-      local reclaim="" line name why count=0 assume_yes=false answer=""
+      local reclaim="" line name why count=0 assume_yes=false answer="" saved=""
       for arg in ${@+"$@"}; do
         case "${arg}" in
           -y|--yes) assume_yes=true ;;
@@ -500,7 +576,7 @@ main() {
         [[ -n "${name}" ]] || continue
         info "${name} — ${why}"
       done <<<"${reclaim}"
-      warn "A sandbox has no host mount: removing it deletes anything the agent built inside it that you have not copied out."
+      info "A sandbox has no host mount, so anything the agent built lives only inside it. Whatever it wrote is copied to ${HOME}/.openhands/workspaces before the container goes."
       if [[ "${assume_yes}" != "true" ]]; then
         printf 'Remove %s sandbox container(s)? [y/N] ' "${count}"
         read -r answer || answer=""
@@ -509,8 +585,16 @@ main() {
       announce_possible_prompt "Removing sandbox containers"
       while IFS=$'\t' read -r name why; do
         [[ -n "${name}" ]] || continue
+        # Same order as remove_orphan_sandboxes, for the same reason: this is
+        # the last moment the work exists. This path used to tell the user to
+        # copy it out by hand and then delete it for them if they had not.
+        saved="$(agent_preserve_workspace "${name}" 2>/dev/null || true)"
         if as_root docker rm -f "${name}" >/dev/null 2>&1; then
-          ok "Removed ${name}."
+          if [[ -n "${saved}" ]]; then
+            ok "Removed ${name}. Its workspace was copied to ${saved} first."
+          else
+            ok "Removed ${name}. It had written nothing."
+          fi
         else
           warn "Could not remove ${name} — remove it by hand: sudo docker rm -f ${name}"
         fi
@@ -518,6 +602,17 @@ main() {
       ;;
     status)
       require_cmd docker
+      # "no container" and "cannot reach the daemon" are different facts, and
+      # collapsing them is how this reported a container that had been up for
+      # seventeen hours as one that "does not exist" -- measured, from an
+      # account that cannot read the daemon, together with the advice to run
+      # 'lca agent start' on something already running. check-system.sh gets
+      # this right two files away ("whether it is running is UNKNOWN"); this is
+      # the same answer, in the command a person actually types.
+      if ! docker_daemon_reachable; then
+        warn "The Docker daemon could not be read as '$(id -un)', so whether '${AGENT_CONTAINER}' is running is UNKNOWN -- this is not a report that it is down. $(docker_unreachable_advice)"
+        return 1
+      fi
       if agent_container_running; then
         ok "Container '${AGENT_CONTAINER}': running"
       elif agent_container_exists; then
@@ -565,7 +660,7 @@ main() {
       [[ "${log_follow}" != "true" ]] \
         || log_cmd=(docker logs --tail "${log_lines}" -f "${AGENT_CONTAINER}")
       run_reader docker container inspect "${AGENT_CONTAINER}" -- "${log_cmd[@]}" \
-        || die "Could not read the agent's logs (is it created? try: lca agent status)"
+        || die "Could not read the agent's logs as '$(id -un)' — either it was never created or the daemon cannot be read from here. 'lca agent status' tells the two apart."
       ;;
     watch)  "${SCRIPT_DIR}/scripts/agent-watch.sh" "$@" ;;
     help|-h|--help) usage ;;

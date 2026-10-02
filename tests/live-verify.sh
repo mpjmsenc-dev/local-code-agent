@@ -484,4 +484,17 @@ printf '\n=============================================================\n'
 printf '%s passed, %s failed, %s skipped\n' \
   "${PASSED}" "${FAILED}" "${SKIPPED}"
 printf '=============================================================\n'
-(( FAILED == 0 ))
+# 'FAILED == 0' alone was the old exit condition, so a machine where every
+# check skipped — no tier running, no model — exited 0 having verified
+# nothing. The status now separates the three.
+if (( FAILED > 0 )); then
+  echo "RESULT: ${FAILED} FAILED against the real machine"
+  exit 1
+elif (( PASSED == 0 )); then
+  echo "RESULT: NOT RUN — nothing was verified against this machine (${SKIPPED} skipped)"
+  exit 77
+elif (( SKIPPED > 0 )); then
+  echo "RESULT: ${PASSED} verified against the real machine, ${SKIPPED} NOT RUN"
+else
+  echo "RESULT: all ${PASSED} verified against the real machine"
+fi

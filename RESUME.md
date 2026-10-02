@@ -128,6 +128,55 @@ lines.
 
 ---
 
+## STATE RIGHT NOW (2026-09-14, the reconciliation session) — read before running anything
+
+**Do not run `tests/test-lib.sh` as root on this machine.** On this box it
+writes the live `/usr/local/bin/lca` link and both boot units
+(`local-code-agent-netmode.service`, `local-code-agent-tune.service`) with paths
+inside its own mktemp sandbox, which it then deletes. Evidence of two separate
+runs doing it: systemd had loaded units pointing at `/tmp/tmp.XNrMjZeS83/setupsb/`
+and the files on disk pointed at `/tmp/tmp.mvUucrkwMg/setupsb/` (saved copies
+were taken). The netmode unit failed at the 20:32 UTC boot with 203/EXEC, so
+**the inbound guard was not loaded, while Open WebUI listens on 0.0.0.0:3000 on a
+public address.** The live-banner tripwire at the top of test-lib.sh watches
+only the motd link, which is why nothing noticed.
+
+The cause is not in either branch's new code: `setup_run` runs setup.sh as root
+with `LCA_MOTD_FILE` redirected and nothing else, and setup.sh reaches
+`ln -sfn ... /usr/local/bin/lca`, `netmode.sh harden` (NETMODE_SERVICE, a
+literal) and tune's `install_service` (TUNE_SERVICE, a literal). Those paths
+have no seam, so no harness can contain them.
+
+**Repaired** (verified afterwards): `/usr/local/bin/lca` points at this checkout;
+a human ran `netmode.sh harden` and fixed the tune unit — the guard is loaded
+with 3000, 3001, 11434 and 11435 and both units name `/opt/local-code-agent`.
+
+**Made impossible rather than repaired**, in commits on top of the merge (all
+local, not pushed — see below):
+
+- `733b482` — `LCA_HOST_ROOT` prefixes every host path the product touches,
+  named once in lib.sh and listed by `lca_host_paths`; every harness moves it;
+  a gate rejects a literal host path outside lib.sh; the escape check
+  fingerprints the whole list, not the banner. `tests/test-lib.sh` refuses root
+  outside a container. **Run the gates with `make gates-container`.**
+- `9298e22` — `lca check`, the suite's RESULT, test-netmode, test-agent-watch
+  and live-verify all tell "verified" from "not attempted".
+- `06b282b` — a commit message's `Suite: N checks` line must name a run
+  recorded on the tree being committed (`.githooks/commit-msg`). Hooks are
+  armed in this clone.
+
+Branches: `agent-live-verify` = the merge `7b023ea` (parents `ca3194b`, and
+`f8ce825` = PR #28's head) plus the commits above. **Not pushed.** The merged
+tree has **not yet had a full run to a verdict**: the first container run was
+OOM-killed in shellcheck because an Ollama model was resident (unloaded with
+`keep_alive:0`, then rerun). `pre-reconcile-2026-09-13` is this branch's tip
+before the merge.
+
+Next: a full `make gates-container` verdict on HEAD, fix what it finds, then
+push (the armed pre-push hook runs the container gates itself).
+
+---
+
 ## Read this first: some of what follows is out of date
 
 Everything under the next divider is the record of that night, unchanged and
@@ -145,6 +194,7 @@ one that would tell you an unattended run is unprotected when it is not.
 | **`git push` fails: this machine has no credentials for GitHub** | **Overtaken.** `~/.git-credentials` exists and the push works. The branch was 21 commits ahead of `origin/agent-live-verify` — all of docs/PROMPT-WINDOW.md, the skills cut, the `/props` tokenizer discovery and the `AGENT_MAX_OUTPUT_TOKENS` correction — and is now pushed. A mobile session searching origin found none of it and correctly refused to act; the work was committed locally the whole time, never lost. |
 | The first prompt is **~15k tokens**, and it is upstream and out of reach | **Both halves wrong.** The real figure was ~18k — ollama logged 17,820 on the day ~15k was estimated, and 18,353 later. And 4,232 tokens of it were a GitHub skills catalogue this project could cut and did. The prompt now fits its window for the first time, with zero truncations since. docs/PROMPT-WINDOW.md. |
 | It tracks `origin/claude/local-code-agent-build-dd13qw` (PR #28) | It tracks **`origin/agent-live-verify`**. |
+| **The machine was left in a clean, off state** — `ENABLE_AGENT=false`, agent containers and images removed, `~/.openhands` removed | **True of the night it describes, and no longer true of this box** — which matters, because "Cleanup: what state this machine is in" below is where somebody looks to find out. The tier was turned back on for the step-ceiling work and left on: `ENABLE_AGENT=true`, `openhands-app` up on 3001, `~/.openhands` back at 9.5M, both `agent-server` images present (1.26.0 and 1.27.0). The temporary `socat` relay is gone because the shipped one replaced it: `local-code-agent-ollama-relay.socket`, active, with `ENABLE_OLLAMA_RELAY=true`. |
 
 `ENABLE_AGENT` still defaults to `false`, and the reason changed: not "too slow
 to be useful" — that was a projection and the measurement refuted it — but ~7 GB
@@ -557,6 +607,11 @@ Changed something:
 ---
 
 ## Cleanup: what state this machine is in
+
+> **Out of date — see the table at the top of this file.** This records the
+> state this machine was restored to on the night below. It is not the state
+> it is in now: the agent tier was turned back on for the step-ceiling work
+> and left running. Check `.env` and `docker ps` rather than this table.
 
 **I chose to restore a clean, off state.** `ENABLE_AGENT=false`.
 

@@ -37,6 +37,28 @@ LCA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${LCA_LIB_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 ENV_EXAMPLE="${REPO_ROOT}/.env.example"
+# LCA_HOST_ROOT — the one override for every path this project reads or writes
+# OUTSIDE its own checkout. Empty on a real machine, so every path below is
+# exactly what it always was. A test sets it to a sandbox and the whole host
+# moves with it.
+#
+# Why one root rather than a variable per path: that was the design until
+# 2026-09-14, and it covered exactly the paths that had already escaped. The
+# unit suite ran setup.sh as root with LCA_MOTD_FILE redirected — the banner
+# was the path that had burned somebody twice — and setup.sh wrote the rest
+# of the host for real: /usr/local/bin/lca and both boot units, pointed into
+# a mktemp directory the suite then deleted. The netmode unit failed at the
+# next boot with 203/EXEC, so the inbound guard was not loaded and the chat
+# app sat on a public address for fifty-five minutes while every report
+# read green. A seam per path is a guard per instance. A root is a guard for
+# the class, and lca_host_paths below is the list the escape check reads.
+#
+# Nothing reads it from .env: it is not a setting, and sync_env_keys works from
+# .env.example, which does not carry it.
+# Never assigned here, only read as ${LCA_HOST_ROOT:-}. Normalising it with an
+# assignment made every gate that sources this file in a subshell look, to
+# ShellCheck, like a subshell changing the root the rest of the suite relies on.
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-${LCA_HOST_ROOT:-}/etc/systemd/system}"
 # Overridable ONLY so a test can keep tune.sh out of the real /etc. The default
 # is the systemd location and nothing in the product ever sets these; a test
 # that did not have this was writing the machine's actual Ollama drop-in from a
@@ -44,10 +66,37 @@ ENV_EXAMPLE="${REPO_ROOT}/.env.example"
 # two gates came to pass on every developer box and fail on every CI run.
 # Nothing reads them from .env: sync_env_keys works from .env.example, and these
 # are not in it.
-OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-/etc/systemd/system/ollama.service.d}"
+OLLAMA_DROPIN_DIR="${OLLAMA_DROPIN_DIR:-${LCA_HOST_ROOT:-}/etc/systemd/system/ollama.service.d}"
 OLLAMA_DROPIN="${OLLAMA_DROPIN:-${OLLAMA_DROPIN_DIR}/local-code-agent.conf}"
-NETMODE_DIR="/etc/local-code-agent"
+NETMODE_DIR="${LCA_HOST_ROOT:-}/etc/local-code-agent"
 NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
+# The boot units this project installs, each named once. They were literals in
+# tune.sh, netmode.sh and backup.sh, which is why no harness could move them.
+# shellcheck disable=SC2034  # read by tune.sh, netmode.sh, backup.sh, uninstall.sh
+TUNE_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-tune.service"
+# shellcheck disable=SC2034
+NETMODE_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-netmode.service"
+# shellcheck disable=SC2034
+BACKUP_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.service"
+# shellcheck disable=SC2034
+BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.timer"
+# The 'lca' command setup.sh links onto PATH, and the directory it lives in.
+# shellcheck disable=SC2034
+LCA_LINK="${LCA_HOST_ROOT:-}/usr/local/bin/lca"
+# What Ollama's own installer puts on the machine, which uninstall.sh removes.
+# shellcheck disable=SC2034
+OLLAMA_UNIT_FILE="${SYSTEMD_UNIT_DIR}/ollama.service"
+# shellcheck disable=SC2034
+OLLAMA_BIN_FILE="${LCA_HOST_ROOT:-}/usr/local/bin/ollama"
+# shellcheck disable=SC2034
+OLLAMA_LIB_DIR="${LCA_HOST_ROOT:-}/usr/local/lib/ollama"
+OLLAMA_HOME_DIR="${LCA_HOST_ROOT:-}/usr/share/ollama"
+OLLAMA_SYSTEM_MODELS_DIR="${OLLAMA_SYSTEM_MODELS_DIR:-${OLLAMA_HOME_DIR}/.ollama/models}"
+# Docker's apt repository, written by install_docker.sh.
+# shellcheck disable=SC2034
+DOCKER_APT_KEY="${LCA_HOST_ROOT:-}/etc/apt/keyrings/docker.asc"
+# shellcheck disable=SC2034
+DOCKER_APT_LIST="${LCA_HOST_ROOT:-}/etc/apt/sources.list.d/docker.list"
 # Where deploy/do-user-data.sh tees the first-boot install. Both 'lca logs
 # setup' and the login banner read it to answer "is it still installing?".
 # do-user-data.sh cannot source this file — it runs before the clone exists —
@@ -55,12 +104,46 @@ NETMODE_STATE_FILE="${NETMODE_DIR}/netmode.state"
 # Read by scripts/logs.sh and scripts/motd.sh, not here — ShellCheck analyses
 # one file at a time and cannot see a sourcing consumer.
 # shellcheck disable=SC2034
-SETUP_LOG="${LCA_LOG:-/var/log/local-code-agent-setup.log}"
+SETUP_LOG="${LCA_LOG:-${LCA_HOST_ROOT:-}/var/log/local-code-agent-setup.log}"
 # Likewise: check-system.sh, uninstall.sh and scripts/motd.sh. The filename
 # must stay free of dots — run-parts --lsbsysinit, which is how pam_motd runs
 # these, skips any name containing one.
 # shellcheck disable=SC2034
-MOTD_FILE="/etc/update-motd.d/99-local-code-agent"
+# Overridable for the same reason SETUP_LOG and OLLAMA_DROPIN_DIR above are,
+# and it was the only one of the three that was not. All three are absolute
+# paths OUTSIDE the checkout, so a test that drives an installer cannot contain
+# the write by pointing LCA_DIR at a sandbox -- and this one is written with
+# 'ln', which no stub in this suite intercepts. The result is on this machine:
+#
+#   /etc/update-motd.d/99-local-code-agent -> /tmp/tmp.PDSSCvpjBI/dud/target/scripts/motd.sh
+#
+# a sandbox that was deleted when the run that made it ended. Every SSH login
+# since has printed "run-parts: failed to stat component" and no banner at all,
+# which is the one screen this project's only real bug report was about. A test
+# reached out of its sandbox and broke the live box it was running on.
+MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT:-}/etc/update-motd.d/99-local-code-agent}"
+
+# lca_host_paths — every path outside the checkout that this project writes,
+# one per line, under the current LCA_HOST_ROOT.
+#
+# The escape check in tests/test-lib.sh fingerprints each of these on the real
+# machine before the suite runs and again after, and a gate requires every
+# absolute host path written anywhere in the product to be one of the names
+# defined above. So a new path is either added here, and watched, or it fails
+# the suite for being a literal — there is no third way for it to arrive.
+lca_host_paths() {
+  printf '%s\n' \
+    "${TUNE_SERVICE}" "${NETMODE_SERVICE}" "${BACKUP_SERVICE}" "${BACKUP_TIMER}" \
+    "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket" \
+    "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service" \
+    "${SYSTEMD_UNIT_DIR}/multi-user.target.wants" \
+    "${SYSTEMD_UNIT_DIR}/sockets.target.wants" \
+    "${SYSTEMD_UNIT_DIR}/timers.target.wants" \
+    "${OLLAMA_DROPIN_DIR}" "${OLLAMA_UNIT_FILE}" \
+    "${NETMODE_DIR}" "${SETUP_LOG}" "${MOTD_FILE}" "${LCA_LINK}" \
+    "${OLLAMA_BIN_FILE}" "${OLLAMA_LIB_DIR}" "${OLLAMA_HOME_DIR}" \
+    "${DOCKER_APT_KEY}" "${DOCKER_APT_LIST}"
+}
 
 # Where start_ollama_bg() sends Ollama's output on a host with no service
 # manager — and therefore where 'lca logs ollama' has to look on that host.
@@ -563,6 +646,37 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
   AGENT_EXTENSIONS_REF="${AGENT_EXTENSIONS_REF:-lca-public-skills-disabled}"
+  # How long the app waits for a fresh sandbox's agent-server to answer before
+  # it declares the sandbox broken. OpenHands' default is 15 seconds and on this
+  # hardware that has no margin at all. Measured, two sandboxes six minutes
+  # apart on the same box:
+  #
+  #   container start -> "ready to serve"   16.55s   FAILED  (grace 15s)
+  #   container start -> "ready to serve"   12.40s   passed
+  #
+  # 1.55 seconds over. The app marks the sandbox ERROR, the conversation is
+  # never created, and the container it gave up on keeps running. Measured
+  # against the app's own start-task record: 5 of 23 submissions here ended
+  # that way — 21.7%, on three separate dates — every one of them reported to
+  # the user as a successful submit. It is a race, not a fault, so the fix is
+  # margin: 120 seconds costs nothing when a sandbox is ready in twelve.
+  #
+  # IT MUST BE SPELLED OH_SANDBOX_STARTUP_GRACE_SECONDS, and that is not what
+  # OpenHands documents. Its own config.py reads a plain
+  # SANDBOX_STARTUP_GRACE_SECONDS — but only inside `if config.sandbox is None`,
+  # the legacy fallback. This stack sets OH_SANDBOX_KIND, so config.sandbox is
+  # NOT None and that whole branch is skipped. Verified by experiment rather
+  # than by reading: with SANDBOX_STARTUP_GRACE_SECONDS=1 a submit succeeded
+  # (the value was never read); with OH_SANDBOX_STARTUP_GRACE_SECONDS=1 the
+  # very next submit failed exactly as the 08-22 one did. Same shape as
+  # agent_settings.tools — a documented setting that is silently inert on the
+  # path this project actually uses. See agent.sh and docs/AGENT.md.
+  AGENT_SANDBOX_GRACE_SECONDS="${AGENT_SANDBOX_GRACE_SECONDS:-120}"
+  # When the watcher starts warning that a conversation is running out of
+  # window, as a percentage of it. Stopping is not tunable and happens only on
+  # real truncation; this is the early warning before that.
+  AGENT_CONTEXT_WARN_PERCENT="${AGENT_CONTEXT_WARN_PERCENT:-90}"
+  # How much of that window the agent may spend on ONE reply.
   # Both of the keys below were found on a live droplet and both were the
   # difference between a run that works and a run that does nothing while
   # looking busy — though not for the reason first written down here.
@@ -1312,7 +1426,7 @@ input_file_ok() {
 ollama_models_dir() {
   local d
   if [[ -n "${OLLAMA_MODELS:-}" ]]; then printf '%s' "${OLLAMA_MODELS}"; return 0; fi
-  for d in "${OLLAMA_SYSTEM_MODELS_DIR:-/usr/share/ollama/.ollama/models}" "${HOME}/.ollama/models"; do
+  for d in "${OLLAMA_SYSTEM_MODELS_DIR}" "${HOME}/.ollama/models"; do
     [[ -d "${d}" ]] && { printf '%s' "${d}"; return 0; }
   done
   printf '%s' "${HOME}/.ollama/models"
@@ -2499,6 +2613,14 @@ lca_user_instructions() {
       [[ "${AIDER_CONVENTIONS:-true}" == "true" ]] || enabled=false
       ;;
     aider) enabled="${CONVENTIONS_AIDER:-${AIDER_CONVENTIONS:-true}}" ;;
+    # CONVENTIONS_AGENT gates a channel that does not carry. Measured: the
+    # agent's only route for this text is LCA_USER_INSTRUCTIONS, which nothing
+    # in OpenHands reads, and the CONVENTIONS.md bind mount, which nothing reads
+    # either — none of the file's keyed phrases appear anywhere in the agent's
+    # first prompt. So this switch costs the agent nothing when true and saves
+    # it nothing when false. Kept for the day OpenHands honours one of them, and
+    # labelled so the per-surface token argument in .env.example is not read as
+    # applying here. docs/AGENT.md has the audit.
     *)     enabled="${CONVENTIONS_AGENT:-${AIDER_CONVENTIONS:-true}}" ;;
   esac
   [[ "${enabled}" == "true" ]] || return 0
@@ -2846,6 +2968,47 @@ webui_container_env() {
   printf '%s' "${out}"
 }
 
+# webui_container_image — the image the chat app container was CREATED from,
+# spelled the way 'docker run' was handed it.
+#
+# Which field to read decided the whole implementation, and a stub cannot
+# answer it, so it was measured on a real daemon with the chat app up:
+#
+#   docker container inspect -f '{{.Config.Image}}' open-webui
+#     -> the WEBUI_IMAGE tag below, character for character, as it was passed
+#   docker container inspect -f '{{.Image}}'        open-webui
+#     -> sha256:6a773e5c...                        the resolved id
+#
+# (The tag is not written out again here on purpose: it is defined once in this
+# file and a gate holds it to that, so a second copy in a comment would be a
+# second definition to go stale.)
+#
+# .Config.Image echoes back what the command line said, and install_webui.sh
+# hands it "${WEBUI_IMAGE}" — a tag — so a plain string comparison is stable
+# and a stock install compares EQUAL. That matters more than it sounds: the
+# alternative, comparing the container's resolved id against the id the
+# configured tag resolves to, needs the image present locally to resolve, so
+# an offline box would report a pin problem it does not have, and any install
+# whose tag had moved would have 'lca apply' re-create the chat container on
+# every single run.
+#
+# What this does NOT catch, and must not be read as catching: .Config.Image is
+# fixed when the container is created, so a ':main' that has advanced upstream
+# still reads equal. The question answered here is "is the container running
+# the image .env asks for", not "is that image the newest one".
+webui_container_image() {
+  local out runner=()
+  have docker || return 1
+  # Bounded and root-fallback for the same reasons as webui_container_env_list
+  # above: every caller is a reporter, and the login banner is one of them.
+  if have timeout; then runner=(timeout "${LCA_INSPECT_TIMEOUT:-15}"); fi
+  out="$("${runner[@]}" docker container inspect -f '{{.Config.Image}}' "${WEBUI_CONTAINER}" 2>/dev/null \
+    || { root_for_probe && as_root "${runner[@]}" docker container inspect -f '{{.Config.Image}}' "${WEBUI_CONTAINER}" 2>/dev/null; } \
+    || true)"
+  [[ -n "${out}" ]] || return 1
+  printf '%s' "${out}"
+}
+
 # LCA_DOCKER_RUNNER — the bound every read-only docker question runs under.
 #
 # 'docker inspect', 'docker info', 'docker ps' and 'docker network inspect'
@@ -2986,6 +3149,57 @@ agent_failure_signature() {
 # uses here for "keep everything", so a reader who has met one has met both.
 # A non-numeric limit is also no limit rather than an error: a typo in .env
 # must not stop a run that is going fine.
+# agent_context_state [SINCE] — "USED<TAB>WINDOW<TAB>TRUNCATED", or nothing.
+#
+# The margin is the limit nobody was watching. Measured: this tier's prompt
+# starts at 13,783 of a 16,384 window, so a whole conversation has 2,601 tokens,
+# and every observation is appended and never removed. Reading one 100-line
+# source file costs 1,287 of them; a 300-line file costs 3,652 and ends the
+# conversation in a single turn.
+#
+# And ending it is silent. Ollama does not refuse an over-long prompt, it keeps
+# the first 4 tokens and the TAIL — which deletes the role, the security policy,
+# the filesystem rules and the definition of `terminal`, the tool that executes.
+# Every documented failure of this tier (fabricated tool calls, writing outside
+# the working directory, reporting success on code it never ran) was measured
+# while that was happening. So a truncated run is not a degraded run, it is a
+# run whose findings cannot be trusted, and the watcher stops it.
+#
+# The numbers come from ollama's own journal, which prints one line per prompt
+# whether or not it truncated — the fitting case is silent in every other log:
+#
+#   new prompt, n_ctx_slot = 16384, n_keep = 4, task.n_tokens = 13783
+#   msg="truncating input prompt" limit=8194 prompt=18353 keep=4 new=8194
+#
+# Best-effort by contract. No journalctl, no systemd unit, or no ollama lines
+# yet all return nothing, and the caller treats that as "cannot tell" rather
+# than as "fine" — this must never invent a verdict it did not measure.
+agent_context_state() {
+  local since="${1:--10min}" lines used="" window="" truncated=no
+  have journalctl || return 1
+  lines="$(journalctl -u ollama -o cat --since "${since}" 2>/dev/null)" || return 1
+  [[ -n "${lines}" ]] || return 1
+  grep -q 'truncating input prompt' <<<"${lines}" && truncated=yes
+  used="$(grep -oE 'task\.n_tokens = [0-9]+' <<<"${lines}" | tail -1 | grep -oE '[0-9]+$' || true)"
+  window="$(grep -oE 'n_ctx_slot = [0-9]+' <<<"${lines}" | tail -1 | grep -oE '[0-9]+$' || true)"
+  [[ -n "${used}" || "${truncated}" == "yes" ]] || return 1
+  printf '%s\t%s\t%s\n' "${used:-0}" "${window:-0}" "${truncated}"
+}
+
+# agent_context_verdict USED WINDOW TRUNCATED WARN_PERCENT — "truncated", "near"
+# or "ok". Split from the reading so it can be tested without a journal.
+agent_context_verdict() {
+  local used="${1:-0}" window="${2:-0}" truncated="${3:-no}" pct="${4:-90}"
+  [[ "${truncated}" == "yes" ]] && { printf 'truncated'; return 0; }
+  [[ "${used}" =~ ^[0-9]+$ && "${window}" =~ ^[0-9]+$ ]] || { printf 'ok'; return 0; }
+  [[ "${pct}" =~ ^[0-9]+$ ]] || pct=90
+  (( window > 0 && pct > 0 )) || { printf 'ok'; return 0; }
+  # Integer arithmetic on purpose: this runs in the watcher's hot loop and bc
+  # is not a dependency this project takes for one comparison.
+  (( used * 100 >= window * pct )) && { printf 'near'; return 0; }
+  printf 'ok'
+}
+
 agent_run_verdict() {
   local iters="${1:-0}" max_iters="${2:-0}" elapsed="${3:-0}" \
         timeout_min="${4:-0}" strikes="${5:-0}" max_strikes="${6:-0}"
@@ -2995,7 +3209,14 @@ agent_run_verdict() {
   [[ "${iters}" =~ ^[0-9]+$ ]] || iters=0
   [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed=0
   [[ "${strikes}" =~ ^[0-9]+$ ]] || strikes=0
-  # Wall clock first: it is the one a runaway run is most likely to hit, and
+  # Truncation first, ahead of even the wall clock. The other three verdicts
+  # stop a run that is going nowhere; this one stops a run that is producing
+  # confident output with its own instructions deleted, which is worse than
+  # going nowhere because it looks like progress. See agent_context_state.
+  if [[ "${7:-ok}" == "truncated" ]]; then
+    printf 'truncated'; return 0
+  fi
+  # Wall clock next: it is the one a runaway run is most likely to hit, and
   # the one the user set to be able to walk away.
   if (( timeout_min > 0 )) && (( elapsed >= timeout_min * 60 )); then
     printf 'timeout'; return 0
@@ -3015,6 +3236,7 @@ agent_stop_reason() {
     timeout)    printf 'the wall-clock limit (AGENT_TIMEOUT_MINUTES) was reached — the run was stopped, not finished' ;;
     iterations) printf 'the step ceiling (AGENT_MAX_ITERATIONS) was reached — the run was stopped, not finished' ;;
     stuck)      printf 'the same failure repeated (AGENT_STUCK_STRIKES) with nothing new tried in between — this approach was abandoned rather than looped on' ;;
+    truncated)  printf 'the prompt outgrew the model window and Ollama cut it — it keeps the first 4 tokens and the TAIL, so the role, the security policy, the filesystem rules and the definition of the tool that executes commands were all deleted. Anything produced after that point is untrustworthy, so the run was stopped rather than left to look like progress' ;;
     *)          printf 'the run ended on its own' ;;
   esac
 }
@@ -3187,7 +3409,7 @@ agent_task_prompt() {
   #                                /workspace/project/TestAppOllama1Coding)
   #   it never checked the task    (a test file and a shown run were asked for
   #                                in plain words, and neither was attempted)
-  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Do not report success on code you have not executed."
+  printf '%s\n' "Never report this task complete without executing what you built. If the task named outputs, files or behaviours, exercise them and paste the real output. Code you have not run is a draft. Never report success on code you have not executed."
   printf '%s\n' "Never write outside ${dir}. Not /workspace, not anywhere above it."
   printf '%s\n' "Before finishing, re-read the task above and check each stated requirement against what you actually did. If any requirement is untouched, the task is not complete."
 }
@@ -3277,6 +3499,58 @@ agent_conversations_payload() {
     "$(agent_api_base)/api/v1/app-conversations/search?limit=50" 2>/dev/null
 }
 
+# agent_start_task_id RESPONSE — the start-task id out of a submit's reply.
+#
+# The POST to /api/v1/app-conversations does NOT return a conversation. It
+# returns a start-task: an id, a status, and later either the conversation it
+# produced or the reason there is none. Three call sites used to throw this
+# reply away with >/dev/null, which is the whole reason a failed submit looked
+# like a successful one for four months.
+agent_start_task_id() {
+  local response="${1:-}"
+  [[ -n "${response}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${response}" | jq -r '.id // empty' 2>/dev/null || return 1
+}
+
+# agent_start_task_state ID — "STATUS<TAB>CONVERSATION_ID<TAB>DETAIL".
+#
+# The app tells you exactly how a submit ended and this project was not asking.
+# Measured on this box: of 23 start-tasks, 5 ended ERROR — 21.7%, on three
+# separate dates — and every one of them was reported to the user as a
+# successful submission whose conversation "could not be identified".
+#
+#   READY    the conversation exists; field 2 is its id
+#   ERROR    there is no conversation and never will be; field 3 says why
+#   WORKING  still provisioning a sandbox, ask again
+#
+# Empty output means the listing could not be read, which is not the same as
+# ERROR and must not be reported as one.
+agent_start_task_state() {
+  local id="${1:-}"
+  [[ -n "${id}" ]] || return 1
+  have curl || return 1
+  agent_start_task_parse \
+    "$(curl -fsS --max-time 10 \
+        "$(agent_api_base)/api/v1/app-conversations/start-tasks/search?limit=100" 2>/dev/null)" \
+    "${id}"
+}
+
+# agent_start_task_parse PAYLOAD ID — the reading half, split out so it can be
+# driven. The fetch above is one curl; everything that can be WRONG is here, and
+# a gate that greps for this logic instead of running it would be exactly the
+# thing this suite refuses.
+agent_start_task_parse() {
+  local payload="${1:-}" id="${2:-}"
+  [[ -n "${payload}" && -n "${id}" ]] || return 1
+  have jq || return 1
+  printf '%s' "${payload}" | jq -r --arg id "${id}" '
+        [ (.items // .results // [])[] | select(.id == $id) ] | first
+        | select(. != null)
+        | [ (.status // "?"), (.app_conversation_id // ""), (.detail // "") ]
+        | @tsv' 2>/dev/null || return 1
+}
+
 # agent_conversation_count PAYLOAD — how many conversations the app is holding.
 #
 # Only interesting when it is more than one, which is the state that made a real
@@ -3291,6 +3565,93 @@ agent_conversation_count() {
     [ ( if type == "array" then .[]
         elif type == "object" then ( .items, .results, .conversations, .data | arrays | .[] )
         else empty end ) | objects ] | length' 2>/dev/null || return 1
+}
+
+# agent_preserve_workspace NAME [DEST_ROOT] — copy a sandbox's /workspace out
+# before the container is destroyed. Prints the directory it wrote, or nothing.
+#
+# WHY THIS EXISTS, and it is a promise this project was breaking. The sandbox
+# has NO mounts — measured: `docker inspect --format {{.Mounts}}` is empty — so
+# everything the agent writes lives in the container's writable layer and
+# nowhere else. `docker rm -f` in remove_orphan_sandboxes therefore deleted it,
+# while agent-watch.sh said "Its workspace is intact in ~/.openhands — read it,
+# then start again". Nothing of the sort was in ~/.openhands: settings, the db,
+# and the conversation events, but never a file the agent wrote. Worse, "start
+# again" is the instruction that triggers the collection that destroys it.
+#
+# docker cp rather than a bind mount, deliberately. OH_SANDBOX_MOUNTS does work
+# on this build — verified, the sandbox came up with the bind in place — but it
+# is the wrong tool here: the sandbox runs as uid 10001 and could not write to a
+# root-owned host directory, the mount shadowed the git repo the sandbox creates
+# for itself, and one host directory shared by every conversation is a collision
+# waiting for the first concurrent run. Copying out at teardown has none of
+# those properties and needs nothing from OpenHands.
+agent_preserve_workspace() {
+  local name="${1:-}" root="${2:-${HOME}/.openhands/workspaces}" dest
+  [[ -n "${name}" ]] || return 1
+  have docker || return 1
+  dest="${root}/${name}"
+
+  # FAST PATH, for a running sandbox on the image this project pins: ask inside
+  # the container, and tar out only the work.
+  #
+  # WHAT COUNTS AS WORK. /workspace always holds three entries — project (the
+  # working directory, which arrives with a .git and nothing else), plus
+  # bash_events and conversations, which the agent-server writes for its own
+  # bookkeeping. A first version of this guard excluded those two by NAME and so
+  # matched every file inside them, preserving untouched sandboxes as though
+  # they held work. Prune the trees, not the directory entries.
+  #
+  # A FAILURE HERE FALLS THROUGH rather than returning. This ran as the only
+  # path for one commit, and 'find -quit' / GNU tar are not universal — a
+  # busybox image answers neither, and the function then reported "nothing to
+  # save" about a workspace full of work. Silence about an empty sandbox and
+  # silence about an unreadable one must not look the same.
+  if [[ -n "$(as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
+    local probe rc=0
+    probe="$(as_root docker exec "${name}" find /workspace \
+        -path /workspace/bash_events -prune -o \
+        -path /workspace/conversations -prune -o \
+        -name .git -prune -o \
+        -type f -print -quit 2>/dev/null)" || rc=$?
+    if (( rc == 0 )); then
+      # The probe ran and is believable. An empty answer means an untouched
+      # sandbox, which must leave no directory behind.
+      [[ -n "${probe}" ]] || return 1
+      mkdir -p "${dest}" 2>/dev/null || return 1
+      if as_root docker exec "${name}" tar -cf - -C /workspace \
+           --exclude=./bash_events --exclude=./conversations --exclude-vcs . 2>/dev/null \
+         | tar -xf - -C "${dest}" 2>/dev/null; then
+        printf '%s\n' "${dest}"
+        return 0
+      fi
+      rm -rf "${dest}" 2>/dev/null || true
+    fi
+  fi
+
+  # FALLBACK: 'docker cp', which needs nothing from inside the container and is
+  # the ONLY option for a stopped one — 'docker exec' refuses those outright
+  # ("container ... is not running"), and orphan collection reaches stopped
+  # sandboxes, so without this their work would be deleted unread. Copy
+  # everything and prune on this side instead.
+  mkdir -p "${dest}" 2>/dev/null || return 1
+  if ! as_root docker cp "${name}:/workspace" "${dest}/" >/dev/null 2>&1; then
+    rm -rf "${dest}" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf "${dest}/workspace/bash_events" "${dest}/workspace/conversations" 2>/dev/null || true
+  find "${dest}/workspace" -name .git -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  if [[ -z "$(find "${dest}" -type f -print -quit 2>/dev/null)" ]]; then
+    rm -rf "${dest}" 2>/dev/null || true
+    return 1
+  fi
+  # Flattened to match the fast path, whose tar is rooted AT /workspace, so a
+  # caller reading either result finds project/ in the same place.
+  if [[ -d "${dest}/workspace" ]]; then
+    mv "${dest}/workspace"/* "${dest}/workspace"/.[!.]* "${dest}/" 2>/dev/null || true
+    rmdir "${dest}/workspace" 2>/dev/null || true
+  fi
+  printf '%s\n' "${dest}"
 }
 
 # agent_live_sandboxes — the running sandbox containers, NEWEST FIRST.
@@ -3313,6 +3674,18 @@ agent_conversation_count() {
 # tier off and once with it on. The gate held — for the shipped default only.
 agent_live_sandboxes() {
   have docker || return 1
+  # Unprivileged first, bounded, and the escalation goes through root_for_probe
+  # like every other shared docker helper -- see LCA_MAY_PROMPT at the top of
+  # this file. It was a bare 'as_root docker ps', and it was found from both
+  # directions at once:
+  #
+  #   from an account that is not a passwordless sudoer, 'lca check' printed
+  #   seven lines and then sat on "[sudo] password for ..." -- it reaches here
+  #   through agent_reclaimable_sandboxes, and the '2>/dev/null || true' around
+  #   that call cannot notice a command that never returns;
+  #
+  #   against a daemon that accepts its socket and never answers, the
+  #   unbounded question never returned either.
   { "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null \
     || { root_for_probe && as_root "${LCA_DOCKER_RUNNER[@]}" docker ps --format '{{.Names}}' 2>/dev/null; } \
     || true; } | grep -E '^oh-agent-server-' || true
@@ -3431,7 +3804,25 @@ agent_orphan_sandboxes() {
   if agent_container_running; then
     return 0
   fi
-  agent_live_sandboxes
+  # Running AND stopped. This used to be agent_live_sandboxes alone, which asks
+  # 'docker ps' and therefore never saw a stopped one — so a sandbox that had
+  # exited was collected by nothing, ever, and sat on the disk holding its
+  # writable layer for the life of the box. Found by stopping one by hand and
+  # watching two restarts walk straight past it.
+  #
+  # Safe to reap now in a way it was not before: agent_preserve_workspace runs
+  # first at every removal site, so "collected" no longer means "deleted
+  # unread". A stopped sandbox is also the one case where the work is certainly
+  # finished being written.
+  agent_all_sandboxes
+}
+
+# agent_all_sandboxes — every sandbox container, running or not, newest first.
+# Separate from agent_live_sandboxes on purpose: the watcher wants the ones
+# still going, collection wants all of them.
+agent_all_sandboxes() {
+  have docker || return 1
+  as_root "${LCA_DOCKER_RUNNER[@]}" docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^oh-agent-server-' || true
 }
 
 # agent_conversation_warning — what is ambiguous about this machine right now,
@@ -3997,7 +4388,7 @@ ollama_relay_healthy() {
 # drift class as a chat app still serving the old WEBUI_PORT. Reported, not
 # silently repaired.
 ollama_relay_unit_address() {
-  local unit="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/local-code-agent-ollama-relay.socket"
+  local unit="${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket"
   local line
   [[ -r "${unit}" ]] || return 1
   line="$(grep -m1 '^ListenStream=' "${unit}" 2>/dev/null || true)"
@@ -4585,6 +4976,19 @@ webui_drift() {
   # nothing at all.
   live="$(webui_container_env WEBUI_NAME || true)"
   [[ "${live}" == "${WEBUI_NAME}" ]] || drifted+=("WEBUI_NAME")
+  # The image the container was created from. Not an environment variable, so
+  # it takes a read of its own — and being the only setting read differently
+  # is exactly why nothing compared it: WEBUI_IMAGE is honoured by lib.sh and
+  # four scripts, its own comment invites pinning the tag, and this function
+  # had no key for it. Measured against a stubbed docker before it was fixed:
+  # container on v0.3.0, .env asking for v9.9.9, drift reported []. 'lca apply'
+  # answered "already matches .env" and the chat app ran the old image for
+  # ever.
+  #
+  # Absent is not agreement, same as everything above: a container whose image
+  # cannot be read is not a container that agrees.
+  live="$(webui_container_image || true)"
+  [[ "${live}" == "${WEBUI_IMAGE}" ]] || drifted+=("WEBUI_IMAGE")
   # The assistant's own instructions, and the starter questions beside them.
   # Neither is an .env key — they live in lib.sh and config/ — which is exactly
   # why they were missed: the gate below scanned install_webui.sh for lines
@@ -4896,7 +5300,7 @@ unit_boot_program() {
     out="$(systemctl show -p ExecStart --value "$1" 2>/dev/null | show_execstart_program)"
   fi
   [[ -n "${out}" ]] \
-    || out="$(execstart_program "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" || true)"
+    || out="$(execstart_program "${SYSTEMD_UNIT_DIR}/$1" || true)"
   [[ -n "${out}" ]] || return 1
   printf '%s' "${out}"
 }
@@ -4948,7 +5352,7 @@ lca_link_state() {
 # offering it unconditionally names a command that fails in the common case.
 # INSTALLER is the heavier thing that writes the file.
 reenable_hint() {
-  if [[ -f "${SYSTEMD_UNIT_DIR:-/etc/systemd/system}/$1" ]]; then
+  if [[ -f "${SYSTEMD_UNIT_DIR}/$1" ]]; then
     # Deliberately not '--now': that would run the unit immediately, and for
     # auto-tune that can mean an unasked-for model download. The question was
     # about the next boot.

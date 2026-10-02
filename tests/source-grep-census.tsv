@@ -47,6 +47,12 @@
 # The A rows are the debt and may only go down. Converting one means moving its
 # row to FP, not deleting it.
 #
+# 153 at the census. 149 after the first four were driven. 145 after the four
+# entry-point gates below them — the ones that could only be read because
+# running an installer installs, until the sandbox in test-lib.sh made a
+# package install something a gate can observe instead of perform.
+# (Those were one branch's figures when it wrote them. The PROGRESS block
+# below is the live count, and the rows are the source of truth.)
 # ---------------------------------------------------------------------------
 # WHERE THIS ENDS, read the same way the census was made: all 115 remaining A
 # rows, one at a time, not sampled.
@@ -99,13 +105,13 @@
 # the end state stays visible. Re-derive it, do not trust it: the labels below
 # are the source of truth.
 #
-#   A rows now              70   of the 115 the projection was made from
-#   still worth driving     70
+#   A rows now              69   of the 115 the projection was made from
+#   still worth driving     69
 #   correctly narrow         0   every row a re-read has CONFIRMED as narrow is
 #                                already B with a pointer. Nothing is counted as
 #                                narrow on a projection any more — see below.
 #
-# THE ORDER FOR THE REMAINING 70, by what a silent failure would cost.
+# THE ORDER FOR THE REMAINING 69, by what a silent failure would cost.
 #
 # Re-derived rather than inherited. The earlier header split these into 52
 # worth driving and 33 correctly narrow; that 33 was a projection from one
@@ -139,7 +145,7 @@
 #     tune_consults_the_disk_before_pulling
 #
 # -------------------------------------------------------------------------
-# TIER 2  A COMMAND THAT REPORTS SUCCESS HAVING NOT DONE THE THING  (30)
+# TIER 2  A COMMAND THAT REPORTS SUCCESS HAVING NOT DONE THE THING  (29)
 #   The false all-clear. 'lca apply' printing Applied with the relay
 #   missing, 'Uninstall complete' over running sandboxes, SELF-TEST
 #   PASSED without a file. Every instance found this month was here.
@@ -151,7 +157,6 @@
 #     autotune_false_still_converges
 #     check_reports_dropin_drift
 #     check_reports_the_agent
-#     entry_points_forward_their_arguments
 #     errexit_survives_sourcing_tune
 #     every_baked_setting_is_compared
 #     fatal_callers_use_require_service
@@ -307,15 +312,16 @@ H	count_word	a number written as a word -> the number
 A	disk_check_names_a_directory_that_exists	greps a block of check-system.sh
 A	disk_check_uses_the_shared_helpers	greps check-system.sh for helper use and a stray df
 A	drift_says_something_specific	greps webui.sh for a warn line; reachability unobserved
-A	entry_points_forward_their_arguments	greps the last line for main "$@"
+FP	entry_points_forward_their_arguments	runs each installer and requires the value it was handed back out of its refusal
 A	errexit_survives_sourcing_tune	awk over check-system.sh for ordering
 A	every_baked_setting_is_compared	derived list, but the source side is a presence-grep for a call
 B	every_banner_state_gets_the_warning	awk inside headline() for one call; the behaviour is driven by every_banner_state_really_prints_the_warning, which runs all six banner states with the row recorded — the awk assumes every banner routes through headline and a seventh that did not would satisfy it
 A	every_boot_unit_is_verified	greps check-system.sh for a call per unit
-FP	every_dispatch_forwards_its_arguments	dispatches every 'lca' word with an argument no script can know and checks it arrived
-FP	every_entry_point_refuses_or_forwards	hands every entry point an argument it cannot know, in a stubbed world, and watches what it does
+FP	every_dispatch_forwards_its_arguments	runs the real bin/lca against stub targets and reads the argv they were handed
+FP	every_entry_point_refuses_or_forwards	runs every entry point in a sandboxed checkout with a flag none of them takes
 A	every_health_wait_checks_the_port	awk over webui.sh for call proximity
 FP	every_installer_call_in_setup_is_guarded	fails each installer in turn and runs setup.sh to see whether it carries on
+B	every_clean_environment_moves_the_host	reads each test file's env -i lines for the host root; what a harness that forgets does is suite_did_not_touch_the_host's subject
 B	every_job_count_claim_is_the_real_one	the subject IS prose about the CI workflow, checked against the workflow
 B	every_test_script_has_a_way_in	the subject IS whether a file name appears in the files that could invoke it — an exhaustive absence rule over the repo
 B	every_surface_reads_one_instructions_source	lca_user_instructions and lca_system_prompt are driven at both values by instructions_reach_the_chat_app and the AIDER_CONVENTIONS pair; this row is the belt that agent.sh and run-agent.sh still call them
@@ -331,12 +337,14 @@ FP	install_is_truncation_safe	runs every truncated prefix of install.sh, both do
 A	install_verifies_the_clone	greps for the existence test
 FP	installer_passes_the_banner	reads the banner off the argv docker was really given
 FP	installer_recreates_rather_than_skipping	runs the real installer and checks the container is removed then re-created
-FP	installers_answer_help_before_acting	runs each installer with --help and -h in a stubbed world and checks nothing was installed
+FP	installers_answer_help_before_acting	runs each installer with --help in a sandboxed checkout and reads what it did
+H	lca_arms	extracts bin/lca's own dispatch table for the gate below to drive
 FP	lca_reaches_aider_at_all	runs the whole of run-agent.sh through entry_run and reads the model off the argv a stub aider really got
 A	lca_link_is_reported	one grep for a function name
 A	listing_flags_models_that_do_not_fit	greps update-model.sh for a call and an absent heading
 FP	load_env_survives_an_uncreatable_env	runs load_env as uid 65534 in a checkout it cannot write, and in one it can
 FP	load_env_validates_before_sourcing	puts a hostile .env in front of the real load_env and looks for the payload
+H	literal_host_paths_in	lists the absolute host paths a file spells out
 H	logs_checkout	builds a checkout of logs.sh minus its 'main "$@"' line so the readers can be sourced and driven
 FP	logs_ollama_reads_the_background_log	runs the real reader, as not-root, over a background log that is there: its lines and its path must both appear
 FP	logs_ollama_separates_absent_from_unreadable	runs the real reader over an absent log and an unopenable one: opposite advice, and root asked for only in the second
@@ -345,6 +353,8 @@ FP	logs_setup_tells_the_two_apart	runs the real install-log reader over absent, 
 B	motd_bounds_the_docker_read	the same: the banner really has to come back from a docker that never answers, and does — this row stays as the structural belt
 A	netmode_checks_args_before_acting	awk ordering inside main()
 A	no_script_blames_ram_on_its_own	presence-grep for a helper call in five scripts carries the claim
+B	no_host_path_outside_lib	reads product scripts for literal host paths; the subject is which paths are spelled out, and the driven half is host_paths_all_move
+B	no_skip_goes_uncounted	reads each suite for skips spelled outside t_skip; that t_skip reaches the verdict is check_counts_a_skip_as_a_skip, driven
 B	no_tracked_file_is_empty	the subject IS the set of tracked files and their sizes — an exhaustive absence rule with a counted floor
 B	no_tracked_path_is_hostile_to_a_glob	the subject IS the set of names git tracks; a leading dash or whitespace breaks every glob and read loop in the tree
 A	optional_installers_are_not_fatal	derived list, but the assertion is the call form in setup.sh
@@ -417,6 +427,7 @@ FP	uninstall_clears_user_model_dirs	extract-to-drive: runs the model sweep over 
 FP	uninstall_feeds_every_step_to_the_verdict	runs the whole uninstall five times, failing one step each time, and reads the closing verdict
 B	uninstall_removals_can_reach_root	an exhaustive absence rule over the source: no bare rm anywhere in uninstall.sh, with a counted floor so it cannot stop watching
 FP	uninstall_removes_the_agent	runs the real removal step and reads the escalation log: the agent container removed, before the chat app, and reported as a survivor when it cannot be
+H	uncounted_skips_in	lists the skips a test file announces outside t_skip
 H	uninstall_run	builds a checkout and runs uninstall.sh's main with as_root recording rather than removing, one step failing at a time
 A	unreadable_is_not_reported_as_empty	presence-greps plus message content
 FP	update_mentions_restore_on_failure	runs update.sh one commit behind its remote with a real backup and a setup that fails, and reads the recovery advice off the run
@@ -579,7 +590,7 @@ H	honoured_settings	lists the user-shaped settings lib.sh resolves a default for
 H	install_cut_points	lists the byte offsets a truncated install.sh could be cut at
 H	install_with_a_top_level_side_effect	builds an install.sh that acts above main(), to prove the harness would see it
 H	installed_units	lists the boot units this repo installs
-H	lca_exec_subcommands	lists every word bin/lca dispatches through an exec
+H	justified_gates	lists the gates in a test file carrying a SOURCE-GREP: justification
 H	lca_subcommands	extracts the subcommands bin/lca dispatches
 H	lib_default_keys	extracts the keys load_env defaults
 H	model_block_says	drives update-model.sh's model block
@@ -599,6 +610,7 @@ H	root_answer	the exit status an escalation probe gives as not-root on a chosen 
 H	seeded_settings_payload	renders agent.sh's real settings payload
 H	setup_installers	lists the installers setup.sh actually runs
 H	shipped_defaults_disagreeing	lists the settings .env.example and lib.sh disagree about
+H	source_grep_gates	lists the gates in a test file that read repo source with a text tool
 H	sourced_scripts	lists the product scripts another product script sources
 H	step_source_check_says	drives agent-watch.sh's step-source check
 H	sudo_that	builds a stub PATH whose sudo either refuses or goes through
@@ -627,8 +639,8 @@ H	census_rows	counts the rows of this table
 H	census_names	lists the names in this table
 H	foreign_fixture_values	reads the values sibling suites and CI set a compared setting to, which this process cannot observe
 B	every_value_setting_is_classified	the subject IS whether each compared setting has a row in the configuration census
-FP	the_duplicate_scanner_says_when_it_went_blind	blinds the duplicate scanner on purpose and reads what it printed
-FP	the_reachability_scanner_says_when_it_went_blind	blinds the reachability scanner with an unclosed heredoc and reads what it printed
+FP	the_duplicate_scanner_says_when_it_went_blind	blinds the duplicate scanner on purpose with an unclosed quote and requires it to refuse rather than answer
+FP	the_reachability_scanner_says_when_it_went_blind	blinds the reachability scanner with an unclosed heredoc and requires it to refuse rather than answer
 H	long_wait_case	writes one fixture per rule of the long-wait scanner
 H	long_wait_verdict	runs the long-wait scanner over one fixture and says reported or silent
 FP	long_wait_scanner_reports_what_it_must	drives the long-wait scanner over nine fixtures and reads each verdict

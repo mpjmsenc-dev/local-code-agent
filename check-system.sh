@@ -52,6 +52,13 @@ FAIL=0
 p_pass() { ok "$*";   PASS=$((PASS+1)); }
 p_warn() { warn "$*"; WARN=$((WARN+1)); }
 p_fail() { err "$*";  FAIL=$((FAIL+1)); }
+# p_skip — a check that could not be MADE. Counted and printed in the summary,
+# because the summary used to end "All checks passed." on a run that had just
+# said, two screens up, that the prompt comparison was "skipped, not passed".
+# Not for settings you turned off: ENABLE_WEBUI=false is a fact that was
+# checked. This is for "I tried to look and could not".
+UNCHECKED=0
+p_skip() { printf '%b[skip]%b %s\n' "${C_YELLOW:-}" "${C_RESET:-}" "$*"; UNCHECKED=$((UNCHECKED+1)); }
 
 # --- Settings that other checks assume are sane ------------------------------
 # Checked FIRST, because a bad value here surfaces further down as three
@@ -124,7 +131,7 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
@@ -147,6 +154,10 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_fail "OLLAMA_RELAY_PORT='${value}' is not a port number, so the relay cannot listen and the agent tier has no way to reach the model. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca relay install" ;;
     AGENT_MODEL_CONTEXT)
       p_warn "AGENT_MODEL_CONTEXT='${value}' is not a positive number, so the agent's derived model falls back to 16384. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+    AGENT_CONTEXT_WARN_PERCENT)
+      p_warn "AGENT_CONTEXT_WARN_PERCENT='${value}' is not a positive number, so 'lca agent watch' falls back to 90 and you get no early warning before a conversation runs out of window. Fix it in ${ENV_FILE}." ;;
+    AGENT_SANDBOX_GRACE_SECONDS)
+      p_warn "AGENT_SANDBOX_GRACE_SECONDS='${value}' is not a positive number, so the app falls back to OpenHands' 15-second default — and this box has needed 17. When a sandbox answers late the app abandons it, 'lca agent task' fails, and the container is left running. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     AGENT_MAX_ITERATIONS)
       p_warn "AGENT_MAX_ITERATIONS='${value}' is not a whole number, so the step ceiling never fires and an unattended run is bounded only by the wall clock. Set a number (or 0 for no limit, on purpose) in ${ENV_FILE}." ;;
     AGENT_TIMEOUT_MINUTES)
@@ -186,7 +197,7 @@ PROMPT_CHARS="$(lca_system_prompt | wc -c)"
 PROMPT_TOKENS=$(( PROMPT_CHARS / 4 ))
 PROMPT_CAP=$(( OLLAMA_CONTEXT_LENGTH * 15 / 100 ))
 if [[ "${OLLAMA_CONTEXT_LENGTH}" =~ ^[0-9]+$ ]] && (( PROMPT_TOKENS > PROMPT_CAP )); then
-  p_warn "the chat app's system prompt is ~${PROMPT_TOKENS} tokens, over the ${PROMPT_CAP} this stack budgets (15% of your ${OLLAMA_CONTEXT_LENGTH}-token context) — config/CONVENTIONS.md is appended to it, so a long instructions file is paid for on every message. Shorten it, or set AIDER_CONVENTIONS=false to drop it from the chat app, aider and the agent together."
+  p_warn "the chat app's system prompt is ~${PROMPT_TOKENS} tokens, over the ${PROMPT_CAP} this stack budgets (15% of your ${OLLAMA_CONTEXT_LENGTH}-token context) — config/CONVENTIONS.md is appended to it, so a long instructions file is paid for on every message. Shorten it, or set AIDER_CONVENTIONS=false to drop it from the chat app and aider. (It does not change what the AGENT receives: the file never reaches it — see docs/AGENT.md.)"
 else
   p_pass "system prompt fits its share of the context (~${PROMPT_TOKENS} tokens)"
 fi
@@ -254,6 +265,88 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
     || p_warn "derived agent models left over from an earlier rung: ${AGENT_STALE}— they are manifests over shared blobs, but they are yours to remove: ollama rm ${AGENT_STALE}"
 fi
 
+# Settings this release ships that your .env has never heard of.
+#
+# The backfill for this already exists — sync_env_keys, called from setup.sh, and
+# 'lca update' re-runs setup — so on a machine that updates normally this check
+# passes and says so. What it catches is the gap between the two: a checkout
+# that has moved ahead of the last setup run, which is exactly where a
+# maintainer lives. Measured on this project's own build box, five settings were
+# missing, including AGENT_MODEL_CONTEXT (which decides whether the agent tier
+# can function at all) and AGENT_NATIVE_TOOL_CALLING (which this project's own
+# docs call the difference between a run that works and one that ends instantly
+# with an empty workspace). Behaviour was correct throughout — load_env defaults
+# them — but nothing said the file was stale.
+#
+# Named rather than written, even though sync_env_keys would happily write them:
+# 'lca check' is the read-only command in this project and must stay that way.
+# It points at the thing that does the writing instead.
+if [[ -f "${ENV_FILE}" && -f "${SCRIPT_DIR}/.env.example" ]]; then
+  MISSING_SETTINGS="$(comm -23 \
+    <(grep -oE '^[A-Z_]+=' "${SCRIPT_DIR}/.env.example" | tr -d '=' | sort -u) \
+    <(grep -oE '^[A-Z_]+=' "${ENV_FILE}" | tr -d '=' | sort -u) | tr '\n' ' ')"
+  MISSING_SETTINGS="${MISSING_SETTINGS% }"
+  if [[ -n "${MISSING_SETTINGS}" ]]; then
+    p_warn "your ${ENV_FILE} predates $(printf '%s' "${MISSING_SETTINGS}" | wc -w) setting(s) this release ships, so they are running on built-in defaults and are invisible in the file you read to understand this box: ${MISSING_SETTINGS}. Their documented defaults and the reasoning are in ${SCRIPT_DIR}/.env.example — catch this box up with: sudo ${SCRIPT_DIR}/setup.sh (or ${SCRIPT_DIR}/update.sh, which re-runs it). Values you have already set are never touched."
+  else
+    p_pass ".env carries every setting this release ships"
+  fi
+fi
+
+# Every limit off at once, which no single setting can tell you about.
+#
+# AGENT_MAX_ITERATIONS, AGENT_TIMEOUT_MINUTES and AGENT_STUCK_STRIKES each treat
+# 0 as "no limit", deliberately and documented. The validators above accept 0
+# for exactly that reason, and each one's message reassures you by naming
+# another limit as the backstop -- "bounded only by the wall clock", "the one
+# limit that lets you walk away". Set all three to 0 and every one of those
+# sentences is false, and nothing anywhere says so.
+#
+# Verified rather than reasoned: agent_run_verdict with all three at 0 returns
+# 'ok' after ten simulated hours and 500 steps. So 'lca agent watch' would
+# supervise, for ever, a container that holds the Docker socket.
+#
+# A warning and not a failure: an unbounded run is a legitimate thing to ask
+# for, and this project's whole argument is that the cost should be stated
+# rather than quietly spent. The truncation verdict still fires -- it is the one
+# limit that is not configurable -- but it catches a ruined run, not a runaway.
+if [[ "${ENABLE_AGENT}" == "true" ]] \
+   && [[ "${AGENT_MAX_ITERATIONS}" == "0" ]] \
+   && [[ "${AGENT_TIMEOUT_MINUTES}" == "0" ]] \
+   && [[ "${AGENT_STUCK_STRIKES}" == "0" ]]; then
+  p_warn "every limit on an unattended agent run is off at once (AGENT_MAX_ITERATIONS, AGENT_TIMEOUT_MINUTES and AGENT_STUCK_STRIKES are all 0), so 'lca agent watch' has nothing left to stop a run with — it would supervise a container holding the Docker socket indefinitely. Each 0 is a legitimate choice on its own and each setting's own message points at the others as the backstop; with all three off, none of them is. Set at least one in ${ENV_FILE}."
+fi
+
+# Is the agent's window big enough to hold the agent's own prompt?
+#
+# Nothing asked until now. AGENT_MODEL_CONTEXT was validated as "a positive
+# number", so 4096 passed and 'lca check' reported PASS on a configuration where
+# EVERY run is ruined before the model reads a word: ollama truncates a prompt
+# longer than the window to num_ctx/2 + 2, keeping the first 4 tokens and the
+# TAIL, so at 4096 the agent would see 2,050 of its 13,783 tokens -- no role, no
+# security policy, no filesystem rules, and no definition of the tool that runs
+# commands. Silently, and looking like a successful run.
+#
+# The floor is measured, not chosen: 13,783 tokens is this tier's first prompt
+# after the skills cut, on 24 tools with a small task (docs/PROMPT-WINDOW.md).
+# 14000 rounds it up rather than pretending to more precision than one
+# measurement supports.
+#
+# This is the preventive half of the ceiling 'lca agent watch' enforces at
+# runtime: the watcher stops a run that has been truncated, and this stops you
+# from starting one that must be.
+if [[ "${ENABLE_AGENT}" == "true" ]]; then
+  AGENT_WINDOW="$(agent_model_context)"
+  AGENT_PROMPT_FLOOR=14000
+  if [[ "${AGENT_WINDOW}" =~ ^[0-9]+$ ]] && (( AGENT_WINDOW < AGENT_PROMPT_FLOOR )); then
+    p_fail "the agent's window is ${AGENT_WINDOW} tokens and its own first prompt is about 13,800 before your task is added, so every run would be truncated before the model reads a word — ollama keeps the first 4 tokens and the TAIL, discarding the role, the security policy, the filesystem rules and the definition of the tool that runs commands. Raise AGENT_MODEL_CONTEXT to at least 16384 in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh — or set ENABLE_AGENT=false. See docs/PROMPT-WINDOW.md."
+  elif [[ "${AGENT_WINDOW}" =~ ^[0-9]+$ ]] && (( AGENT_WINDOW < 16384 )); then
+    p_warn "the agent's window is ${AGENT_WINDOW} tokens against a first prompt of about 13,800, leaving roughly $(( AGENT_WINDOW - 13800 )) for the whole conversation — and every observation is added and never removed, so one 100-line file read (about 1,300 tokens) can end it. 16384 is what this tier is measured at. Raise AGENT_MODEL_CONTEXT in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/scripts/tune.sh"
+  else
+    p_pass "the agent's window (${AGENT_WINDOW}) holds its own prompt with about $(( AGENT_WINDOW - 13800 )) tokens left for the conversation"
+  fi
+fi
+
 # The agent's prompt cache, which is really a question about OLLAMA_KEEP_ALIVE.
 #
 # Measured: the agent's first prompt is ~13,800 tokens of OpenHands' own framing
@@ -270,7 +363,7 @@ if agent_skills_catalogue_fetched; then
 fi
 
 if agent_prompt_cache_at_risk; then
-  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's whole prompt (13,796 tokens on the current build) is re-read from scratch on the next step (measured: 13,430 tokens the first time, 171 the next while it stayed loaded). Auto-tune decides this now: run sudo ${SCRIPT_DIR}/bin/lca tune and it will set it from this box's RAM, or set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} yourself if AUTO_TUNE is off."
+  p_warn "the agent is on and OLLAMA_KEEP_ALIVE is '${OLLAMA_KEEP_ALIVE}', so the model unloads while you think — and the agent's whole prompt (13,783 tokens measured on the current build) is re-read from scratch on the next step. Measured on one run: 13,778 tokens of prompt eval the first time — 18 minutes — then 264, 136 and 74 on the turns after it, while the model stayed loaded. Auto-tune decides this now: run sudo ${SCRIPT_DIR}/bin/lca tune and it will set it from this box's RAM and which tiers are on, or set OLLAMA_KEEP_ALIVE=-1 in ${ENV_FILE} yourself if AUTO_TUNE is off."
 fi
 
 # The relay itself, whenever it is switched on — with or without the agent,
@@ -443,7 +536,7 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
     if [[ "${QUICK}" == "true" ]]; then
       # Reported as skipped, never counted as a pass: "downloaded" is not
       # "works", and this is the only check that proves inference at all.
-      info "--quick: skipping the real-generation probe (run 'lca check' without it to test inference)"
+      p_skip "--quick: the real-generation probe was not run, so 'downloaded' is all that is known — run 'lca check' without it to test inference"
     else
       info "asking '${MODEL_NAME}' for a real generation. If the model is not loaded yet this loads it first, which on a CPU-only box has taken up to 5 minutes here..."
       if model_responds "${MODEL_NAME}"; then
@@ -569,7 +662,7 @@ step "The 'lca' command and the login banner"
 # is a symlink into this checkout, so moving or renaming the directory breaks
 # it — including 'lca check', which is what someone reaches for when the stack
 # seems broken. This copy still runs, so it is the one that can explain.
-LCA_LINK=/usr/local/bin/lca
+# LCA_LINK is lib.sh's, under LCA_HOST_ROOT.
 case "$(lca_link_state "${LCA_LINK}" "${SCRIPT_DIR}/bin/lca")" in
   ok)      p_pass "'lca' on PATH runs this checkout" ;;
   broken)  p_warn "'lca' on PATH points at $(readlink "${LCA_LINK}" 2>/dev/null || echo 'nothing'), which is not there — the lca command is broken (was this checkout moved or renamed?). Fix: sudo ${SCRIPT_DIR}/setup.sh" ;;
@@ -661,7 +754,7 @@ else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name, system prompt)"
       else
         p_pass "chat app matches .env (port, model, signups, Ollama address, name)"
-        info "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable) — those were skipped, not passed"
+        p_skip "the assistant prompt and starter questions could not be compared here (jq missing, or the container's values unreadable) — skipped, not passed"
       fi
     fi
   fi
@@ -685,9 +778,9 @@ if have tailscale; then
     # only way to find it was to be holding the phone.
     TSIP="$(tailscale_ip4 || true)"
     if [[ -z "${TSIP}" ]]; then
-      info "no Tailscale IPv4 address yet, so the addresses the docs point at could not be checked"
+      p_skip "no Tailscale IPv4 address yet, so the addresses the docs point at could not be checked"
     elif ! have ss; then
-      info "ss is not installed, so the addresses the docs point at could not be checked"
+      p_skip "ss is not installed, so the addresses the docs point at could not be checked"
     else
       GAPS="$(tailscale_promise_gaps "${TSIP}" "$(host_listeners || true)" || true)"
       if [[ -z "${GAPS}" ]]; then
@@ -989,12 +1082,17 @@ fi
 
 # --- Summary ----------------------------------------------------------------
 printf '\n%b\n' "${C_BOLD}=================== SUMMARY ===================${C_RESET}"
-printf '%b\n' "  ${C_GREEN}PASS: ${PASS}${C_RESET}   ${C_YELLOW}WARN: ${WARN}${C_RESET}   ${C_RED}FAIL: ${FAIL}${C_RESET}"
+printf '%b\n' "  ${C_GREEN}PASS: ${PASS}${C_RESET}   ${C_YELLOW}WARN: ${WARN}${C_RESET}   ${C_RED}FAIL: ${FAIL}${C_RESET}   NOT CHECKED: ${UNCHECKED}"
 if (( FAIL > 0 )); then
   printf '%b\n' "${C_RED}${C_BOLD}Some checks FAILED — see above and docs/TROUBLESHOOTING.md${C_RESET}"
   exit 1
 fi
-if (( WARN > 0 )); then
+# "passed" is only said about what was checked. The [skip] lines are checks
+# this run could not make, and a line that says all is well above them is the
+# confident all-clear this file exists to avoid.
+if (( UNCHECKED > 0 )); then
+  printf '%b\n' "${C_YELLOW}Nothing failed, but ${UNCHECKED} check(s) could not be made — the [skip] lines above. This is not an all-clear.${C_RESET}"
+elif (( WARN > 0 )); then
   printf '%b\n' "${C_YELLOW}All hard checks passed, with warnings.${C_RESET}"
 else
   printf '%b\n' "${C_GREEN}${C_BOLD}All checks passed.${C_RESET}"

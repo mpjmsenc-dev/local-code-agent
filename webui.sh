@@ -309,6 +309,8 @@ main() {
             warn "Starter question drift: the chat app's empty-screen suggestions are the ones it was created with, not the ones in config/prompt-suggestions.json. Apply them with: sudo lca apply" ;;
           WEBUI_BANNERS)
             warn "Banner drift: the chat app is not showing this repo's warning banner — the one that tells whoever opens it that the chat box cannot read or write files. Whoever opens it will be told nothing. Apply it with: sudo lca apply" ;;
+          WEBUI_IMAGE)
+            warn "Image drift: the chat app container was created from '$(webui_container_image || true)', but .env says WEBUI_IMAGE=${WEBUI_IMAGE}. A container keeps the image it was created with, so editing .env changes nothing until it is re-created: sudo lca apply. (This compares what the container was BUILT from, not whether that tag has since moved upstream — a ':main' that advanced still reads as matching.)" ;;
           # A key with no arm of its own printed NOTHING and fell straight
           # through to the green /health line below. That is how WEBUI_BANNERS
           # — detected by webui_drift since the day it shipped — was reported
