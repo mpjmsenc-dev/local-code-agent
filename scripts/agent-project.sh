@@ -156,7 +156,7 @@ delete_sandbox() {   # CID — the step is over; its work is on the host already
   local sid
   sid="$(conversation_field "$1" sandbox_id || true)"
   [[ -n "${sid}" ]] || return 0
-  if curl -fsS --max-time 120 -X DELETE "$(api)/api/v1/sandboxes/${sid}" >/dev/null 2>&1; then
+  if curl -fsS --max-time 120 -X DELETE "$(agent_sandbox_delete_url "${sid}")" >/dev/null 2>&1; then
     say "sandbox ${sid} removed"
   else
     say "could not remove sandbox ${sid} (it is collected later by: lca agent gc)"

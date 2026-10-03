@@ -24685,6 +24685,41 @@ project_answerer_defaults_to_chat() {
 }
 check "...and answers with the chat model unless told otherwise" project_answerer_defaults_to_chat
 
+# The first live run's plan ignored a spec that named its own three steps
+# (the prompt said "three to twelve") and wrote a check for "a bad OP exits 2"
+# as 'python3 -m toycalc mul 3 4 && ...', which can never pass. Both rules are
+# in the planning task now, and pytest, which the sandbox image lacks, is not
+# offered as the example.
+project_planning_task_sets_the_rules_that_failed_live() {
+  local t bad=0
+  t="$(project_planning_task /workspace/projects/x)"
+  grep -qF 'If the spec lists its own steps, the plan has exactly those steps' <<<"${t}" || {
+    echo 'the planner is not told to keep the steps a spec names' >&2; bad=1; }
+  grep -qF 'test $? -eq 2' <<<"${t}" || {
+    echo 'the planner is not shown how to verify an intended failure' >&2; bad=1; }
+  grep -qF 'pytest is not installed' <<<"${t}" || {
+    echo 'the planner is not told pytest is absent' >&2; bad=1; }
+  ! grep -qE 'python3 -m pytest|Three to twelve' <<<"${t}" || {
+    echo 'the planner is still offered pytest, or a step count that overrides the spec' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and the planner keeps a spec's own steps and verifies an intended failure by its exit code" \
+  project_planning_task_sets_the_rules_that_failed_live
+
+# This build's DELETE /sandboxes/{id} takes the id as a query parameter and
+# answers the path-only form 422 having deleted nothing.
+# shellcheck disable=SC2016  # the stub is code for the child shell
+sandbox_delete_carries_the_query_parameter() {
+  local u
+  u="$(lib_probe 'agent_api_base() { echo http://app; }' 'agent_sandbox_delete_url oh-agent-server-Ab1')"
+  [[ "${u}" == 'http://app/api/v1/sandboxes/oh-agent-server-Ab1?sandbox_id=oh-agent-server-Ab1' ]] || {
+    printf 'the sandbox delete URL was %q\n' "${u}" >&2; return 1; }
+  ! lib_probe ':' 'agent_sandbox_delete_url "a b"' >/dev/null || {
+    echo 'a sandbox id with a space in it was put in a URL' >&2; return 1; }
+}
+check "a sandbox is deleted with its id as the query parameter this build requires" \
+  sandbox_delete_carries_the_query_parameter
+
 project_autonomy_modes_are_the_three() {
   project_autonomy_valid ask && project_autonomy_valid self && project_autonomy_valid answerer \
     && ! project_autonomy_valid yolo && ! project_autonomy_valid ''

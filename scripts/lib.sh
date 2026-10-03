@@ -3916,6 +3916,20 @@ agent_event_steps() {
   return 1
 }
 
+# agent_sandbox_delete_url SANDBOX — the URL that deletes one sandbox.
+#
+# The id goes in the path AND as ?sandbox_id=. This build declares the route
+# as /sandboxes/{id} while its handler takes sandbox_id, so it demands the
+# query parameter and answers the path-only form 422 without deleting
+# anything. Measured 2026-10-03: project mode's "remove the step's sandbox"
+# had never removed one. A build that fixes the route reads the path and
+# ignores the extra parameter.
+agent_sandbox_delete_url() {
+  local sid="${1:-}"
+  [[ "${sid}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  printf '%s/api/v1/sandboxes/%s?sandbox_id=%s' "$(agent_api_base)" "${sid}" "${sid}"
+}
+
 # agent_events_payload ID — every event of a conversation, oldest first, as
 # {"items":[...]}.
 #
@@ -5154,7 +5168,13 @@ Read the spec at ${d}/.lca-project/spec.md, then write exactly three files:
   Verify: \`one shell command, run from ${d}, that exits 0 only if this step works\`
 - [ ] 2. ...
 
-Rules for the steps: each is a small piece of work touching at most three files, finishable in under 20 minutes. Order them so each builds on the last. Each Verify is ONE command (for Python, e.g. \`python3 -m pytest -q tests/test_x.py\`). Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv. Three to twelve steps.
+Rules for the steps:
+- If the spec lists its own steps, the plan has exactly those steps, in that order. Otherwise use as few small steps as the spec needs, at most twelve.
+- Each step touches at most three files and can be finished in under 20 minutes. Order them so each builds on the last.
+- Each Verify is ONE command, run from ${d}, that exits 0 when that step is done correctly and only then. It may only rely on that step and the ones before it.
+- To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
+- Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.
+- Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv.
 3. ${d}/DECISIONS.md containing only the line: # Decisions
 
 Then check that PLAN.md follows the form exactly, and end your final message with: PLAN DONE

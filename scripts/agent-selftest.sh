@@ -216,7 +216,7 @@ stop_selftest_conversation() {
   # limit gave up first, and the conversation went on running.
   curl -fsS --max-time 180 -X DELETE "${base}/api/v1/app-conversations/${SELFTEST_CID}" >/dev/null 2>&1 || true
   [[ -n "${sid}" ]] || { ok "Stopped this test's conversation."; return 0; }
-  curl -fsS --max-time 180 -X DELETE "${base}/api/v1/sandboxes/${sid}" >/dev/null 2>&1 || true
+  curl -fsS --max-time 180 -X DELETE "$(agent_sandbox_delete_url "${sid}")" >/dev/null 2>&1 || true
   # Gone means docker said so. A docker ps that failed is no answer at all, and
   # reading its empty output as "not running" is how this reported success over
   # a sandbox that was still calling the model.
