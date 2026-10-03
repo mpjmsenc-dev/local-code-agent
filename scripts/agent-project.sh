@@ -215,7 +215,7 @@ wait_turn() {
 
 final_text() {   # CID — the agent's last word in this conversation
   local payload
-  payload="$(curl -fsS --max-time 30 "$(api)/api/v1/conversation/$1/events/search?limit=10000" 2>/dev/null || true)"
+  payload="$(agent_events_payload "$1" 2>/dev/null || true)"
   project_final_text "${payload}" 2>/dev/null || true
 }
 

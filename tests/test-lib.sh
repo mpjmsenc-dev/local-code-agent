@@ -24500,6 +24500,29 @@ two_slots_only_for_a_pinned_agent_that_fits() {
 check "Ollama keeps two models resident only for a pinned agent model that fits beside chat's" \
   two_slots_only_for_a_pinned_agent_that_fits
 
+# The event list pages at 100 on this build, and a limit above that is refused
+# with nothing at all: every reader here asked for 10000, so the live view went
+# blank and project mode never saw a question. Driven with a stub app that
+# pages: two pages, a page id that needs encoding, and no limit over 100.
+# shellcheck disable=SC2016  # the stub is code for the child shell
+agent_events_are_read_page_by_page() {
+  local out
+  out="$(lib_probe 'agent_api_base() { echo http://app; }
+    curl() {
+      local url="${*: -1}"
+      [[ "${url}" == *limit=100\&* ]] || { echo "refused: ${url}" >&2; return 22; }
+      case "${url}" in
+        *page_id=p%2B2*) printf "{\"items\":[{\"id\":3}],\"next_page_id\":null}" ;;
+        *page_id=*)      echo "bad page id: ${url}" >&2; return 22 ;;
+        *)               printf "{\"items\":[{\"id\":1},{\"id\":2}],\"next_page_id\":\"p+2\"}" ;;
+      esac
+    }' 'agent_events_payload conv1 | jq -c "[.items[].id]"')"
+  [[ "${out}" == "[1,2,3]" ]] || {
+    printf 'two pages of events were read as %q, not [1,2,3] in order\n' "${out}" >&2; return 1; }
+}
+check "a conversation's events are read page by page, oldest first, never over 100 a page" \
+  agent_events_are_read_page_by_page
+
 echo "# project mode: the decisions, driven without a model"
 # lca agent project runs unattended for hours, so every judgement it makes is a
 # pure function in lib.sh and is driven here: what a plan is, when a step is

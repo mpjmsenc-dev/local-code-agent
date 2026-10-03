@@ -86,8 +86,13 @@ fetch_events() {
   [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
   have curl || return 1
   base="$(agent_api_base)"
-  for path in "/api/v1/conversation/${id}/events/search?limit=10000" \
-              "/api/v1/conversations/${id}/events/search?limit=10000" \
+  # The paged search first: the only route this build answers in full.
+  payload="$(agent_events_payload "${id}" 2>/dev/null || true)"
+  if [[ -n "${payload}" ]] && agent_event_lines "${payload}" >/dev/null 2>&1; then
+    printf '%s' "${payload}"
+    return 0
+  fi
+  for path in "/api/v1/conversations/${id}/events/search?limit=100" \
               "/api/v1/conversation/${id}/events"; do
     payload="$(curl -fsS --max-time 10 "${base}${path}" 2>/dev/null || true)"
     [[ -n "${payload}" ]] || continue

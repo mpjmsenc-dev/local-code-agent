@@ -3897,23 +3897,55 @@ agent_conversation_warning() {
 
 # agent_event_steps ID — how many events that conversation has, or rc 1.
 #
-# Three routes are tried because two spellings of the path are in circulation
-# and the search route answers when the count route does not. A limit is passed
-# to the search one; it is far above any ceiling worth setting, so a run that
-# could reach it was stopped long before.
+# The count route first, in both spellings in circulation; the whole event
+# list, counted, when neither answers.
 agent_event_steps() {
   local id="${1:-}" base path payload n
   [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
   have curl || return 1
   base="$(agent_api_base)"
   for path in "/api/v1/conversation/${id}/events/count" \
-              "/api/v1/conversations/${id}/events/count" \
-              "/api/v1/conversation/${id}/events/search?limit=10000"; do
+              "/api/v1/conversations/${id}/events/count"; do
     payload="$(curl -fsS --max-time 5 "${base}${path}" 2>/dev/null || true)"
     n="$(agent_events_count "${payload}" 2>/dev/null || true)"
     [[ "${n}" =~ ^[0-9]+$ ]] && { printf '%s' "${n}"; return 0; }
   done
+  payload="$(agent_events_payload "${id}" 2>/dev/null || true)"
+  n="$(agent_events_count "${payload}" 2>/dev/null || true)"
+  [[ "${n}" =~ ^[0-9]+$ ]] && { printf '%s' "${n}"; return 0; }
   return 1
+}
+
+# agent_events_payload ID — every event of a conversation, oldest first, as
+# {"items":[...]}.
+#
+# The search route pages, and on this build it REFUSES a page over 100: limit=
+# 10000, which every caller here sent, is answered 422 and nothing at all. The
+# live view went blank on it, and project mode read every agent's last word as
+# empty, so no question was ever seen. Measured 2026-10-03: limit=100 answers,
+# sort_order=TIMESTAMP is oldest first, next_page_id walks the rest.
+#
+# Pages go to a file and are joined by jq from there, not passed as an
+# argument: one event (the system prompt with its tool schemas) can be larger
+# than a single argument may be.
+agent_events_payload() {
+  local id="${1:-}" base page="" tmp n=0 resp rc=0
+  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
+  have curl && have jq || return 1
+  base="$(agent_api_base)"
+  tmp="$(mktemp)" || return 1
+  while :; do
+    resp="$(curl -fsS --max-time 15 \
+      "${base}/api/v1/conversation/${id}/events/search?limit=100&sort_order=TIMESTAMP${page:+&page_id=$(jq -rn --arg p "${page}" '$p | @uri')}" \
+      2>/dev/null)" || { rm -f "${tmp}"; return 1; }
+    printf '%s\n' "${resp}" >> "${tmp}"
+    page="$(jq -r '.next_page_id // empty' <<<"${resp}" 2>/dev/null || true)"
+    n=$(( n + 1 ))
+    if [[ -z "${page}" ]] || (( n >= 200 )); then break; fi
+  done
+  jq -cs '{items: [.[].items[]?]}' "${tmp}" || rc=$?
+  rm -f "${tmp}"
+  return "${rc}"
 }
 
 # --- reading the event stream as something a person can watch ----------------
