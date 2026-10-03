@@ -1,0 +1,70 @@
+# Every on/off setting in .env.example, and whether anything in this repo runs
+# a product script at BOTH of its values.
+#
+# ---------------------------------------------------------------------------
+# CONFIGURATION BLINDNESS — the failure this file exists for.
+#
+# A gate that reads source is dishonest: it claims a runtime behaviour and
+# offers text as evidence. This is a different failure and, in one way, a worse
+# one. The gate is honest — it drives its subject — and its coverage is
+# partial, and NOTHING about the gate says which. A source grep at least looks
+# suspicious when you read it.
+#
+# The instance that named it: 'lca check' is the first entry in
+# REPORTING_COMMANDS and had been run under the blocking-sudo stub on every CI
+# run since that gate was written. It stalled for ever on any machine with
+# ENABLE_AGENT=true. The gate held. Its FIXTURE was .env.example, where the
+# agent tier is off, so the whole agent half of check-system.sh was unreachable
+# and the bare 'as_root docker ps' inside agent_live_sandboxes was never called.
+#
+# Measured across the repo: 34 places build an .env for a product script to be
+# run against, and 31 of them are .env.example verbatim. The shipped defaults
+# are not merely the common case here — they are very nearly the only case.
+#
+#   BOTH          some fixture, here or in CI, runs a product script at each
+#                 value. Checked against the .env files the fixtures really
+#                 built, so the row cannot outlive what makes it true.
+#   SHIPPED-ONLY  only the shipped value is ever run end to end. The other
+#                 side's branches exist and nothing reaches them. The note says
+#                 what they are and what it would cost to reach them.
+#
+# A row is about WHOLE-COMMAND coverage. A probe that sets a switch and calls
+# one function is not the same thing and does not count here: ENABLE_AGENT=true
+# appeared nineteen times in this suite, all of them narrow, while the
+# whole-command path stalled for ever.
+#
+# THE COMPARED SETTINGS have rows of their own below, labelled MANY or
+# ONE-VALUE. They used to live here as prose, and that is exactly how four of
+# those notes came to understate what already ran while a fifth was simply
+# false. A claim in a comment derives from nothing; a row is checked against
+# the .env files the fixtures really built, by the same three gates the
+# switches get.
+#
+# There are six. The prose said "six other settings are compared", listed six,
+# and then corrected "those five" — a header disagreeing with the rows under
+# it, the third time that shape has appeared in this project's own
+# bookkeeping. OLLAMA_CONTEXT_LENGTH is the one the sentence dropped, and it
+# would have been dropped for good when the prose was replaced by rows.
+#
+# Format: LABEL <TAB> setting <TAB> shipped <TAB> what the other side is, and what reaches it.
+# ---------------------------------------------------------------------------
+BOTH	AGENT_NATIVE_TOOL_CALLING	false	DRIVEN at both values, twice over: the settings payload agent.sh really builds (seeds_a_real_boolean), and the whole of scripts/agent-selftest.sh run end to end against stand-in curl, docker and ollama. The 'needs a live agent' cost in this row was wrong — every link in that script reaches its world through those three commands. true with a model that returns no native tool calls must stop at 5/6 and name the setting; true with one that does must reach the end
+BOTH	AIDER_CONVENTIONS	true	DRIVEN at both values through a whole 'lca check'. The old note said check_report reaches it and that was wrong at the shipped defaults: CONVENTIONS_CHAT is false, so the chat prompt carries no appendix and the master switch changes nothing a report can see — identical output, ~577 tokens either way. With the chat surface on it is 1224 tokens against 577
+BOTH	AIDER_NO_AUTO_COMMIT	false	DRIVEN at both values by a whole run of run-agent.sh — the headline 'lca' command, which had no whole-command harness at all until this row needed one. The flag is read off the argv a stub aider really received, and the warning about losing the undo path off the run's own output
+BOTH	AUTO_TUNE	true	false pins the model and skips the recommendation drift check. CI's ollama E2E job runs the whole stack at false; every other fixture is true
+BOTH	BACKUP_AGENT_WORKSPACE	false	true puts the agent's workspace into the archive, subject to BACKUP_AGENT_MAX_MB. Driven: a real backup at each value, and the archive's own listing read back — plus the over-the-ceiling case, which must leave the rest of the backup intact
+BOTH	CONVENTIONS_AGENT	unset	DRIVEN at both values through a whole 'lca check'. Setting it takes the switch count from 12 to 13 either way, which is the observable difference between a suggestion in a comment and a decision: check-system skips a name the reader has not set
+BOTH	CONVENTIONS_AIDER	unset	DRIVEN at true and at false through a whole 'lca check', and at 'yes' as well — the value that reads as OFF because every switch here is compared against the word 'true'. The warning names the setting and says which way it is read
+BOTH	CONVENTIONS_CHAT	false	true adds ~618 tokens of CONVENTIONS.md to the chat's system prompt, measured 577 -> 1224 tokens, against a 15% budget that is 614 at the 4096 window of the smallest rung this project ships. lca check's context-fit line has only ever run at the small one. Cost: trivial — one check_report line. DRIVEN as of this commit
+BOTH	ENABLE_AGENT	false	true reaches the whole agent half of check-system.sh, apply.sh, motd.sh and the guard's Agent port. Driven by WAITS_CONFIGS and by check_report — it is the switch this census exists because of
+BOTH	ENABLE_OLLAMA_RELAY	false	true adds the relay's boot units, its address to guarded_ports, a section to lca check, a step to setup.sh and a requirement to agent-setup.sh. Cost: trivial for lca check, high for setup and netmode. lca check DRIVEN as of this commit
+BOTH	ENABLE_WEBUI	true	false skips the chat-app section and, until it was fixed, dropped its live port out of the guard. CI's ollama E2E job and three check_report cases run at false
+BOTH	SKIP_DOCKER	false	true skips the docker, chat-app and agent sections. Driven by tests/test-fresh-install.sh, which CI runs on a clean machine, and by check_report
+BOTH	SKIP_TAILSCALE	false	true skips the Tailscale install and changes what setup, motd, webui and lca check say about reachability. Driven by tests/test-fresh-install.sh; the motd and webui arms at true are still unreached
+BOTH	WEBUI_ENABLE_SIGNUP	true	false closes registration. Driven by check_report both ways and by CI's webui job, which closes signups against a real container
+MANY	OLLAMA_CONTEXT_LENGTH	8192	DRIVEN at 4096, 8192 and 32768. The 4096 cell produced a budget warning nothing else in this suite produces, and the three together are what shows lca ask computes a window rather than holding a constant
+MANY	OLLAMA_KEEP_ALIVE	30m	DRIVEN at 30m, at -1 and at 17m. The tune harness writes -1 into a real .env and runs the whole of scripts/tune.sh; CI's ollama job installs at 17m. The old note said no whole command had ever run at -1, which had been untrue since that harness was written
+MANY	AGENT_STEP_SOURCE	auto	DRIVEN at auto, log and events — tests/test-agent-watch.sh runs the whole watcher at each, against a real event endpoint for the last of them
+MANY	MODEL_NAME	qwen2.5-coder:7b	DRIVEN at the shipped 7b by every fixture here, and at 3b and 0.5b by CI's real installs
+MANY	AGENT_PORT	3001	DRIVEN at the shipped 3001 everywhere and at 22 by tests/test-netmode.sh, which renders the real ruleset. The ledger also sees 3999, which is a unit probe on agent_web_url and is NOT a whole-command run — the text scan cannot tell them apart, so the evidence for this row is 22 and 3001
+MANY	AGENT_TIMEOUT_MINUTES	180	DRIVEN at 0 and at 1 by tests/test-agent-watch.sh, which is the difference between a watcher that gives up and one that never does

@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
-# pre-push hook — run the exact gates CI runs, so a push never opens a red PR.
+# pre-push hook — run the CI gates that CAN run here, before anything reaches
+# GitHub.
 #
 # Installed by `make hooks` (sets git's core.hooksPath to .githooks/). This is
-# the safety rail for the AI-assisted loop: an agent edits code, this hook runs
-# the gates (lint + bash -n + the unit suites) before anything reaches GitHub,
-# so a human only ever reviews PRs whose CI is already green.
+# the safety rail for the AI-assisted loop: an agent edits code, this runs
+# ShellCheck, bash -n and both unit suites, and a push that fails them never
+# leaves the machine.
+#
+# This used to claim it ran everything CI does, and that a push through it
+# could not open a failing PR. Both halves were untrue, and both were measured
+# on this project. (Paraphrased rather than quoted: a gate in the test suite
+# refuses those sentences, and it greps this file.)
+#
+# CI has 7 jobs and this runs two of them. The other five need a fresh machine
+# and cannot exist here: the system-artifact job (nft ruleset and systemd
+# units), the fresh-install job (a clean ubuntu:24.04 walked through setup.sh
+# with a real model pull), the minimal-base install, the real Ollama install and
+# generation, and the Open WebUI container with its backup/restore round trip.
+#
+# And the two it DOES run can answer differently there. CI's runner is a
+# non-root passwordless sudoer with a real Docker daemon behind it; a developer
+# box is usually root, where nothing escalates. Two pushes on this project went
+# green here and red there for exactly that reason — a PATH stub sudo walked
+# past, and a DOCKER_HOST sudo stripped.
+#
+# So a green hook is a strong signal, not a guarantee. Watch the run.
 #
 # Bypass a single push with:  git push --no-verify
 set -euo pipefail
@@ -12,8 +32,18 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
-echo "pre-push: running 'make gates' (shellcheck + bash -n + unit tests)..."
-if make gates; then
+# As root on a real machine the gates run in a container, never here: the
+# suite once rewrote this project's firewall boot unit on the box it ran on.
+# CONTRIBUTING, "Where the gates run". tests/test-lib.sh refuses root outside
+# a container for the same reason, so without this the hook would stop every
+# push from such a box.
+target=gates
+if [[ "$(id -u)" -eq 0 && -z "${CI:-}" && "${LCA_SUITE_ON_THIS_HOST:-}" != "yes" ]] \
+   && [[ ! -f /.dockerenv && ! -f /run/.containerenv ]]; then
+  target=gates-container
+fi
+echo "pre-push: running 'make ${target}' (shellcheck + bash -n + unit tests)..."
+if make "${target}"; then
   echo "pre-push: gates passed — pushing."
 else
   echo "pre-push: gates FAILED — push aborted." >&2

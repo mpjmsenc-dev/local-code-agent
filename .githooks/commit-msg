@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# commit-msg hook — a "Suite:" line in a commit message is a claim, and it must
+# name a suite run that really happened on the tree being committed.
+#
+# Installed by `make hooks`, with pre-push. Why it exists: commit messages on
+# this project close with lines like "Suite: 1299 checks, all passing.", and
+# nothing tied that line to a run. A number typed from memory after an edit, or
+# carried over from the run before the last change, reads exactly like one that
+# was measured. The same month recorded a wrapper that reported exit 0 for a
+# suite that exited 1, and a verdict that said "all tests passed" over checks
+# that never ran. A claim in the permanent record deserves at least the rigour
+# of the census lines, which commit_message_claims_match_its_diff already holds
+# to their diff.
+#
+# How: tests/test-lib.sh appends one line per run to .git/lca-suite-runs —
+#
+#   tree=<the working tree it ran on> passed=N failed=N skipped=N when=... where=...
+#
+# — and tests/in-container.sh carries the container's line back. A message line
+# "Suite: N checks ..." is accepted only if a run on the tree being committed
+# passed N with nothing failed, and one that also says "all passing" only if
+# nothing was skipped either. A message with no Suite: line is not judged.
+#
+# Overrides, for the gate that drives this hook:
+#   LCA_SUITE_LEDGER   the ledger to read      (default: .git/lca-suite-runs)
+#   LCA_COMMIT_TREE    the tree being committed (default: git write-tree)
+#
+# Bypass a single commit with:  git commit --no-verify
+set -uo pipefail
+
+msg_file="${1:?commit-msg: git passes the message file as the first argument}"
+ledger="${LCA_SUITE_LEDGER:-$(git rev-parse --absolute-git-dir 2>/dev/null)/lca-suite-runs}"
+
+# Only lines that begin "Suite:", and not comment lines git will strip.
+claims="$(grep -E '^Suite: *[0-9][0-9,]* checks' "${msg_file}" 2>/dev/null || true)"
+[[ -n "${claims}" ]] || exit 0
+
+tree="${LCA_COMMIT_TREE:-$(git write-tree 2>/dev/null)}"
+[[ -n "${tree}" ]] || {
+  echo "commit-msg: the message makes a Suite: claim and the tree being committed could not be read, so it cannot be checked." >&2
+  exit 1
+}
+
+bad=0
+while IFS= read -r claim; do
+  n="$(sed -E 's/^Suite: *([0-9][0-9,]*) checks.*/\1/' <<<"${claim}" | tr -d ',')"
+  all=false
+  grep -qiE 'all (passing|passed|pass)' <<<"${claim}" && all=true
+  records="$(grep -E "^tree=${tree} " "${ledger}" 2>/dev/null || true)"
+  if awk -v n="${n}" -v all="${all}" '
+       { for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] } }
+       v["passed"] == n && v["failed"] == 0 && (all != "true" || v["skipped"] == 0) { found = 1 }
+       END { exit !found }' <<<"${records}"; then
+    continue
+  fi
+  bad=1
+  printf 'commit-msg: this message says\n  %s\nand no suite run recorded on the tree being committed (%s) backs it.\n' \
+    "${claim}" "${tree:0:12}" >&2
+  if [[ -n "${records}" ]]; then
+    printf 'Runs recorded on this tree:\n  %s\n' "${records//$'\n'/$'\n  '}" >&2
+  else
+    printf 'No run is recorded on this tree at all. Run the gates on exactly what you are committing (make gates-container), then commit.\n' >&2
+  fi
+done <<<"${claims}"
+if (( bad )); then
+  echo "Either run the suite on this tree, correct the number, or drop the Suite: line. Bypass once with: git commit --no-verify" >&2
+  exit 1
+fi
+exit 0

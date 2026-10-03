@@ -37,9 +37,19 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 # quick CMD... — run a probe under a hard time limit, discarding failures.
 # Two seconds is far longer than any of these take when healthy and short
 # enough that a hung daemon costs a login almost nothing.
+#
+# The fallback for a host with no 'timeout' runs the probe UNBOUNDED, which is
+# the one thing this wrapper exists to prevent. This file runs as root from
+# pam_motd on every SSH login, and the project has already written down what an
+# unbounded probe here costs: not "the banner is slow" but a machine nobody can
+# log in to in order to restart the daemon that is hanging.
+#
+# So the network probes carry their own --max-time as well (see QUICK_SECONDS
+# below). belt and braces, because the braces are optional on some hosts.
+QUICK_SECONDS=2
 quick() {
   if have timeout; then
-    timeout 2 "$@" 2>/dev/null
+    timeout "${QUICK_SECONDS}" "$@" 2>/dev/null
   else
     "$@" 2>/dev/null
   fi
@@ -142,6 +152,26 @@ log_age_human() {
   fi
 }
 
+# product_installed — did setup get far enough to leave the coding agent behind?
+#
+# This is the difference between "the install stopped partway" and "this box
+# has worked for days and the engine just died", and install_state cannot tell
+# them apart: both are a log with no verdict. Its own header comment describes
+# the second case — an interrupted first boot on a machine where everything
+# works — and banner_stalled was still chosen for it the moment ollama stopped.
+#
+# Measured on that machine. With ollama killed, the banner read "the install
+# stopped before it finished (nothing written to the log for 144 h)" and
+# offered 'sudo setup.sh': a 20-30 minute re-run, for a process that had died a
+# minute earlier. banner_attention's "installed, but the model engine is not
+# running · lca check · lca logs ollama" is the answer to what actually
+# happened.
+#
+# aider is installed by install_python.sh, near the end of setup.sh, so its
+# presence means the install got past everything that matters. A path test, so
+# it cannot hang — which this file requires of every probe.
+product_installed() { [[ -x "$(aider_bin)" ]]; }
+
 # engine_up — is the model engine actually serving? systemd first because it
 # cannot hang on a wedged HTTP listener; the curl fallback covers containers
 # and other places without systemd.
@@ -149,7 +179,7 @@ engine_up() {
   if have systemctl && quick systemctl is-active --quiet ollama; then
     return 0
   fi
-  if have curl && quick curl -fsS "$(ollama_url)/api/version" >/dev/null; then
+  if have curl && quick curl -fsS --max-time "${QUICK_SECONDS}" "$(ollama_url)/api/version" >/dev/null; then
     return 0
   fi
   return 1
@@ -185,9 +215,62 @@ chat_address() {
 # scannable in the second someone actually gives it.
 row() { printf '   %-20s %s\n' "$1" "$2"; }
 
-headline() { printf '\n %b%s%b  %s\n' "${C_BOLD}" "local-code-agent" "${C_RESET}" "$1"; }
+headline() {
+  printf '\n %b%s%b  %s\n' "${C_BOLD}" "local-code-agent" "${C_RESET}" "$1"
+  missing_lca_row
+}
+
+# missing_lca_row — every banner below speaks in 'lca'. Say so when it is not
+# there.
+#
+# setup.sh installs /usr/local/bin/lca as a symlink and deliberately does NOT
+# die if it cannot: no root, or a read-only /usr/local, and it warns and
+# carries on. That is the right call — the stack works, only the short name is
+# missing — but it leaves a box where every line of this banner names a command
+# that does not exist. Measured on exactly such a box: 'ready', a chat URL, and
+# four commands, all of which answer 'lca: command not found'.
+#
+# chat_address() already refuses to print 'sudo tailscale up' on a machine
+# without tailscale, for this reason and in as many words. This is the same
+# rule applied to the command this file mentions four times instead of once.
+#
+# Called from headline() rather than from each banner, so a sixth banner state
+# added later cannot forget it — the note has to sit above the rows it is about,
+# and every banner starts with exactly one headline.
+# Silent in the two banners that are already about setup not having finished.
+# There the missing symlink is a symptom rather than a fault — setup.sh
+# installs it near the end — and the advice would be actively wrong: "run sudo
+# setup.sh" printed underneath "still installing — nothing works yet" invites a
+# SECOND concurrent install, and banner_stalled prints that same line already,
+# for the real reason.
+#
+# Keyed on WHICH BANNER is rendering, not on install_state. Written the other
+# way first, and it was wrong on the machine it was written on: this box's log
+# is verdict-less from an interrupted first boot, so install_state says
+# 'stalled' while main() — which trusts the live system over the log — prints
+# banner_ready. The row vanished from precisely the box that needed it.
+#
+# Default is to SHOW, so a future banner that forgets to opt out prints one
+# redundant row rather than hiding a needed one.
+# full | path | none — how much of the note this banner wants.
+#
+# 'path' exists because banner_no_model already ends with "Finish it: sudo
+# setup.sh", so the full note printed that same command again two lines above
+# it. The translation half is still needed there — that banner's last row is
+# "Details: lca check" — so suppressing the whole thing would leave its own
+# advice unusable. Seen by rendering the no-model banner on a box without the
+# symlink.
+BANNER_LCA_ROW=full
+missing_lca_row() {
+  [[ "${BANNER_LCA_ROW}" == "none" ]] && return 0
+  have lca && return 0
+  row "'lca' NOT on PATH" "run them as ${REPO_ROOT}/bin/lca"
+  [[ "${BANNER_LCA_ROW}" == "path" ]] && return 0
+  row "Install the name" "sudo ${REPO_ROOT}/setup.sh"
+}
 
 banner_installing() {
+  BANNER_LCA_ROW=none   # setup is running; it installs the symlink itself
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
@@ -222,6 +305,7 @@ banner_attention() {
 # install really did give up partway. Re-running setup is safe (it is
 # idempotent) and is the actual fix, which "run lca check" would not have said.
 banner_stalled() {
+  BANNER_LCA_ROW=none   # this banner already says "sudo setup.sh"
   local age step
   age="$(log_age_human || true)"
   step="$(last_step || true)"
@@ -233,8 +317,43 @@ banner_stalled() {
   printf '\n'
 }
 
+# model_missing — a POSITIVE answer that the configured model is not on this
+# box. Anything else (no curl, no answer, an unparseable body) is "could not
+# tell" and returns non-zero.
+#
+# That asymmetry is deliberate. A banner that cried "not ready" on a slow box,
+# at every login, would be worse than one that says nothing — but "ready" is
+# the strongest claim this file makes and it currently means only that the API
+# answered. An engine with no model answers /api/version perfectly and then
+# fails every question the next line invites. That is not hypothetical: setup
+# no longer dies when the model pull fails, deliberately, so the rest of the
+# stack can finish installing; and on a hand-installed box there is no
+# first-boot log for install_state to read, so 'ready' is decided here alone.
+model_missing() {
+  have curl || return 1
+  local tags
+  tags="$(quick curl -fsS --max-time "${QUICK_SECONDS}" "$(ollama_url)/api/tags" || true)"
+  [[ "${tags}" == *'"models"'* ]] || return 1
+  grep -qF "\"${MODEL_NAME}\"" <<<"${tags}" && return 1
+  return 0
+}
+
+banner_no_model() {
+  BANNER_LCA_ROW=path   # this banner ends with "Finish it: sudo setup.sh"
+  headline "engine running, but model ${MODEL_NAME} is NOT downloaded"
+  row "Nothing can answer" "until it is pulled — this is a download, not a bug"
+  row "Finish it" "sudo ${REPO_ROOT}/setup.sh"
+  row "Details" "lca check"
+  offline_row
+  printf '\n'
+}
+
 banner_ready() {
   local addr url hint
+  if model_missing; then
+    banner_no_model
+    return 0
+  fi
   headline "ready   ·   model ${MODEL_NAME}"
   addr="$(chat_address || true)"
   url="${addr%%$'\t'*}"
@@ -245,10 +364,89 @@ banner_ready() {
   elif [[ -n "${hint}" ]]; then
     row "Chat on your phone" "${hint}"
   fi
+  chat_down_row
+  chat_stale_row
+  coding_row
   row "Ask right here" "lca ask \"why is this box slow?\""
   row "All commands" "lca help"
   offline_row
   printf '\n'
+}
+
+# chat_down_row — the chat app is enabled and not answering at all.
+#
+# The row below this one warns when the chat is up but running an older
+# assistant. Not warning when it is simply DOWN covered the milder fault and
+# left the louder one silent: the headline still says "ready" and the line
+# above hands out a phone URL that answers nothing. Measured by stopping the
+# container — 'lca check' reported it twice, with the command to fix it, and
+# the one screen you get without asking still said ready and offered the link.
+#
+# A direct bounded curl rather than webui_responds(), which is the same probe
+# with --max-time 3: this file's rule is that every probe goes through quick()
+# at 2 seconds, and quick() runs 'timeout', which cannot wrap a shell function.
+# 'have curl' first so a box without curl is never told its chat is down on the
+# strength of a missing binary.
+chat_down_row() {
+  [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
+  have curl || return 0
+  quick curl -fsS --max-time "${QUICK_SECONDS}" "$(webui_url)/health" >/dev/null 2>&1 && return 0
+  # 18 characters: row() pads labels to 20, so a longer one eats its own
+  # separator and the value no longer lines up with every other row. "Chat is
+  # NOT answering" was 21 and did exactly that.
+  row "Chat NOT answering" "sudo lca webui start   ·   then: lca check"
+}
+
+# chat_stale_row — the chat app is healthy AND running an older assistant than
+# this repo's.
+#
+# The assistant's instructions are baked into the container when it is created,
+# so 'git pull' does not reach a running one and nothing restarts it. Every
+# other line of this banner is true on such a box: the engine is up, the model
+# is pulled, the URL works. The only real bug report this project has ever had
+# was exactly that box, twice — and "ready" plus a phone URL is the last thing
+# its owner saw before asking the chat to build an app and getting a JSON blob
+# back. 'lca check' knew. 'lca test' knew. The one screen you get without
+# asking for it did not.
+#
+# Two seconds, not the fifteen a health check may take: the banner runs on
+# every SSH login, and a probe that hangs here hangs the login itself. A
+# missing line costs nothing — webui_prompt_drifted answers "no" whenever it
+# could not look.
+chat_stale_row() {
+  [[ "${ENABLE_WEBUI}" == "true" && "${SKIP_DOCKER}" != "true" ]] || return 0
+  if LCA_INSPECT_TIMEOUT=2 webui_prompt_drifted; then
+    row "Chat is OUT OF DATE" "it answers with an older assistant — sudo lca apply"
+  fi
+}
+
+# coding_row — the one command on this box that writes files.
+#
+# Every other line of the ready banner points at something that cannot. The
+# chat URL is a text box with no filesystem. 'lca ask' is one-shot text. Both
+# are useful and neither is the product. So the banner named the chat, named
+# the one-shot, named 'lca help', and never once named the coding agent — while
+# "Ask right here" sat there looking exactly like the thing to try if what you
+# want is code.
+#
+# That is the same bug as chat_stale_row above, one layer earlier: this is the
+# screen the one real bug reporter was reading when they picked the wrong door.
+# A banner nobody asked for is the only documentation everyone reads, and it
+# has to name the thing the box is for.
+#
+# Placed directly above "Ask right here" so the two sit adjacent: one edits your
+# files, one answers a question. Read together the difference is obvious, which
+# it is not when only one of them is on screen.
+coding_row() {
+  # Not installed → say so rather than staying quiet, for the reason
+  # model_missing() gives at length: "ready" is the strongest claim this file
+  # makes, and a box that cannot run the coding agent has not earned it. The
+  # command matches run-agent.sh's own message, so the two cannot drift.
+  if [[ -x "$(aider_bin)" ]]; then
+    row "Write code here" "cd ~/my-project && lca   (edits real files)"
+  else
+    row "Coding agent MISSING" "${REPO_ROOT}/scripts/install_python.sh"
+  fi
 }
 
 # offline_row — the kill switch is invisible once engaged, and every download
@@ -260,10 +458,19 @@ offline_row() {
 }
 
 main() {
-  if [[ "${1:-}" == "--install" ]]; then
-    install_motd
-    return 0
-  fi
+  case "${1:-}" in
+    --install) install_motd; return 0 ;;
+    -h|--help)
+      # The header block above is the help text, as everywhere else here.
+      sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+      return 0
+      ;;
+    "") ;;
+    # Anything else printed the banner and said nothing — so a typo'd
+    # '--instal' silently did not install the banner and looked like it had.
+    # run-parts invokes this with no arguments, so it never reaches here.
+    *) printf 'Unknown option: %s (try: %s --help)\n' "$1" "${BASH_SOURCE[0]}" >&2; return 1 ;;
+  esac
   load_env_readonly
 
   local state
@@ -278,7 +485,7 @@ main() {
   # log saying COMPLETE is no comfort if ollama died an hour later.
   if engine_up; then
     banner_ready
-  elif [[ "${state}" == "stalled" ]]; then
+  elif [[ "${state}" == "stalled" ]] && ! product_installed; then
     banner_stalled
   else
     banner_attention
@@ -297,7 +504,20 @@ install_motd() {
   # (which is how pam_motd invokes it) skips files with dots in the name.
   if as_root ln -sfn "${SCRIPT_DIR}/motd.sh" "${MOTD_FILE}" 2>/dev/null; then
     as_root chmod +x "${SCRIPT_DIR}/motd.sh" 2>/dev/null || true
-    ok "Login banner installed — SSH in and it reports whether the stack is ready."
+    # Checked, not assumed. run-parts executes only files it can execute, and
+    # this one is a symlink, so the bit that matters is on the target. The
+    # chmod above is best-effort and its failure is swallowed by '|| true' —
+    # after which this printed "Login banner installed — SSH in and it reports
+    # whether the stack is ready" about a banner that would never print, on
+    # the one screen somebody gets without asking for it.
+    #
+    # '[[ -x ]]' answers this for any account: unlike a directory, a regular
+    # file needs a real execute bit even for root.
+    if [[ -x "${SCRIPT_DIR}/motd.sh" ]]; then
+      ok "Login banner installed — SSH in and it reports whether the stack is ready."
+    else
+      warn "The login banner is linked at ${MOTD_FILE}, but ${SCRIPT_DIR}/motd.sh is not executable — run-parts only runs files that are, so nothing would print at login. Fix it with: sudo chmod +x ${SCRIPT_DIR}/motd.sh"
+    fi
   else
     warn "Could not install the login banner at ${MOTD_FILE} — not fatal, everything else works."
   fi

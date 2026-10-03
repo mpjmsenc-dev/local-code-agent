@@ -4,26 +4,49 @@
 #
 # Targets:
 #   make gates    lint + syntax + unit tests (the pre-push gate; matches CI)
+#   make gates-container  the same, in a throwaway Ubuntu 24.04 container —
+#                 where they run on any machine this project is installed on
 #   make lint     ShellCheck (zero findings required), same flags as CI
 #   make syntax   bash -n on every script
 #   make test     both unit suites (lib + netmode ruleset)
+#   make coverage which lib.sh functions no test touches (a report, not a gate)
+#   make live-verify  the agent tier against a REAL machine (read-only)
 #   make dry-run  scripts/tune.sh --dry-run (detection only, changes nothing)
 #   make check    ./check-system.sh (full health check; degrades gracefully)
 #   make smoke    scripts/selftest.sh (live end-to-end round-trip on this box)
+#   make bench    measure the assistant's system prompt against the real model
 #   make hooks    install the pre-push git hook (runs `make gates` before push)
+#   make hooks-status  is that hook armed in THIS clone? (a report, not a gate)
 #   make help     list targets
 
 SHELL := /usr/bin/env bash
-SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/*)
+# .githooks/* included. The pre-push hook is a bash script like any other, and
+# it was the ONLY one in the repo that neither ShellCheck nor 'bash -n' ever
+# saw — the gate that guards every push, ungated. It fails badly in both
+# directions: a syntax error blocks every push, and a swallowed status lets red
+# gates through, which is the one thing it exists to prevent.
+SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
 
-.PHONY: gates lint syntax test dry-run check smoke hooks help
+.PHONY: gates gates-container lint syntax test coverage live-verify dry-run check smoke bench hooks hooks-status help
 .DEFAULT_GOAL := help
 
-gates: syntax lint test ## Everything CI gates on, locally
+gates: syntax lint test ## The CI gates that can run locally (2 of CI's 7 jobs)
 	@echo "== gates passed =="
+	@$(MAKE) --no-print-directory hooks-status
+
+# Not a convenience. The suite, run as root on an installed machine, once wrote
+# that machine's firewall boot unit into a sandbox it then deleted; see
+# CONTRIBUTING, "Where the gates run". tests/test-lib.sh refuses root outside
+# a container for that reason, and this is the way in.
+gates-container: ## The CI gates, in a throwaway container (the way to run them on an installed box)
+	bash tests/in-container.sh gates
 
 lint: ## ShellCheck, same invocation as CI
 	@command -v shellcheck >/dev/null || { echo "shellcheck not installed (apt-get install -y shellcheck)"; exit 1; }
+	@# Before ShellCheck, not after: it peaks near 3.8 GB on tests/test-lib.sh, and
+	@# a box that cannot hold that kills it twenty minutes into a run. Refuse at
+	@# the start, and name what to unload. tests/memory-preflight.sh says why.
+	@bash tests/memory-preflight.sh
 	shellcheck -x -P SCRIPTDIR $(SCRIPTS)
 	@echo "== shellcheck: zero findings =="
 
@@ -35,6 +58,16 @@ test: ## Unit suites (library helpers + netmode ruleset)
 	bash tests/test-lib.sh
 	bash tests/test-netmode.sh
 
+coverage: ## Report which lib.sh functions no test touches (a report, not a gate)
+	bash tests/coverage.sh
+
+# The only script under tests/ with no way in. It is the other half of the unit
+# suite — same subjects, no stubs, a real docker and a real agent — and until
+# this target existed the only record that it can be run at all was a sentence
+# in docs/PROMPT-WINDOW.md.
+live-verify: ## Drive the agent-tier gates against a REAL machine (read-only; needs a running tier)
+	bash tests/live-verify.sh
+
 dry-run: ## Preview the auto-tune decision without changing anything
 	bash scripts/tune.sh --dry-run
 
@@ -44,10 +77,20 @@ check: ## Full system health check
 smoke: ## Live end-to-end acceptance test on this machine (Ollama + model + aider + WebUI)
 	./scripts/selftest.sh
 
+bench: ## Measure the assistant's system prompt against the real model (minutes, not seconds)
+	./scripts/prompt-bench.sh
+
+hooks-status: ## Is the pre-push hook armed in this clone? (a report, not a gate)
+	@if [ "$$(git config --get core.hooksPath 2>/dev/null)" = ".githooks" ]; then \
+		echo "== pre-push hook armed: the gates run on every push ('make gates', or 'make gates-container' as root outside a container) =="; \
+	else \
+		echo "== NOTE: the pre-push hook is NOT installed in this clone, so nothing runs these gates for you. Install it: make hooks =="; \
+	fi
+
 hooks: ## Install the pre-push gate hook (git runs `make gates` before every push)
 	git config core.hooksPath .githooks
 	@chmod +x .githooks/* 2>/dev/null || true
-	@echo "== pre-push hook installed: pushes now run 'make gates' (bypass once with --no-verify) =="
+	@echo "== hooks installed: pushes now run the gates ('make gates', or 'make gates-container' as root outside a container), and a commit message's Suite: line must name a recorded run (bypass once with --no-verify) =="
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
