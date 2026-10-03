@@ -165,6 +165,120 @@ Three tasks and one run each (two for 14b on A) is a small sample, and every
 task here was well specified. The ranking was the same on every task, though,
 and the gaps are big: 0/3 vs 3/3 on first tries, and 2× in time.
 
+## qwen3.6:35b-a3b against the 2.5 models — measured, and the verdict
+
+qwen3.6:35b-a3b (April 2026, mixture-of-experts: 35.5B parameters in all, about
+3B active per token) was measured on the same VM and harness as the table above,
+one model at a time with nothing else loaded. The vendor reports 73.4 on
+SWE-bench Verified on its own scaffold; nothing here relies on that number.
+
+**The verdict, against criteria fixed before any run:** qwen3.6 would replace
+the 14b if it passed task D, passed the agent self-test, and was at least as
+fast as the 14b. It passed the self-test and nothing else. It failed task D at
+Q4_K_M and at q8_0, and on the aider tasks it was slower. **The 14b stays the
+default.** That is a statement about these criteria on this CPU, not a general
+ranking: on the agent self-test qwen3.6 was the fastest model measured here
+(see below), because it is the first one whose native tool calls work.
+
+### Speed and memory (each alone, 16 vCPUs, 16384 context)
+
+| | reading | writing | resident (`ollama ps`) |
+|---|---|---|---|
+| qwen2.5-coder:14b | 13.2–13.3 tok/s | 4.3–4.5 tok/s | 12.5 GB |
+| qwen2.5-coder:32b | 5.6 tok/s | 2.0 tok/s | 24.6 GB (28.9 GB as the agent model at 32768) |
+| **qwen3.6:35b-a3b** (Q4_K_M) | **40.0 tok/s** | 4.3 tok/s (`lca speed`), 5.5 tok/s over a 1,058-token answer | 22.3 GB |
+| qwen3.6:35b-a3b-q8_0 | — | — | 37.7 GB |
+
+Reading follows the active parameters, so it is three times the 14b. Writing
+does not: it stays at the 14b's pace. A first load took 31 s from page cache.
+
+### Thinking: off, or nothing finishes
+
+qwen3.6 thinks by default. With thinking on, one function plus its tests used
+all 6,000 tokens of its budget thinking (21,465 characters) and never started
+the answer: **20 minutes, no code**. With thinking off, the same prompt took
+194 s. Off is `think:false` on `/api/chat`, and `reasoning_effort: "none"`
+through Ollama's `/v1` and through litellm (aider): with it unset, a one-word
+reply cost 143 tokens and 29 s; with `none`, 2 tokens and 2 s. Every graded
+run below is with thinking off.
+
+Off is not quiet, though. With thinking off, qwen3.6 reasons in the answer
+itself ("Let's design… Wait, what about…"): 8.0k tokens for task A, against
+about 600 for a correct answer. That is why its aider times below lose most of
+what its reading speed wins.
+
+### Tool calling: the first model here whose native calls work
+
+Asked through `/v1/chat/completions` with tools, the way OpenHands asks,
+qwen3.6 returned `finish_reason: tool_calls` with a well-formed `file_editor`
+create. qwen2.5-coder never filled `tool_calls` at 3b or 7b (docs/AGENT.md).
+With thinking left on, it still called the tool, after 528 tokens of
+reasoning.
+
+### The graded tasks
+
+Same harness as above, plus a fourth task. Task D is harder on purpose. It
+moves subscriptions from 30-day to calendar-month billing across three modules
+(the model's fields, the schedule and the invoices), with tests. It has two
+traps: a Jan 31 start must bill Feb 29 and then come back to Mar 31, and the
+proration rounds half up, which Python's `round()` does not. The hidden grader
+was checked both ways first: a reference solution passes all 12 of its tests,
+and the untouched seed fails all 12.
+
+| Task | 14b | 32b | qwen3.6 (Q4_K_M) | qwen3.6 q8_0 |
+|---|---|---|---|---|
+| A | ✓ 1st try, 16 min | ✓ 1st try, 35 min | ✓ 2nd try, 53 min | — |
+| B | ✓ 1st try, 9 min | ✓ 1st try, 20 min | ✓ 1st try, 16 min | — |
+| C | ✓ 1st try, 36 min | ✓ 1st try, 63 min | ✓ 1st try, 23 min | — |
+| **D** | ✗ after 2 tries, 59 min | ✗ after 2 tries, 95 min | ✗ after 2 tries, 75 min | ✗ after 2 tries, 66 min |
+
+The 14b and 32b A–C results are the earlier runs on the same day, same
+harness. Two harness changes came with this round, and both are neutral. aider
+now gets a 3600 s request timeout instead of litellm's 600 s, because
+qwen3.6's long replies were thrown away and retried; the 2.5 runs never hit it.
+And thinking models run with `reasoning_effort` none.
+
+How D failed, which is the same story four times:
+
+- **All four stepped from the previous billing date instead of from the
+  start**, so a Jan 31 subscription bills Feb 29 and then Mar 29 for ever.
+- **qwen3.6, both quantisations:** no check on `interval_months`, so an
+  interval of 0 returns the same date for ever and the grader timed out. The
+  first Q4 try never added the two fields at all. Neither version's tests
+  touched the new fields.
+- **14b:** the drift, a cancelled-on-a-billing-date invoice charged 0, and a
+  float interval crashing instead of raising `ValueError`.
+- **32b:** the drift, an "adjustment" for short months that steps the date
+  backwards (another infinite loop), and `dateutil`, which is not in the
+  standard library.
+
+On A, qwen3.6's first try accepted an empty string. Its own tests would have
+caught that, but it did not run them.
+
+### The agent self-test
+
+`lca agent selftest` with qwen3.6:35b-a3b-agent at 16384, native tool calling
+on, `reasoning_effort` none: **passed, the file written after 10 minutes**,
+10.6 min end to end, against 24 for the 14b and 50 for the 32b. It found one
+bug in the self-test itself. Its tool-call probe allowed 64 tokens and did not
+turn thinking off, so the model spent them thinking and returned no call: a
+false FAIL. The probe now sends `reasoning_effort` none, and `agent.sh` stores
+`none` in the agent's settings, where OpenHands defaults to `high`.
+
+(Run on this VM without passwordless sudo. The self-test's own `sudo docker`
+calls went through a stand-in that runs `docker` only, which this account may
+do as a docker-group member, and refuses everything else. The agent's settings
+were switched for the run through the app's API and restored afterwards.)
+
+### Two models resident: the 14b for chat, the 32b for the agent
+
+Project mode's `answerer` and a pinned `AGENT_MODEL` both want two models
+loaded at once. Measured alone, at the windows they run at: the 14b at 16384 is
+12.5 GB and qwen2.5-coder:32b-agent at 32768 is 28.9 GB, **41.4 GB of 62.9
+GiB**, leaving about 17 GB for the OS, Open WebUI, the agent app and its
+sandbox. `ollama_two_models_fit` gives the second slot on this box
+(63 − 9.4 − 20.2 = 33.4 GB of weights headroom, against the 16 it requires).
+
 ## The one change that matters most: a GPU
 
 Nothing else is close. A model that fits entirely in VRAM runs roughly an order

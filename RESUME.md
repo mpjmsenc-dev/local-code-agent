@@ -1,5 +1,31 @@
 # RESUME.md — the agent tier's first run on real hardware
 
+## 2026-10-03: qwen3.6 evaluated (it lost), AGENT_MODEL and project mode built
+
+- **qwen3.6:35b-a3b lost** against the criteria fixed beforehand. It passed the
+  agent self-test (10 min, native tool calls work) but failed graded task D at
+  Q4_K_M and q8_0, and was slower than the 14b on the aider tasks. The 14b and
+  32b also fail D. Everything is in docs/PERFORMANCE.md ("qwen3.6:35b-a3b
+  against the 2.5 models"). Both qwen3.6 quantisations and
+  qwen3.6:35b-a3b-agent are still on disk (22 + 38 GB); remove them if you
+  want the space back.
+- **Built, gated, committed, not deployed:** `AGENT_MODEL` (pin the agent
+  alone, with two Ollama slots where RAM allows) and `lca agent project`
+  (docs/AGENT.md, "Project mode"). Not pushed and not on `/opt`:
+  passwordless sudo was removed mid-session, and the push uses root's stored
+  token.
+- **Waiting on root, in this order:** push; `git pull` in `/opt`; `.env`
+  AGENT_MODEL=qwen2.5-coder:32b, AGENT_MODEL_CONTEXT=32768,
+  AGENT_REQUEST_TIMEOUT=3600, AGENT_PROJECTS_DIR=/home/jmuryn/projects;
+  `sudo lca agent setup`; `sudo lca apply`; `lca agent restart`; then the
+  toy test, `lca agent project ~/specs/toycalc.md --dir ~/projects/toycalc
+  --autonomy answerer`.
+- The graded-task harness is `~/projects/lca-eval/run2.sh` and `eval2.sh`
+  (model as an argument, run through the eval worktree `~/work/lca-eval-co`,
+  no root). Task D is new: `seed/D`, `grade/D.py`.
+
+---
+
 ## 2026-10-02, later: three branches merged into this one
 
 `origin/agent-live-verify` (the droplet's work) and `origin/absence-rules` are

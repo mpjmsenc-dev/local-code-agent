@@ -114,8 +114,13 @@ link_settings() {
 link_channel() {
   local resp calls body
   step "5/6  The tool-call channel"
+  # reasoning_effort none, as the agent's own settings say (agent.sh). A model
+  # that thinks by default spends a 64-token budget thinking and returns no
+  # call at all: qwen3.6:35b-a3b did exactly that (finish "length", 0 calls),
+  # and with none it returned the call in 42 tokens. Without this the probe
+  # failed a model whose tool calls work.
   body="$(jq -nc --arg m "$(agent_model_name "$(agent_base_model)")" \
-    '{model:$m, temperature:0, max_tokens:64,
+    '{model:$m, temperature:0, max_tokens:64, reasoning_effort:"none",
       messages:[{role:"user",content:"Create /tmp/x.py containing print(1). Use the tool."}],
       tools:[{type:"function",function:{name:"file_editor",description:"Create or edit a file.",
               parameters:{type:"object",properties:{path:{type:"string"},file_text:{type:"string"}},

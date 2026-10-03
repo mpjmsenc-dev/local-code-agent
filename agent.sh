@@ -408,6 +408,12 @@ seed_agent_settings() {
   # The llm.* fields below are the opposite and were checked the same way: all
   # five arrive in the sandbox's own base_state.json (model, base_url,
   # native_tool_calling, max_output_tokens 2048, timeout 1800).
+  #
+  # reasoning_effort "none", where OpenHands stores "high" by default. A model
+  # that does not think ignores it (every qwen2.5-coder). One that does,
+  # thinks at length: qwen3.6:35b-a3b spent 6,000 tokens, 20 minutes on this
+  # CPU, thinking about a task of one function without starting the answer.
+  # Through Ollama's /v1, "none" is think:false. docs/PERFORMANCE.md.
   body="$(jq -nc --arg m "${model}" --arg u "${base_url}" \
         --argjson native "$([[ "${AGENT_NATIVE_TOOL_CALLING}" == "true" ]] && echo true || echo false)" \
         --argjson out "$(agent_max_output_tokens)" \
@@ -416,6 +422,7 @@ seed_agent_settings() {
                                enable_switch_llm_tool:false,
                                llm:{model:$m, base_url:$u, api_key:"local-llm",
                                     native_tool_calling:$native,
+                                    reasoning_effort:"none",
                                     max_output_tokens:$out,
                                     timeout:$tmo}}}')"
   curl -fsS --max-time 20 -X POST "${url}" -H 'Content-Type: application/json' \
