@@ -5047,7 +5047,7 @@ project_plan_steps() {
 # be committed on the agent's say-so, which is the thing this mode exists to
 # replace.
 project_plan_problem() {
-  local steps n=0 want=1 num title verify
+  local steps n=0 want=1 num title verify spec="${2:-}" wanted
   steps="$(project_plan_steps "$1" 2>/dev/null)" || { printf 'PLAN.md is missing or unreadable'; return 0; }
   [[ -n "${steps}" ]] || { printf 'PLAN.md has no steps in the "- [ ] 1. Title" form'; return 0; }
   while IFS=$'\t' read -r num _ title verify; do
@@ -5057,9 +5057,37 @@ project_plan_problem() {
     [[ -n "${title}" ]] || { printf 'step %s has no title' "${num}"; return 0; }
     # shellcheck disable=SC2016  # the backticks are the format being named
     [[ -n "${verify}" ]] || { printf 'step %s (%s) has no "Verify: `command`" line' "${num}" "${title}"; return 0; }
+    # 'cmd | grep -q x && test $? -eq 2' tests grep's status, and so can never
+    # be true: the third live plan wrote exactly that for "a bad OP exits 2".
+    # test $? only means the previous command's status straight after a ';'.
+    # shellcheck disable=SC2016  # $? is the text being looked for
+    if [[ "${verify}" == *'test $?'* ]] && ! grep -qE '(^|;)[[:space:]]*test \$\?' <<<"${verify}"; then
+      printf 'step %s verifies with "test $?" after && or a pipe, where $? is not the status of the command it means; write it as "cmd; test $? -eq N"' "${num}"
+      return 0
+    fi
   done <<<"${steps}"
   (( n <= 40 )) || { printf 'PLAN.md has %s steps; a plan this long is a spec to split, not to run' "${n}"; return 0; }
+  # A spec that says how many steps it is built in gets that many. Two live
+  # plans wrote 10 and 7 for a spec saying "exactly three steps".
+  if [[ -r "${spec}" ]] && wanted="$(project_spec_step_count "${spec}")" && (( n != wanted )); then
+    printf 'the spec says it is built in exactly %s steps, and PLAN.md has %s; use the steps the spec names' "${wanted}" "${n}"
+    return 0
+  fi
   return 1
+}
+
+# project_spec_step_count SPEC — N when the spec says it is built in exactly N
+# steps (a digit or a word up to twelve), else rc 1.
+project_spec_step_count() {
+  local w
+  w="$(grep -oiE 'exactly (one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|[0-9]+) steps' "${1:-}" 2>/dev/null | head -1 | awk '{ print tolower($2) }')"
+  [[ -n "${w}" ]] || return 1
+  case "${w}" in
+    one) w=1 ;; two) w=2 ;; three) w=3 ;; four) w=4 ;; five) w=5 ;; six) w=6 ;;
+    seven) w=7 ;; eight) w=8 ;; nine) w=9 ;; ten) w=10 ;; eleven) w=11 ;; twelve) w=12 ;;
+  esac
+  [[ "${w}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${w}"
 }
 
 # project_plan_mark_done PLAN_FILE N — tick step N, and nothing else.

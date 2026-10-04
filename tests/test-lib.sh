@@ -24572,6 +24572,30 @@ project_plan_problems_are_named() {
 check "...and refuses a plan with an unverifiable, missing or misnumbered step" \
   project_plan_problems_are_named
 
+# The two faults the live plans had that no prompt rule stopped: a step count
+# the spec fixed and the plan ignored, and a check that could never pass.
+# shellcheck disable=SC2016  # PLAN.md's backticks and $? are literal text
+project_plan_faults_from_the_live_runs_are_refused() {
+  local plan="${PROJECT_SB}/live-plan.txt" spec="${PROJECT_SB}/spec.txt" bad=0
+  printf 'A toy. Build it in exactly three steps:\n1. a\n2. b\n3. c\n' > "${spec}"
+  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}" "${spec}")" == *'exactly 3 steps'*'has 2'* ]] || {
+    echo 'a two-step plan for an "exactly three steps" spec was accepted' >&2; bad=1; }
+  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>&1 | grep -q usage && test $? -eq 2`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}" "${spec}")" == *'step 3'*'test $?'* ]] || {
+    echo 'the live run'"'"'s never-true check was accepted' >&2; bad=1; }
+  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>/dev/null; test $? -eq 2`\n' > "${plan}"
+  ! project_plan_problem "${plan}" "${spec}" >/dev/null || {
+    printf 'a correct three-step plan was refused: %s\n' "$(project_plan_problem "${plan}" "${spec}")" >&2; bad=1; }
+  printf 'No count here.\n' > "${spec}"
+  ! project_plan_problem "${plan}" "${spec}" >/dev/null || { echo 'a step count was enforced on a spec that sets none' >&2; bad=1; }
+  [[ "$(printf 'built in Exactly 12 steps\n' > "${spec}"; project_spec_step_count "${spec}")" == 12 ]] || {
+    echo 'a step count written as digits was not read' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and refuses a plan that ignores the spec's step count or verifies with a test \$? that can never pass" \
+  project_plan_faults_from_the_live_runs_are_refused
+
 # shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
 project_mark_done_ticks_one_step() {
   local plan="${PROJECT_SB}/tick.txt"

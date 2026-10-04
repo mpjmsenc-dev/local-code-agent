@@ -153,9 +153,16 @@ conversation_field() {   # CID FIELD
 }
 
 delete_sandbox() {   # CID — the step is over; its work is on the host already
-  local sid
-  sid="$(conversation_field "$1" sandbox_id || true)"
-  [[ -n "${sid}" ]] || return 0
+  local sid tries=0
+  # A conversation seconds old may not have its sandbox recorded yet: the
+  # stop that came 90 s into a step found no id, returned without a word, and
+  # left the sandbox running. Asked again for up to 30 s, and said if never.
+  while :; do
+    sid="$(conversation_field "$1" sandbox_id || true)"
+    [[ -z "${sid}" && "${tries}" -lt 6 ]] || break
+    tries=$(( tries + 1 )); sleep 5
+  done
+  [[ -n "${sid}" ]] || { say "could not find the sandbox of conversation $1 to remove it (lca agent gc collects it)"; return 0; }
   if curl -fsS --max-time 120 -X DELETE "$(agent_sandbox_delete_url "${sid}")" >/dev/null 2>&1; then
     say "sandbox ${sid} removed"
   else
@@ -409,7 +416,7 @@ verify() {
 # --- the two phases -------------------------------------------------------------
 plan_phase() {
   local attempt problem failure=""
-  [[ -f "${DIR}/PLAN.md" ]] && ! problem="$(project_plan_problem "${DIR}/PLAN.md")" && return 0
+  [[ -f "${DIR}/PLAN.md" ]] && ! problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")" && return 0
   for (( attempt = 1; attempt <= AGENT_PROJECT_RETRIES + 1; attempt++ )); do
     state_set STATUS planning STEP 0 ATTEMPT "${attempt}"
     say "planning, attempt ${attempt}"
@@ -423,7 +430,7 @@ plan_phase() {
     fi
     delete_sandbox "${CID}"
     normalize_perms || true
-    if problem="$(project_plan_problem "${DIR}/PLAN.md")"; then
+    if problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")"; then
       failure="${problem}"
       say "the plan is not usable: ${problem}"
       continue
