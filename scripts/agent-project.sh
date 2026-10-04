@@ -261,8 +261,17 @@ ask_answerer() {   # QUESTION — the answerer model's reply, or rc 1
   printf '%s' "${reply}"
 }
 
+# The spec itself when it is short enough to carry, its summary when not. The
+# second live run's summary turned "prints a usage line to stderr" into
+# "printing ... a usage line", and the CLI it built printed usage to stdout;
+# it also softened "ask the project lead" into "decided by the project lead".
+# A short spec is cheaper to send whole than to lose a requirement from.
+PROJECT_SPEC_VERBATIM_CHARS=3000
 summary_text() {
-  if [[ -s "${STATE_DIR}/spec-summary.md" ]]; then
+  if [[ -s "${STATE_DIR}/spec.md" ]] \
+     && (( $(wc -c < "${STATE_DIR}/spec.md") <= PROJECT_SPEC_VERBATIM_CHARS )); then
+    cat "${STATE_DIR}/spec.md"
+  elif [[ -s "${STATE_DIR}/spec-summary.md" ]]; then
     project_strip_tool_markup < "${STATE_DIR}/spec-summary.md"
   else
     head -c 1500 "${STATE_DIR}/spec.md"

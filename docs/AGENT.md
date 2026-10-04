@@ -596,7 +596,9 @@ It builds a project from one spec file with nobody at the keyboard.
    nothing can verify, or with misnumbered steps, is sent back.
 2. **Execution.** Each unticked step runs as its own fresh conversation through
    `lca agent task`, with the directory named. The task text carries the spec
-   summary, `PLAN.md`, `DECISIONS.md` and that one step. A fresh conversation
+   (verbatim up to 3000 characters, its summary beyond that), `PLAN.md`,
+   `DECISIONS.md` and that one step. The first live run showed why: its
+   summary dropped "to stderr", and the CLI printed usage to stdout. A fresh conversation
    per step is what keeps a long project inside the window: the agent's own
    prompt is about 13k tokens before the step says a word.
 3. **Verification, then commit.** The step's command runs in a throwaway

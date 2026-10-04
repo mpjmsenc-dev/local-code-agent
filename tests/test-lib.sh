@@ -24652,7 +24652,7 @@ project_step_task_carries_one_step() {
   local t bad=0
   t="$(project_step_task /workspace/projects/toy 2 3 'Add add()' 'python3 -m pytest -q' \
         'A toy adder.' $'- [x] 1. Skeleton\n- [ ] 2. Add add()' '# Decisions' 'E   assert 4 == 5')"
-  for want in 'step 2 of 3: Add add()' 'Spec summary:' 'A toy adder.' '- [x] 1. Skeleton' '# Decisions' \
+  for want in 'step 2 of 3: Add add()' 'The spec (summarised when it is long):' 'A toy adder.' '- [x] 1. Skeleton' '# Decisions' \
               'python3 -m pytest -q' 'STEP DONE' 'do not run git' 'FAILED verification' 'assert 4 == 5'; do
     grep -qF -- "${want}" <<<"${t}" || { printf 'the step task does not carry: %s\n' "${want}" >&2; bad=1; }
   done
@@ -24710,7 +24710,9 @@ check "...and the planner keeps a spec's own steps and verifies an intended fail
 # project lead"; the planner titled the step "decide division by zero
 # behavior", and the agent decided. The title has to carry the ask.
 project_planner_keeps_an_ask_in_the_step_title() {
-  grep -qF 'says so in its title' <<<"$(project_planning_task /workspace/projects/x)"
+  local t
+  t="$(project_planning_task /workspace/projects/x)"
+  grep -qF 'says so in its title' <<<"${t}" && grep -qF 'which stream (stdout or stderr)' <<<"${t}"
 }
 check "...and a step that needs the project lead's answer says so in its title" \
   project_planner_keeps_an_ask_in_the_step_title

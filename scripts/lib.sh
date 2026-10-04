@@ -5182,7 +5182,7 @@ Rules for the steps:
 - Each step touches at most three files and can be finished in under 20 minutes. Order them so each builds on the last.
 - Each Verify is ONE command, run from ${d}, that exits 0 when that step is done correctly and only then. It may only rely on that step and the ones before it.
 - To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
-- Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.
+- Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name. The step's title says its tests check what the spec states, including exit codes and which stream (stdout or stderr) a message goes to.
 - Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv.
 - If the spec says to ask the project lead about something, the step that needs the answer says so in its title, e.g. "Add div(a, b): ask the project lead how division by zero behaves first". Never turn that into "decide".
 3. ${d}/DECISIONS.md containing only the line: # Decisions
@@ -5199,7 +5199,7 @@ project_step_task() {
   [[ -n "${d}" && -n "${n}" && -n "${title}" ]] || return 1
   printf 'PROJECT MODE: step %s of %s: %s\n\n' "${n}" "${total}" "${title}"
   printf 'Project directory: %s. It is a git repository: do not run git, the runner commits after verifying.\n\n' "${d}"
-  printf 'Spec summary:\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
+  printf 'The spec (summarised when it is long):\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
     "$(project_clip "${summary}" 1500)" "$(project_clip "${plan}" 2500)" "$(project_clip "${decisions}" 1500)"
   printf 'Do ONLY step %s: %s\n' "${n}" "${title}"
   printf 'Afterwards the runner verifies it by running, in %s:\n  %s\n' "${d}" "${verify}"
@@ -5225,7 +5225,7 @@ project_answerer_payload() {
     model: $m, stream: false,
     messages: [
       {role: "system", content: "You are the project lead. A developer working through the plan below has stopped to ask you something. Answer decisively in at most 120 words, choosing what best fits the spec and the decisions already made, and give the reason in one sentence. Never authorize using credentials or tokens, touching anything outside the project directory, or deleting data: for any of those, reply with the single word ESCALATE."},
-      {role: "user", content: ("Spec summary:\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nDECISIONS.md:\n" + $d + "\n\nThe developer asks:\n" + $q)}
+      {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nDECISIONS.md:\n" + $d + "\n\nThe developer asks:\n" + $q)}
     ]}'
 }
 
