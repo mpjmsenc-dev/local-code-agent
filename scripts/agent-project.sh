@@ -347,7 +347,8 @@ handle_turn() {
           delete_sandbox "${cid}"
           stop_for_human waiting "${what}: the answerer $(project_answerer_model) did not answer. The question: $(project_clip "${LAST_TEXT}" 600)"
         fi
-        if grep -q 'ESCALATE' <<<"${ans}" || hs="$(project_hard_stop "${ans}")"; then
+        say "${what}: the project lead replied: $(project_clip "${ans}" 600)"
+        if project_answer_escalates "${ans}" || hs="$(project_hard_stop "${ans}")"; then
           delete_sandbox "${cid}"
           stop_for_human waiting "${what}: the answerer escalated (${hs:-ESCALATE}). The question: $(project_clip "${LAST_TEXT}" 600)"
         fi

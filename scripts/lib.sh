@@ -5240,17 +5240,30 @@ project_step_task() {
   fi
 }
 
+# project_answer_escalates REPLY — true when the project lead's reply IS the
+# refusal: the word ESCALATE alone, formatting aside. Not when the word merely
+# appears in an answer. The first live answerer reply stopped a run on an
+# ordinary design question ("how should division by zero behave?"), and the
+# same question replayed three times got a plain answer every time; the reply
+# itself was not logged, so the substring match is the suspect, and it is gone.
+project_answer_escalates() {
+  local t
+  t="$(printf '%s' "${1:-}" | tr -d '*_`.!:' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+  [[ "${t^^}" == "ESCALATE" ]]
+}
+
 # project_answerer_payload MODEL SUMMARY PLAN DECISIONS QUESTION — the /api/chat
 # body that asks the second model, as project lead, to answer the agent.
 #
 # No num_ctx: a request that asks for a different window than the server's
 # reloads the model, and the answerer is the chat model precisely so that
-# answering costs no load at all.
+# answering costs no load at all. Temperature 0 does not reload anything, and
+# makes the lead's answer to the same question the same answer.
 project_answerer_payload() {
   have jq || return 1
   jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg p "$(project_clip "$3" 2500)" \
          --arg d "$(project_clip "$4" 1500)" --arg q "$(project_clip "$5" 2000)" '{
-    model: $m, stream: false,
+    model: $m, stream: false, options: {temperature: 0},
     messages: [
       {role: "system", content: "You are the project lead. A developer working through the plan below has stopped to ask you something. Answer decisively in at most 120 words, choosing what best fits the spec and the decisions already made, and give the reason in one sentence. Never authorize using credentials or tokens, touching anything outside the project directory, or deleting data: for any of those, reply with the single word ESCALATE."},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nDECISIONS.md:\n" + $d + "\n\nThe developer asks:\n" + $q)}

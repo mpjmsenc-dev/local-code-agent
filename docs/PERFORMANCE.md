@@ -273,11 +273,24 @@ were switched for the run through the app's API and restored afterwards.)
 ### Two models resident: the 14b for chat, the 32b for the agent
 
 Project mode's `answerer` and a pinned `AGENT_MODEL` both want two models
-loaded at once. Measured alone, at the windows they run at: the 14b at 16384 is
-12.5 GB and qwen2.5-coder:32b-agent at 32768 is 28.9 GB, **41.4 GB of 62.9
-GiB**, leaving about 17 GB for the OS, Open WebUI, the agent app and its
-sandbox. `ollama_two_models_fit` gives the second slot on this box
-(63 − 9.4 − 20.2 = 33.4 GB of weights headroom, against the 16 it requires).
+loaded at once. With `AGENT_MODEL=qwen2.5-coder:32b` and `sudo lca apply`,
+the server runs with `OLLAMA_MAX_LOADED_MODELS=2` (read back from its
+environment), and both stay resident: qwen2.5-coder:32b-agent at 32768 is
+28.9 GB and the 14b at 16384 is 12.5 GB, **41.8 GB used of 64.4, 22.6 GB
+still available**, during a live project run. `ollama_two_models_fit` gives
+the second slot on this box (63 − 9.4 − 20.2 = 33.4 GB of weights headroom,
+against the 16 it requires).
+
+### What project mode costs on the 32b
+
+Every step is a fresh conversation, and every fresh conversation starts by
+reading the agent's own prompt, about 16k tokens. Ollama's prompt cache did
+not carry it from one conversation to the next. At 5.6 tok/s that first turn
+took **50–51 minutes, every step**, and after it the turns were 1–5 minutes
+each. Planning a 3-step toy took 75–80 minutes; each of its steps took about
+an hour end to end. Reading speed decides this far more than writing does:
+the same first turn would be about 18 minutes on the 14b, and about 7 on
+qwen3.6 at 40 tok/s.
 
 ## The one change that matters most: a GPU
 

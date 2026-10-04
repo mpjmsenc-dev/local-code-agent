@@ -24702,6 +24702,21 @@ project_answerer_asks_as_lead_without_reloading() {
 check "...and the answerer is asked as project lead, at the server's own window" \
   project_answerer_asks_as_lead_without_reloading
 
+project_escalation_is_the_word_alone() {
+  local r bad=0
+  for r in 'ESCALATE' '**ESCALATE**' ' escalate. ' 'ESCALATE!'; do
+    project_answer_escalates "${r}" || { printf 'the refusal %q was not read as one\n' "${r}" >&2; bad=1; }
+  done
+  for r in 'Raise ZeroDivisionError; no need to ESCALATE this.' 'ESCALATE if the spec is silent, otherwise raise.' ''; do
+    ! project_answer_escalates "${r}" || { printf 'the answer %q was read as a refusal\n' "${r}" >&2; bad=1; }
+  done
+  jq -e '.options.temperature == 0' <<<"$(project_answerer_payload m s p d q)" >/dev/null || {
+    echo 'the answerer is not asked at temperature 0' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and only a reply that is ESCALATE, alone, stops the run as a refusal" \
+  project_escalation_is_the_word_alone
+
 # shellcheck disable=SC2030,SC2031,SC2034  # set for this probe's subshell only, for lib.sh to read
 project_answerer_defaults_to_chat() {
   [[ "$(MODEL_NAME=m:14b; AGENT_PROJECT_ANSWERER=''; project_answerer_model)" == m:14b ]] \
