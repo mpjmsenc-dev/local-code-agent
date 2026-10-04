@@ -661,6 +661,10 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   AGENT_PROJECT_ANSWERER="${AGENT_PROJECT_ANSWERER:-}"
   # Retries for a step that fails its verification, before the run stops.
   AGENT_PROJECT_RETRIES="${AGENT_PROJECT_RETRIES:-2}"
+  # Which agent does the work in project mode: openhands (the app, a sandbox
+  # per conversation) or opencode (one container per turn). See
+  # project_engine_valid.
+  AGENT_PROJECT_ENGINE="${AGENT_PROJECT_ENGINE:-openhands}"
   # Which ref of the public skills repository the agent's sandboxes may load
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
@@ -5030,7 +5034,7 @@ project_plan_steps() {
       d = ($0 ~ /^[[:space:]]*[-*] \[[xX]\]/) ? 1 : 0
       s = $0; sub(/^[[:space:]]*[-*] \[[ xX]\] /, "", s)
       n = s; sub(/\..*/, "", n)
-      t = s; sub(/^[0-9]+\.[[:space:]]+/, "", t); gsub(/\t/, " ", t)
+      t = s; sub(/^[0-9]+\.[[:space:]]+/, "", t); gsub(/\t/, " ", t); sub(/[[:space:]]+$/, "", t)
       next
     }
     n != "" && /^[[:space:]]*(-[[:space:]]*)?[Vv]erify:/ {
@@ -5128,7 +5132,7 @@ project_final_text() {
 project_turn_kind() {
   local text="${1:-}" tail
   [[ -n "${text//[[:space:]]/}" ]] || { printf 'unclear'; return 0; }
-  if grep -qE '(STEP|PLAN) DONE' <<<"${text}"; then printf 'done'; return 0; fi
+  if grep -qE '(STEP|PLAN|TESTS) DONE' <<<"${text}"; then printf 'done'; return 0; fi
   tail="$(printf '%s' "${text}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   (( ${#tail} <= 400 )) || tail="${tail: -400}"
   if [[ "${tail}" == *'?' ]] \
@@ -5187,14 +5191,30 @@ project_clip() {
   fi
 }
 
+# project_clip_head TEXT MAX — the first MAX characters of TEXT, said to be
+# clipped. For a diff, whose head is the code and whose tail is often a test
+# or a lockfile.
+project_clip_head() {
+  local text="${1:-}" max="${2:-2000}"
+  if (( ${#text} > max )); then
+    printf '%s\n[... %s later characters cut ...]' "${text:0:max}" "$(( ${#text} - max ))"
+  else
+    printf '%s' "${text}"
+  fi
+}
+
 # project_planning_task SANDBOX_DIR — the task text for the planning step.
 project_planning_task() {
-  local d="${1:-}"
+  local d="${1:-}" tf=" The tests for each step are written before the step, so its Verify must run them."
   [[ -n "${d}" ]] || return 1
   cat <<EOF
 PROJECT MODE: PLANNING. Do not write any project code in this step.
 
-Read the spec at ${d}/.lca-project/spec.md, then write exactly three files:
+Read the spec at ${d}/.lca-project/spec.md.
+
+First decide whether to build on an existing project. If a mature open-source project (widely used, maintained for years) already does most of what the spec asks, the plan installs it and customises it instead of writing it from scratch. Prefer permissive licenses (MIT, BSD, Apache-2.0); LGPL and MPL are fine; GPL is acceptable; AGPL only for internal use. It has to run where the steps run: a Debian container with Python 3, pip, uv, Node.js and git, no root, no system services (no PostgreSQL, MySQL, Redis or Docker; use SQLite), network while a step runs but none during verification, so every dependency is installed inside ${d} (.venv, node_modules). Only ${d} survives a step. If nothing fits those limits, the choice is none.
+
+Then write exactly three files:
 
 1. ${d}/.lca-project/spec-summary.md: the spec in at most 150 words, keeping every hard requirement (names, interfaces, file names, versions).
 2. ${d}/PLAN.md: a numbered checklist of small steps, in exactly this form:
@@ -5206,24 +5226,37 @@ Read the spec at ${d}/.lca-project/spec.md, then write exactly three files:
 - [ ] 2. ...
 
 Rules for the steps:
-- If the spec lists its own steps, the plan has exactly those steps, in that order. Otherwise use as few small steps as the spec needs, at most twelve.
-- Each step touches at most three files and can be finished in under 20 minutes. Order them so each builds on the last.
+- If the spec lists its own steps, the plan has exactly those steps, in that order. Otherwise use as few small steps as the spec needs, at most fifteen.
+- Each step touches at most three files of our own and can be finished in under 20 minutes. Order them so each builds on the last. With a base project, step 1 installs it into ${d} and proves it starts.
 - Each Verify is ONE command, run from ${d}, that exits 0 when that step is done correctly and only then. It may only rely on that step and the ones before it.
 - To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
-- Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name. The step's title says its tests check what the spec states, including exit codes and which stream (stdout or stderr) a message goes to.
-- Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv.
+- Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.${tf} The step's title says its tests check what the spec states, including exit codes and which stream (stdout or stderr) a message goes to.
+- Use the standard library unless the spec requires a dependency or the base project brings it; a step that adds one installs it into ${d}/.venv.
 - If the spec says to ask the project lead about something, the step that needs the answer says so in its title, e.g. "Add div(a, b): ask the project lead how division by zero behaves first". Never turn that into "decide".
-3. ${d}/DECISIONS.md containing only the line: # Decisions
+3. ${d}/DECISIONS.md, in exactly this form:
+
+# Decisions
+
+## Base project
+
+- Choice: the project's name and URL, or none
+- License: its SPDX id, e.g. MIT or AGPL-3.0, or n/a
+- Why: one sentence
 
 Then check that PLAN.md follows the form exactly, and end your final message with: PLAN DONE
 EOF
 }
 
-# project_step_task SANDBOX_DIR N TOTAL TITLE VERIFY SUMMARY PLAN DECISIONS [PREVIOUS_FAILURE]
+# project_step_task SANDBOX_DIR N TOTAL TITLE VERIFY SUMMARY PLAN DECISIONS
+#                   [PREVIOUS_FAILURE] [TEST_FILES] [LAST_ATTEMPT]
 # — the task text for one step. Spec summary, plan, decisions and this step
 # only: the step must not need the whole spec, and the window cannot hold it.
+# TEST_FILES are the tests written for it beforehand, which it may not change
+# (the runner puts them back) except on its LAST_ATTEMPT (true), when a test
+# that contradicts the spec may be corrected, said which and why.
 project_step_task() {
   local d="$1" n="$2" total="$3" title="$4" verify="$5" summary="$6" plan="$7" decisions="$8" failure="${9:-}"
+  local tests="${10:-}" last="${11:-false}"
   [[ -n "${d}" && -n "${n}" && -n "${title}" ]] || return 1
   printf 'PROJECT MODE: step %s of %s: %s\n\n' "${n}" "${total}" "${title}"
   printf 'Project directory: %s. It is a git repository: do not run git, the runner commits after verifying.\n\n' "${d}"
@@ -5232,6 +5265,14 @@ project_step_task() {
   printf 'Do ONLY step %s: %s\n' "${n}" "${title}"
   printf 'Afterwards the runner verifies it by running, in %s:\n  %s\n' "${d}" "${verify}"
   printf 'Run that command yourself before finishing and make it pass.\n\n'
+  if [[ -n "${tests}" ]]; then
+    printf 'The tests for this step are already written: %s. Make them pass by implementing the step.\n' "${tests}"
+    if [[ "${last}" == "true" ]]; then
+      printf 'This is the last attempt. If a test contradicts the spec, you may correct that test, and your final message must say which test and why.\n\n'
+    else
+      printf 'Do not edit them: the runner puts them back as they were before verifying.\n\n'
+    fi
+  fi
   printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Install any dependency inside ${d}/.venv. Never use credentials and never touch anything outside ${d}."
   printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: STEP DONE"
   if [[ -n "${failure}" ]]; then
@@ -5288,6 +5329,310 @@ project_progress_line() {
     running)  printf 'Project %s: step %s of %s, %s (attempt %s)' "${dir}" "${step}" "${total:-?}" "${title}" "${attempt:-1}" ;;
     *)        printf 'Project %s: %s, see %s/.lca-project/SUMMARY.md' "${dir}" "${status:-unknown}" "${dir}" ;;
   esac
+}
+
+# --- project mode: the engine, the quality loop, the base project --------------
+#
+# THE ENGINE. OpenHands is a whole application: each conversation gets a
+# sandbox from the app, and its agent reads a ~14k-token system prompt before
+# its first word (measured on the 32b: 14,235 tokens, 45 minutes at 5.3 tok/s,
+# every step). OpenCode (MIT) is a single binary with a non-interactive mode,
+# 'opencode run'. Here it runs in a throwaway container of its own, built FROM
+# the same agent-server image, as the same uid and group the verification uses,
+# with only the project directory mounted. It has no text-format fallback for
+# tool calls, so it needs a model whose native tool calls work.
+#
+# THE QUALITY LOOP, sized for a CPU: a step's tests are written first, by a
+# conversation of their own, and kept; the step then gets one attempt, and
+# another only when the tests fail, with their output (AGENT_PROJECT_RETRIES,
+# 2); every accepted step is reviewed for bugs and security by one request to
+# the model, not a conversation; and every phase is a fresh context.
+#
+# THE BASE PROJECT. Before planning anything, the planner decides whether a
+# mature open-source project already does most of what the spec asks, and if
+# so the plan installs and customises it. The choice and its license go in
+# DECISIONS.md, and the runner refuses a plan that names a base project
+# without a license it recognises.
+
+# The OpenCode release project mode runs, and the sha256 of its asset. The
+# "baseline" build: the regular one needs AVX2, which the reference box's Xeon
+# E5-2680 v2 does not have.
+AGENT_OPENCODE_VERSION="${AGENT_OPENCODE_VERSION:-1.18.34}"
+AGENT_OPENCODE_SHA256="${AGENT_OPENCODE_SHA256:-24b0d458d21ef548b2752166303defcf7f4945b049fb4876ab78dfaf86d81b27}"
+
+# project_engine_valid ENGINE — openhands or opencode.
+project_engine_valid() {
+  case "${1:-}" in openhands|opencode) return 0 ;; *) return 1 ;; esac
+}
+
+# opencode_image — the local image the OpenCode engine runs in.
+opencode_image() {
+  printf 'lca-opencode:%s' "${AGENT_OPENCODE_VERSION}"
+}
+
+# opencode_asset_url — the release asset that image is built from.
+opencode_asset_url() {
+  printf 'https://github.com/anomalyco/opencode/releases/download/v%s/opencode-linux-x64-baseline.tar.gz' \
+    "${AGENT_OPENCODE_VERSION}"
+}
+
+# opencode_dockerfile BASE_IMAGE — the image: the agent's own runtime image,
+# so a step sees the same Python, Node and uid 10001 group as under OpenHands,
+# plus the pinned binary, checked against its sha256.
+opencode_dockerfile() {
+  cat <<EOF
+FROM ${1:?}
+USER root
+RUN curl -fsSL -o /tmp/opencode.tgz '$(opencode_asset_url)' \\
+ && echo '${AGENT_OPENCODE_SHA256}  /tmp/opencode.tgz' | sha256sum -c - \\
+ && tar -xzf /tmp/opencode.tgz -C /usr/local/bin opencode \\
+ && cd /usr/local/bin && chmod 0755 opencode && rm -f /tmp/opencode.tgz
+ENTRYPOINT []
+EOF
+}
+
+# opencode_env — the environment every OpenCode run gets, one KEY=VALUE a line.
+# Each one switches off something that would reach the network for nothing
+# the run needs (an update check, the models.dev catalogue, language servers,
+# sharing) or read instructions meant for another tool.
+opencode_env() {
+  printf '%s\n' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 \
+    OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_SHARE=1 \
+    OPENCODE_DISABLE_DEFAULT_PLUGINS=1 OPENCODE_DISABLE_CLAUDE_CODE=1
+}
+
+# opencode_config_json MODEL BASE_URL CONTEXT OUTPUT MAX_STEPS — the whole
+# configuration, passed as OPENCODE_CONFIG_CONTENT so nothing in the project
+# directory can change it.
+#
+# Three of OpenCode's nine tools are switched off: task (subagents, each a new
+# context to read), skill and todowrite. Measured against a stub server, that
+# takes the first request from 29.1k characters of system prompt and tool
+# schemas to 21.2k. --title on the command line (opencode_run_args) saves a
+# whole second request per run that would only name the session.
+opencode_config_json() {
+  have jq || return 1
+  jq -nc --arg m "${1:?}" --arg u "${2:?}" --argjson ctx "${3:-32768}" --argjson out "${4:-4096}" \
+         --argjson steps "${5:-100}" '{
+    "$schema": "https://opencode.ai/config.json",
+    autoupdate: false, share: "disabled", snapshot: false, lsp: false, formatter: false,
+    provider: {lca: {npm: "@ai-sdk/openai-compatible", name: "local Ollama",
+      options: {baseURL: $u, apiKey: "local-llm", timeout: 3600000},
+      models: {($m): {name: $m, tool_call: true, limit: {context: $ctx, output: $out}}}}},
+    model: ("lca/" + $m),
+    agent: {build: {steps: $steps}},
+    tools: {task: false, skill: false, todowrite: false},
+    permission: {edit: "allow", bash: "allow", webfetch: "deny", external_directory: "deny",
+                 task: "deny", skill: "deny", todowrite: "deny"}
+  }'
+}
+
+# opencode_final_text — stdin: one run's '--format json' events. The text of
+# the last text part: what the agent said last.
+opencode_final_text() {
+  have jq || return 1
+  jq -Rrn '[inputs | fromjson? | select(.type? == "text") | .part.text? // empty] | last // empty' 2>/dev/null
+}
+
+# Read line by line, each parsed on its own: one line that is not JSON (a
+# notice printed on stdout) must not cost the whole run's answer.
+#
+# opencode_session_id — stdin: the same events. The session they belong to,
+# which is what a reply continues.
+opencode_session_id() {
+  have jq || return 1
+  jq -Rrn '[inputs | fromjson? | .sessionID? // empty] | first // empty' 2>/dev/null
+}
+
+# opencode_usage — stdin: the same events. "REQUESTS FIRST_INPUT INPUT OUTPUT":
+# one model request per step_finish, the first request's prompt tokens (the
+# overhead a step pays before it has done anything), and the totals.
+opencode_usage() {
+  have jq || return 1
+  jq -Rrn '[inputs | fromjson? | select(.type? == "step_finish") | .part.tokens? // empty]
+          | "\(length) \(.[0].input // 0) \(map(.input // 0) | add // 0) \(map(.output // 0) | add // 0)"' 2>/dev/null
+}
+
+# ollama_journal_usage — stdin: Ollama's journal over some window. Prints
+# "REQUESTS FIRST_PROMPT PROMPT PROCESSED GENERATED": requests started, the
+# first one's prompt in tokens, all prompts, the prompt tokens actually read
+# (the rest came from the cache) and the tokens written.
+#
+# Read from the server, not from either agent, so OpenHands and OpenCode are
+# counted by the same meter. The lines are llama-server's, as Ollama 0.34
+# logs them:
+#   slot   operator(): id  0 | task 16087 | new prompt, n_ctx_slot = 32768, n_keep = 4, task.n_tokens = 14235
+#   slot print_timing: id  0 | task 16078 | prompt eval time =   6123.40 ms /   361 tokens (...)
+#   slot print_timing: id  0 | task 16078 |        eval time =   3875.98 ms /     8 tokens (...)
+ollama_journal_usage() {
+  awk '
+    /new prompt, .*task\.n_tokens = [0-9]+/ {
+      n = $0; sub(/.*task\.n_tokens = /, "", n); n += 0
+      req++; if (req == 1) first = n; prompt += n
+    }
+    /prompt eval time = .* tokens/ { t = $0; sub(/ tokens.*/, "", t); sub(/.*\/ */, "", t); processed += t }
+    /[^t] eval time = .* tokens/ && !/prompt eval time/ { t = $0; sub(/ tokens.*/, "", t); sub(/.*\/ */, "", t); generated += t }
+    END { printf "%d %d %d %d %d\n", req, first, prompt, processed, generated }
+  '
+}
+
+# project_verify_runs_tests VERIFY — true when the step's check runs a test
+# suite, which is when writing its tests first means anything. A step checked
+# by "the server answers" or "the file exists" has no tests to write first.
+project_verify_runs_tests() {
+  grep -qE '(^|[^[:alnum:]_-])(unittest|pytest|manage\.py test|npm (run )?test|node --test|jest|vitest|artisan test|go test|cargo test|make (test|check)|phpunit|rspec)([^[:alnum:]_-]|$)' <<<"${1:-}"
+}
+
+# project_tests_task SANDBOX_DIR N TOTAL TITLE VERIFY SUMMARY PLAN DECISIONS —
+# the task for the conversation that writes step N's tests, before the step.
+project_tests_task() {
+  local d="$1" n="$2" total="$3" title="$4" verify="$5" summary="$6" plan="$7" decisions="$8"
+  [[ -n "${d}" && -n "${n}" && -n "${title}" ]] || return 1
+  printf 'PROJECT MODE: the TESTS for step %s of %s, before the step exists: %s\n\n' "${n}" "${total}" "${title}"
+  printf 'Project directory: %s. It is a git repository: do not run git, the runner commits.\n\n' "${d}"
+  printf 'The spec (summarised when it is long):\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
+    "$(project_clip "${summary}" 1500)" "$(project_clip "${plan}" 2500)" "$(project_clip "${decisions}" 1500)"
+  printf 'Write ONLY the tests for step %s. Do not implement the step and do not write stubs of the code under test: another conversation implements it afterwards and has to make your tests pass without changing them.\n' "${n}"
+  printf 'The tests check what the spec and the step title state, including return values, error cases, exit codes and which stream (stdout or stderr) a message goes to. They must be found and run by:\n  %s\n' "${verify}"
+  printf 'Run that command once: it is EXPECTED to fail now, because the step is not implemented yet. A failure that is only the missing code is right; fix any error in the tests themselves.\n\n'
+  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: TESTS DONE"
+}
+
+# project_review_payload MODEL SUMMARY TITLE DIFF — the /api/chat body for the
+# review of one accepted step: bugs and security, nothing else, in a form
+# project_review_findings can read. One request, not a conversation: on a CPU
+# a conversation costs the agent's whole prompt again.
+project_review_payload() {
+  have jq || return 1
+  jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg d "$(project_clip_head "$4" 14000)" '{
+    model: $m, stream: false, options: {temperature: 0},
+    messages: [
+      {role: "system", content: "You review one change to a project for BUGS and SECURITY problems only: wrong results, crashes, unhandled errors, injection (SQL, shell, HTML/XSS, template), missing escaping, missing authentication or authorization checks, secrets in code, unsafe file paths. Ignore style, naming and missing features. Report each problem on ONE line, exactly:\nFINDING <high|medium|low> <bug|security> <file:line> - <what is wrong, and the fix>\nhigh means wrong results, a crash in normal use, or an exploitable hole. If there is nothing to report, reply with exactly: NO FINDINGS"},
+      {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe change (git diff):\n" + $d)}
+    ]}'
+}
+
+# project_review_findings — stdin: the reviewer's reply. One line per finding,
+# SEVERITY<TAB>KIND<TAB>WHERE<TAB>TEXT; nothing for NO FINDINGS or for a reply
+# with no line in the form.
+project_review_findings() {
+  sed -E 's/\*\*//g; s/`//g' | awk '
+    {
+      # Matched on a lowercased copy, cut from the original: tolower keeps
+      # every offset, and a model writes "High" or "Security" as often as not.
+      l = tolower($0)
+      if (!match(l, /finding[[:space:]:]+(high|medium|low)[[:space:]]+(bug|security)[[:space:]]+[^[:space:]]+/)) next
+      s = substr($0, RSTART, RLENGTH); rest = substr($0, RSTART + RLENGTH)
+      sub(/^[A-Za-z]+[[:space:]:]+/, "", s)
+      split(s, w, /[[:space:]]+/)
+      where = w[3]; sub(/:+$/, "", where); gsub(/\t/, " ", where)
+      sub(/^[[:space:]]*([-:]|—|–)*[[:space:]]*/, "", rest); gsub(/\t/, " ", rest)
+      printf "%s\t%s\t%s\t%s\n", tolower(w[1]), tolower(w[2]), where, rest
+    }'
+}
+
+# project_review_must_fix — stdin: findings as project_review_findings prints
+# them. The ones a step does not stay without: every high, and a security
+# finding of medium. The rest are written down and left.
+project_review_must_fix() {
+  awk -F'\t' '$1 == "high" || ($1 == "medium" && $2 == "security")'
+}
+
+# project_reviewer_model — who reviews: the agent's own model, by the name the
+# agent loads it under, so a review shares its runner and loads nothing.
+project_reviewer_model() {
+  printf '%s' "${AGENT_PROJECT_REVIEWER:-$(agent_model_name)}"
+}
+
+# project_fix_task SANDBOX_DIR N TITLE VERIFY FINDINGS — the task that fixes
+# what the review found that must be fixed.
+project_fix_task() {
+  local d="$1" n="$2" title="$3" verify="$4" findings="$5"
+  [[ -n "${d}" && -n "${n}" && -n "${findings}" ]] || return 1
+  printf 'PROJECT MODE: fix what the review of step %s found: %s\n\n' "${n}" "${title}"
+  printf 'Project directory: %s. It is a git repository: do not run git, the runner commits.\n\n' "${d}"
+  printf 'The review found (severity, kind, where, what):\n%s\n\n' "$(project_clip "${findings}" 3000)"
+  printf 'Fix each one in the code, and add a test for it where one can be written. Then run, in %s:\n  %s\nand make it pass. Do not weaken or delete existing tests.\n\n' "${d}" "${verify}"
+  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "End your final message with: STEP DONE"
+}
+
+# project_base_decision DECISIONS_FILE — "CHOICE<TAB>LICENSE" from the
+# planner's "## Base project" section, or rc 1 when there is none. Bold and
+# a missing list dash are forgiven: a refused plan costs a whole planning run.
+project_base_decision() {
+  [[ -r "${1:-}" ]] || return 1
+  awk '
+    { gsub(/\*\*/, ""); k = tolower($0) }
+    k ~ /^##[[:space:]]+base project/ { inside = 1; found = 1; next }
+    /^##[[:space:]]/ { inside = 0 }
+    inside && k ~ /^[[:space:]]*([-*][[:space:]]*)?choice[[:space:]]*:/  { c = $0; sub(/^[^:]*:[[:space:]]*/, "", c) }
+    inside && k ~ /^[[:space:]]*([-*][[:space:]]*)?license[[:space:]]*:/ { l = $0; sub(/^[^:]*:[[:space:]]*/, "", l) }
+    END { if (!found) exit 1; gsub(/\t/, " ", c); gsub(/\t/, " ", l); sub(/[[:space:]]+$/, "", c); printf "%s\t%s\n", c, l }
+  ' "$1"
+}
+
+# project_license_class LICENSE — permissive | weak | gpl | agpl | none |
+# unknown, from an SPDX id or the way a README names one.
+#
+# Whole words, not substrings: "permitted" contains MIT and "example" MPL,
+# and npm's UNLICENSED means proprietary, the opposite of the Unlicense.
+# Anything that also says proprietary or commercial is unknown.
+project_license_class() {
+  local l w t cls=""
+  l="$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]' | tr -d '`*')"
+  l="${l#"${l%%[![:space:]]*}"}"; l="${l%"${l##*[![:space:]]}"}"
+  case "${l}" in ''|N/A|NA|NONE|-) printf 'none'; return 0 ;; esac
+  t=" $(tr -cs 'A-Z0-9.+-' ' ' <<<"${l}") "
+  case "${t}" in *' UNLICENSED '*|*' PROPRIETARY '*|*' COMMERCIAL '*) printf 'unknown'; return 0 ;; esac
+  for w in ${t}; do
+    case "${w}" in
+      AGPL*|AFFERO) cls=agpl; break ;;
+      LGPL*|LESSER|MPL*|MOZILLA|EPL*|ECLIPSE) cls=weak ;;
+      GPL*) [[ "${cls}" == weak ]] || cls=gpl ;;
+      MIT|MIT-*|BSD|BSD-*|0BSD|APACHE|APACHE-*|ISC|ZLIB|UNLICENSE|POSTGRESQL|PSF*|PYTHON-*|X11)
+        [[ -n "${cls}" ]] || cls=permissive ;;
+    esac
+  done
+  if [[ -z "${cls}" && "${t}" == *' GENERAL PUBLIC '* ]]; then cls=gpl; fi
+  printf '%s' "${cls:-unknown}"
+}
+
+# project_license_note CLASS — the line DECISIONS.md gets under the choice,
+# so the condition of using it is written down where the choice is.
+project_license_note() {
+  case "${1:-}" in
+    permissive) printf 'Permissive license: it may be used, changed and redistributed; keep its copyright notice.' ;;
+    weak)       printf 'Weak copyleft: changes to its own files must stay under its license when distributed; our own code may use any license.' ;;
+    gpl)        printf 'GPL: fine for internal use; distributing it, changed or not, obliges releasing the source under the GPL.' ;;
+    agpl)       printf 'AGPL: acceptable for INTERNAL USE ONLY. Letting anyone outside the company use it over a network obliges publishing the modified source under the AGPL.' ;;
+    none)       printf 'No base project: everything is written for this project.' ;;
+    *)          return 1 ;;
+  esac
+}
+
+# project_base_is_none CHOICE — true when the planner chose no base project.
+project_base_is_none() {
+  case "${1,,}" in none*|n/a|na|-) return 0 ;; *) return 1 ;; esac
+}
+
+# project_base_problem DECISIONS_FILE — why the planner's base-project
+# decision cannot stand, or rc 1 when it can.
+project_base_problem() {
+  local d choice license class
+  # shellcheck disable=SC2016  # Markdown, not an expansion
+  d="$(project_base_decision "${1:-}")" || { printf 'DECISIONS.md has no "## Base project" section with "- Choice:" and "- License:" lines'; return 0; }
+  choice="${d%%$'\t'*}" license="${d#*$'\t'}"
+  [[ -n "${choice//[[:space:]]/}" ]] || { printf 'the base project decision has no "- Choice:" (write "- Choice: none" when nothing fits)'; return 0; }
+  if project_base_is_none "${choice}"; then return 1; fi
+  class="$(project_license_class "${license}")"
+  case "${class}" in
+    none|unknown)
+      printf 'the base project "%s" has no recognisable open-source license ("%s"); give its SPDX id, e.g. MIT or AGPL-3.0' "${choice}" "${license}"
+      return 0 ;;
+  esac
+  return 1
 }
 
 # --- what the docs promise, against what is actually listening ---------------

@@ -583,6 +583,7 @@ ran past the 1800-second `AGENT_REQUEST_TIMEOUT`, so raise that with it.
 
 ```bash
 lca agent project ~/specs/myapp.md --dir ~/projects/myapp --autonomy answerer
+lca agent project ~/specs/myapp.md --dir ~/projects/myapp2 --engine opencode
 lca agent watch --live                        # follows each step's conversation
 lca agent project --dir ~/projects/myapp --status
 ```
@@ -590,10 +591,18 @@ lca agent project --dir ~/projects/myapp --status
 It builds a project from one spec file with nobody at the keyboard.
 
 1. **Planning.** The agent reads the spec (copied to `.lca-project/spec.md`)
-   and writes `PLAN.md`: a numbered checklist of small steps, each with a
-   `Verify:` command that exits 0 only when the step works. It also writes a
-   short summary of the spec and an empty `DECISIONS.md`. A plan with a step
-   nothing can verify, or with misnumbered steps, is sent back.
+   and first decides whether to **build on an existing project**: if a mature
+   open-source project already does most of what the spec asks, and runs
+   where the steps run (no root, no system services, SQLite, every dependency
+   inside the project), the plan installs and customises it. The choice goes
+   into `DECISIONS.md` under `## Base project` (`Choice:`, `License:`,
+   `Why:`), and the runner writes under it what the license means: permissive
+   is free to use, GPL is fine internally, **AGPL is for internal use only**.
+   A plan naming a base project without a recognisable open-source license is
+   sent back. Then it writes `PLAN.md`: a numbered checklist of small steps,
+   each with a `Verify:` command that exits 0 only when the step works, and a
+   short summary of the spec. A plan with a step nothing can verify, or with
+   misnumbered steps, is sent back.
 2. **Execution.** Each unticked step runs as its own fresh conversation through
    `lca agent task`, with the directory named. The task text carries the spec
    (verbatim up to 3000 characters, its summary beyond that), `PLAN.md`,
@@ -607,6 +616,51 @@ It builds a project from one spec file with nobody at the keyboard.
    committed. Fail: the step is retried with the failure output in hand,
    `AGENT_PROJECT_RETRIES` (2) times. Then the run **stops** instead of
    building on a broken base.
+
+### The quality loop, sized for a CPU
+
+On this hardware every conversation costs minutes before its first word, so
+the loop spends conversations only where they buy something:
+
+| | what | costs |
+|---|---|---|
+| **tests first** | before a step, a conversation of its own writes the step's tests, which should fail (the step does not exist yet); they are committed as `Step N tests: …` | one conversation, only for steps whose `Verify:` runs a test suite |
+| **one attempt** | the step is implemented against those tests; it may not change them (they are put back before verifying), except on its last attempt, when it may correct a test that contradicts the spec and must say so | one conversation |
+| **retry on red only** | a retry happens only when the tests fail, with their output, at most `AGENT_PROJECT_RETRIES` (2) times. A turn that ends badly (a timeout, the step cap) is not a retry by itself: the tests run on what it left | one conversation per retry |
+| **review** | every accepted step's diff (tests included; lockfiles and minified files left out; each file at most 3,500 characters, our code before its tests) goes to the agent's model, as one request, for bugs and security only. Findings go to `REVIEW.md`. High ones, and security ones of medium, get one fix conversation, kept only if the step's check still passes; otherwise discarded and left open. Only then is the step ticked in `PLAN.md` (`Step N done`); a restart in the middle of a review reviews the step again from its accepted commit | one request, plus one conversation when something must be fixed |
+| **fresh context** | every phase above is a new conversation; nothing carries over but the files, `PLAN.md`, `DECISIONS.md` and the spec | |
+
+The tests are protected against HEAD, not against the commit that wrote them:
+if a step stops on a test that is wrong, correct it, **commit it**, and
+`--resume`; an uncommitted correction is put back like any other change.
+
+The loop has no off switch: tests-first already applies only where a step's
+check runs a test suite, and the review is one request. What each phase cost, in seconds and in tokens read
+and written, is in `.lca-project/metrics.tsv`, counted from Ollama's own
+journal (readable by members of `adm` or `systemd-journal`; otherwise the
+token columns are 0) so both engines are measured by the same meter.
+
+### Two engines: OpenHands and OpenCode
+
+`--engine` (or `AGENT_PROJECT_ENGINE`) picks who does the work; everything
+around it is the same code.
+
+- **`openhands`** (default): a conversation in the agent app, a sandbox per
+  conversation, as above. It works with text-format tool calls, so it runs
+  qwen2.5-coder too.
+- **`opencode`**: [OpenCode](https://github.com/anomalyco/opencode) (MIT),
+  `opencode run --format json`, in a throwaway container per turn: the
+  agent's own runtime image plus the pinned OpenCode release (the "baseline"
+  build: the regular one needs AVX2), checked against its sha256 and built
+  locally the first time it is needed. It runs as you with the sandbox group,
+  sees only the project directory, and talks to the same model through the
+  same relay. Its whole configuration is passed in the environment: the local
+  model and no other provider, no update check, no model catalogue, no
+  language-server downloads, no sharing, the web tools denied, every other
+  permission decided so a run never waits. Its subagent, skill and to-do
+  tools are off, which takes its first request from 29.1k characters to
+  21.2k. A question is answered in the same session by the next run. It calls
+  tools natively only, so it needs a model whose native tool calls work.
 
 ### When the agent asks instead of finishing
 

@@ -4,11 +4,20 @@
 #   lca agent project SPEC --dir DIR [--autonomy ask|self|answerer]
 #
 # The agent plans the project into PLAN.md, a numbered checklist where every
-# step names the command that proves it. Then each step runs as its own fresh
-# conversation (through scripts/agent-task.sh, with the directory named), is
-# verified by running that command, and is committed only when it passes. A
-# step that fails is retried with the failure in hand, AGENT_PROJECT_RETRIES
-# times, and then the run STOPS rather than building on a broken base.
+# step names the command that proves it, after deciding whether a mature
+# open-source project should be the base (DECISIONS.md, with its license).
+# Then, for each step, as fresh conversations of their own: its tests are
+# written first and committed; the step is implemented and verified by that
+# command, and committed only when it passes; and the accepted change is
+# reviewed for bugs and security. A step whose tests fail is retried with
+# their output, AGENT_PROJECT_RETRIES times, and then the run STOPS rather
+# than building on a broken base.
+#
+# Two engines do the work (AGENT_PROJECT_ENGINE, or --engine): openhands, a
+# conversation in the app (through scripts/agent-task.sh, with the directory
+# named), and opencode, 'opencode run' in a throwaway container. Everything
+# around them (the plan, verification, commits, questions, the stops) is the
+# same code for both, so the two can be compared on the same spec.
 #
 # Unattended, and the pieces that make that safe are deliberate:
 #
@@ -44,13 +53,16 @@ PROJECT_MAX_QUESTIONS=3
 
 usage() {
   cat <<EOF
-Usage: lca agent project SPEC --dir DIR [--autonomy ask|self|answerer] [--foreground]
+Usage: lca agent project SPEC --dir DIR [--autonomy ask|self|answerer]
+                                [--engine openhands|opencode] [--foreground]
        lca agent project --dir DIR --status | --stop | --resume [--answer "text"]
 
 Builds a project from one spec file with no input from you: the agent writes
-PLAN.md (small steps, each with a command that proves it), then each step runs
-as its own conversation, is verified, and is committed when it passes. A step
-that fails ${AGENT_PROJECT_RETRIES} retries stops the run instead of building on it.
+PLAN.md (small steps, each with a command that proves it), choosing a mature
+open-source base project when one fits. Then, for each step: its tests are
+written first, the step is implemented and verified and committed when it
+passes, and the change is reviewed for bugs and security. A step that fails
+${AGENT_PROJECT_RETRIES} retries stops the run instead of building on it.
 
   --dir DIR         the project directory; must be under AGENT_PROJECTS_DIR
                     (now: ${AGENT_PROJECTS_DIR:-unset — project mode is off})
@@ -61,6 +73,10 @@ that fails ${AGENT_PROJECT_RETRIES} retries stops the run instead of building on
                                 and the answer is logged in DECISIONS.md
                     In every mode it stops for credentials, anything outside
                     DIR, and deleting data.
+  --engine ENGINE   who does the work (default: ${AGENT_PROJECT_ENGINE}):
+                    - openhands  the agent app, a sandbox per conversation
+                    - opencode   OpenCode ${AGENT_OPENCODE_VERSION}, a container per turn
+                                 (needs a model whose native tool calls work)
   --foreground      run here instead of under systemd
   --status          where it is: the plan, the state, the last log lines
   --stop            stop it and stop it resuming at boot
@@ -122,9 +138,13 @@ ensure_repo() {
     git_here init -q
     say "git: initialised ${DIR}"
   fi
-  # The runner's own state is not the project's history.
-  grep -qxF '.lca-project/' "${DIR}/.git/info/exclude" 2>/dev/null \
-    || printf '.lca-project/\n' >> "${DIR}/.git/info/exclude"
+  # The runner's own state is not the project's history, and neither are the
+  # dependencies a step installs into the project, nor what running it leaves.
+  local x
+  for x in .lca-project/ .venv/ venv/ node_modules/ __pycache__/ '*.pyc' .pytest_cache/; do
+    grep -qxF -- "${x}" "${DIR}/.git/info/exclude" 2>/dev/null \
+      || printf '%s\n' "${x}" >> "${DIR}/.git/info/exclude"
+  done
   git_here config user.name >/dev/null 2>&1 || git_here config user.name "lca project mode"
   git_here config user.email >/dev/null 2>&1 || git_here config user.email "lca-project@localhost"
 }
@@ -300,17 +320,59 @@ record_decision() {   # HEADING QUESTION ANSWER
 # STATUS waiting: a person has to answer or decide. failed: a step could not be
 # made to pass. Both exit 0, so systemd does not restart into the same wall.
 stop_for_human() {   # STATUS REASON
+  # A turn that is stopped mid-conversation leaves its sandbox or container
+  # behind unless whoever started it said how to take it down.
+  if [[ -n "${TURN_CLEANUP:-}" ]]; then ${TURN_CLEANUP} || true; TURN_CLEANUP=""; fi
   state_set STATUS "$1" REASON "$2"
   say "STOPPED ($1): $2"
   write_summary
   exit 0
 }
 
-# handle_turn CID WHAT — run the conversation to an end, answering questions
-# the way the autonomy mode says. Returns 0 with the agent's last word in
-# LAST_TEXT, or 1 with the reason in TURN_FAIL for a stopped/broken run.
+# answer_question WHAT ASKED — the agent's last word (LAST_TEXT) is a
+# question, the ASKED-th of this attempt: answer it the way the autonomy mode
+# says. Sets REPLY; rc 1 with TURN_FAIL when the attempt should be abandoned;
+# exits through stop_for_human when a person has to answer.
+answer_question() {
+  local what="$1" asked="$2" hs ans
+  if hs="$(project_hard_stop "${LAST_TEXT}")"; then
+    stop_for_human waiting "${what}: the agent asked something only you may decide (${hs}): $(project_clip "${LAST_TEXT}" 600)"
+  fi
+  (( asked <= PROJECT_MAX_QUESTIONS )) \
+    || { TURN_FAIL="the agent asked ${asked} questions in one attempt without finishing"; return 1; }
+  case "${AUTONOMY}" in
+    "ask")
+      state_set QUESTION "$(project_clip "${LAST_TEXT}" 2000)"
+      stop_for_human waiting "${what}: the agent asked: $(project_clip "${LAST_TEXT}" 600)  — answer with: lca agent project --dir ${DIR} --resume --answer \"...\""
+      ;;
+    "self")
+      REPLY="${PROJECT_SELF_REPLY}"
+      say "${what}: answered in self mode: ${REPLY}"
+      ;;
+    "answerer")
+      say "${what}: asking $(project_answerer_model) as project lead"
+      if ! ans="$(ask_answerer "${LAST_TEXT}")"; then
+        stop_for_human waiting "${what}: the answerer $(project_answerer_model) did not answer. The question: $(project_clip "${LAST_TEXT}" 600)"
+      fi
+      say "${what}: the project lead replied: $(project_clip "${ans}" 600)"
+      if project_answer_escalates "${ans}" || hs="$(project_hard_stop "${ans}")"; then
+        stop_for_human waiting "${what}: the answerer escalated (${hs:-ESCALATE}). The question: $(project_clip "${LAST_TEXT}" 600)"
+      fi
+      record_decision "${what}: answered by $(project_answerer_model) as project lead" \
+        "$(project_clip "${LAST_TEXT}" 1500)" "${ans}"
+      say "${what}: answer recorded in DECISIONS.md"
+      REPLY="Project lead's answer: ${ans}
+
+This decision is recorded in DECISIONS.md. Continue, and end your final message with STEP DONE (TESTS DONE when writing tests, PLAN DONE when planning)."
+      ;;
+  esac
+}
+
+# handle_turn CID WHAT — run an OpenHands conversation to an end, answering
+# questions the way the autonomy mode says. Returns 0 with the agent's last
+# word in LAST_TEXT, or 1 with the reason in TURN_FAIL for a stopped/broken run.
 handle_turn() {
-  local cid="$1" what="$2" how kind hs reply asked=0 ans
+  local cid="$1" what="$2" how kind asked=0
   while :; do
     how="$(wait_turn "${cid}")"
     case "${how}" in
@@ -325,44 +387,10 @@ handle_turn() {
     say "${what}: the agent's turn ended (${kind})"
     [[ "${kind}" == "question" ]] || return 0
     asked=$(( asked + 1 ))
-    if hs="$(project_hard_stop "${LAST_TEXT}")"; then
-      delete_sandbox "${cid}"
-      stop_for_human waiting "${what}: the agent asked something only you may decide (${hs}): $(project_clip "${LAST_TEXT}" 600)"
-    fi
-    (( asked <= PROJECT_MAX_QUESTIONS )) \
-      || { TURN_FAIL="the agent asked ${asked} questions in one attempt without finishing"; return 1; }
-    case "${AUTONOMY}" in
-      "ask")
-        delete_sandbox "${cid}"
-        state_set QUESTION "$(project_clip "${LAST_TEXT}" 2000)"
-        stop_for_human waiting "${what}: the agent asked: $(project_clip "${LAST_TEXT}" 600)  — answer with: lca agent project --dir ${DIR} --resume --answer \"...\""
-        ;;
-      "self")
-        reply="${PROJECT_SELF_REPLY}"
-        say "${what}: answered in self mode: ${reply}"
-        ;;
-      "answerer")
-        say "${what}: asking $(project_answerer_model) as project lead"
-        if ! ans="$(ask_answerer "${LAST_TEXT}")"; then
-          delete_sandbox "${cid}"
-          stop_for_human waiting "${what}: the answerer $(project_answerer_model) did not answer. The question: $(project_clip "${LAST_TEXT}" 600)"
-        fi
-        say "${what}: the project lead replied: $(project_clip "${ans}" 600)"
-        if project_answer_escalates "${ans}" || hs="$(project_hard_stop "${ans}")"; then
-          delete_sandbox "${cid}"
-          stop_for_human waiting "${what}: the answerer escalated (${hs:-ESCALATE}). The question: $(project_clip "${LAST_TEXT}" 600)"
-        fi
-        record_decision "${what}: answered by $(project_answerer_model) as project lead" \
-          "$(project_clip "${LAST_TEXT}" 1500)" "${ans}"
-        say "${what}: answer recorded in DECISIONS.md"
-        reply="Project lead's answer: ${ans}
-
-This decision is recorded in DECISIONS.md. Continue, and end your final message with STEP DONE (or PLAN DONE when planning)."
-        ;;
-    esac
+    answer_question "${what}" "${asked}" || return 1
     local before_steps waited=0
     before_steps="$(agent_event_steps "${cid}" 2>/dev/null || printf 0)"
-    send_reply "${cid}" "${reply}" \
+    send_reply "${cid}" "${REPLY}" \
       || { TURN_FAIL="could not deliver the answer to the conversation"; return 1; }
     # The status still says "finished" for a moment after the reply lands, and
     # waiting on it then would read the SAME question back and answer it again.
@@ -373,6 +401,128 @@ This decision is recorded in DECISIONS.md. Continue, and end your final message 
       sleep 5; waited=$(( waited + 5 ))
     done
   done
+}
+
+# oh_turn TASK WHAT — one OpenHands conversation, start to end, sandbox removed.
+oh_turn() {
+  submit "$1" || { say "the agent would not take ${2} (see run.log); retrying later"; exit 75; }
+  TURN_CLEANUP="delete_sandbox ${CID}"
+  if handle_turn "${CID}" "$2"; then
+    delete_sandbox "${CID}"; TURN_CLEANUP=""; return 0
+  fi
+  delete_sandbox "${CID}"; TURN_CLEANUP=""
+  return 1
+}
+
+# --- the OpenCode engine: 'opencode run' in a container of its own ---------------
+# The image is built here, as whoever runs this (docker, no sudo), the first
+# time it is needed: the agent's runtime image plus the pinned binary.
+ensure_opencode_image() {
+  docker image inspect "$(opencode_image)" >/dev/null 2>&1 && return 0
+  say "building $(opencode_image) (OpenCode ${AGENT_OPENCODE_VERSION} over $(runtime_image))"
+  opencode_dockerfile "$(runtime_image)" | docker build -q -t "$(opencode_image)" - >/dev/null
+}
+
+# oc_run NAME SESSION TITLE MESSAGE — one 'opencode run' to its end; its JSON
+# events on stdout. The project is mounted at the path the agent sees under
+# OpenHands, and OpenCode's own state (its sessions) lives in .lca-project,
+# so a question can be answered in the same session by the next run. The
+# container carries the project's label, so whatever outlives this runner
+# (a SIGKILL takes the docker client and not the container) is found and
+# removed by the next one (remove_opencode_containers).
+oc_run() {
+  local kv secs="$(( AGENT_TIMEOUT_MINUTES * 60 ))" steps="${AGENT_MAX_ITERATIONS}"
+  local -a envs=() args=(run --format json --title "$3")
+  (( steps > 0 )) || steps=1000
+  while IFS= read -r kv; do envs+=(-e "${kv}"); done < <(opencode_env)
+  [[ -z "$2" ]] || args+=(--session "$2")
+  timeout --kill-after=30 "${secs}" docker run --rm --init --name "$1" --label "lca-project=${DIR}" \
+    --user "$(owner_uid):${PROJECT_SANDBOX_GID}" --add-host host.docker.internal:host-gateway \
+    -e HOME="${SBX}/.lca-project/opencode-home" "${envs[@]}" \
+    -e OPENCODE_CONFIG_CONTENT="$(opencode_config_json "$(agent_model_name)" "$(agent_llm_base_url)" \
+                                  "$(agent_model_context)" "${AGENT_MAX_OUTPUT_TOKENS}" "${steps}")" \
+    -v "${DIR}:${SBX}" -w "${SBX}" "$(opencode_image)" opencode "${args[@]}" "$4"
+}
+
+remove_opencode_containers() {
+  local ids
+  ids="$(docker ps -aq --filter "label=lca-project=${DIR}" 2>/dev/null || true)"
+  # shellcheck disable=SC2086  # container ids: hex, one per word
+  [[ -z "${ids}" ]] || { docker rm -f ${ids} >/dev/null 2>&1 || true; say "removed a leftover OpenCode container"; }
+}
+
+# oc_turn TASK WHAT — the same contract as oh_turn, with OpenCode.
+oc_turn() {
+  local msg="$1" what="$2" session="" out rc kind asked=0 name t0 events
+  mkdir -p "${STATE_DIR}/opencode-home"
+  while :; do
+    out="$(mktemp "${STATE_DIR}/.opencode.XXXXXX")"
+    name="lca-opencode-$$-${RANDOM}"
+    rc=0; t0="$(date +%s)"
+    oc_run "${name}" "${session}" "${what}" "${msg}" > "${out}" 2>> "${STATE_DIR}/opencode.err" || rc=$?
+    cat "${out}" >> "${STATE_DIR}/opencode-events.jsonl"
+    events="$(grep -c '"type"' "${out}" || true)"
+    [[ -n "${session}" ]] || session="$(opencode_session_id < "${out}")"
+    LAST_TEXT="$(opencode_final_text < "${out}")"
+    say "${what}: opencode exited ${rc}; requests, first prompt, prompt and output tokens: $(opencode_usage < "${out}")"
+    rm -f "${out}"
+    if (( rc != 0 && events == 0 )) && [[ -z "${session}" ]]; then
+      # Not one event: docker, the image, the relay or the model never got
+      # going. That is the machine, not the step; like a submit the app would
+      # not take, it is for systemd to try again, not a retry to burn.
+      remove_opencode_containers
+      say "${what}: opencode produced nothing (exit ${rc}; see .lca-project/opencode.err); retrying later"
+      exit 75
+    fi
+    case "${rc}" in
+      0) ;;
+      124|137)
+        docker rm -f "${name}" >/dev/null 2>&1 || true
+        if (( $(date +%s) - t0 >= AGENT_TIMEOUT_MINUTES * 60 && AGENT_TIMEOUT_MINUTES > 0 )); then
+          TURN_FAIL="the step ran past AGENT_TIMEOUT_MINUTES (${AGENT_TIMEOUT_MINUTES}) and was stopped"
+        else
+          TURN_FAIL="opencode was killed (exit ${rc}) before the time limit"
+        fi
+        return 1 ;;
+      *)
+        [[ -n "${LAST_TEXT}" ]] \
+          || { TURN_FAIL="opencode exited ${rc} without a word (see .lca-project/opencode.err)"; return 1; } ;;
+    esac
+    kind="$(project_turn_kind "${LAST_TEXT}")"
+    say "${what}: the agent's turn ended (${kind})"
+    [[ "${kind}" == "question" ]] || return 0
+    asked=$(( asked + 1 ))
+    answer_question "${what}" "${asked}" || return 1
+    [[ -n "${session}" ]] || { TURN_FAIL="opencode asked a question but named no session to answer it in"; return 1; }
+    msg="${REPLY}"
+  done
+}
+
+# run_turn TASK WHAT — one fresh conversation with the engine this project
+# runs on: 0 with LAST_TEXT, or 1 with TURN_FAIL.
+run_turn() {
+  case "${ENGINE}" in
+    opencode) oc_turn "$1" "$2" ;;
+    *)        oh_turn "$1" "$2" ;;
+  esac
+}
+
+# --- what each phase cost: .lca-project/metrics.tsv --------------------------------
+# Seconds from the wall clock; tokens from Ollama's own journal for the same
+# window (ollama_journal_usage), so both engines are counted by one meter.
+PHASE_T0=0
+phase_begin() { PHASE_T0="$(date +%s)"; }
+phase_end() {   # PHASE STEP ATTEMPT OUTCOME
+  local t1 usage="0 0 0 0 0" f="${STATE_DIR}/metrics.tsv" log
+  t1="$(date +%s)"
+  # Wherever this host keeps Ollama's log; only a journal can be read by time.
+  log="$(ollama_log_hint)"
+  if [[ "${log}" == journalctl* ]]; then
+    usage="$(${log} --since "@${PHASE_T0}" --until "@${t1}" --no-pager -o cat 2>/dev/null | ollama_journal_usage)"
+  fi
+  [[ -s "${f}" ]] || printf 'when\tengine\tphase\tstep\tattempt\toutcome\tseconds\trequests\tfirst_prompt\tprompt_tokens\tprompt_read\tgenerated\n' > "${f}"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${ENGINE}" "$1" "$2" "$3" "$4" \
+    "$(( t1 - PHASE_T0 ))" "${usage// /$'\t'}" >> "${f}"
 }
 
 # --- the checks after a step, before anything is committed --------------------
@@ -414,63 +564,187 @@ verify() {
   return "${rc}"
 }
 
-# --- the two phases -------------------------------------------------------------
+# --- the phases ---------------------------------------------------------------------
+# plan_accepted — a plan was accepted earlier in this project. Then it stands
+# as it is: a project started before the base-project rule, or whose
+# DECISIONS.md lost that section since, is not planned again over its own work.
+plan_accepted() {
+  [[ "$(state_get PLAN_ACCEPTED)" == "1" ]] && return 0
+  [[ -n "$(git_here log -1 --format=%H -F --grep='Plan: ' 2>/dev/null || true)" ]]
+}
+
 plan_phase() {
   local attempt problem failure=""
-  [[ -f "${DIR}/PLAN.md" ]] && ! problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")" && return 0
+  if [[ -f "${DIR}/PLAN.md" ]] && ! project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md" >/dev/null; then
+    if plan_accepted || ! project_base_problem "${DIR}/DECISIONS.md" >/dev/null; then
+      return 0
+    fi
+  fi
   for (( attempt = 1; attempt <= AGENT_PROJECT_RETRIES + 1; attempt++ )); do
     state_set STATUS planning STEP 0 ATTEMPT "${attempt}"
     say "planning, attempt ${attempt}"
     normalize_perms || true
     local task
     task="$(project_planning_task "${SBX}")"
-    [[ -z "${failure}" ]] || task+=$'\n\n'"The previous plan could not be used: ${failure}. Rewrite PLAN.md in exactly the form above."
-    submit "${task}" || { say "the agent would not take the planning task (see run.log); retrying later"; exit 75; }
-    if ! handle_turn "${CID}" "planning"; then
-      failure="${TURN_FAIL}"; delete_sandbox "${CID}"; continue
+    [[ -z "${failure}" ]] || task+=$'\n\n'"The previous plan could not be used: ${failure}. Rewrite the files in exactly the form above."
+    phase_begin
+    if ! run_turn "${task}" "planning"; then
+      phase_end plan 0 "${attempt}" "turn: ${TURN_FAIL}"
+      failure="${TURN_FAIL}"; continue
     fi
-    delete_sandbox "${CID}"
     normalize_perms || true
-    if problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")"; then
+    if problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")" \
+       || problem="$(project_base_problem "${DIR}/DECISIONS.md")"; then
+      phase_end plan 0 "${attempt}" "refused"
       failure="${problem}"
       say "the plan is not usable: ${problem}"
       continue
     fi
-    [[ -f "${DIR}/DECISIONS.md" ]] || printf '# Decisions\n' > "${DIR}/DECISIONS.md"
+    phase_end plan 0 "${attempt}" "accepted"
+    note_base_project
     commit_all "Plan: $(project_plan_steps "${DIR}/PLAN.md" | wc -l | tr -d ' ') steps"
+    state_set PLAN_ACCEPTED 1
     return 0
   done
   stop_for_human failed "planning failed $(( AGENT_PROJECT_RETRIES + 1 )) times; last: ${failure}"
 }
 
+# note_base_project — the planner's choice of base project, logged, with the
+# condition its license puts on using it written under it in DECISIONS.md.
+note_base_project() {
+  local d choice license class note
+  d="$(project_base_decision "${DIR}/DECISIONS.md")" || return 0
+  choice="${d%%$'\t'*}" license="${d#*$'\t'}"
+  if project_base_is_none "${choice}"; then class=none; else class="$(project_license_class "${license}")"; fi
+  note="$(project_license_note "${class}")" || return 0
+  say "base project: ${choice} (license: ${license:-n/a}, ${class})"
+  grep -qF -- "- Note: ${note}" "${DIR}/DECISIONS.md" 2>/dev/null && return 0
+  awk -v note="- Note: ${note}" '
+    { print; k = tolower($0); gsub(/\*\*/, "", k) }
+    k ~ /^##[[:space:]]+base project/ { inside = 1; next }
+    inside && k ~ /^[[:space:]]*([-*][[:space:]]*)?license[[:space:]]*:/ { print note; inside = 0 }
+  ' "${DIR}/DECISIONS.md" > "${STATE_DIR}/.decisions" && cat "${STATE_DIR}/.decisions" > "${DIR}/DECISIONS.md"
+  rm -f "${STATE_DIR}/.decisions"
+}
+
+# head_or_empty — HEAD, or git's empty tree when there is no commit yet: a
+# diff base that always exists.
+head_or_empty() {
+  git_here rev-parse -q --verify HEAD 2>/dev/null || git_here hash-object -t tree /dev/null
+}
+
+# tests_phase N TOTAL TITLE VERIFY — a step's tests, written and committed
+# before the step itself, by a conversation of their own. Sets TESTS_COMMIT
+# and TEST_FILES (the test files that commit holds, one a line) and TEST_LIST
+# (the same on one line, for the prompt); all empty when the step's check
+# runs no test suite. The commit is remembered in the
+# state, so a resumed run does not write them again.
+tests_phase() {
+  local n="$1" total="$2" title="$3" check="$4" c="" before
+  TEST_FILES="" TEST_LIST="" TESTS_COMMIT=""
+  if ! project_verify_runs_tests "${check}"; then
+    say "step ${n}: its check runs no test suite, so no tests are written first"
+    return 0
+  fi
+  if [[ "$(state_get TESTS_STEP)" == "${n}" ]]; then
+    c="$(state_get TESTS_COMMIT)"
+    git_here cat-file -e "${c}^{commit}" 2>/dev/null || c=""
+  fi
+  if [[ -z "${c}" ]]; then
+    state_set STATUS running STEP "${n}" ATTEMPT 0 TITLE "${title}"
+    say "step ${n}/${total}: writing its tests first"
+    normalize_perms || true
+    touch "${STATE_DIR}/step-start"
+    phase_begin
+    run_turn "$(project_tests_task "${SBX}" "${n}" "${total}" "${title}" "${check}" \
+                "$(summary_text)" "$(plan_text)" "$(decisions_text)")" "step ${n} tests" \
+      || say "step ${n} tests: ${TURN_FAIL}; keeping what was written"
+    normalize_perms || true
+    after_step_checks || stop_for_human waiting "step ${n} tests: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
+    if verify "${check}"; then
+      phase_end tests "${n}" 1 "already-pass"
+      say "step ${n}: its tests already pass before the step is written, so they may not test it (the review sees this)"
+    else
+      phase_end tests "${n}" 1 "red"
+      say "step ${n}: the new tests fail before the step is written, as they should"
+    fi
+    printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-tests.log"
+    before="$(head_or_empty)"
+    commit_all "Step ${n} tests: ${title}"
+    c="$(git_here rev-parse -q --verify HEAD 2>/dev/null || true)"
+    [[ "${c}" != "${before}" ]] || c=""
+    state_set TESTS_STEP "${n}" TESTS_COMMIT "${c}"
+  fi
+  [[ -n "${c}" ]] || { say "step ${n}: no tests were written"; return 0; }
+  TESTS_COMMIT="${c}"
+  TEST_FILES="$(git_here -c core.quotePath=false diff-tree --no-commit-id --name-only --diff-filter=AM -r "${c}" \
+                | grep -E '(^|/)(tests?/|spec/|test_[^/]*$|tests\.py$|[^/]*_(test|spec)\.[[:alnum:]]+$|[^/]*\.(test|spec)\.[[:alnum:]]+$)' || true)"
+  TEST_LIST="$(tr '\n' ' ' <<<"${TEST_FILES}" | sed 's/ *$//')"
+}
+
+# restore_tests — the step may not change the tests written for it: put back
+# any it changed or deleted, as HEAD has them, and say so. HEAD, not the tests
+# commit: a test a person corrected and committed before resuming stays
+# corrected. Not on the last attempt (see project_step_task).
+restore_tests() {
+  local f changed=""
+  [[ -n "${TESTS_COMMIT}" && -n "${TEST_FILES}" ]] || return 0
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    git_here cat-file -e "HEAD:${f}" 2>/dev/null || continue
+    git_here diff --quiet HEAD -- "${f}" 2>/dev/null && [[ -e "${DIR}/${f}" ]] && continue
+    changed+=" ${f}"
+    git_here checkout HEAD -- "${f}"
+  done <<<"${TEST_FILES}"
+  [[ -z "${changed}" ]] || say "the step changed its tests, which were put back:${changed}"
+}
+
 step_phase() {   # N TOTAL TITLE VERIFY
-  local n="$1" total="$2" title="$3" check="$4" attempt failure="" task
+  local n="$1" total="$2" title="$3" check="$4" attempt failure="" task base last
+  # Where the step began, kept across a restart, so its review sees all of it.
+  if [[ "$(state_get BASE_STEP)" == "${n}" ]] && base="$(state_get BASE)" \
+     && git_here cat-file -e "${base}" 2>/dev/null; then :; else
+    base="$(head_or_empty)"
+    state_set BASE_STEP "${n}" BASE "${base}"
+  fi
+  tests_phase "${n}" "${total}" "${title}" "${check}"
   for (( attempt = 1; attempt <= AGENT_PROJECT_RETRIES + 1; attempt++ )); do
+    # The last attempt may correct a test; with no retries at all there is no
+    # "last" to speak of, and the tests stay protected.
+    last=false; (( AGENT_PROJECT_RETRIES == 0 || attempt <= AGENT_PROJECT_RETRIES )) || last=true
     state_set STATUS running STEP "${n}" ATTEMPT "${attempt}" TITLE "${title}"
     say "step ${n}/${total}: ${title} (attempt ${attempt})"
     normalize_perms || true
     touch "${STATE_DIR}/step-start"
     task="$(project_step_task "${SBX}" "${n}" "${total}" "${title}" "${check}" \
-            "$(summary_text)" "$(plan_text)" "$(decisions_text)" "${failure}")"
-    submit "${task}" || { say "the agent would not take step ${n} (see run.log); retrying later"; exit 75; }
-    if ! handle_turn "${CID}" "step ${n}"; then
-      failure="${TURN_FAIL}"
-      say "step ${n}, attempt ${attempt}: ${failure}"
-      delete_sandbox "${CID}"
-      continue
-    fi
-    delete_sandbox "${CID}"
+            "$(summary_text)" "$(plan_text)" "$(decisions_text)" "${failure}" "${TEST_LIST}" "${last}")"
+    phase_begin
+    # A turn that ends badly (a timeout, a step limit) is not a retry by
+    # itself: the tests decide, and they run on whatever it left.
+    run_turn "${task}" "step ${n}" || say "step ${n}, attempt ${attempt}: ${TURN_FAIL}; verifying what it left"
     normalize_perms || true
+    if [[ "${last}" == "true" ]]; then
+      local -a tf=()
+      [[ -z "${TEST_FILES}" ]] || mapfile -t tf <<<"${TEST_FILES}"
+      (( ${#tf[@]} == 0 )) || git_here diff --quiet HEAD -- "${tf[@]}" \
+        || say "step ${n}: the last attempt changed its tests (allowed once; the review sees it)"
+    else
+      # Before the checks: a test the step deleted is put back, not a stop.
+      restore_tests
+    fi
     if ! after_step_checks; then
+      phase_end step "${n}" "${attempt}" "stopped"
       stop_for_human waiting "step ${n}: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
     fi
     if verify "${check}"; then
+      phase_end step "${n}" "${attempt}" "passed"
       printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-attempt-${attempt}.log"
-      project_plan_mark_done "${DIR}/PLAN.md" "${n}" || say "could not tick step ${n} in PLAN.md"
       commit_all "Step ${n}: ${title}"
       say "step ${n} PASSED: ${check}"
+      review_phase "${n}" "${title}" "${check}" "${base}"
       return 0
     fi
+    phase_end step "${n}" "${attempt}" "failed"
     printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-attempt-${attempt}.log"
     failure="${VERIFY_OUT}"
     say "step ${n}, attempt ${attempt}: verification FAILED (${check}); output in .lca-project/step-${n}-attempt-${attempt}.log"
@@ -478,8 +752,158 @@ step_phase() {   # N TOTAL TITLE VERIFY
   stop_for_human failed "step ${n} (${title}) failed verification $(( AGENT_PROJECT_RETRIES + 1 )) times; last output in .lca-project/step-${n}-attempt-$(( attempt - 1 )).log"
 }
 
+# finish_step N TITLE — tick the step in PLAN.md and commit that, the last
+# thing a step does, after its review: a step is only "done" once reviewed.
+finish_step() {
+  project_plan_mark_done "${DIR}/PLAN.md" "$1" || say "could not tick step $1 in PLAN.md"
+  commit_all "Step $1 done: $2"
+  state_set REVIEW_PENDING "" ACCEPTED ""
+}
+
+# --- the review of every accepted step ----------------------------------------------
+ask_reviewer() {   # TITLE DIFF — the reviewer's reply, or rc 1
+  local reply
+  reply="$(curl -fsS --max-time "${AGENT_REQUEST_TIMEOUT:-3600}" "$(ollama_url)/api/chat" -H 'Content-Type: application/json' \
+            -d "$(project_review_payload "$(project_reviewer_model)" "$(summary_text)" "$1" "$2")" 2>/dev/null \
+           | jq -r '.message.content // empty' 2>/dev/null)" || return 1
+  [[ -n "${reply//[[:space:]]/}" ]] || return 1
+  printf '%s' "${reply}"
+}
+
+# REVIEW_EXCLUDE — what the review does not read: the runner's own files,
+# lockfiles, minified and generated assets, translations' compiled forms.
+REVIEW_EXCLUDE=(':(exclude)PLAN.md' ':(exclude)DECISIONS.md' ':(exclude)REVIEW.md'
+  ':(exclude,glob)**/*.lock' ':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/*.min.*'
+  ':(exclude,glob)**/*.mo' ':(exclude,glob)**/*.svg' ':(exclude,glob)**/*.map')
+
+# review_diff BASE — the step's diff for the reviewer: every file gets at most
+# PER_FILE characters, our files first, so a big install does not crowd out
+# the code that was written; the files that did not fit are named.
+review_diff() {
+  local base="$1" f d out="" left=() per=3500 max=14000
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    d="$(git_here -c core.quotePath=false diff "${base}" HEAD -- "${f}" 2>/dev/null || true)"
+    if (( ${#out} + 200 >= max )); then left+=("${f}"); continue; fi
+    out+="$(project_clip_head "${d}" "${per}")"$'\n'
+  done < <(git_here -c core.quotePath=false diff --name-only "${base}" HEAD -- . "${REVIEW_EXCLUDE[@]}" 2>/dev/null \
+           | awk '{ print (($0 ~ /(^|\/)(tests?|spec)\// || $0 ~ /(^|\/)test_/) ? 1 : 0) "\t" $0 }' \
+           | sort -s -k1,1n | cut -f2-)
+  (( ${#left[@]} == 0 )) || out+="[not shown, over the budget: ${left[*]}]"$'\n'
+  printf '%s' "${out}"
+}
+
+# review_phase N TITLE VERIFY BASE — review everything the step changed since
+# BASE (its tests included) for bugs and security. Every finding goes into
+# REVIEW.md. The ones that must be fixed (project_review_must_fix) get ONE
+# fresh conversation; its fix is kept only if the step's check still passes,
+# and otherwise discarded and the finding left open. The step is ticked done
+# only after this, and a restart in the middle reviews it again from the
+# accepted commit (resume_review).
+review_phase() {
+  local n="$1" title="$2" check="$3" base="$4" diff reply findings must status accepted
+  accepted="$(git_here rev-parse HEAD)"
+  state_set REVIEW_PENDING "${n}" ACCEPTED "${accepted}" REVIEW_TITLE "${title}" REVIEW_CHECK "${check}"
+  diff="$(review_diff "${base}")"
+  if [[ -z "${diff}" ]]; then finish_step "${n}" "${title}"; return 0; fi
+  state_set STATUS running STEP "${n}" ATTEMPT review TITLE "${title}"
+  say "step ${n}: reviewing the change for bugs and security ($(git_here diff --shortstat "${base}" HEAD | sed 's/^ *//'))"
+  phase_begin
+  if ! reply="$(ask_reviewer "${title}" "${diff}")"; then
+    phase_end review "${n}" 1 "no-answer"
+    say "step ${n}: the reviewer $(project_reviewer_model) did not answer; the step stays accepted, unreviewed"
+    review_record "${n}" "${title}" "" "not reviewed: the reviewer did not answer"
+    finish_step "${n}" "${title}"
+    return 0
+  fi
+  findings="$(project_review_findings <<<"${reply}")"
+  must="$(project_review_must_fix <<<"${findings}")"
+  phase_end review "${n}" 1 "$(grep -c . <<<"${findings}" || true) findings, $(grep -c . <<<"${must}" || true) to fix"
+  printf '%s\n' "${reply}" > "${STATE_DIR}/step-${n}-review.txt"
+  say "step ${n}: review: $(grep -c . <<<"${findings}" || true) findings, $(grep -c . <<<"${must}" || true) to fix"
+  status=""
+  if [[ -n "${must}" ]]; then
+    state_set STATUS running STEP "${n}" ATTEMPT fix TITLE "${title}"
+    normalize_perms || true
+    touch "${STATE_DIR}/step-start"
+    phase_begin
+    run_turn "$(project_fix_task "${SBX}" "${n}" "${title}" "${check}" "${must}")" "step ${n} review fixes" \
+      || say "step ${n} review fixes: ${TURN_FAIL}; verifying what it left"
+    normalize_perms || true
+    CHECK_FAIL=""
+    if ! after_step_checks && [[ "${CHECK_FAIL}" == outside* ]]; then
+      phase_end fix "${n}" 1 "stopped"
+      stop_for_human waiting "step ${n} review fixes: ${CHECK_FAIL} — look before resuming"
+    fi
+    if [[ -z "${CHECK_FAIL}" ]] && verify "${check}"; then
+      phase_end fix "${n}" 1 "kept"
+      commit_all "Step ${n}: review fixes"
+      status=fixed
+      say "step ${n}: the review fixes pass the step's check and are kept"
+    else
+      phase_end fix "${n}" 1 "discarded"
+      discard_to "${accepted}"
+      status=open
+      say "step ${n}: the review fixes broke the step's check (${CHECK_FAIL:-verification}) and were discarded; the findings stay open in REVIEW.md"
+    fi
+  fi
+  review_record "${n}" "${title}" "${findings}" "${status}"
+  finish_step "${n}" "${title}"
+}
+
+# discard_to COMMIT — back to COMMIT, dropping only what came after it: the
+# accepted step is committed and the runner's files and the dependencies are
+# ignored, so clean leaves them. DECISIONS.md keeps what was decided in the
+# meantime (an answer the lead gave the discarded fix is still the answer).
+discard_to() {
+  local keep="${STATE_DIR}/.decisions-keep"
+  cp -p "${DIR}/DECISIONS.md" "${keep}" 2>/dev/null || keep=""
+  git_here reset -q --hard "$1"
+  git_here clean -fdq
+  if [[ -n "${keep}" ]]; then cat "${keep}" > "${DIR}/DECISIONS.md"; rm -f "${keep}"; fi
+}
+
+# resume_review — a run that stopped between accepting a step and finishing
+# its review: back to the accepted commit, and review it again.
+resume_review() {
+  local n accepted base
+  n="$(state_get REVIEW_PENDING)"
+  [[ -n "${n}" ]] || return 0
+  accepted="$(state_get ACCEPTED)"
+  git_here cat-file -e "${accepted}^{commit}" 2>/dev/null || { state_set REVIEW_PENDING "" ACCEPTED ""; return 0; }
+  say "step ${n} was accepted and its review did not finish; reviewing it again"
+  discard_to "${accepted}"
+  base="$(state_get BASE)"
+  if [[ "$(state_get BASE_STEP)" != "${n}" ]] || ! git_here cat-file -e "${base}" 2>/dev/null; then
+    base="${accepted}~1"
+  fi
+  review_phase "${n}" "$(state_get REVIEW_TITLE)" "$(state_get REVIEW_CHECK)" "${base}"
+}
+
+# review_record N TITLE FINDINGS FIX_STATUS — the step's findings, appended to
+# REVIEW.md: must-fix ones marked fixed or open, the rest noted.
+review_record() {
+  local n="$1" title="$2" findings="$3" fixst="$4" f="${DIR}/REVIEW.md"
+  [[ -f "${f}" ]] || printf '# Review\n\nEvery accepted step, reviewed for bugs and security by %s.\n' "$(project_reviewer_model)" > "${f}"
+  {
+    printf '\n## Step %s: %s\n\n' "${n}" "${title}"
+    if [[ "${fixst}" == "not reviewed"* ]]; then
+      printf '%s\n' "${fixst}"
+    elif [[ -z "${findings}" ]]; then
+      printf 'No findings.\n'
+    else
+      printf '| Severity | Kind | Where | Finding | Status |\n|---|---|---|---|---|\n'
+      while IFS=$'\t' read -r sev kind where text; do
+        local st=noted
+        if project_review_must_fix <<<"${sev}"$'\t'"${kind}"$'\t'"${where}"$'\t'"${text}" | grep -q .; then st="${fixst:-open}"; fi
+        printf '| %s | %s | %s | %s | %s |\n' "${sev}" "${kind}" "${where//|/\\|}" "${text//|/\\|}" "${st}"
+      done <<<"${findings}"
+    fi
+  } >> "${f}"
+}
+
 write_summary() {
-  local steps total done_ status decisions failed_line
+  local steps total done_ status decisions failed_line base
   steps="$(project_plan_steps "${DIR}/PLAN.md" 2>/dev/null || true)"
   total="$(grep -c . <<<"${steps}" || true)"
   done_="$(awk -F'\t' '$2 == 1' <<<"${steps}" | grep -c . || true)"
@@ -493,10 +917,24 @@ write_summary() {
     printf -- '- Steps done: %s of %s\n' "${done_:-0}" "${total:-0}"
     [[ -z "${failed_line}" ]] || printf '%s\n' "${failed_line}"
     printf -- '- Decisions recorded in DECISIONS.md: %s\n' "${decisions:-0}"
-    printf -- '- Autonomy: %s%s\n\n' "$(state_get AUTONOMY)" "$( [[ "$(state_get AUTONOMY)" == answerer ]] && printf ' (answerer: %s)' "$(project_answerer_model)")"
-    printf '## What to review\n\n'
+    printf -- '- Autonomy: %s%s\n' "$(state_get AUTONOMY)" "$( [[ "$(state_get AUTONOMY)" == answerer ]] && printf ' (answerer: %s)' "$(project_answerer_model)")"
+    printf -- '- Engine: %s, model %s\n' "$(state_get ENGINE | grep . || echo openhands)" "$(agent_model_name)"
+    base="$(project_base_decision "${DIR}/DECISIONS.md" 2>/dev/null || true)"
+    [[ -z "${base}" ]] || printf -- '- Base project: %s (license: %s)\n' "${base%%$'\t'*}" "${base#*$'\t'}"
+    if [[ -s "${STATE_DIR}/metrics.tsv" ]]; then
+      awk -F'\t' 'NR > 1 { s += $7; r += $8; p += $10; g += $12 }
+        END { printf "- Model time: %.1f h over %d requests; %d prompt tokens, %d generated\n", s / 3600, r, p, g }' \
+        "${STATE_DIR}/metrics.tsv"
+    fi
+    if [[ -f "${DIR}/REVIEW.md" ]]; then
+      printf -- '- Review findings: %s (fixed %s, open %s)\n' "$(grep -cE '^\| (high|medium|low) ' "${DIR}/REVIEW.md" || true)" \
+        "$(grep -cE '\| fixed \|$' "${DIR}/REVIEW.md" || true)" "$(grep -cE '\| open \|$' "${DIR}/REVIEW.md" || true)"
+    fi
+    printf '\n## What to review\n\n'
     printf -- '- DECISIONS.md: every decision taken without you:\n'
     grep '^## ' "${DIR}/DECISIONS.md" 2>/dev/null | sed 's/^## /  - /' || true
+    printf -- '- REVIEW.md: what the review of each step found, and what was fixed\n'
+    printf -- '- What each phase cost: %s/metrics.tsv\n' "${STATE_DIR}"
     printf -- '- The commits: git -C %s log --oneline\n' "${DIR}"
     printf -- '- Each step'"'"'s verification output: %s/step-*-attempt-*.log\n' "${STATE_DIR}"
     [[ -z "$(state_get QUESTION)" || "${status}" != waiting ]] || printf -- '- The open question: %s\n' "$(state_get QUESTION)"
@@ -515,20 +953,33 @@ cmd_run() {
     done|failed|waiting|stopped) say "nothing to do: the project is ${status}"; exit 0 ;;
   esac
   AUTONOMY="$(state_get AUTONOMY)"
+  ENGINE="$(state_get ENGINE)"; ENGINE="${ENGINE:-openhands}"
+  if [[ "${ENGINE}" == "opencode" ]] && ! ensure_opencode_image; then
+    say "could not build $(opencode_image); systemd will try again"
+    exit 75
+  fi
   # A run that was interrupted (a reboot, a crash) left its attempt's sandbox
-  # behind. The attempt is started again from the top, so that one goes.
-  local stale
+  # or container behind. The attempt is started again from the top, so that
+  # one goes. The app is only waited for when this project runs on it, or has
+  # a sandbox there to remove (it switched engines).
+  local stale app_up=false
   stale="$(state_get CONVERSATION)"
-  if ! agent_container_running || ! curl -fsS --max-time 10 -o /dev/null "$(api)/" 2>/dev/null; then
+  if agent_container_running && curl -fsS --max-time 10 -o /dev/null "$(api)/" 2>/dev/null; then app_up=true; fi
+  if [[ "${ENGINE}" == "openhands" && "${app_up}" != "true" ]]; then
     say "the agent is not answering yet; systemd will try again"
     exit 75
   fi
-  if [[ -n "${stale}" ]]; then
+  if [[ -n "${stale}" && "${app_up}" == "true" ]]; then
     delete_sandbox "${stale}"
     state_set CONVERSATION ""
   fi
+  remove_opencode_containers
+  # Stopped by systemd or a person mid-turn: an OpenCode container outlives
+  # its docker client, so it goes with the runner.
+  trap 'remove_opencode_containers; exit 143' TERM INT
   ensure_repo
   plan_phase
+  resume_review
   steps="$(project_plan_steps "${DIR}/PLAN.md")"
   total="$(grep -c . <<<"${steps}")"
   while IFS=$'\t' read -r n done_ title check; do
@@ -590,13 +1041,15 @@ preflight() {
   SBX="$(project_sandbox_dir "${DIR}")" \
     || die "${DIR} is not inside AGENT_PROJECTS_DIR (${AGENT_PROJECTS_DIR}), which is the only host directory the agent's sandboxes can see. Put the project under it."
   [[ "${ENABLE_AGENT}" == "true" ]] || die "The agent tier is off. Bring it up: lca agent setup"
+  have git || die "git is needed to commit each step. Install it: sudo apt-get install -y git"
+  # OpenCode needs the agent's model and the relay, and none of the app.
+  [[ "${ENGINE}" != "opencode" ]] || return 0
   agent_container_running || die "The agent container is not running. Start it: lca agent start"
   # The mount is fixed when the app container starts, so a value set since then
   # has not reached any sandbox yet.
   docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${AGENT_CONTAINER}" 2>/dev/null \
       | grep -qxF "OH_SANDBOX_MOUNTS_0_HOST_PATH=${AGENT_PROJECTS_DIR%/}" \
     || die "The running agent does not mount ${AGENT_PROJECTS_DIR} into its sandboxes yet. Restart it so it does: lca agent restart"
-  have git || die "git is needed to commit each step. Install it: sudo apt-get install -y git"
 }
 
 cmd_start() {
@@ -615,14 +1068,18 @@ cmd_start() {
   cp "${SPEC}" "${STATE_DIR}/spec.md"
   : > "${STATE_DIR}/run.log"
   rm -f "${STATE_FILE}"
-  state_set STATUS planning AUTONOMY "${AUTONOMY}" STEP 0 ATTEMPT 0 STARTED "$(date -u +%FT%TZ)" SPEC "$(realpath "${SPEC}")"
+  state_set STATUS planning AUTONOMY "${AUTONOMY}" ENGINE "${ENGINE}" STEP 0 ATTEMPT 0 STARTED "$(date -u +%FT%TZ)" SPEC "$(realpath "${SPEC}")"
   ensure_repo
   normalize_perms || die "Could not set up ${DIR} for the sandbox (docker run of $(runtime_image) failed). Is the agent's image pulled? lca agent start"
-  say "project started from ${SPEC}, autonomy ${AUTONOMY}"
+  if [[ "${ENGINE}" == "opencode" ]]; then
+    ensure_opencode_image || die "Could not build $(opencode_image): docker build of OpenCode ${AGENT_OPENCODE_VERSION} over $(runtime_image) failed."
+  fi
+  say "project started from ${SPEC}, autonomy ${AUTONOMY}, engine ${ENGINE}"
   start_runner
 }
 
 cmd_resume() {
+  ENGINE="${ENGINE_FLAG:-$(state_get ENGINE)}"; ENGINE="${ENGINE:-openhands}"
   preflight
   [[ -r "${STATE_FILE}" ]] || die "No project at ${DIR} to resume."
   [[ "$(state_get STATUS)" != "done" ]] || die "The project at ${DIR} is done. See ${STATE_DIR}/SUMMARY.md."
@@ -631,6 +1088,7 @@ cmd_resume() {
     say "your answer is recorded in DECISIONS.md"
   fi
   [[ -z "${AUTONOMY_FLAG}" ]] || state_set AUTONOMY "${AUTONOMY_FLAG}"
+  [[ -z "${ENGINE_FLAG}" ]] || state_set ENGINE "${ENGINE_FLAG}"
   # Back to the step it was on; a failed step gets a fresh set of attempts.
   if [[ "$(state_get STEP)" == "0" ]]; then state_set STATUS planning REASON "" QUESTION ""
   else state_set STATUS running REASON "" QUESTION ""; fi
@@ -641,9 +1099,9 @@ cmd_resume() {
 cmd_status() {
   [[ -r "${STATE_FILE}" ]] || die "No project at ${DIR}."
   local steps
-  printf 'Project:  %s\nStatus:   %s%s\nStep:     %s (attempt %s)  %s\nAutonomy: %s\n' \
+  printf 'Project:  %s\nStatus:   %s%s\nStep:     %s (attempt %s)  %s\nAutonomy: %s\nEngine:   %s\n' \
     "${DIR}" "$(state_get STATUS)" "$( [[ -n "$(state_get REASON)" ]] && printf ' — %s' "$(state_get REASON)")" \
-    "$(state_get STEP)" "$(state_get ATTEMPT)" "$(state_get TITLE)" "$(state_get AUTONOMY)"
+    "$(state_get STEP)" "$(state_get ATTEMPT)" "$(state_get TITLE)" "$(state_get AUTONOMY)" "$(state_get ENGINE)"
   if systemd_available; then
     printf 'Service:  %s (%s)\n' "$(unit_instance)" "$(systemctl is-active "$(unit_instance)" 2>/dev/null || true)"
   fi
@@ -665,17 +1123,19 @@ cmd_stop() {
   local cid
   cid="$(state_get CONVERSATION)"
   [[ -z "${cid}" ]] || delete_sandbox "${cid}"
+  remove_opencode_containers
   [[ "$(state_get STATUS)" == "done" ]] || state_set STATUS stopped REASON "stopped by $(invoking_user)"
   ok "Stopped. Carry on later with: lca agent project --dir ${DIR} --resume"
 }
 
 main() {
-  SPEC="" DIR="" AUTONOMY_FLAG="" ANSWER="" ACTION=start FOREGROUND=false
+  SPEC="" DIR="" AUTONOMY_FLAG="" ENGINE_FLAG="" ANSWER="" ACTION=start FOREGROUND=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir)        DIR="${2:-}"; shift 2 || die "--dir needs a path" ;;
       --autonomy)   AUTONOMY_FLAG="${2:-}"; shift 2 || die "--autonomy needs ask, self or answerer" ;;
       --answer)     ANSWER="${2:-}"; shift 2 || die "--answer needs the text" ;;
+      --engine)     ENGINE_FLAG="${2:-}"; shift 2 || die "--engine needs openhands or opencode" ;;
       --status)     ACTION=status; shift ;;
       --stop)       ACTION=stop; shift ;;
       --resume)     ACTION=resume; shift ;;
@@ -692,6 +1152,12 @@ main() {
   STATE_FILE="${STATE_DIR}/state"
   AUTONOMY="${AUTONOMY_FLAG:-${AGENT_PROJECT_AUTONOMY}}"
   project_autonomy_valid "${AUTONOMY}" || die "--autonomy must be ask, self or answerer (got '${AUTONOMY}')."
+  # The .env default only matters to a new project; a running one has its
+  # engine in its state, and a bad .env value must not stop it.
+  ENGINE="${ENGINE_FLAG:-${AGENT_PROJECT_ENGINE}}"
+  if [[ -n "${ENGINE_FLAG}" || "${ACTION}" == "start" ]]; then
+    project_engine_valid "${ENGINE}" || die "--engine must be openhands or opencode (got '${ENGINE}')."
+  fi
   [[ "${AGENT_PROJECT_RETRIES}" =~ ^[0-9]+$ ]] || die "AGENT_PROJECT_RETRIES must be a number (got '${AGENT_PROJECT_RETRIES}')."
   require_cmd curl jq docker
   # start, resume and stop ACT (they install or stop a systemd unit), so they

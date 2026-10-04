@@ -434,6 +434,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PROJECT_AUTONOMY` | `ask` | project mode, when the agent asks: `ask` stops, `self` decides and records why, `answerer` has a second model answer |
 | `AGENT_PROJECT_ANSWERER` | *(empty)* | the answerer model; empty means `MODEL_NAME` |
 | `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its verification before the project run stops |
+| `AGENT_PROJECT_ENGINE` | `openhands` | who does a project's work: `openhands` (the agent app) or `opencode` (OpenCode, MIT, in a container per turn; needs a model whose native tool calls work) |
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |
 | `AGENT_NATIVE_TOOL_CALLING` | `false` | use the model's native tool-call channel; `false` parses tool calls from the text, which is what `qwen2.5-coder` needs |

@@ -9468,7 +9468,7 @@ script_doc_references_resolve() {
   # Files project mode writes into the USER's project, not documents of this
   # repository. Exact basenames, so a real reference that merely ends the same
   # way (docs/PLAN-B.md, say) is still checked.
-  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md "
+  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md REVIEW.md "
   for f in "${scripts[@]}"; do
     while IFS= read -r ref; do
       [[ -n "${ref}" ]] || continue
@@ -24030,6 +24030,9 @@ INTERNAL_SETTINGS=(
   WEBUI_IMAGE               # honoured and unshipped; webui_drift watches it — see above
   LCA_CPU_CORES             # "what would tune pick on box X": a what-if for the CPU cap
   LCA_CPU_AVX2              # likewise, for the vector width the cap reads
+  AGENT_OPENCODE_VERSION    # the pinned OpenCode release; moves only with its sha256
+  AGENT_OPENCODE_SHA256     # likewise
+  AGENT_PROJECT_REVIEWER    # who reviews; unset is the agent's own model, by design
 )
 honoured_settings() {   # -> every user-shaped name lib.sh resolves a default for
   sed 's/#.*//' "${REPO}/scripts/lib.sh" \
@@ -24785,6 +24788,190 @@ project_autonomy_modes_are_the_three() {
 }
 check "...and the autonomy modes are ask, self and answerer, and nothing else" \
   project_autonomy_modes_are_the_three
+
+project_engines_are_the_two() {
+  project_engine_valid openhands && project_engine_valid opencode \
+    && ! project_engine_valid aider && ! project_engine_valid ''
+}
+check "...and the engines are openhands and opencode, and nothing else" project_engines_are_the_two
+
+# OpenCode runs from its whole configuration in the environment: a model on
+# the local relay and nothing hosted, tools that read the network or spawn
+# more contexts off, and every permission decided so 'run' never waits.
+opencode_config_is_local_and_unattended() {
+  local c bad=0
+  c="$(opencode_config_json m:80b-agent http://host.docker.internal:11435/v1 32768 2048 100)"
+  jq -e '.model == "lca/m:80b-agent" and .provider.lca.options.baseURL == "http://host.docker.internal:11435/v1"' <<<"${c}" >/dev/null \
+    || { echo 'the model or its endpoint is not the local one asked for' >&2; bad=1; }
+  jq -e '.provider | keys == ["lca"]' <<<"${c}" >/dev/null || { echo 'a provider other than the local one is configured' >&2; bad=1; }
+  jq -e '.provider.lca.models["m:80b-agent"].limit == {context: 32768, output: 2048}' <<<"${c}" >/dev/null \
+    || { echo 'the window or the output cap is not the one given' >&2; bad=1; }
+  jq -e '.share == "disabled" and .autoupdate == false and .snapshot == false and .agent.build.steps == 100' <<<"${c}" >/dev/null \
+    || { echo 'sharing, updates or snapshots are on, or the step cap is missing' >&2; bad=1; }
+  jq -e '.permission.webfetch == "deny" and .permission.external_directory == "deny" and .permission.bash == "allow" and .permission.edit == "allow"' <<<"${c}" >/dev/null \
+    || { echo 'a permission would wait for a person, or the web is allowed' >&2; bad=1; }
+  jq -e '.tools.task == false and .tools.skill == false and .tools.todowrite == false' <<<"${c}" >/dev/null \
+    || { echo 'subagents, skills or todos are still offered' >&2; bad=1; }
+  if ! grep -qx 'OPENCODE_DISABLE_MODELS_FETCH=1' <<<"$(opencode_env)" \
+     || ! grep -qx 'OPENCODE_DISABLE_AUTOUPDATE=1' <<<"$(opencode_env)"; then
+    echo 'OpenCode would fetch its catalogue or an update' >&2; bad=1
+  fi
+  return "${bad}"
+}
+check "...and OpenCode is configured for the local model only, and never waits for a person" \
+  opencode_config_is_local_and_unattended
+
+opencode_image_is_pinned_and_checked() {
+  local d
+  d="$(opencode_dockerfile base:1)"
+  grep -qx 'FROM base:1' <<<"${d}" || { echo 'the image is not built over the agent runtime image' >&2; return 1; }
+  grep -qE "'[0-9a-f]{64}  /tmp/opencode.tgz' [|] sha256sum -c -" <<<"${d}" || { echo 'the binary is not checked against its sha256' >&2; return 1; }
+  [[ "$(opencode_asset_url)" == */releases/download/v*/opencode-linux-x64-baseline.tar.gz ]] \
+    || { echo 'not the pinned baseline (no-AVX2) build' >&2; return 1; }
+  grep -qF "$(opencode_asset_url)" <<<"${d}" || { echo 'the image is not built from the pinned asset' >&2; return 1; }
+  [[ "$(opencode_image)" =~ ^lca-opencode:[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+check "...and the OpenCode image is the pinned baseline build, checked by its sha256" \
+  opencode_image_is_pinned_and_checked
+
+# The events are what 'opencode run --format json' printed on this box against
+# a stub server: one tool call, then a final word.
+opencode_events_are_read() {
+  local ev bad=0
+  ev='{"type":"step_start","sessionID":"ses_A1","part":{"type":"step-start"}}
+{"type":"tool_use","sessionID":"ses_A1","part":{"type":"tool","tool":"write"}}
+{"type":"step_finish","sessionID":"ses_A1","part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":5400,"output":40}}}
+{"type":"text","sessionID":"ses_A1","part":{"type":"text","text":"Should div(1, 0) raise?"}}
+{"type":"text","sessionID":"ses_A1","part":{"type":"text","text":"Wrote it.\nSTEP DONE"}}
+{"type":"step_finish","sessionID":"ses_A1","part":{"type":"step-finish","reason":"stop","tokens":{"input":5480,"output":12}}}'
+  [[ "$(opencode_final_text <<<"${ev}")" == $'Wrote it.\nSTEP DONE' ]] || { echo 'the last word was not the last text part' >&2; bad=1; }
+  [[ "$(opencode_session_id <<<"${ev}")" == ses_A1 ]] || { echo 'the session was not found' >&2; bad=1; }
+  [[ "$(opencode_usage <<<"${ev}")" == '2 5400 10880 52' ]] || { printf 'usage read as %q\n' "$(opencode_usage <<<"${ev}")" >&2; bad=1; }
+  [[ -z "$(opencode_final_text <<<'')" ]] || { echo 'no events gave a last word' >&2; bad=1; }
+  [[ "$(printf '%s\nA notice that is not JSON\n' "${ev}" | opencode_final_text)" == $'Wrote it.\nSTEP DONE' ]] || {
+    echo 'one line that is not JSON lost the whole last word' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and an OpenCode run's last word, session and token use are read from its events" \
+  opencode_events_are_read
+
+# Lines as Ollama 0.34's journal carries them on this box (journalctl -o cat).
+ollama_journal_is_metered() {
+  local j out
+  j='slot   operator(): id  0 | task 16087 | new prompt, n_ctx_slot = 32768, n_keep = 4, task.n_tokens = 14235
+slot   operator(): id  0 | task 16087 | cached n_tokens = 5, memory_seq_rm [5, end)
+slot print_timing: id  0 | task 16087 | prompt processing, n_tokens =   1024, progress = 0.07, t = 187.54 s / 5.46 tokens per second
+slot print_timing: id  0 | task 16087 | prompt eval time = 2700000.00 ms / 14230 tokens (  189.74 ms per token,     5.27 tokens per second)
+slot print_timing: id  0 | task 16087 |        eval time =   3875.98 ms /     8 tokens (  553.71 ms per token,     1.81 tokens per second)
+slot print_timing: id  0 | task 16087 |       total time =   69757.18 ms /   369 tokens
+slot   operator(): id  1 | task 16090 | new prompt, n_ctx_slot = 32768, n_keep = 4, task.n_tokens = 14500
+slot print_timing: id  1 | task 16090 | prompt eval time =   50000.00 ms /   265 tokens (  189.74 ms per token,     5.27 tokens per second)
+slot print_timing: id  1 | task 16090 |        eval time =   9000.00 ms /    92 tokens (  553.71 ms per token,     1.81 tokens per second)'
+  out="$(ollama_journal_usage <<<"${j}")"
+  [[ "${out}" == '2 14235 28735 14495 100' ]] || { printf 'the journal was metered as %q\n' "${out}" >&2; return 1; }
+  [[ "$(ollama_journal_usage </dev/null)" == '0 0 0 0 0' ]]
+}
+check "...and what each phase cost is read from Ollama's own journal, the same meter for both engines" \
+  ollama_journal_is_metered
+
+project_tests_first_only_where_tests_run() {
+  local v bad=0
+  for v in 'python3 -m unittest discover -s tests -q' 'python manage.py test crm' 'pytest -q' 'npm test' 'node --test test/'; do
+    project_verify_runs_tests "${v}" || { printf 'no tests first for: %s\n' "${v}" >&2; bad=1; }
+  done
+  for v in 'test -f app.py' 'curl -fsS http://127.0.0.1:8000/ | grep -q Login' 'python3 -c "import crm"' 'python3 tests_helper_free.py'; do
+    ! project_verify_runs_tests "${v}" || { printf 'tests first for a check that runs no suite: %s\n' "${v}" >&2; bad=1; }
+  done
+  return "${bad}"
+}
+check "...and a step's tests are written first only when its check runs a test suite" \
+  project_tests_first_only_where_tests_run
+
+project_tests_task_writes_tests_only() {
+  local t bad=0 want
+  t="$(project_tests_task /workspace/projects/toy 2 3 'Add div(a, b)' 'python3 -m unittest discover -s tests -q' 'A toy.' '- [ ] 2. Add div' '# Decisions')"
+  for want in 'TESTS for step 2 of 3' 'Do not implement the step' 'EXPECTED to fail now' 'which stream (stdout or stderr)' \
+              'python3 -m unittest discover -s tests -q' 'TESTS DONE' 'A toy.'; do
+    grep -qF -- "${want}" <<<"${t}" || { printf 'the tests task does not carry: %s\n' "${want}" >&2; bad=1; }
+  done
+  [[ "$(project_turn_kind $'Wrote tests/test_div.py.\nTESTS DONE')" == "done" ]] || { echo 'TESTS DONE is not a finished turn' >&2; bad=1; }
+  t="$(project_step_task /w/toy 2 3 'Add div' 'v' s p d '' 'tests/test_div.py' false)"
+  if ! grep -qF 'already written: tests/test_div.py' <<<"${t}" || ! grep -qF 'puts them back' <<<"${t}"; then
+    echo 'the step is not told its tests exist and are put back' >&2; bad=1
+  fi
+  t="$(project_step_task /w/toy 2 3 'Add div' 'v' s p d 'boom' 'tests/test_div.py' true)"
+  if ! grep -qF 'last attempt' <<<"${t}" || ! grep -qF 'contradicts the spec' <<<"${t}"; then
+    echo 'the last attempt is not allowed to correct a test that contradicts the spec' >&2; bad=1
+  fi
+  return "${bad}"
+}
+check "...and the tests are written by a task of their own, and the step is told to keep them" \
+  project_tests_task_writes_tests_only
+
+project_review_is_read_and_triaged() {
+  local reply f must p bad=0
+  reply='Here is my review.
+FINDING high bug crm/views.py:42 - total ignores the discount; apply it before tax
+- **FINDING** medium security crm/templates/deal.html:7 - the name is rendered with |safe, XSS; drop |safe
+FINDING low bug crm/models.py:3 - __str__ may be empty
+FINDING medium bug crm/forms.py:9 - accepts a negative quantity'
+  f="$(project_review_findings <<<"${reply}")"
+  [[ "$(grep -c . <<<"${f}")" == 4 ]] || { printf 'findings read:\n%s\n' "${f}" >&2; bad=1; }
+  [[ "$(head -1 <<<"${f}")" == $'high\tbug\tcrm/views.py:42\ttotal ignores the discount; apply it before tax' ]] || {
+    printf 'the first finding read as %q\n' "$(head -1 <<<"${f}")" >&2; bad=1; }
+  must="$(project_review_must_fix <<<"${f}")"
+  [[ "$(cut -f3 <<<"${must}" | tr '\n' ' ')" == 'crm/views.py:42 crm/templates/deal.html:7 ' ]] || {
+    printf 'must-fix was: %q\n' "${must}" >&2; bad=1; }
+  [[ -z "$(project_review_findings <<<'NO FINDINGS')" ]] || { echo 'NO FINDINGS was read as a finding' >&2; bad=1; }
+  # The forms a model writes as often as the one asked for (all found by
+  # review): capitalised words, a colon after FINDING, "file:line:".
+  f="$(project_review_findings <<<$'FINDING High Security a.py:3 - shell=True on input\nFINDING : low bug b.py:2: off by one')"
+  [[ "${f}" == $'high\tsecurity\ta.py:3\tshell=True on input\nlow\tbug\tb.py:2\toff by one' ]] || {
+    printf 'capitalised or colon forms read as %q\n' "${f}" >&2; bad=1; }
+  p="$(project_review_payload m:r 'spec' 'Step 3' $'+x = 1')"
+  jq -e '.model == "m:r" and .options.temperature == 0 and (.messages[0].content | test("SECURITY") and test("NO FINDINGS"))' <<<"${p}" >/dev/null \
+    || { echo 'the reviewer is not asked for bugs and security in the form it is read in' >&2; bad=1; }
+  jq -e '.messages[1].content | test("\\+x = 1")' <<<"${p}" >/dev/null || { echo 'the diff did not reach the reviewer' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and the review's findings are read, and only high and security ones must be fixed" \
+  project_review_is_read_and_triaged
+
+project_base_project_is_licensed() {
+  local d="${PROJECT_SB}/decisions-fixture.txt" bad=0 c
+  printf '# Decisions\n\n## Base project\n\n- Choice: Krayin CRM (https://github.com/krayin/laravel-crm)\n- License: MIT\n- Why: it has it all.\n' > "${d}"
+  ! project_base_problem "${d}" >/dev/null || { echo 'an MIT base project was refused' >&2; bad=1; }
+  [[ "$(project_base_decision "${d}")" == $'Krayin CRM (https://github.com/krayin/laravel-crm)\tMIT' ]] || { echo 'the choice was misread' >&2; bad=1; }
+  printf '# Decisions\n\n## Base project\n\n- Choice: SomeCRM\n- License: proprietary\n' > "${d}"
+  [[ "$(project_base_problem "${d}")" == *'no recognisable open-source license'* ]] || { echo 'a proprietary base project was accepted' >&2; bad=1; }
+  printf '# Decisions\n\n## Base project\n\n- Choice: none\n- License: n/a\n' > "${d}"
+  ! project_base_problem "${d}" >/dev/null || { echo 'choosing no base project was refused' >&2; bad=1; }
+  printf '# Decisions\n' > "${d}"
+  [[ "$(project_base_problem "${d}")" == *'no "## Base project" section'* ]] || { echo 'a plan with no base-project decision was accepted' >&2; bad=1; }
+  printf '# Decisions\n\n## Base project\n\n**Choice:** none\n- **License:** n/a\n' > "${d}"
+  ! project_base_problem "${d}" >/dev/null || { echo 'a decision written in bold, without a dash, was refused' >&2; bad=1; }
+  # Whole words: "permitted" holds MIT, "example" MPL, and npm's UNLICENSED
+  # is proprietary, the opposite of the Unlicense.
+  for c in 'MIT:permissive' 'BSD-3-Clause:permissive' 'Apache-2.0:permissive' 'LGPL-3.0:weak' 'MPL-2.0:weak' \
+           'GPL-3.0-or-later:gpl' 'AGPL-3.0:agpl' 'n/a:none' 'proprietary:unknown' 'UNLICENSED:unknown' \
+           'Unlicense:permissive' 'Proprietary, not permitted:unknown' 'Commercial, see example:unknown' \
+           'Simple:unknown' 'GNU General Public License v3:gpl' 'MIT License:permissive'; do
+    [[ "$(project_license_class "${c%%:*}")" == "${c#*:}" ]] || { printf '%s was classed %s\n' "${c%%:*}" "$(project_license_class "${c%%:*}")" >&2; bad=1; }
+  done
+  [[ "$(project_license_note agpl)" == *'INTERNAL USE ONLY'* ]] || { echo 'AGPL is not marked internal use only' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and a base project is accepted only with an open-source license, AGPL marked internal-only" \
+  project_base_project_is_licensed
+
+project_planner_weighs_a_base_project() {
+  local t
+  t="$(project_planning_task /workspace/projects/x)"
+  grep -qF 'mature open-source project' <<<"${t}" && grep -qF 'AGPL only for internal use' <<<"${t}" \
+    && grep -qF '## Base project' <<<"${t}" && grep -qF 'no system services' <<<"${t}"
+}
+check "...and the planner weighs a base project, within what the sandbox can run, and records it" \
+  project_planner_weighs_a_base_project
 
 systemd_needs_systemctl_and_a_running_systemd() {
   # A host with no systemctl cannot have systemd, whatever else is true. This
