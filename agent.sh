@@ -44,6 +44,8 @@ Commands:
   project   Build a project from one spec file with no input from you: it
             plans PLAN.md, then runs, verifies and commits each step under
             systemd ('lca agent project --help')
+  telegram  Project mode's progress on your phone: 'setup' finds your chat
+            id, 'test' sends one message ('lca agent telegram --help')
   selftest  Run one small real task end to end, assert a file appeared, and
             report the timing — the honest answer to "is this usable here?"
 
@@ -530,6 +532,7 @@ main() {
     setup)   exec "${SCRIPT_DIR}/scripts/agent-setup.sh" "$@" ;;
     task)    exec "${SCRIPT_DIR}/scripts/agent-task.sh" "$@" ;;
     project) exec "${SCRIPT_DIR}/scripts/agent-project.sh" "$@" ;;
+    telegram) exec "${SCRIPT_DIR}/scripts/telegram.sh" "$@" ;;
     start)   start_agent ;;
     stop)
       require_cmd docker

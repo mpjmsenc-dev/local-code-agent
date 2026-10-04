@@ -326,6 +326,14 @@ stop_for_human() {   # STATUS REASON
   state_set STATUS "$1" REASON "$2"
   say "STOPPED ($1): $2"
   write_summary
+  local why
+  case "$1" in
+    failed) why="a step could not be made to pass" ;;
+    *)      why="it needs you"
+            if [[ "$2" =~ \((credentials|outside|delete)\) ]]; then why+=" (${BASH_REMATCH[1]})"; fi ;;
+  esac
+  tg_progress "Stopped (${1}): ${why}"
+  tg_event "⏸ stopped at step $(state_get STEP): ${why}. $(tg_summary). See: lca agent project --dir ${DIR} --status"
   exit 0
 }
 
@@ -361,6 +369,7 @@ answer_question() {
       record_decision "${what}: answered by $(project_answerer_model) as project lead" \
         "$(project_clip "${LAST_TEXT}" 1500)" "${ans}"
       say "${what}: answer recorded in DECISIONS.md"
+      tg_event "💬 ${what}: the project lead answered a question (recorded in DECISIONS.md)"
       REPLY="Project lead's answer: ${ans}
 
 This decision is recorded in DECISIONS.md. Continue, and end your final message with STEP DONE (TESTS DONE when writing tests, PLAN DONE when planning)."
@@ -564,6 +573,48 @@ verify() {
   return "${rc}"
 }
 
+# --- Telegram: progress text only (lib.sh, the Telegram section) --------------------
+# One progress message per project, edited in place, and a message per event.
+# Everything is composed from the runner's own state; nothing the agent wrote
+# is sent. A failure to reach Telegram never touches the run.
+tg_elapsed() {
+  local s
+  s="$(date -d "$(state_get STARTED)" +%s 2>/dev/null)" || { printf 0; return; }
+  printf '%s' "$(( $(date +%s) - s ))"
+}
+tg_progress() {   # NOW
+  telegram_ready 2>/dev/null || return 0
+  local f="${STATE_DIR}/telegram" steps total done_ text id
+  steps="$(project_plan_steps "${DIR}/PLAN.md" 2>/dev/null || true)"
+  total="$(grep -c . <<<"${steps}" || true)"
+  done_="$(awk -F'\t' '$2 == 1' <<<"${steps}" | grep -c . || true)"
+  text="$(telegram_progress_text "$(basename "${DIR}")" "${done_:-0}" "${total:-0}" "$1" "$(tg_elapsed)")"
+  # No file yet on the first call: that must not end the runner under set -e.
+  id="$(sed -n 's/^PROGRESS=//p' "${f}" 2>/dev/null | tail -1 || true)"
+  if [[ "${id}" =~ ^[0-9]+$ ]] && telegram_edit "${id}" "${text}"; then return 0; fi
+  id="$(telegram_send "${text}")" && printf 'PROGRESS=%s\n' "${id}" > "${f}"
+  return 0
+}
+tg_event() {   # TEXT
+  telegram_ready 2>/dev/null || return 0
+  telegram_send "$(basename "${DIR}"): $1" >/dev/null || say "telegram: could not send a notification"
+  return 0
+}
+# tg_summary — the end of a run in one message: counts and the clock only.
+tg_summary() {
+  local steps total done_ dec base f
+  steps="$(project_plan_steps "${DIR}/PLAN.md" 2>/dev/null || true)"
+  total="$(grep -c . <<<"${steps}" || true)"
+  done_="$(awk -F'\t' '$2 == 1' <<<"${steps}" | grep -c . || true)"
+  dec="$(grep -c '^## ' "${DIR}/DECISIONS.md" 2>/dev/null || true)"
+  printf 'Steps %s/%s · %s · %s decisions recorded' "${done_:-0}" "${total:-0}" "$(telegram_elapsed "$(tg_elapsed)")" "${dec:-0}"
+  f="${DIR}/REVIEW.md"
+  [[ ! -f "${f}" ]] || printf ' · review: %s findings, %s fixed, %s open' "$(grep -cE '^\| (high|medium|low) ' "${f}" || true)" \
+    "$(grep -cE '\| fixed \|$' "${f}" || true)" "$(grep -cE '\| open \|$' "${f}" || true)"
+  base="$(project_base_decision "${DIR}/DECISIONS.md" 2>/dev/null || true)"
+  [[ -z "${base}" ]] || printf ' · base project: %s (%s)' "$(telegram_safe "${base%%$'\t'*}" 60)" "$(telegram_safe "${base#*$'\t'}" 30)"
+}
+
 # --- the phases ---------------------------------------------------------------------
 # plan_accepted — a plan was accepted earlier in this project. Then it stands
 # as it is: a project started before the base-project rule, or whose
@@ -583,6 +634,7 @@ plan_phase() {
   for (( attempt = 1; attempt <= AGENT_PROJECT_RETRIES + 1; attempt++ )); do
     state_set STATUS planning STEP 0 ATTEMPT "${attempt}"
     say "planning, attempt ${attempt}"
+    tg_progress "Planning (attempt ${attempt})"
     normalize_perms || true
     local task
     task="$(project_planning_task "${SBX}")"
@@ -604,6 +656,7 @@ plan_phase() {
     note_base_project
     commit_all "Plan: $(project_plan_steps "${DIR}/PLAN.md" | wc -l | tr -d ' ') steps"
     state_set PLAN_ACCEPTED 1
+    tg_event "📋 plan accepted: $(project_plan_steps "${DIR}/PLAN.md" | wc -l | tr -d ' ') steps"
     return 0
   done
   stop_for_human failed "planning failed $(( AGENT_PROJECT_RETRIES + 1 )) times; last: ${failure}"
@@ -653,6 +706,7 @@ tests_phase() {
   if [[ -z "${c}" ]]; then
     state_set STATUS running STEP "${n}" ATTEMPT 0 TITLE "${title}"
     say "step ${n}/${total}: writing its tests first"
+    tg_progress "Step ${n}/${total}, writing its tests: ${title}"
     normalize_perms || true
     touch "${STATE_DIR}/step-start"
     phase_begin
@@ -714,6 +768,7 @@ step_phase() {   # N TOTAL TITLE VERIFY
     last=false; (( AGENT_PROJECT_RETRIES == 0 || attempt <= AGENT_PROJECT_RETRIES )) || last=true
     state_set STATUS running STEP "${n}" ATTEMPT "${attempt}" TITLE "${title}"
     say "step ${n}/${total}: ${title} (attempt ${attempt})"
+    tg_progress "Step ${n}/${total}: ${title} (attempt ${attempt})"
     normalize_perms || true
     touch "${STATE_DIR}/step-start"
     task="$(project_step_task "${SBX}" "${n}" "${total}" "${title}" "${check}" \
@@ -741,6 +796,7 @@ step_phase() {   # N TOTAL TITLE VERIFY
       printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-attempt-${attempt}.log"
       commit_all "Step ${n}: ${title}"
       say "step ${n} PASSED: ${check}"
+      tg_event "✅ step ${n}/${total} passed: $(telegram_safe "${title}") (attempt ${attempt})"
       review_phase "${n}" "${title}" "${check}" "${base}"
       return 0
     fi
@@ -748,6 +804,11 @@ step_phase() {   # N TOTAL TITLE VERIFY
     printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-attempt-${attempt}.log"
     failure="${VERIFY_OUT}"
     say "step ${n}, attempt ${attempt}: verification FAILED (${check}); output in .lca-project/step-${n}-attempt-${attempt}.log"
+    if (( attempt <= AGENT_PROJECT_RETRIES )); then
+      tg_event "🔁 step ${n}/${total} failed its tests (attempt ${attempt} of $(( AGENT_PROJECT_RETRIES + 1 ))); retrying with the failure in hand"
+    else
+      tg_event "❌ step ${n}/${total} failed its tests on its last attempt (${attempt})"
+    fi
   done
   stop_for_human failed "step ${n} (${title}) failed verification $(( AGENT_PROJECT_RETRIES + 1 )) times; last output in .lca-project/step-${n}-attempt-$(( attempt - 1 )).log"
 }
@@ -758,6 +819,7 @@ finish_step() {
   project_plan_mark_done "${DIR}/PLAN.md" "$1" || say "could not tick step $1 in PLAN.md"
   commit_all "Step $1 done: $2"
   state_set REVIEW_PENDING "" ACCEPTED ""
+  tg_progress "Step $1 done: $2"
 }
 
 # --- the review of every accepted step ----------------------------------------------
@@ -808,6 +870,7 @@ review_phase() {
   if [[ -z "${diff}" ]]; then finish_step "${n}" "${title}"; return 0; fi
   state_set STATUS running STEP "${n}" ATTEMPT review TITLE "${title}"
   say "step ${n}: reviewing the change for bugs and security ($(git_here diff --shortstat "${base}" HEAD | sed 's/^ *//'))"
+  tg_progress "Step ${n}: review for bugs and security"
   phase_begin
   if ! reply="$(ask_reviewer "${title}" "${diff}")"; then
     phase_end review "${n}" 1 "no-answer"
@@ -989,6 +1052,8 @@ cmd_run() {
   state_set STATUS "done" STEP "${total}" REASON ""
   say "all ${total} steps done"
   write_summary
+  tg_progress "Finished"
+  tg_event "🏁 finished. $(tg_summary)"
 }
 
 unit_instance() { printf 'local-code-agent-project@%s.service' "$(systemd-escape --path "${DIR}")"; }

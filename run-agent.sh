@@ -107,6 +107,18 @@ EOF
   fi
   [[ "${meta_ok}" == "true" ]] || die "Could not write ${meta_file}, and aider must not start without it: it would trust a generic 32k context while Ollama runs at ${window} and truncates anything longer, with no error. Usually this directory is root-owned from a run under sudo — check with: ls -ld ${meta_dir}"
 
+  # ...and pin the window aider ASKS Ollama for to that same size. Left to
+  # itself, aider sends num_ctx = prompt tokens x 1.25 + 8192 with every
+  # request to an ollama_chat model: a different number nearly every time, and
+  # Ollama reloads the model for each new one. On the 14b that is ~20 s a
+  # reload, unnoticed. On qwen3-coder-next (51 GB) it was ~3 min and a burst
+  # of swap, four times in one graded task (2026-10-04). aider/extra_params is
+  # aider's own name for settings that apply to every model, and a num_ctx
+  # there is used as it is.
+  local settings_file="${meta_dir}/aider.model.settings.yml"
+  printf -- '- name: aider/extra_params\n  extra_params:\n    num_ctx: %s\n' "${window}" > "${settings_file}" 2>/dev/null \
+    || die "Could not write ${settings_file}; without it aider asks Ollama for a new window on nearly every request and the model reloads each time. Usually this directory is root-owned from a run under sudo — check with: ls -ld ${meta_dir}"
+
   # Edit format and repo-map size make a large difference to output quality on
   # small local models — see aider_edit_format()/aider_map_tokens(). AUTO picks
   # per model/window; set LCA_EDIT_FORMAT in .env to force one.
@@ -128,6 +140,7 @@ EOF
   local -a aider_args=(
     --config "${REPO_ROOT}/config/aider.conf.yml"
     --model-metadata-file "${meta_file}"
+    --model-settings-file "${settings_file}"
     --model "ollama_chat/${MODEL_NAME}"
     --edit-format "${edit_format}"
     --map-tokens "${map_tokens}"

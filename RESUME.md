@@ -1,5 +1,50 @@
 # RESUME.md — the agent tier's first run on real hardware
 
+## 2026-10-04: everything local; toycalc4; qwen3-coder-next; OpenCode; the quality loop
+
+**Direction (owner, final):** free and local only. No paid API, no
+subscription, no hosted model anywhere in the runtime. Checked: no Claude,
+GLM or other hosted "brain" option exists in this repo or its history
+(`git log --all -S`), OpenHands' stored settings name only
+`openai/<model>-agent` at the local relay, Open WebUI runs with
+`ENABLE_OPENAI_API=false` and only Ollama, aider has no key. Nothing removed,
+because nothing was there.
+
+### toycalc4 (the 32b agent, the 14b as project lead): not a pass
+
+- Planning: 2 attempts (the first plan had 11 steps for a 3-step spec and was
+  refused), 3 h 40 min. Steps 1 and 2 PASSED and were committed (step 2 asked
+  the lead twice; the lead's answer, "raise ZeroDivisionError", is in
+  DECISIONS.md). About an hour per step: each fresh conversation re-reads a
+  14.2k-token prompt at ~5.3 tok/s.
+- Step 3 (the CLI) ran 2 h and ended "STEP DONE" having written only
+  `toycalc/cli.py`: no `toycalc/__main__.py`, so `python3 -m toycalc` does not
+  run at all, and no `tests/test_cli.py`.
+- **The old runner would have committed it as PASSED.** Its check was the
+  plan's `python3 -m unittest discover -s tests -q`, which ran only the three
+  existing tests (re-run by hand in the verification container: rc 0, and
+  `python3 -m toycalc add 1 2`: rc 1). It did not get that far: the run
+  STOPPED on "files outside the project changed", and that was not the agent.
+  It was this session writing the eval harness under `~/projects`. Left
+  stopped; the evidence is in the tree.
+- What changed because of it: the tests-first loop (below). A step's own
+  tests are written before it and must fail first, so "the suite passes"
+  can no longer mean "the old tests pass". The eval harness moved from
+  `~/projects/lca-eval` to **`~/lca-eval`**: everything under
+  `AGENT_PROJECTS_DIR` is mounted into every sandbox, hidden graders included.
+
+### Memory: swap during model loads
+
+`vm.swappiness` is now 1 (`/etc/sysctl.d/99-lca-swappiness.conf`). Loading
+qwen3-coder-next (51.5 GB, copied into the server's memory) fills the page
+cache with the same file at the same time and pushed ~1.2 GB of other
+processes into swap at the default 60, and still does at 1. So every speed
+measurement here is taken with the model already loaded, the page cache
+dropped and swap emptied first (`~/lca-eval/prep.sh`), under a vmstat guard
+that marks any run with swap-in or swap-out invalid
+(`~/lca-eval/swapguard.sh`).
+
+
 ## 2026-10-03: qwen3.6 evaluated (it lost), AGENT_MODEL and project mode built
 
 - **qwen3.6:35b-a3b lost** against the criteria fixed beforehand. It passed the

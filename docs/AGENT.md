@@ -662,6 +662,38 @@ around it is the same code.
   21.2k. A question is answered in the same session by the next run. It calls
   tools natively only, so it needs a model whose native tool calls work.
 
+### On your phone: Telegram
+
+Off by default (`AGENT_PROJECT_TELEGRAM=false`): it is the only thing in the
+stack that talks to a service on the internet. Switched on, a project keeps
+**one message, edited in place**: a progress bar, steps done of total, the
+step it is on, and the time since it started. Separate messages say when a
+step passed, when the project lead answered a question, when a step failed
+its tests and is retried (or failed for good), when the plan was accepted,
+and when the run finished or stopped, with the counts (steps, time,
+decisions, review findings fixed and open, base project).
+
+Progress text only, by construction: every message is composed from the
+runner's own bookkeeping. Step titles are cut to one line without backticks;
+questions, answers, code, diffs, file contents and data are never sent.
+
+```bash
+# 1. a bot from @BotFather; its token in ~/.telegram.env (chmod 600):
+#      TELEGRAM_BOT_TOKEN=123456789:AA...
+# 2. message the bot once from your own account
+lca agent telegram setup      # finds your chat id, stores it in the same file
+# 3. AGENT_PROJECT_TELEGRAM=true in .env
+lca agent telegram test       # one test message
+lca agent telegram status     # what is configured, never the token itself
+```
+
+The token is read from that file (never sourced), reaches curl on its
+standard input rather than its command line, and is never printed or
+committed. Nothing reads what is sent to the bot except `setup`, once, and
+it takes only a private chat: every message goes to that one chat id. A
+failure to reach Telegram (offline, `lca offline`) is logged and never
+touches the run.
+
 ### When the agent asks instead of finishing
 
 `--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`):

@@ -396,6 +396,7 @@ edited. Override with `LCA_EDIT_FORMAT` in `.env`.
 | `scripts/apply.sh` | `lca apply` — re-apply `.env` to the things that hold their own copy |
 | `scripts/agent-task.sh` | `lca agent task` — submits a task with the working directory named explicitly, and returns the conversation id |
 | `scripts/agent-project.sh` | `lca agent project` — builds a project from one spec: plans it, then runs, verifies and commits each step under systemd |
+| `scripts/telegram.sh` | `lca agent telegram` — project mode's progress to your own Telegram bot: `setup` finds your chat id, `test` sends one message (off unless `AGENT_PROJECT_TELEGRAM=true`) |
 | `scripts/agent-setup.sh` | `lca agent setup` — brings the agent tier up from wherever it is, in dependency order, and says what it changed |
 | `scripts/agent-selftest.sh` | `lca agent selftest` — one real task end to end; asserts a file appeared and reports the timing |
 | `scripts/agent-view.sh` | `lca agent watch --live` — the read-only view of a run in progress: thoughts, tool calls, results, and the clock on the current step |
@@ -434,6 +435,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PROJECT_AUTONOMY` | `ask` | project mode, when the agent asks: `ask` stops, `self` decides and records why, `answerer` has a second model answer |
 | `AGENT_PROJECT_ANSWERER` | *(empty)* | the answerer model; empty means `MODEL_NAME` |
 | `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its verification before the project run stops |
+| `AGENT_PROJECT_TELEGRAM` | `false` | project mode's progress to your own Telegram bot (progress text only; token and chat id in `~/.telegram.env`): `lca agent telegram --help` |
 | `AGENT_PROJECT_ENGINE` | `openhands` | who does a project's work: `openhands` (the agent app) or `opencode` (OpenCode, MIT, in a container per turn; needs a model whose native tool calls work) |
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |

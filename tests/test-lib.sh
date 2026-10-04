@@ -9130,7 +9130,7 @@ aider_argv_with() {
     info() { :; }
     warn() { printf "WARN %s\n" "$*"; }
     REPO_ROOT="$3"; aider="$4"
-    meta_file=/dev/null; MODEL_NAME=m; edit_format=diff; map_tokens=1024
+    meta_file=/dev/null; settings_file=/dev/null; MODEL_NAME=m; edit_format=diff; map_tokens=1024
     input_tokens=1; output_tokens=1; window=2
     ollama_url() { printf "http://127.0.0.1:11434"; }
     model_load_notice() { :; }
@@ -19147,6 +19147,26 @@ auto_commit_switch_reaches_the_real_argv() {
 }
 check "...and AIDER_NO_AUTO_COMMIT reaches the argv aider really gets, both ways" \
   auto_commit_switch_reaches_the_real_argv
+# aider sends Ollama num_ctx = prompt x 1.25 + 8192 unless told one, and every
+# new value reloads the model: four reloads of a 51 GB model in one graded
+# task, ~3 min and a burst of swap each (2026-10-04). The window it is told
+# must be the window the metadata promises, so the two cannot disagree.
+aider_window_is_pinned() {
+  local out settings meta want
+  entry_env ""
+  out="$(entry_run run-agent.sh)"
+  settings="$(grep '^DID aider ' <<<"${out}" | grep -oE -- '--model-settings-file [^ ]+' | cut -d' ' -f2)"
+  meta="$(grep '^DID aider ' <<<"${out}" | grep -oE -- '--model-metadata-file [^ ]+' | cut -d' ' -f2)"
+  [[ -n "${settings}" && -r "${settings}" ]] || {
+    printf 'aider was started with no model settings file it could read:\n%s\n' "$(grep '^DID aider ' <<<"${out}")" >&2; return 1; }
+  want="$(jq -r '.[].max_tokens' "${meta}" 2>/dev/null | head -1)"
+  [[ "${want}" =~ ^[0-9]+$ ]] || { echo 'the metadata file names no window' >&2; return 1; }
+  if ! grep -qx -- '- name: aider/extra_params' "${settings}" || ! grep -qx "    num_ctx: ${want}" "${settings}"; then
+    printf 'the window aider asks for is not pinned to the %s the metadata promises:\n%s\n' "${want}" "$(cat "${settings}")" >&2; return 1
+  fi
+}
+check "...and aider asks Ollama for one fixed window, the one it budgets for, so the model is never reloaded mid-task" \
+  aider_window_is_pinned
 # Driven, not read. The grep version read the last line of each file and looked
 # for the characters 'main "$@"'. That is the right line to worry about — this
 # is the bug it was written for, and it is worth restating because the shape
@@ -24972,6 +24992,143 @@ project_planner_weighs_a_base_project() {
 }
 check "...and the planner weighs a base project, within what the sandbox can run, and records it" \
   project_planner_weighs_a_base_project
+
+echo "# project mode's Telegram notifications: progress text, one chat, off by default"
+# The one outbound service in the stack. What is driven here: the switch at
+# both values through a whole 'telegram.sh test', the one-time chat id setup,
+# the progress message edited in place rather than sent again, and that the
+# token is never on a command line and the text never carries code.
+TG_SB="${SANDBOX}/telegram"
+TG_TOKEN="123456789:$(printf 'A%.0s' {1..35})"
+tg_copy_repo() {   # the working tree, new files included, and the shipped .env
+  rm -rf "${TG_SB}"; mkdir -p "${TG_SB}/repo" "${TG_SB}/home" "${TG_SB}/bin"
+  ( cd "${REPO}" && git ls-files -z --cached --others --exclude-standard | xargs -0 cp --parents -t "${TG_SB}/repo" )
+  cp "${REPO}/.env.example" "${TG_SB}/repo/.env"
+}
+telegram_sandbox() {   # AGENT_PROJECT_TELEGRAM
+  tg_copy_repo
+  # The last assignment in .env is the one load_env keeps, as entry_env relies on.
+  printf 'AGENT_PROJECT_TELEGRAM=%s\n' "$1" >> "${TG_SB}/repo/.env"
+  record_configuration "${TG_SB}/repo/.env"
+  printf 'TELEGRAM_BOT_TOKEN=%s\n' "${TG_TOKEN}" > "${TG_SB}/home/.telegram.env"
+  chmod 600 "${TG_SB}/home/.telegram.env"
+  # A stand-in for curl that is the Telegram API: the config on its stdin
+  # (where the token is) and its arguments are logged apart, and it answers
+  # by method.
+  cat > "${TG_SB}/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+cfg="$(cat)"; body=""
+while [[ $# -gt 0 ]]; do [[ "$1" == --data-binary ]] && body="$2"; printf '%s\n' "$1" >> "${TG_LOG}.args"; shift; done
+printf '%s\n' "${cfg}" >> "${TG_LOG}.cfg"
+printf '%s\n' "${body}" >> "${TG_LOG}.body"
+case "${cfg}" in
+  */getUpdates*) printf '%s' '{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":4242,"type":"private"},"from":{"first_name":"Owner"},"text":"hi"}},{"update_id":2,"message":{"chat":{"id":4242,"type":"private"},"from":{"first_name":"Owner"},"text":"again"}},{"update_id":3,"message":{"chat":{"id":-100,"type":"group"},"from":{"first_name":"Other"},"text":"x"}}]}' ;;
+  */editMessageText*) printf '%s' '{"ok":true,"result":{"message_id":77}}' ;;
+  *) printf '%s' '{"ok":true,"result":{"message_id":77}}' ;;
+esac
+STUB
+  chmod +x "${TG_SB}/bin/curl"
+  # stub_path wants a sudo beside every stub, so a stub is never bypassed by
+  # a call that goes through sudo. Nothing here uses sudo; it passes through.
+  printf '#!/bin/sh\nexec "$@"\n' > "${TG_SB}/bin/sudo"
+  chmod +x "${TG_SB}/bin/sudo"
+}
+tg_run() {   # SCRIPT ARGS... — a product script in the sandbox, as its owner would run it
+  HOME="${TG_SB}/home" TG_LOG="${TG_SB}/curl" PATH="$(stub_path "${TG_SB}/bin")" bash "${TG_SB}/repo/scripts/$1" "${@:2}" 2>&1
+}
+
+telegram_off_sends_nothing() {
+  local out rc=0
+  telegram_sandbox false
+  printf 'TELEGRAM_CHAT_ID=4242\n' >> "${TG_SB}/home/.telegram.env"
+  out="$(tg_run telegram.sh test)" || rc=$?
+  (( rc == 0 )) || { printf 'telegram.sh test exited %s with the switch off:\n%s\n' "${rc}" "${out}" >&2; return 1; }
+  [[ "${out}" == *'notifications are off'* ]] || { printf 'the switch being off was not said:\n%s\n' "${out}" >&2; return 1; }
+  [[ ! -e "${TG_SB}/curl.cfg" ]] || { echo 'something was sent to Telegram with AGENT_PROJECT_TELEGRAM=false' >&2; return 1; }
+}
+check "with AGENT_PROJECT_TELEGRAM=false, nothing is sent to Telegram, and it says so" telegram_off_sends_nothing
+
+telegram_setup_finds_the_one_private_chat() {
+  local out mode
+  telegram_sandbox true
+  out="$(tg_run telegram.sh setup)" || { printf 'setup failed:\n%s\n' "${out}" >&2; return 1; }
+  grep -qx 'TELEGRAM_CHAT_ID=4242' "${TG_SB}/home/.telegram.env" || { echo 'the private chat id was not stored' >&2; return 1; }
+  grep -qxF "TELEGRAM_BOT_TOKEN=${TG_TOKEN}" "${TG_SB}/home/.telegram.env" || { echo 'storing the chat id lost the token' >&2; return 1; }
+  mode="$(stat -c %a "${TG_SB}/home/.telegram.env")"
+  [[ "${mode}" == 600 ]] || { printf 'the credentials file is mode %s after setup\n' "${mode}" >&2; return 1; }
+  ! grep -qF "${TG_TOKEN#*:}" <<<"${out}" || { echo 'setup printed the token' >&2; return 1; }
+}
+check "...and setup stores the chat id of the private chat that messaged the bot, not a group's" \
+  telegram_setup_finds_the_one_private_chat
+
+telegram_on_sends_one_message_to_that_chat() {
+  local out
+  telegram_sandbox true
+  printf 'TELEGRAM_CHAT_ID=4242\n' >> "${TG_SB}/home/.telegram.env"
+  out="$(tg_run telegram.sh test)" || { printf 'telegram.sh test failed with the switch on:\n%s\n' "${out}" >&2; return 1; }
+  [[ "${out}" == *'Sent (message 77)'* ]] || { printf 'no sent message reported:\n%s\n' "${out}" >&2; return 1; }
+  grep -q '/sendMessage"' "${TG_SB}/curl.cfg" || { echo 'no sendMessage was made' >&2; return 1; }
+  jq -e '.chat_id == 4242' "${TG_SB}/curl.body" >/dev/null || { echo 'the message did not go to the configured chat' >&2; return 1; }
+  ! grep -qF "${TG_TOKEN#*:}" "${TG_SB}/curl.args" || { echo 'the token was on curl'"'"'s command line, where ps shows it' >&2; return 1; }
+  ! grep -qF "${TG_TOKEN#*:}" <<<"${out}" || { echo 'the token was printed' >&2; return 1; }
+}
+check "...and with it true, one message goes to that chat, the token on no command line" \
+  telegram_on_sends_one_message_to_that_chat
+
+telegram_placeholder_token_is_not_used() {
+  local out rc=0
+  telegram_sandbox true
+  printf 'TELEGRAM_BOT_TOKEN=your-token-here\nTELEGRAM_CHAT_ID=4242\n' > "${TG_SB}/home/.telegram.env"
+  out="$(tg_run telegram.sh test)" || rc=$?
+  if (( rc == 0 )) || [[ "${out}" != *'no usable TELEGRAM_BOT_TOKEN'* ]]; then
+    printf 'a placeholder token was not refused:\n%s\n' "${out}" >&2; return 1
+  fi
+  [[ ! -e "${TG_SB}/curl.cfg" ]] || { echo 'a placeholder token was sent to Telegram' >&2; return 1; }
+}
+check "...and a placeholder token is refused by name, without printing it or calling Telegram" \
+  telegram_placeholder_token_is_not_used
+
+# The runner's own message: sent once, then edited in place, from the
+# runner's state; its text is progress, with the code markup taken out.
+telegram_progress_is_edited_in_place() {
+  local out d
+  telegram_sandbox true
+  printf 'TELEGRAM_CHAT_ID=4242\n' >> "${TG_SB}/home/.telegram.env"
+  d="${TG_SB}/projects/toy"; mkdir -p "${d}/.lca-project"
+  # shellcheck disable=SC2016  # the backticks are Markdown in the fixture
+  printf '# Plan\n\n- [x] 1. Add `add(a, b)`\n  Verify: `true`\n- [ ] 2. Add div\n  Verify: `true`\n' > "${d}/PLAN.md"
+  printf 'STARTED=%s\n' "$(date -u -d '-65 min' +%FT%TZ)" > "${d}/.lca-project/state"
+  # shellcheck disable=SC2016  # the probe's text is the child's
+  out="$(HOME="${TG_SB}/home" TG_LOG="${TG_SB}/curl" PATH="$(stub_path "${TG_SB}/bin")" bash -c '
+    source "$1" >/dev/null 2>&1
+    DIR="$2"; STATE_DIR="$2/.lca-project"; STATE_FILE="$2/.lca-project/state"
+    tg_progress "Step 2/2: Add \`div(a, b)\` (attempt 1)"
+    tg_progress "Step 2/2: review"
+    cat "$2/.lca-project/telegram"' _ "${TG_SB}/repo/scripts/agent-project.sh" "${d}" 2>&1)"
+  [[ "${out}" == 'PROGRESS=77' ]] || { printf 'the progress message id was not kept: %q\n' "${out}" >&2; return 1; }
+  [[ "$(grep -c '/sendMessage"' "${TG_SB}/curl.cfg")" == 1 && "$(grep -c '/editMessageText"' "${TG_SB}/curl.cfg")" == 1 ]] || {
+    printf 'not one send then one edit:\n%s\n' "$(cat "${TG_SB}/curl.cfg")" >&2; return 1; }
+  jq -se '.[0].text | test("▓▓▓▓▓░░░░░ 50%  1/2 steps") and test("Elapsed: 1 h 0[45] min") and (test("`") | not)' "${TG_SB}/curl.body" >/dev/null || {
+    printf 'the progress text was:\n%s\n' "$(jq -r '.text' "${TG_SB}/curl.body" | head -5)" >&2; return 1; }
+  jq -se '.[1].message_id == 77' "${TG_SB}/curl.body" >/dev/null || { echo 'the edit was not of the message sent' >&2; return 1; }
+}
+check "...and a project's progress is one message, edited in place, with no code in it" \
+  telegram_progress_is_edited_in_place
+
+telegram_text_is_progress_only() {
+  local t bad=0
+  t="$(telegram_safe $'Add `div(a, b)`\n```\nimport os\nos.system(x)\n```')"
+  [[ "${t}" == 'Add div(a, b)' ]] || { printf 'telegram_safe left: %q\n' "${t}" >&2; bad=1; }
+  [[ "$(telegram_bar 0 0)" == '░░░░░░░░░░ 0%' && "$(telegram_bar 7 7)" == '▓▓▓▓▓▓▓▓▓▓ 100%' ]] || { echo 'the bar is wrong at its ends' >&2; bad=1; }
+  [[ "$(telegram_elapsed 125)" == '2 min' && "$(telegram_elapsed 7500)" == '2 h 05 min' ]] || { echo 'elapsed time is misprinted' >&2; bad=1; }
+  ! telegram_token_looks_real your-token-here || { echo 'a placeholder passed for a token' >&2; bad=1; }
+  telegram_token_looks_real "${TG_TOKEN}" || { echo 'a token in BotFather'"'"'s shape was refused' >&2; bad=1; }
+  # shellcheck disable=SC2031  # set in this probe's subshell only
+  ! (AGENT_PROJECT_TELEGRAM=false; HOME="${TG_SB}/home"; telegram_ready) || { echo 'ready with the switch off' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and what a message may carry is one line of progress: no code blocks, no backticks" \
+  telegram_text_is_progress_only
 
 systemd_needs_systemctl_and_a_running_systemd() {
   # A host with no systemctl cannot have systemd, whatever else is true. This

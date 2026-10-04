@@ -665,6 +665,9 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # per conversation) or opencode (one container per turn). See
   # project_engine_valid.
   AGENT_PROJECT_ENGINE="${AGENT_PROJECT_ENGINE:-openhands}"
+  # Project mode's progress to Telegram (scripts/telegram.sh). Off by default:
+  # it is the one thing in this stack that talks to a service on the internet.
+  AGENT_PROJECT_TELEGRAM="${AGENT_PROJECT_TELEGRAM:-false}"
   # Which ref of the public skills repository the agent's sandboxes may load
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
@@ -5633,6 +5636,119 @@ project_base_problem() {
       return 0 ;;
   esac
   return 1
+}
+
+# --- Telegram: project mode's progress, and nothing else -------------------------
+#
+# The one outbound service in the stack, so it is off unless
+# AGENT_PROJECT_TELEGRAM=true, and what it may carry is narrow by
+# construction: every message is composed here from the runner's own
+# bookkeeping (step numbers, titles, status, counts, the clock), never from
+# what the agent wrote. Titles go through telegram_safe. No code, no diff, no
+# file contents, no data.
+#
+# The bot token and the chat id live in ~/.telegram.env (mode 600), read here
+# and never sourced, printed or committed. The token reaches curl on its
+# standard input, as a config line, so it is not on any command line where
+# ps could show it. Nothing reads what is sent TO the bot, except
+# 'lca agent telegram setup', once, to find the owner's chat id; every send
+# goes to that one chat id and no other.
+
+telegram_env_file() { printf '%s/.telegram.env' "${HOME}"; }
+
+# telegram_cred KEY — TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID from the file,
+# without executing it.
+telegram_cred() {
+  local f
+  f="$(telegram_env_file)"
+  [[ -r "${f}" ]] || return 1
+  awk -v k="$1" '
+    { line = $0; sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line) }
+    index(line, k "=") == 1 {
+      v = substr(line, length(k) + 2)
+      gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", v)
+      val = v
+    }
+    END { if (val == "") exit 1; print val }
+  ' "${f}"
+}
+
+# telegram_token_looks_real TOKEN — the shape BotFather issues: digits, a
+# colon, a long tail. A placeholder ("your-token-here") is not one.
+telegram_token_looks_real() {
+  [[ "${1:-}" =~ ^[0-9]{5,}:[A-Za-z0-9_-]{30,}$ ]]
+}
+
+# telegram_ready — the switch is on and both credentials are there.
+telegram_ready() {
+  [[ "${AGENT_PROJECT_TELEGRAM:-false}" == "true" ]] || return 1
+  telegram_token_looks_real "$(telegram_cred TELEGRAM_BOT_TOKEN)" || return 1
+  [[ "$(telegram_cred TELEGRAM_CHAT_ID)" =~ ^-?[0-9]+$ ]]
+}
+
+# telegram_api METHOD [JSON] — one Bot API call; its JSON reply on stdout.
+telegram_api() {
+  local token
+  token="$(telegram_cred TELEGRAM_BOT_TOKEN)" || return 1
+  telegram_token_looks_real "${token}" || return 1
+  printf 'url = "https://api.telegram.org/bot%s/%s"\n' "${token}" "$1" \
+    | curl -sS --max-time 20 -K - -H 'Content-Type: application/json' --data-binary "${2:-{\}}" 2>/dev/null
+}
+
+# telegram_send TEXT — a new message to the owner's chat; its message_id.
+telegram_send() {
+  local chat
+  chat="$(telegram_cred TELEGRAM_CHAT_ID)" || return 1
+  telegram_api sendMessage "$(jq -nc --arg c "${chat}" --arg t "$1" \
+    '{chat_id: ($c | tonumber), text: $t, disable_web_page_preview: true}')" \
+    | jq -er '.result.message_id' 2>/dev/null
+}
+
+# telegram_edit MESSAGE_ID TEXT — rewrite that message in place. rc 0 also
+# when Telegram says nothing changed.
+telegram_edit() {
+  local chat reply
+  chat="$(telegram_cred TELEGRAM_CHAT_ID)" || return 1
+  reply="$(telegram_api editMessageText "$(jq -nc --arg c "${chat}" --argjson m "$1" --arg t "$2" \
+    '{chat_id: ($c | tonumber), message_id: $m, text: $t, disable_web_page_preview: true}')")"
+  jq -e '.ok == true' <<<"${reply}" >/dev/null 2>&1 && return 0
+  grep -q 'message is not modified' <<<"${reply}"
+}
+
+# telegram_safe TEXT [MAX] — one line of progress text: the first line only,
+# fenced blocks and backticks gone, whitespace collapsed, clipped to MAX.
+telegram_safe() {
+  local t="${1:-}" max="${2:-120}"
+  t="${t%%$'\n'*}"
+  t="${t//\`/}"
+  t="$(tr -s '[:space:]' ' ' <<<"${t}" | sed 's/^ //; s/ $//')"
+  (( ${#t} <= max )) || t="${t:0:max-1}…"
+  printf '%s' "${t}"
+}
+
+# telegram_bar DONE TOTAL [WIDTH] — "▓▓▓░░░░░░░ 30%".
+telegram_bar() {
+  local done_="${1:-0}" total="${2:-0}" w="${3:-10}" fill pct i bar=""
+  (( total > 0 )) || total=1
+  (( done_ <= total )) || done_="${total}"
+  fill=$(( done_ * w / total )); pct=$(( done_ * 100 / total ))
+  for (( i = 0; i < w; i++ )); do if (( i < fill )); then bar+="▓"; else bar+="░"; fi; done
+  printf '%s %s%%' "${bar}" "${pct}"
+}
+
+# telegram_elapsed SECONDS — "2 h 05 min", "7 min".
+telegram_elapsed() {
+  local s="${1:-0}"
+  (( s >= 0 )) || s=0
+  if (( s >= 3600 )); then printf '%d h %02d min' "$(( s / 3600 ))" "$(( s % 3600 / 60 ))"
+  else printf '%d min' "$(( s / 60 ))"; fi
+}
+
+# telegram_progress_text NAME DONE TOTAL NOW ELAPSED_SECONDS — the one
+# progress message a project keeps, edited in place.
+telegram_progress_text() {
+  printf '%s\n%s  %s/%s steps\nNow: %s\nElapsed: %s' "$(telegram_safe "$1" 60)" \
+    "$(telegram_bar "$2" "$3")" "$2" "$3" "$(telegram_safe "$4" 160)" "$(telegram_elapsed "$5")"
 }
 
 # --- what the docs promise, against what is actually listening ---------------

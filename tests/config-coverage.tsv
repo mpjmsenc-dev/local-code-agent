@@ -68,3 +68,4 @@ MANY	AGENT_STEP_SOURCE	auto	DRIVEN at auto, log and events — tests/test-agent-
 MANY	MODEL_NAME	qwen2.5-coder:7b	DRIVEN at the shipped 7b by every fixture here, and at 3b and 0.5b by CI's real installs
 MANY	AGENT_PORT	3001	DRIVEN at the shipped 3001 everywhere and at 22 by tests/test-netmode.sh, which renders the real ruleset. The ledger also sees 3999, which is a unit probe on agent_web_url and is NOT a whole-command run — the text scan cannot tell them apart, so the evidence for this row is 22 and 3001
 MANY	AGENT_TIMEOUT_MINUTES	180	DRIVEN at 0 and at 1 by tests/test-agent-watch.sh, which is the difference between a watcher that gives up and one that never does
+BOTH	AGENT_PROJECT_TELEGRAM	false	DRIVEN at both values by whole runs of scripts/telegram.sh test against a stub Telegram API: false must send nothing and say so, true must send one message to the configured chat with the token on no command line
