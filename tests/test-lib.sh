@@ -24706,6 +24706,24 @@ project_planning_task_sets_the_rules_that_failed_live() {
 check "...and the planner keeps a spec's own steps and verifies an intended failure by its exit code" \
   project_planning_task_sets_the_rules_that_failed_live
 
+# The second live run: the spec said division by zero "must be decided by the
+# project lead"; the planner titled the step "decide division by zero
+# behavior", and the agent decided. The title has to carry the ask.
+project_planner_keeps_an_ask_in_the_step_title() {
+  grep -qF 'says so in its title' <<<"$(project_planning_task /workspace/projects/x)"
+}
+check "...and a step that needs the project lead's answer says so in its title" \
+  project_planner_keeps_an_ask_in_the_step_title
+
+project_tool_markup_is_stripped() {
+  local out
+  out="$(printf 'A toy adder.\nDivision by zero is up to the lead.\n</parameter_text>\n<parameter=security_risk>MEDIUM\n</function>\n' | project_strip_tool_markup)"
+  [[ "${out}" == $'A toy adder.\nDivision by zero is up to the lead.' ]] || {
+    printf 'after stripping, the summary read:\n%s\n' "${out}" >&2; return 1; }
+}
+check "...and tool-call markup a text-format call left in a file is not passed to the next step" \
+  project_tool_markup_is_stripped
+
 # This build's DELETE /sandboxes/{id} takes the id as a query parameter and
 # answers the path-only form 422 having deleted nothing.
 # shellcheck disable=SC2016  # the stub is code for the child shell

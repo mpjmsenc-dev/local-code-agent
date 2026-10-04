@@ -219,6 +219,31 @@ final_text() {   # CID — the agent's last word in this conversation
   project_final_text "${payload}" 2>/dev/null || true
 }
 
+# settled_final_text CID — the agent's last word, once the app has it.
+#
+# The sandbox posts its events to the app on its own schedule, so the
+# conversation can say "finished" before the event that finished it has
+# arrived. Measured on the first full run: the reply that ended step 2 came
+# back from Ollama at 03:59:06, the runner read the events at 03:59:21 and
+# found the last one a terminal observation from 03:56:32, and then removed
+# the sandbox, so that final event never arrived at all. Every turn read
+# as "unclear", and a question would have been missed the same way.
+#
+# So: until a final word is there, or the event count has not moved for 40 s
+# (the agent really did end without one), at most two minutes.
+settled_final_text() {
+  local text n prev=-1 still=0 waited=0
+  while :; do
+    text="$(final_text "$1")"
+    [[ -z "${text//[[:space:]]/}" ]] || { printf '%s' "${text}"; return 0; }
+    n="$(agent_event_steps "$1" 2>/dev/null || printf '?')"
+    if [[ "${n}" == "${prev}" ]]; then still=$(( still + 1 )); else still=0; prev="${n}"; fi
+    if (( still >= 4 || waited >= 120 )); then break; fi
+    sleep 10; waited=$(( waited + 10 ))
+  done
+  printf '%s' "${text}"
+}
+
 send_reply() {   # CID TEXT
   curl -fsS --max-time 60 -X POST "$(api)/api/v1/app-conversations/$1/send-message" \
     -H 'Content-Type: application/json' \
@@ -236,8 +261,14 @@ ask_answerer() {   # QUESTION — the answerer model's reply, or rc 1
   printf '%s' "${reply}"
 }
 
-summary_text()   { cat "${STATE_DIR}/spec-summary.md" 2>/dev/null || head -c 1500 "${STATE_DIR}/spec.md"; }
-plan_text()      { cat "${DIR}/PLAN.md" 2>/dev/null || true; }
+summary_text() {
+  if [[ -s "${STATE_DIR}/spec-summary.md" ]]; then
+    project_strip_tool_markup < "${STATE_DIR}/spec-summary.md"
+  else
+    head -c 1500 "${STATE_DIR}/spec.md"
+  fi
+}
+plan_text()      { project_strip_tool_markup < "${DIR}/PLAN.md" 2>/dev/null || true; }
 decisions_text() { cat "${DIR}/DECISIONS.md" 2>/dev/null || true; }
 
 record_decision() {   # HEADING QUESTION ANSWER
@@ -273,7 +304,7 @@ handle_turn() {
       gone)       TURN_FAIL="the step's sandbox went away before it finished"; return 1 ;;
       *)          TURN_FAIL="the conversation ended in state '${how}'"; return 1 ;;
     esac
-    LAST_TEXT="$(final_text "${cid}")"
+    LAST_TEXT="$(settled_final_text "${cid}")"
     kind="$(project_turn_kind "${LAST_TEXT}")"
     say "${what}: the agent's turn ended (${kind})"
     [[ "${kind}" == "question" ]] || return 0

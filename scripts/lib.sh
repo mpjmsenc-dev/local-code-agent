@@ -5138,6 +5138,15 @@ project_diff_has_secret() {
     | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}|(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
 }
 
+# project_strip_tool_markup — stdin to stdout, without the lines a prompt-parsed
+# tool call leaves behind in a file. qwen2.5-coder writes its calls as text,
+# and the file editor took the call's closing tags with the content: the first
+# live spec summary ended in '</parameter_text>' and
+# '<parameter=security_risk>MEDIUM', which then went into every step's task.
+project_strip_tool_markup() {
+  sed -E '/^[[:space:]]*<\/?(parameter|function)([=_][^>]*)?>/d; /^[[:space:]]*<\/?tool_call>/d'
+}
+
 # project_clip TEXT MAX — the last MAX characters of TEXT, said to be clipped.
 # Everything a step prompt carries competes with the agent's own ~13k-token
 # system prompt for one window, so nothing goes in unbounded.
@@ -5175,6 +5184,7 @@ Rules for the steps:
 - To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
 - Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.
 - Use the standard library unless the spec requires a dependency; a step that adds one installs it into ${d}/.venv.
+- If the spec says to ask the project lead about something, the step that needs the answer says so in its title, e.g. "Add div(a, b): ask the project lead how division by zero behaves first". Never turn that into "decide".
 3. ${d}/DECISIONS.md containing only the line: # Decisions
 
 Then check that PLAN.md follows the form exactly, and end your final message with: PLAN DONE
