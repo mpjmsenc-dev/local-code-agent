@@ -24861,6 +24861,8 @@ opencode_config_is_local_and_unattended() {
   jq -e '.provider | keys == ["lca"]' <<<"${c}" >/dev/null || { echo 'a provider other than the local one is configured' >&2; bad=1; }
   jq -e '.provider.lca.models["m:80b-agent"].limit == {context: 32768, output: 2048}' <<<"${c}" >/dev/null \
     || { echo 'the window or the output cap is not the one given' >&2; bad=1; }
+  jq -e '.provider.lca.options | .timeout == 3600000 and .chunkTimeout == 3600000 and .headerTimeout == 3600000' <<<"${c}" >/dev/null \
+    || { echo 'a stream may be cut before a CPU has read a long prompt (chunk or header timeout left at the default)' >&2; bad=1; }
   jq -e '.share == "disabled" and .autoupdate == false and .snapshot == false and .agent.build.steps == 100' <<<"${c}" >/dev/null \
     || { echo 'sharing, updates or snapshots are on, or the step cap is missing' >&2; bad=1; }
   jq -e '.permission.webfetch == "deny" and .permission.external_directory == "deny" and .permission.bash == "allow" and .permission.edit == "allow"' <<<"${c}" >/dev/null \

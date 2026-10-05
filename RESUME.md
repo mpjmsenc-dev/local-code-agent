@@ -33,6 +33,46 @@ because nothing was there.
   `~/projects/lca-eval` to **`~/lca-eval`**: everything under
   `AGENT_PROJECTS_DIR` is mounted into every sandbox, hidden graders included.
 
+### qwen3-coder-next replaces the 32b as agent model and project lead
+
+Measured alone, swap-clean: reading 32.9 tok/s, writing 7.4 tok/s (32b: 5.6
+and 2.0). Graded tasks: A ✓ (2nd try, 47 min), B ✓ (1st, 4 min), C ✓ (1st,
+12 min), D ✗ (34 min) — the 32b's 3 of 4 in 62 min against 117. Agent
+self-test 8–9 min with native tool calls on AND off (32b: 50 min). The rule
+fixed beforehand (as many tasks and faster, or D) is met, so on this box:
+`AGENT_MODEL=qwen3-coder-next:q4_K_M`, `AGENT_PROJECT_ANSWERER=
+qwen3-coder-next:q4_K_M-agent`, `AGENT_NATIVE_TOOL_CALLING=true`,
+`AGENT_MAX_OUTPUT_TOKENS=4096`. Chat and aider stay on the 14b
+(`MODEL_NAME`), and since the two cannot both be resident, a chat message
+while a project runs costs a ~3-minute reload of the 51 GB model. Details:
+docs/PERFORMANCE.md. qwen2.5-coder:32b and its -agent are still on disk.
+
+### OpenCode is the project engine here; OpenHands stays the shipped default
+
+Task D as a 2-step project, same model, runner and 8-hour budget: OpenHands
+did not finish (3 h 58 min planning, then a tests turn that timed out at 180
+min having written nothing); OpenCode passed step 1 first time and stopped at
+step 2 after 82 min, 10 of 12 hidden tests passing. Prompt per conversation:
+13.4k tokens against 5.8k. `AGENT_PROJECT_ENGINE=opencode` in this box's
+.env; docs/AGENT.md has the table and why the shipped default is unchanged.
+
+### Built and deployed this session
+
+- Project mode: OpenCode engine; tests written first and protected;
+  retry only on red tests (2); a review of every accepted step (REVIEW.md);
+  base-project decision with its license in DECISIONS.md; per-phase metrics
+  from Ollama's journal; planning may only write the plan; a planning turn
+  that hits a limit has its plan checked.
+- `lca agent telegram` and `AGENT_PROJECT_TELEGRAM` (off). **Not live-tested:
+  `~/.telegram.env` holds the placeholder `your-token-here`.** Put the real
+  token there, message the bot, then `lca agent telegram setup`, set the
+  switch, `lca agent telegram test`.
+- aider's window pinned (`aider/extra_params num_ctx`): it was reloading the
+  model on nearly every request.
+- The reply cap lives in the derived model (`num_predict`); a model without
+  it is drift and is rebuilt.
+- `LLAMA_ARG_CACHE_RAM=2048` in config/ollama.env.
+
 ### Memory: swap during model loads
 
 `vm.swappiness` is now 1 (`/etc/sysctl.d/99-lca-swappiness.conf`). Loading

@@ -5425,7 +5425,7 @@ opencode_env() {
     OPENCODE_DISABLE_DEFAULT_PLUGINS=1 OPENCODE_DISABLE_CLAUDE_CODE=1
 }
 
-# opencode_config_json MODEL BASE_URL CONTEXT OUTPUT MAX_STEPS — the whole
+# opencode_config_json MODEL BASE_URL CONTEXT OUTPUT MAX_STEPS [TIMEOUT_MS] — the whole
 # configuration, passed as OPENCODE_CONFIG_CONTENT so nothing in the project
 # directory can change it.
 #
@@ -5434,14 +5434,20 @@ opencode_env() {
 # takes the first request from 29.1k characters of system prompt and tool
 # schemas to 21.2k. --title on the command line (opencode_run_args) saves a
 # whole second request per run that would only name the session.
+#
+# TIMEOUT_MS bounds the whole request AND the wait for each piece of the
+# stream (chunkTimeout, headerTimeout), whose 5-minute defaults are a GPU's.
+# Here, a 30k-token prompt read from scratch takes ~25 minutes before the
+# first byte, and a CRM step died on "SSE read timed out" after 34 silent
+# minutes (2026-10-05).
 opencode_config_json() {
   have jq || return 1
   jq -nc --arg m "${1:?}" --arg u "${2:?}" --argjson ctx "${3:-32768}" --argjson out "${4:-4096}" \
-         --argjson steps "${5:-100}" '{
+         --argjson steps "${5:-100}" --argjson to "${6:-3600000}" '{
     "$schema": "https://opencode.ai/config.json",
     autoupdate: false, share: "disabled", snapshot: false, lsp: false, formatter: false,
     provider: {lca: {npm: "@ai-sdk/openai-compatible", name: "local Ollama",
-      options: {baseURL: $u, apiKey: "local-llm", timeout: 3600000},
+      options: {baseURL: $u, apiKey: "local-llm", timeout: $to, chunkTimeout: $to, headerTimeout: $to},
       models: {($m): {name: $m, tool_call: true, limit: {context: $ctx, output: $out}}}}},
     model: ("lca/" + $m),
     agent: {build: {steps: $steps}},

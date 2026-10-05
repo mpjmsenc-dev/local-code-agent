@@ -449,7 +449,8 @@ oc_run() {
     --user "$(owner_uid):${PROJECT_SANDBOX_GID}" --add-host host.docker.internal:host-gateway \
     -e HOME="${SBX}/.lca-project/opencode-home" "${envs[@]}" \
     -e OPENCODE_CONFIG_CONTENT="$(opencode_config_json "$(agent_model_name)" "$(agent_llm_base_url)" \
-                                  "$(agent_model_context)" "${AGENT_MAX_OUTPUT_TOKENS}" "${steps}")" \
+                                  "$(agent_model_context)" "$(agent_max_output_tokens)" "${steps}" \
+                                  "$(( $(agent_request_timeout) * 1000 ))")" \
     -v "${DIR}:${SBX}" -w "${SBX}" "$(opencode_image)" opencode "${args[@]}" "$4"
 }
 
@@ -747,6 +748,11 @@ tests_phase() {
     if ! after_step_checks; then
       phase_end tests "${n}" 1 "stopped"
       stop_for_human waiting "step ${n} tests: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
+    fi
+    if [[ -z "$(git_here status --porcelain 2>/dev/null)" ]]; then
+      phase_end tests "${n}" 1 "none-written"
+      say "step ${n}: no tests were written; the step goes on without tests first"
+      return 0
     fi
     if verify "${check}"; then
       phase_end tests "${n}" 1 "already-pass"
