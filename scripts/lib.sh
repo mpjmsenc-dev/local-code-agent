@@ -4405,16 +4405,31 @@ agent_model_declared_context() {
   printf '%s' "${out}"
 }
 
+# agent_model_predict_stale MODEL — true when MODEL's parameters can be read
+# and its num_predict is missing or is not agent_max_output_tokens: a model
+# built before the cap moved into the Modelfile, or with another cap. Free,
+# like agent_model_declared_context. Unreadable is not stale.
+agent_model_predict_stale() {
+  local model="${1:-}" out have_p
+  [[ -n "${model}" ]] || return 1
+  have ollama || return 1
+  out="$(ollama show "${model}" --parameters 2>/dev/null)" || return 1
+  have_p="$(awk '$1 == "num_predict" { print $2; exit }' <<<"${out}")"
+  [[ "${have_p}" != "$(agent_max_output_tokens)" ]]
+}
+
 # agent_model_drift — why the derived model is not what it should be, or
 # non-zero when it is fine.
 #
-# Two answers, because they need different remedies:
+# Three answers, the cheap ones first:
 #   absent   there is no derived model for the current rung
+#   predict  it carries no cap on one reply, or another one
 #   context  it exists but Ollama loads it at the wrong window
 agent_model_drift() {
   local derived want got
   derived="$(agent_model_name "$(agent_base_model)")"
   model_present "${derived}" || { printf 'absent'; return 0; }
+  if agent_model_predict_stale "${derived}"; then printf 'predict'; return 0; fi
   want="$(agent_model_context)"
   got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
   [[ -n "${got}" ]] || return 1
@@ -4547,7 +4562,8 @@ refresh_agent_model_after_tune() {
   [[ "${ENABLE_AGENT}" == "true" ]] || return 0
   derived="$(agent_model_name "${base}")"
   if have_ctx="$(agent_model_declared_context "${derived}")" \
-     && [[ "${have_ctx}" == "$(agent_model_context)" ]]; then
+     && [[ "${have_ctx}" == "$(agent_model_context)" ]] \
+     && ! agent_model_predict_stale "${derived}"; then
     return 0
   fi
   info "Building the agent's ${derived} at context $(agent_model_context)..."

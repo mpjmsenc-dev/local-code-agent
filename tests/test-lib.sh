@@ -4724,6 +4724,25 @@ check "...and the right one is not"                   drift_is fine    yes "$(ag
 # A window nobody could read is NOT drift. Same rule as the chat app's config:
 # an unanswerable question must not become a list of things to rebuild.
 check "a window that cannot be read is not called drift" drift_is fine yes ""
+# A model built before the cap on one reply moved into the Modelfile is drift
+# too, found from its parameters without loading it. Unreadable is not.
+predict_drift_when() (   # PARAMETERS-OUTPUT|unreadable -> the verdict
+  # shellcheck disable=SC2317  # asked by agent_model_drift, not from here
+  model_present() { return 0; }
+  # shellcheck disable=SC2317  # ...and these
+  have() { [[ "$1" == ollama ]] || command -v "$1" >/dev/null 2>&1; }
+  # shellcheck disable=SC2317
+  ollama() { [[ "${params}" != unreadable ]] || return 1; printf '%s\n' "${params}"; }
+  # shellcheck disable=SC2317
+  agent_model_loaded_context() { agent_model_context; }
+  agent_model_drift || printf 'fine'
+)
+check "a derived model with no cap on one reply is reported, from its parameters alone" \
+  test "$(params='num_ctx 32768' predict_drift_when)" = predict
+check "...and one with the cap is not" \
+  test "$(params="$(printf 'num_ctx 32768\nnum_predict %s' "$(agent_max_output_tokens)")" predict_drift_when)" = fine
+check "...and parameters nobody could read are not called drift" \
+  test "$(params=unreadable predict_drift_when)" = fine
 
 # Building it must PROVE it, not assume it. rc 2 is reserved for "created, but
 # Ollama did not load it at that window", which is the failure that would
