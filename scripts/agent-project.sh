@@ -760,6 +760,7 @@ tests_phase() {
     else
       phase_end tests "${n}" 1 "red"
       say "step ${n}: the new tests fail before the step is written, as they should"
+      check_tests "${n}" "${total}" "${title}" "${check}"
     fi
     printf '%s\n' "${VERIFY_OUT}" > "${STATE_DIR}/step-${n}-tests.log"
     before="$(head_or_empty)"
@@ -773,6 +774,43 @@ tests_phase() {
   TEST_FILES="$(git_here -c core.quotePath=false diff-tree --no-commit-id --name-only --diff-filter=AM -r "${c}" \
                 | grep -E '(^|/)(tests?/|spec/|test_[^/]*$|tests\.py$|[^/]*_(test|spec)\.[[:alnum:]]+$|[^/]*\.(test|spec)\.[[:alnum:]]+$)' || true)"
   TEST_LIST="$(tr '\n' ' ' <<<"${TEST_FILES}" | sed 's/ *$//')"
+}
+
+# check_tests N TOTAL TITLE VERIFY — red tests, but red for the right reason?
+# One request asks (project_tests_check_payload). Broken tests get ONE more
+# tests conversation, told what is wrong; whatever it leaves is what is
+# committed. Leaves VERIFY_OUT as the last red run's.
+ask_tests_check() {   # TITLE TESTS OUTPUT — the verdict line
+  local reply
+  reply="$(curl -fsS --max-time "$(agent_request_timeout)" "$(ollama_url)/api/chat" -H 'Content-Type: application/json' \
+            -d "$(project_tests_check_payload "$(project_reviewer_model)" "$(summary_text)" "$1" "$2" "$3")" 2>/dev/null \
+           | jq -r '.message.content // empty' 2>/dev/null)" || { printf 'unclear'; return 0; }
+  project_tests_verdict <<<"${reply}"
+}
+check_tests() {
+  local n="$1" total="$2" title="$3" check="$4" tests verdict reason f
+  # What the tests conversation wrote: changes to tracked files, and new files whole.
+  tests="$(git_here diff HEAD 2>/dev/null || true)"
+  while IFS= read -r -d '' f; do
+    tests+=$'\n'"=== ${f} ==="$'\n'"$(cat "${DIR}/${f}" 2>/dev/null || true)"
+  done < <(git_here ls-files --others --exclude-standard -z 2>/dev/null || true)
+  phase_begin
+  verdict="$(ask_tests_check "${title}" "${tests}" "${VERIFY_OUT}")"
+  phase_end tests-check "${n}" 1 "${verdict%%$'\t'*}"
+  [[ "${verdict}" == broken* ]] || return 0
+  reason="${verdict#*$'\t'}"
+  say "step ${n}: the check says its tests are broken, not just red: $(project_clip "${reason}" 300); one more go at the tests"
+  phase_begin
+  run_turn "$(project_tests_task "${SBX}" "${n}" "${total}" "${title}" "${check}" \
+              "$(summary_text)" "$(plan_text)" "$(decisions_text)")"$'\n\n'"The tests you wrote are broken, not just failing for the missing feature: ${reason} Fix the tests themselves; still do not implement the step." \
+           "step ${n} tests, again" \
+    || say "step ${n} tests, again: ${TURN_FAIL}; keeping what was written"
+  normalize_perms || true
+  if ! after_step_checks; then
+    phase_end tests "${n}" 2 "stopped"
+    stop_for_human waiting "step ${n} tests: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
+  fi
+  if verify "${check}"; then phase_end tests "${n}" 2 "already-pass"; else phase_end tests "${n}" 2 "red"; fi
 }
 
 # restore_tests — the step may not change the tests written for it: put back

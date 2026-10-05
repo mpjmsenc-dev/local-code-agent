@@ -5189,9 +5189,23 @@ project_hard_stop() {
 # project_diff_has_secret DIFF — true when ADDED lines look like a credential:
 # a private key block, a cloud or forge token, or a literal password. The agent
 # may not put one in the tree unasked, in any mode.
+#
+# Keys and tokens count in every file. A literal password does not count in a
+# test file: a test that signs in needs one, and it is a fixture, not a
+# secret. A CRM step stopped for "credentials" on
+#   def _login(self, username='admin', password='admin123'):
+# in tests/test_contacts.py, while the app's real password came from the
+# environment as its spec required (2026-10-05).
 project_diff_has_secret() {
-  grep -E '^\+' <<<"${1:-}" | grep -vE '^\+\+\+ ' \
-    | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}|(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{6,}'
+  awk '
+    /^\+\+\+ / { f = $2; sub(/^b\//, "", f); next }
+    /^\+/ {
+      if ($0 ~ /-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}/) { hit = 1; exit }
+      if (f ~ /(^|\/)(tests?|spec)\// || f ~ /(^|\/)test_[^\/]*$/ || f ~ /_test\.[A-Za-z0-9]+$/) next
+      if (tolower($0) ~ /(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["\047][^"\047]{6,}/) { hit = 1; exit }
+    }
+    END { exit !hit }
+  ' <<<"${1:-}"
 }
 
 # project_strip_tool_markup — stdin to stdout, without the lines a prompt-parsed
@@ -5527,6 +5541,36 @@ project_tests_task() {
   printf 'Run that command once: it is EXPECTED to fail now, because the step is not implemented yet. A failure that is only the missing code is right; fix any error in the tests themselves.\n\n'
   printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Never use credentials and never touch anything outside ${d}."
   printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: TESTS DONE"
+}
+
+# project_tests_check_payload MODEL SUMMARY TITLE TESTS OUTPUT — the /api/chat
+# body that asks whether tests written before their feature fail only because
+# the feature is missing. One request. Measured: the tests of a CRM step
+# called self.login_admin, which they never defined; every implementation
+# attempt then failed on the tests themselves, and only the last attempt may
+# change them (2026-10-05).
+project_tests_check_payload() {
+  have jq || return 1
+  jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg c "$(project_clip_head "$4" 9000)" \
+         --arg o "$(project_clip "$5" 3000)" '{
+    model: $m, stream: false, options: {temperature: 0},
+    messages: [
+      {role: "system", content: "You check unit tests written BEFORE the feature they test exists. Right now they must fail, because the feature is missing, and that is correct. Decide whether they fail ONLY for that reason, or whether the tests themselves are broken: a helper, fixture or attribute they use but never define, a syntax error, a wrong import of the test framework, or an expectation the spec contradicts. A missing module, class, route or function OF THE FEATURE is expected, not broken. Reply with exactly TESTS OK, or with TESTS BROKEN: followed by one sentence naming what is wrong in the tests."},
+      {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe tests:\n" + $c + "\n\nRunning them now gives:\n" + $o)}
+    ]}'
+}
+
+# project_tests_verdict — stdin: that reply. "ok", or "broken" and a TAB and
+# the reason, or "unclear" for anything else (which counts as ok: the check
+# exists to catch broken tests, not to stop on its own doubt).
+project_tests_verdict() {
+  local r
+  r="$(sed -E 's/\*\*//g; s/`//g' | tr '\n' ' ' | sed 's/^[[:space:]]*//')"
+  case "${r^^}" in
+    "TESTS BROKEN"*) r="${r#*[Bb][Rr][Oo][Kk][Ee][Nn]}"; r="${r#:}"; printf 'broken\t%s' "$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"${r}")" ;;
+    "TESTS OK"*)     printf 'ok' ;;
+    *)               printf 'unclear' ;;
+  esac
 }
 
 # project_review_payload MODEL SUMMARY TITLE DIFF — the /api/chat body for the

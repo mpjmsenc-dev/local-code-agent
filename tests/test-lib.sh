@@ -24710,6 +24710,35 @@ project_secrets_in_a_diff_are_seen() {
   return "${bad}"
 }
 check "...and refuses to commit what looks like a credential" project_secrets_in_a_diff_are_seen
+# A test that signs in needs a password, and that is a fixture: the literal
+# password pattern does not count in a test file. Keys and tokens still do.
+project_test_fixture_passwords_are_not_secrets() {
+  local bad=0
+  ! project_diff_has_secret $'+++ b/tests/test_contacts.py\n+    def _login(self, username="admin", password="admin123"):' || {
+    echo 'a fixture password in a test file was called a credential' >&2; bad=1; }
+  project_diff_has_secret $'+++ b/tests/test_x.py\n+-----BEGIN OPENSSH PRIVATE KEY-----' || {
+    echo 'a private key in a test file was not seen' >&2; bad=1; }
+  project_diff_has_secret $'+++ b/tests/test_x.py\n+    ok\n+++ b/app/config.py\n+password = "hunter22"' || {
+    echo 'a literal password in the app, after a test file in the same diff, was not seen' >&2; bad=1; }
+  return "${bad}"
+}
+check "...but a password in a test file's fixture is not one" project_test_fixture_passwords_are_not_secrets
+
+project_broken_tests_are_told_from_red_ones() {
+  local p bad=0
+  [[ "$(project_tests_verdict <<<'TESTS OK')" == ok ]] || { echo 'TESTS OK was not read as ok' >&2; bad=1; }
+  [[ "$(project_tests_verdict <<<'**TESTS BROKEN**: it calls self.login_admin, which it never defines.')" == $'broken\tit calls self.login_admin, which it never defines.' ]] || {
+    printf 'a broken verdict read as %q\n' "$(project_tests_verdict <<<'**TESTS BROKEN**: it calls self.login_admin, which it never defines.')" >&2; bad=1; }
+  [[ "$(project_tests_verdict <<<'I am not sure.')" == unclear ]] || { echo 'an unclear reply was given a verdict' >&2; bad=1; }
+  p="$(project_tests_check_payload m:r 'spec' 'Step 6' 'def test_x(self): self.login_admin()' 'AttributeError: login_admin')"
+  jq -e '.model == "m:r" and .options.temperature == 0 and (.messages[0].content | test("TESTS OK") and test("TESTS BROKEN"))' <<<"${p}" >/dev/null \
+    || { echo 'the check is not asked in the form it is read in' >&2; bad=1; }
+  jq -e '.messages[1].content | test("login_admin") and test("AttributeError")' <<<"${p}" >/dev/null \
+    || { echo 'the tests or their output did not reach the check' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and tests that are broken, not just red, are told apart by one request" \
+  project_broken_tests_are_told_from_red_ones
 
 # shellcheck disable=SC2030,SC2031,SC2034  # each probe sets its own copy, in a subshell, for lib.sh to read
 project_dirs_stay_inside_the_mount() {
