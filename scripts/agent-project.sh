@@ -523,6 +523,9 @@ PHASE_T0=0
 phase_begin() { PHASE_T0="$(date +%s)"; }
 phase_end() {   # PHASE STEP ATTEMPT OUTCOME
   local t1 usage="0 0 0 0 0" f="${STATE_DIR}/metrics.tsv" log
+  # The server logs a request's timings just after its reply has gone: a
+  # review that ends with its one request read as 0 tokens without this.
+  sleep 2
   t1="$(date +%s)"
   # Wherever this host keeps Ollama's log; only a journal can be read by time.
   log="$(ollama_log_hint)"
@@ -640,19 +643,23 @@ plan_phase() {
     task="$(project_planning_task "${SBX}")"
     [[ -z "${failure}" ]] || task+=$'\n\n'"The previous plan could not be used: ${failure}. Rewrite the files in exactly the form above."
     phase_begin
-    if ! run_turn "${task}" "planning"; then
-      phase_end plan 0 "${attempt}" "turn: ${TURN_FAIL}"
-      failure="${TURN_FAIL}"; continue
-    fi
+    # Like a step: a turn that ends on a limit is not a failure by itself; the
+    # plan it left is checked like any other. Measured on task D: two planning
+    # turns of qwen3-coder-next under OpenHands spent 100 events each revising a
+    # PLAN.md that was already in the right form, and both were thrown away.
+    local how="done"
+    run_turn "${task}" "planning" || { how="turn: ${TURN_FAIL}"; say "planning: ${TURN_FAIL}; checking the plan it left"; }
     normalize_perms || true
+    keep_plan_only
     if problem="$(project_plan_problem "${DIR}/PLAN.md" "${STATE_DIR}/spec.md")" \
        || problem="$(project_base_problem "${DIR}/DECISIONS.md")"; then
-      phase_end plan 0 "${attempt}" "refused"
+      phase_end plan 0 "${attempt}" "refused (${how})"
       failure="${problem}"
+      [[ "${how}" == "done" ]] || failure="${TURN_FAIL}; and the plan it left: ${problem}"
       say "the plan is not usable: ${problem}"
       continue
     fi
-    phase_end plan 0 "${attempt}" "accepted"
+    phase_end plan 0 "${attempt}" "accepted (${how})"
     note_base_project
     commit_all "Plan: $(project_plan_steps "${DIR}/PLAN.md" | wc -l | tr -d ' ') steps"
     state_set PLAN_ACCEPTED 1
@@ -678,6 +685,29 @@ note_base_project() {
     inside && k ~ /^[[:space:]]*([-*][[:space:]]*)?license[[:space:]]*:/ { print note; inside = 0 }
   ' "${DIR}/DECISIONS.md" > "${STATE_DIR}/.decisions" && cat "${STATE_DIR}/.decisions" > "${DIR}/DECISIONS.md"
   rm -f "${STATE_DIR}/.decisions"
+}
+
+# keep_plan_only — planning may write PLAN.md and DECISIONS.md and nothing
+# else of the project's. Anything else it changed is put back as it was, and
+# what it created is moved aside to .lca-project/planning-discarded/, kept
+# rather than deleted. Measured: an OpenHands planning turn on task D wrote
+# the models, the schedule and both test files, and all of it was committed
+# with the plan, ahead of the tests-first step that should have written them.
+keep_plan_only() {
+  local line st path moved=""
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    st="${line:0:2}" path="${line:3}"
+    case "${path}" in PLAN.md|DECISIONS.md|.lca-project/*) continue ;; esac
+    if [[ "${st}" == "??" ]]; then
+      mkdir -p "${STATE_DIR}/planning-discarded/$(dirname "${path}")"
+      mv -f "${DIR}/${path}" "${STATE_DIR}/planning-discarded/${path}"
+    else
+      git_here checkout -q HEAD -- "${path}" 2>/dev/null || true
+    fi
+    moved+=" ${path}"
+  done < <(git_here status --porcelain -z --untracked-files=all 2>/dev/null | tr '\0' '\n' || true)
+  [[ -z "${moved}" ]] || say "planning changed files it may not; put back or moved to .lca-project/planning-discarded/:${moved}"
 }
 
 # head_or_empty — HEAD, or git's empty tree when there is no commit yet: a
@@ -714,7 +744,10 @@ tests_phase() {
                 "$(summary_text)" "$(plan_text)" "$(decisions_text)")" "step ${n} tests" \
       || say "step ${n} tests: ${TURN_FAIL}; keeping what was written"
     normalize_perms || true
-    after_step_checks || stop_for_human waiting "step ${n} tests: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
+    if ! after_step_checks; then
+      phase_end tests "${n}" 1 "stopped"
+      stop_for_human waiting "step ${n} tests: ${CHECK_FAIL} — nothing was committed; look at the working tree before resuming"
+    fi
     if verify "${check}"; then
       phase_end tests "${n}" 1 "already-pass"
       say "step ${n}: its tests already pass before the step is written, so they may not test it (the review sees this)"

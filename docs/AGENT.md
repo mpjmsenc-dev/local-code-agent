@@ -694,6 +694,38 @@ it takes only a private chat: every message goes to that one chat id. A
 failure to reach Telegram (offline, `lca offline`) is logged and never
 touches the run.
 
+### OpenHands against OpenCode, measured: task D, same model, same runner
+
+Task D (calendar-month billing over three modules, the graded task every
+model has failed under aider) as a project spec in two steps, with
+qwen3-coder-next as agent, project lead and reviewer, autonomy `answerer`,
+on the 64 GB box, each engine alone in RAM with nothing swapping, and the
+same 8-hour budget declared for both (2026-10-04/05).
+
+| | OpenHands 1.8 | OpenCode 1.18.34 |
+|---|---|---|
+| prompt before the agent's first word, per conversation | 13.4–13.5k tokens (+ a 0.5k request naming the conversation) | 5.8k tokens |
+| planning | 3 attempts, 3 h 58 min: two hit the 100-event cap while revising a PLAN.md already in form, the third was accepted | 2 attempts, 11 min: the first had 3 steps for a spec that says 2 |
+| step 1 | tests turn: 180 min, timed out having written nothing; context full at 32k; one reply 6,244 tokens | tests 6 min (red, as they should be), step 7 min, passed first try, review 1 min, no findings |
+| step 2 | not reached | tests 14 min (red); 3 attempts, 26 + 9 + 9 min, all failing the one test that contradicts the spec (full price for a period the cancellation falls inside); the last attempt, allowed to correct it, did not |
+| result | **did not finish** (stopped after 7 h) | **stopped at step 2** after 82 min |
+| hidden grader (12 tests) | 9 pass, from code the **planning** turn wrote against its own instructions (models, schedule, both test files), which the runner committed with the plan | **10 pass**: the drift trap handled; rounding half-up (500 for 501) and a float interval (TypeError, not ValueError) wrong |
+| model requests, prompt tokens read, written | 93, 130k, 37.5k | 64, 49k, 18k |
+
+**OpenCode is kept on this box** (`AGENT_PROJECT_ENGINE=opencode`): faster by
+far, and at better quality, not merely equal. The shipped default stays
+`openhands`, because a fresh install runs qwen2.5-coder, whose native tool
+calls do not work, and OpenCode has no text-format fallback.
+
+Four runner fixes came out of these two runs. Planning may change PLAN.md and
+DECISIONS.md and nothing else: anything more is put back, and what it
+created is kept aside in `.lca-project/planning-discarded/`. A planning turn
+that ends on a limit has its plan checked instead of thrown away. The cap on one reply is a
+parameter of the agent's derived model (`num_predict`), because the one sent
+by the client did not hold. And llama-server's RAM prompt cache is capped at
+2 GiB (`config/ollama.env`), because at its 8 GiB default it grew the
+51.5 GB model's server to 59.7 GB.
+
 ### When the agent asks instead of finishing
 
 `--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`):

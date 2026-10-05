@@ -4743,6 +4743,22 @@ check "a model that loads at the wrong window is not called built" \
   test "$(loaded=4096 build_result)" = 2
 check "...and neither is one whose window cannot be read" \
   test "$(loaded='' build_result)" = 2
+# The cap on one reply is in the model, where every client meets it.
+built_modelfile() (
+  # shellcheck disable=SC2317  # ensure_agent_model calls these
+  model_present() { return 0; }
+  # shellcheck disable=SC2317  # ...and this: the Modelfile it was handed
+  ollama() { [[ "$1" == create ]] && cp "$4" "${SANDBOX}/modelfile-probe"; return 0; }
+  # shellcheck disable=SC2317  # ...and this
+  agent_model_loaded_context() { agent_model_context; }
+  # shellcheck disable=SC2030  # local to this subshell on purpose
+  AGENT_MAX_OUTPUT_TOKENS=1536
+  rm -f "${SANDBOX}/modelfile-probe"
+  ensure_agent_model >/dev/null 2>&1
+  cat "${SANDBOX}/modelfile-probe"
+)
+check "...and the derived model carries the cap on one reply, not only the window" \
+  grep -qx 'PARAMETER num_predict 1536' <<<"$(built_modelfile)"
 
 # The rest of the stack has to know about it too.
 # RUN tune.sh, do not read it.
@@ -25114,6 +25130,35 @@ telegram_progress_is_edited_in_place() {
 }
 check "...and a project's progress is one message, edited in place, with no code in it" \
   telegram_progress_is_edited_in_place
+
+# Planning writes PLAN.md and DECISIONS.md and nothing else of the project's.
+# Measured: an OpenHands planning turn wrote the code and both test files, and
+# all of it went into the plan's commit, ahead of the tests-first step.
+plan_only_probe() {   # DIR -> keep_plan_only run on DIR, then what git still sees changed
+  # shellcheck disable=SC2016  # the probe's text is the child's
+  bash -c 'source "$1" >/dev/null 2>&1; DIR="$2"; STATE_DIR="$2/.lca-project"; keep_plan_only >/dev/null
+    cd "$2" && git status --porcelain --untracked-files=all' _ "${REPO}/scripts/agent-project.sh" "$1"
+}
+planning_keeps_only_the_plan() {
+  local d="${SANDBOX}/plan-only" out
+  rm -rf "${d}"; mkdir -p "${d}/t"
+  # As ensure_repo leaves a project: the runner's own directory is not the project's.
+  ( cd "${d}" && git init -q && printf '.lca-project/\n' >> .git/info/exclude && echo a > a.py && echo x > t/old.py \
+      && git add -A && git -c user.name=x -c user.email=x@x commit -qm seed )
+  echo changed >> "${d}/a.py"; echo plan > "${d}/PLAN.md"; echo dec > "${d}/DECISIONS.md"
+  mkdir -p "${d}/sp ace" "${d}/.lca-project"; echo new > "${d}/sp ace/n.py"; echo s > "${d}/.lca-project/state"
+  out="$(plan_only_probe "${d}")"
+  [[ "$(<"${d}/a.py")" == a ]] || { echo 'a file planning changed was not put back' >&2; return 1; }
+  [[ ! -e "${d}/sp ace/n.py" && -f "${d}/.lca-project/planning-discarded/sp ace/n.py" ]] || {
+    echo 'a file planning created was not moved aside, kept' >&2; return 1; }
+  [[ -f "${d}/PLAN.md" && -f "${d}/DECISIONS.md" && -f "${d}/.lca-project/state" ]] || {
+    echo 'the plan, the decisions or the runner'"'"'s own state were touched' >&2; return 1; }
+  case "${out}" in
+    *a.py*|*sp\ ace*) printf 'still changed after planning:\n%s\n' "${out}" >&2; return 1 ;;
+  esac
+}
+check "...and planning may write the plan and the decisions, and anything else it did is put back or kept aside" \
+  planning_keeps_only_the_plan
 
 telegram_text_is_progress_only() {
   local t bad=0

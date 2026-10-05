@@ -4431,7 +4431,12 @@ ensure_agent_model() {
   have ollama || return 1
   model_present "${base}" || return 1
   tmp="$(mktemp)" || return 1
-  printf 'FROM %s\nPARAMETER num_ctx %s\n' "${base}" "${want}" > "${tmp}"
+  # num_predict too: the cap on one reply has to live in the model. Sent by the
+  # client it did not hold: under OpenHands, with AGENT_MAX_OUTPUT_TOKENS=2048
+  # in its settings, one qwen3-coder-next reply ran to 6,244 tokens and 25
+  # minutes (2026-10-05). A model parameter is applied whatever the client
+  # sends or leaves out, OpenCode included.
+  printf 'FROM %s\nPARAMETER num_ctx %s\nPARAMETER num_predict %s\n' "${base}" "${want}" "$(agent_max_output_tokens)" > "${tmp}"
   # 'ollama create' over the same weights: the blob is shared on disk, so this
   # costs a manifest rather than another copy of the model.
   if ! ollama create "${derived}" -f "${tmp}" >/dev/null 2>&1; then

@@ -165,6 +165,73 @@ Three tasks and one run each (two for 14b on A) is a small sample, and every
 task here was well specified. The ranking was the same on every task, though,
 and the gaps are big: 0/3 vs 3/3 on first tries, and 2× in time.
 
+## qwen3-coder-next (80B MoE, 3B active) — measured, and it replaces the 32b
+
+qwen3-coder-next:q4_K_M (Ollama's tag; 51.7 GB on disk, 51.5 GB resident)
+was measured on the same VM and harness, alone in RAM, on 2026-10-04.
+
+**The verdict, against the rule fixed beforehand** (it replaces the 32b as
+the agent model if it passes at least as many graded tasks and is faster, or
+passes D): it passes A, B and C, as the 32b does, in 62 minutes against the
+32b's 117, and its agent self-test takes 8–9 minutes against 50. **It is the
+agent model now, and the project lead.** It fails D, like every model so far.
+
+### Speed (alone, 16 vCPUs, nothing swapping)
+
+| | reading | writing | resident | load (page cache cold) |
+|---|---|---|---|---|
+| qwen2.5-coder:14b | 13.2 tok/s | 4.4 tok/s | 12.5 GB | 20–25 s |
+| qwen2.5-coder:32b | 5.6 tok/s | 2.0 tok/s | 24.6 GB | ~42 s |
+| qwen3.6:35b-a3b | 40.0 tok/s | 4.3–5.5 tok/s | 22.3 GB | 31 s |
+| **qwen3-coder-next** | **32.9 tok/s** | **7.4 tok/s** | 51.5 GB | ~175 s |
+
+Writing is the fastest measured here, 3.7 times the 32b's. Ollama 0.34 runs
+llama.cpp's own llama-server underneath, and these numbers are not poor, so a
+separate llama.cpp build was not tried.
+
+**Memory, and the measurement rule it forced.** It fits only alone: with it
+resident, 11–12 GB are left. Its load copies 51 GB into the server's memory
+while the same file fills the page cache, and that pushed about 1.2 GB of
+other processes into swap at every load, at `vm.swappiness` 60 and still at
+1. So every number here was taken with the model already loaded, the page
+cache dropped and swap emptied, under a vmstat guard that rejects any run
+with a single page swapped in or out. Two `lca speed` runs taken before that
+rule (7.2–7.4 and 31.9–33.3 tok/s) agreed with the clean one, but they are
+not the ones quoted.
+
+**And a product bug it exposed.** aider sends Ollama `num_ctx = prompt × 1.25
++ 8192` with every request unless told otherwise, and each new value reloads
+the model. On the 14b that was ~20 s a reload and nobody noticed; on this
+model it was four reloads of ~3 minutes in one graded task, each with its
+burst of swap. `lca` now pins aider's window to the one it budgets for
+(run-agent.sh, `aider/extra_params`). The graded runs below are with the pin.
+
+### The graded tasks
+
+| Task | 14b | 32b | qwen3.6 | **qwen3-coder-next** |
+|---|---|---|---|---|
+| A | ✓ 1st try, 16 min | ✓ 1st try, 35 min | ✓ 2nd try, 53 min | ✓ 2nd try, 47 min |
+| B | ✓ 1st try, 9 min | ✓ 1st try, 20 min | ✓ 1st try, 16 min | ✓ 1st try, **4 min** |
+| C | ✓ 1st try, 36 min | ✓ 1st try, 63 min | ✓ 1st try, 23 min | ✓ 1st try, **12 min** |
+| D | ✗ 59 min | ✗ 95 min | ✗ 75 min | ✗ 34 min |
+
+On A its first answer was right except for one of its own new tests
+("invalid characters" accepted); the retry wrote 9.4k tokens to fix it,
+which is most of the 47 minutes: corrected, it gets verbose. On D its first
+try made the drift every model makes (Jan 31, Feb 29, then Mar 29 for ever)
+and a float interval crashed instead of raising ValueError; the second fixed
+the drift and broke the proration and the quarterly dates.
+
+### The agent self-test, both tool-call channels
+
+| `lca agent selftest` | native tool calls on | native tool calls off |
+|---|---|---|
+| qwen3-coder-next at 32768 | **pass, 8 m 44 s** (file after 8 min) | **pass, 8 m 55 s** (file after 8 min) |
+
+The first model here for which both channels work. The agent runs with
+native calls on: same speed, and no text-format call markup that can leak
+into files, which is what the 2.5 models did.
+
 ## qwen3.6:35b-a3b against the 2.5 models — measured, and the verdict
 
 qwen3.6:35b-a3b (April 2026, mixture-of-experts: 35.5B parameters in all, about
