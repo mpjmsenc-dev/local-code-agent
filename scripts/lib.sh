@@ -5139,7 +5139,10 @@ project_verify_trivial() {
   local c="${1:-}"
   c="$(printf '%s' "${c}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
   [[ -z "${c}" ]] && return 0
-  grep -qxE '(true|:|exit( 0)?|echo( .*)?|printf( .*)?|test 1|\[ 1 \]|(true|:)( *(;|&&|\|\|) *(true|:|echo.*))*)' <<<"${c}"
+  grep -qxE '(true|:|exit( 0)?|echo( .*)?|printf( .*)?|test 1|\[ 1 \]|(true|:)( *(;|&&|\|\|) *(true|:|echo.*))*)' <<<"${c}" && return 0
+  # ...and one that throws its own verdict away: "cmd || true" passes when
+  # cmd fails. The first live plan's Install check was exactly that.
+  grep -qE '(\|\||;)[[:space:]]*(true|:|exit( 0)?)[[:space:]]*$' <<<"${c}"
 }
 
 # project_plan_problem PLAN_FILE — why this plan cannot be run, or rc 1 when it
@@ -5183,6 +5186,16 @@ project_plan_problem() {
       return 0
     fi
   done <<<"${steps}"
+  # The project checks are held to the same rule as a step's: a check that
+  # cannot fail would switch on and then pass whatever the project does.
+  local cname ccmd
+  while IFS=$'\t' read -r cname ccmd; do
+    [[ -n "${cname}" ]] || continue
+    if project_verify_trivial "${ccmd}"; then
+      printf 'the %s check "%s" passes whatever the project does; write a command that fails when it should, or none' "${cname}" "${ccmd}"
+      return 0
+    fi
+  done < <(project_plan_checks "$1" 2>/dev/null || true)
   # The steps still to do: a plan grows by milestones and by the fixes the
   # acceptance rounds add, so what is done does not count against it.
   (( left <= 40 )) || { printf 'PLAN.md has %s steps left; a plan this long is a spec to split into milestones, not to run' "${left}"; return 0; }
@@ -5529,15 +5542,15 @@ Then write exactly three files:
 
 ## Checks
 
-- Install: \`a command that exits 0 when the dependencies are installed\`, or none
-- Build: \`the build command\`, or none
-- Typecheck: \`the type checker\`, or none
-- Lint: \`the linter\`, or none
+- Install: \`a command that exits 0 only when the dependencies are installed\`
+- Build: \`the build command\`
+- Typecheck: \`the type checker\`
+- Lint: \`the linter\`
 - Test: \`the command that runs ALL the tests\`
 
 ${form}
 
-Rules for the checks: they run from ${d} with NO network, after every step once they have passed for the first time, and all of them must pass before the project counts as done. Use tools installed inside ${d} by the steps or that come with Python and Node (for Python, \`python3 -m compileall -q .\` is a fair build check). Write none where a kind of check does not apply.
+Rules for the checks: they run from ${d} with NO network, after every step once they have passed for the first time, and all of them must pass before the project counts as done. Use tools installed inside ${d} by the steps or that come with Python and Node (for Python, \`python3 -m compileall -q .\` is a fair build check). Where a kind of check does not apply, write the word none after its colon instead of a command. A check must be able to fail: never end one with \`|| true\`.
 
 Rules for the steps:
 ${steps_rule}

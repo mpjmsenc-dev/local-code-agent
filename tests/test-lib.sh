@@ -24729,12 +24729,14 @@ project_checks_milestones_and_done_are_read() {
     printf 'the Definition of Done was read as: %s\n' "$(project_spec_dod_items "${spec}" | tr '\n' '|')" >&2; bad=1; }
   printf '# App\n\nNo such section.\n' > "${spec}"
   ! project_spec_dod_items "${spec}" >/dev/null || { echo 'a spec with no Definition of Done had items' >&2; bad=1; }
-  for c in true ':' 'exit 0' 'echo ok' 'true && echo done'; do
+  for c in true ':' 'exit 0' 'echo ok' 'true && echo done' 'pip install . 2>/dev/null || true' 'make check; true'; do
     project_verify_trivial "${c}" || { printf 'the check "%s" passed for a real one\n' "${c}" >&2; bad=1; }
   done
   ! project_verify_trivial 'python3 -m app; test $? -eq 0' || { echo 'a real check was called trivial' >&2; bad=1; }
   printf -- '- [ ] 1. A\n  Verify: `true`\n' > "${plan}"
   [[ "$(project_plan_problem "${plan}")" == *'passes whatever'* ]] || { echo 'a step verified by true was accepted' >&2; bad=1; }
+  printf -- '# Plan\n\n## Checks\n\n- Install: `pip install -q . || true`\n\n- [ ] 1. A\n  Verify: `test -f a`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}")" == *'Install check'*'passes whatever'* ]] || { echo 'a project check that ignores its own failure was accepted' >&2; bad=1; }
   return "${bad}"
 }
 check "...and reads the project checks, the milestones still to plan, the spec's Definition of Done, and refuses checks that prove nothing" \
