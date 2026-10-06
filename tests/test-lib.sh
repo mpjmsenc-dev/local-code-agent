@@ -24730,6 +24730,12 @@ project_broken_tests_are_told_from_red_ones() {
   [[ "$(project_tests_verdict <<<'**TESTS BROKEN**: it calls self.login_admin, which it never defines.')" == $'broken\tit calls self.login_admin, which it never defines.' ]] || {
     printf 'a broken verdict read as %q\n' "$(project_tests_verdict <<<'**TESTS BROKEN**: it calls self.login_admin, which it never defines.')" >&2; bad=1; }
   [[ "$(project_tests_verdict <<<'I am not sure.')" == unclear ]] || { echo 'an unclear reply was given a verdict' >&2; bad=1; }
+  # The last verdict counts: measured, a reply that opened TESTS BROKEN and
+  # reasoned its way to "Final answer: TESTS OK".
+  [[ "$(project_tests_verdict <<<$'TESTS BROKEN? Let me look.\nThe route does not exist yet, so 404 is expected.\nFinal answer: TESTS OK')" == ok ]] || {
+    echo 'a reply that ends TESTS OK was read as broken' >&2; bad=1; }
+  [[ "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" == $'broken\tsetUp never creates the tables.' ]] || {
+    printf 'the last verdict, or its one-sentence reason, was misread: %q\n' "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" >&2; bad=1; }
   p="$(project_tests_check_payload m:r 'spec' 'Step 6' 'def test_x(self): self.login_admin()' 'AttributeError: login_admin')"
   jq -e '.model == "m:r" and .options.temperature == 0 and (.messages[0].content | test("TESTS OK") and test("TESTS BROKEN"))' <<<"${p}" >/dev/null \
     || { echo 'the check is not asked in the form it is read in' >&2; bad=1; }

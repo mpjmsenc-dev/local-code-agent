@@ -5561,7 +5561,7 @@ project_tests_check_payload() {
   have jq || return 1
   jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg c "$(project_clip_head "$4" 9000)" \
          --arg o "$(project_clip "$5" 3000)" '{
-    model: $m, stream: false, options: {temperature: 0},
+    model: $m, stream: false, options: {temperature: 0, num_predict: 400},
     messages: [
       {role: "system", content: "You check unit tests written BEFORE the feature they test exists. Right now they must fail, because the feature is missing, and that is correct. Decide whether they fail ONLY for that reason, or whether the tests themselves are broken: a helper, fixture or attribute they use but never define, a syntax error, a wrong import of the test framework, or an expectation the spec contradicts. A missing module, class, route or function OF THE FEATURE is expected, not broken. Reply with exactly TESTS OK, or with TESTS BROKEN: followed by one sentence naming what is wrong in the tests."},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe tests:\n" + $c + "\n\nRunning them now gives:\n" + $o)}
@@ -5571,14 +5571,33 @@ project_tests_check_payload() {
 # project_tests_verdict — stdin: that reply. "ok", or "broken" and a TAB and
 # the reason, or "unclear" for anything else (which counts as ok: the check
 # exists to catch broken tests, not to stop on its own doubt).
+#
+# The LAST verdict in the reply is the one that counts, and the reason is the
+# one sentence after it. Asked for a bare verdict, the model wrote 4,000
+# tokens that opened "TESTS BROKEN" and closed "Final answer: TESTS OK"; read
+# from the front, sound tests were sent back for rewriting with the whole
+# essay as the reason (2026-10-06).
 project_tests_verdict() {
-  local r
-  r="$(sed -E 's/\*\*//g; s/`//g' | tr '\n' ' ' | sed 's/^[[:space:]]*//')"
-  case "${r^^}" in
-    "TESTS BROKEN"*) r="${r#*[Bb][Rr][Oo][Kk][Ee][Nn]}"; r="${r#:}"; printf 'broken\t%s' "$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"${r}")" ;;
-    "TESTS OK"*)     printf 'ok' ;;
-    *)               printf 'unclear' ;;
-  esac
+  sed -E 's/\*\*//g; s/`//g' | tr '\n' ' ' | awk '
+    {
+      u = toupper($0); last = ""; pos = 0; i = 1
+      while (i <= length(u)) {
+        r = substr(u, i)
+        a = index(r, "TESTS OK"); b = index(r, "TESTS BROKEN")
+        if (a == 0 && b == 0) break
+        if (b != 0 && (a == 0 || b < a)) { last = "broken"; pos = i + b - 1; i = pos + 12 }
+        else { last = "ok"; pos = i + a - 1; i = pos + 8 }
+      }
+      if (last == "ok") { printf "ok"; exit }
+      if (last == "broken") {
+        reason = substr($0, pos + 12)
+        sub(/^[[:space:]:.-]*/, "", reason)
+        if (match(reason, /[.!?]( |$)/)) reason = substr(reason, 1, RSTART)
+        if (length(reason) > 400) reason = substr(reason, 1, 400)
+        printf "broken\t%s", reason; exit
+      }
+      printf "unclear"
+    }'
 }
 
 # project_review_payload MODEL SUMMARY TITLE DIFF — the /api/chat body for the
@@ -5588,7 +5607,7 @@ project_tests_verdict() {
 project_review_payload() {
   have jq || return 1
   jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg d "$(project_clip_head "$4" 14000)" '{
-    model: $m, stream: false, options: {temperature: 0},
+    model: $m, stream: false, options: {temperature: 0, num_predict: 1500},
     messages: [
       {role: "system", content: "You review one change to a project for BUGS and SECURITY problems only: wrong results, crashes, unhandled errors, injection (SQL, shell, HTML/XSS, template), missing escaping, missing authentication or authorization checks, secrets in code, unsafe file paths. Ignore style, naming and missing features. Report each problem on ONE line, exactly:\nFINDING <high|medium|low> <bug|security> <file:line> - <what is wrong, and the fix>\nhigh means wrong results, a crash in normal use, or an exploitable hole. If there is nothing to report, reply with exactly: NO FINDINGS"},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe change (git diff):\n" + $d)}
