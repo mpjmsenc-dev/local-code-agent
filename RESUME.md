@@ -36,7 +36,7 @@ Box settings changed this session (`.env`): `AGENT_MODEL=qwen3-coder-next:q4_K_M
 `AGENT_NATIVE_TOOL_CALLING=true`, `AGENT_MAX_OUTPUT_TOKENS=8192`,
 `AGENT_REQUEST_TIMEOUT=3600`, `AGENT_PROJECT_ENGINE=opencode`;
 `vm.swappiness=1` (`/etc/sysctl.d/99-lca-swappiness.conf`). The pre-session
-.env is saved in the session's job directory as `env.before-qcn`.
+.env is saved as `~/lca-eval/env.before-qcn` (mode 600).
 
 Open: `/etc/sudoers.d/jmuryn` (passwordless sudo) can be removed once this
 work is over: `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true`
