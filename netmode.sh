@@ -191,6 +191,21 @@ relay_port_from_env() {
   [[ "${port}" =~ ^[0-9]+$ ]] || return 0
   printf '%s\n' "${port}"
 }
+# ...and the dashboard's, on the same terms again: guarded_ports lists it while
+# ENABLE_OPENCLAW=true, so this renderer must emit it on exactly that
+# condition, or check and apply disagree in the loop described above.
+openclaw_port_from_env() {
+  local enabled="" port=""
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    enabled="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${ENABLE_OPENCLAW:-false}" )"
+    # shellcheck disable=SC1090
+    port="$( . <(tr -d '\r' < "${ENV_FILE}") >/dev/null 2>&1; printf '%s' "${OPENCLAW_PORT:-18789}" )"
+  fi
+  [[ "${enabled}" == "true" ]] || return 0
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${port}"
+}
 ollama_port_from_env() {
   local url="" port=""
   if [[ -f "${ENV_FILE}" ]]; then
@@ -209,12 +224,13 @@ ollama_port_from_env() {
 # and tailscale0. SSH (22) and all other ports are left fully open, so this
 # guard cannot lock anyone out.
 render_inbound_rules() {
-  local webui_port ollama_port agent_port relay_port bridge_if p q seen port_list=""
+  local webui_port ollama_port agent_port relay_port dash_port bridge_if p q seen port_list=""
   local ports=()
   webui_port="$(webui_port_from_env)"
   ollama_port="$(ollama_port_from_env)"
   agent_port="$(agent_port_from_env)"
   relay_port="$(relay_port_from_env)"
+  dash_port="$(openclaw_port_from_env)"
   bridge_if="$(docker_bridge_interface)"
   # ENFORCE the "can never lock you out" invariant below instead of merely
   # asserting it. If WEBUI_PORT — or the port in OLLAMA_HOST — is 22 (a typo,
@@ -223,7 +239,7 @@ render_inbound_rules() {
   # the guard after each reboot: the box would then be reachable only from the
   # provider's recovery console. Refuse to guard 22, and say so on stderr so
   # the ruleset on stdout stays byte-clean for nft.
-  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"} ${relay_port:+"${relay_port}"}; do
+  for p in "${webui_port}" "${ollama_port}" ${agent_port:+"${agent_port}"} ${relay_port:+"${relay_port}"} ${dash_port:+"${dash_port}"}; do
     [[ "${p}" =~ ^[0-9]+$ ]] || continue
     if (( p == 22 )); then
       warn "Refusing to add port 22 (SSH) to the inbound guard — that would lock you out of this machine. Change WEBUI_PORT / OLLAMA_HOST in .env, then re-run: sudo ${SCRIPT_DIR}/netmode.sh harden"
@@ -319,7 +335,8 @@ apply_inbound_guard() {
     "WebUI:$(webui_port_from_env)" \
     "Ollama:$(ollama_port_from_env)" \
     "Agent:$(agent_port_from_env)" \
-    "Ollama relay:$(relay_port_from_env)"; do
+    "Ollama relay:$(relay_port_from_env)" \
+    "Dashboard:$(openclaw_port_from_env)"; do
     guard_label="${pair%:*}"
     guard_port="${pair##*:}"
     [[ -n "${guard_port}" ]] || continue

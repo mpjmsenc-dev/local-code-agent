@@ -25,7 +25,7 @@ SHELL := /usr/bin/env bash
 # saw — the gate that guards every push, ungated. It fails badly in both
 # directions: a syntax error blocks every push, and a swallowed status lets red
 # gates through, which is the one thing it exists to prevent.
-SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*)
+SCRIPTS := $(wildcard *.sh scripts/*.sh deploy/*.sh tests/*.sh openclaw/*.sh bin/* .githooks/*)
 
 .PHONY: gates gates-container lint syntax test coverage live-verify dry-run check smoke bench hooks hooks-status help
 .DEFAULT_GOAL := help

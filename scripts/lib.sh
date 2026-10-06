@@ -84,6 +84,12 @@ BACKUP_TIMER="${SYSTEMD_UNIT_DIR}/local-code-agent-backup.timer"
 # directory, escaped). See the project-mode section below.
 # shellcheck disable=SC2034
 PROJECT_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-project@.service"
+# The dashboard (openclaw/setup.sh): its unit, run as the owner, and where
+# Node and OpenClaw are installed, root-owned so the gateway cannot change them.
+# shellcheck disable=SC2034
+OPENCLAW_SERVICE="${SYSTEMD_UNIT_DIR}/openclaw-gateway.service"
+# shellcheck disable=SC2034
+OPENCLAW_DIR="${LCA_HOST_ROOT:-}/opt/openclaw"
 # The 'lca' command setup.sh links onto PATH, and the directory it lives in.
 # shellcheck disable=SC2034
 LCA_LINK="${LCA_HOST_ROOT:-}/usr/local/bin/lca"
@@ -138,7 +144,7 @@ MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT:-}/etc/update-motd.d/99-local-code-a
 lca_host_paths() {
   printf '%s\n' \
     "${TUNE_SERVICE}" "${NETMODE_SERVICE}" "${BACKUP_SERVICE}" "${BACKUP_TIMER}" \
-    "${PROJECT_SERVICE}" \
+    "${PROJECT_SERVICE}" "${OPENCLAW_SERVICE}" "${OPENCLAW_DIR}" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service" \
     "${SYSTEMD_UNIT_DIR}/multi-user.target.wants" \
@@ -677,6 +683,11 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # Project mode's progress to Telegram (scripts/telegram.sh). Off by default:
   # it is the one thing in this stack that talks to a service on the internet.
   AGENT_PROJECT_TELEGRAM="${AGENT_PROJECT_TELEGRAM:-false}"
+  # The dashboard: OpenClaw, locked down to this repo's own plugin, on this
+  # machine's Tailscale address behind a password (openclaw/setup.sh). Off by
+  # default: it is a page that starts projects, so it is opt-in like the agent.
+  ENABLE_OPENCLAW="${ENABLE_OPENCLAW:-false}"
+  OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
   # Which ref of the public skills repository the agent's sandboxes may load
   # from. The default names one that does not exist, deliberately: see
   # agent_sandbox_env, and docs/PROMPT-WINDOW.md for the 4,232 tokens it saves.
@@ -6251,7 +6262,20 @@ tailscale_promised_ports() {
   if [[ "${ENABLE_AGENT}" == "true" ]] && valid_port "${AGENT_PORT}"; then
     printf "the agent's UI %s\n" "${AGENT_PORT}"
   fi
+  if [[ "${ENABLE_OPENCLAW}" == "true" ]] && valid_port "${OPENCLAW_PORT}"; then
+    printf 'the dashboard %s\n' "${OPENCLAW_PORT}"
+  fi
   return 0
+}
+
+# openclaw_dashboard_url — where the dashboard is, at this machine's Tailscale
+# address; rc 1 when it is off, its port is not a port, or there is no address.
+openclaw_dashboard_url() {
+  local ip
+  [[ "${ENABLE_OPENCLAW}" == "true" ]] || return 1
+  valid_port "${OPENCLAW_PORT}" || return 1
+  ip="$(tailscale_ip4)" || return 1
+  printf 'http://%s:%s' "${ip}" "${OPENCLAW_PORT}"
 }
 
 # tailscale_promise_gaps TSIP LISTENERS — the promised ports that are NOT
@@ -6510,6 +6534,15 @@ guarded_ports() {
   if [[ "${ENABLE_OLLAMA_RELAY}" == "true" && "${OLLAMA_RELAY_PORT}" != "22" ]] \
      && valid_port "${OLLAMA_RELAY_PORT}"; then
     out+=("Ollama relay ${OLLAMA_RELAY_PORT}")
+  fi
+  # The dashboard binds the Tailscale address (and loopback) alone, and that
+  # is not a reason to leave it out: a packet that arrives on the public
+  # interface addressed to the Tailscale IP is still delivered (Linux answers
+  # for any of its addresses on any interface). The guard is what makes
+  # "Tailscale only" true rather than likely.
+  if [[ "${ENABLE_OPENCLAW}" == "true" && "${OPENCLAW_PORT}" != "22" ]] \
+     && valid_port "${OPENCLAW_PORT}"; then
+    out+=("Dashboard ${OPENCLAW_PORT}")
   fi
   # The port the container is REALLY on, when that is not the one .env names.
   #

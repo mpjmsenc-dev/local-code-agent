@@ -816,6 +816,52 @@ else
 fi
 
 # --- Inbound guard ----------------------------------------------------------
+# --- Dashboard ----------------------------------------------------------------
+# OpenClaw, as openclaw/setup.sh leaves it: running, at its address, and still
+# locked down. The config is read back rather than trusted: a dashboard that
+# gained a hosted provider, a channel or a tool group would still answer, and
+# nothing else here would notice.
+step "Dashboard"
+if [[ "${ENABLE_OPENCLAW}" != "true" ]]; then
+  info "off (ENABLE_OPENCLAW=false). Turn it on: sudo lca dashboard setup"
+else
+  DASH_URL="$(openclaw_dashboard_url || true)"
+  if have systemctl && systemctl is-active --quiet openclaw-gateway.service 2>/dev/null; then
+    p_pass "the dashboard is running: ${DASH_URL:-port ${OPENCLAW_PORT} (no Tailscale address yet)}"
+  else
+    p_fail "the dashboard (openclaw-gateway.service) is not running. Start it: sudo lca dashboard restart · why: journalctl -u openclaw-gateway"
+  fi
+  DASH_HOME="$(getent passwd "$(invoking_user)" | cut -d: -f6)"
+  DASH_PW="${DASH_HOME}/.openclaw-dashboard-password"
+  if [[ -s "${DASH_PW}" && "$(stat -c %a "${DASH_PW}" 2>/dev/null)" == "600" ]]; then
+    p_pass "its password is in ${DASH_PW} (mode 600)"
+  elif [[ -e "${DASH_PW}" ]]; then
+    p_warn "${DASH_PW} is not mode 600 — anyone on this machine can read the dashboard password: chmod 600 ${DASH_PW}"
+  else
+    p_warn "no ${DASH_PW}: the dashboard has no password file. Re-run: sudo lca dashboard setup"
+  fi
+  DASH_CFG="${DASH_HOME}/.openclaw/openclaw.json"
+  if [[ -r "${DASH_CFG}" ]] && have jq; then
+    DASH_BAD="$(jq -r '
+      [ (if (.plugins.allow // []) != ["ollama","lca"] then "plugins other than ollama and lca may load" else empty end),
+        (if (.tools.alsoAllow // []) != ["lca"] or (.tools.allow // null) != null then "tools other than the lca plugin may be allowed" else empty end),
+        (if (.tools.profile // "") != "minimal" then "the tool profile is not minimal" else empty end),
+        (if ((.channels // {}) | length) > 0 then "a channel is configured" else empty end),
+        (if (.gateway.auth.mode // "") != "password" then "the gateway has no password login" else empty end),
+        (if (.gateway.bind // "") != "tailnet" then "it is not bound to the Tailscale address" else empty end),
+        (if (.gateway.terminal.enabled // true) != false then "the browser terminal is on" else empty end),
+        (if ([.models.providers // {} | keys[]] - ["ollama"] | length) > 0 then "a provider other than Ollama is configured" else empty end)
+      ] | join("; ")' "${DASH_CFG}" 2>/dev/null || echo "its config could not be read as JSON")"
+    if [[ -z "${DASH_BAD}" ]]; then
+      p_pass "locked down: local Ollama only, the lca plugin's tools only, no channels, password login, Tailscale only"
+    else
+      p_fail "the dashboard is not locked down as set up: ${DASH_BAD}. Re-run: sudo lca dashboard setup"
+    fi
+  else
+    p_skip "its config (${DASH_CFG}) could not be read here, so its lockdown was not checked"
+  fi
+fi
+
 step "Inbound guard"
 # guarded_ports, not a fourth hand-written copy of the decision — the note in
 # the else-branch below already says why: "'lca apply' now fixes what this

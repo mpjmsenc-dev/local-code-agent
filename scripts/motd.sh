@@ -348,6 +348,22 @@ banner_no_model() {
   printf '\n'
 }
 
+# dashboard_row — where the browser dashboard is, when it is on. The Tailscale
+# address through quick(), like every probe here, so the banner cannot hang.
+dashboard_row() {
+  local ip=""
+  [[ "${ENABLE_OPENCLAW}" == "true" ]] || return 0
+  if have tailscale; then
+    ip="$(quick tailscale ip -4 || true)"
+    ip="${ip%%$'\n'*}"
+  fi
+  if [[ -n "${ip}" ]]; then
+    row "Dashboard" "http://${ip}:${OPENCLAW_PORT}   (password: ~/.openclaw-dashboard-password)"
+  else
+    row "Dashboard" "port ${OPENCLAW_PORT} on the Tailscale address (none yet: sudo tailscale up)"
+  fi
+}
+
 banner_ready() {
   local addr url hint
   if model_missing; then
@@ -366,6 +382,7 @@ banner_ready() {
   fi
   chat_down_row
   chat_stale_row
+  dashboard_row
   coding_row
   row "Ask right here" "lca ask \"why is this box slow?\""
   row "All commands" "lca help"

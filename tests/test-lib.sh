@@ -9503,7 +9503,7 @@ script_doc_references_resolve() {
   # Files project mode writes into the USER's project, not documents of this
   # repository. Exact basenames, so a real reference that merely ends the same
   # way (docs/PLAN-B.md, say) is still checked.
-  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md REVIEW.md "
+  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md REVIEW.md ACCEPTANCE.md "
   for f in "${scripts[@]}"; do
     while IFS= read -r ref; do
       [[ -n "${ref}" ]] || continue
@@ -25298,12 +25298,15 @@ check "...and planning may write the plan and the decisions, and anything else i
 # is split, the project checks switching on, an agent that adds a git remote
 # and commits by itself, and an acceptance round that turns an unmet item of
 # the spec's Definition of Done into a fix step. Done means all of it passed.
+project_loop_sandbox() {   # SB — a copy of the working tree with the shipped .env, as tg_copy_repo makes
+  rm -rf "$1"; mkdir -p "$1/repo" "$1/home" "$1/projects/demo/.lca-project"
+  ( cd "${REPO}" && git ls-files -z --cached --others --exclude-standard | xargs -0 cp --parents -t "$1/repo" )
+  cp "${REPO}/.env.example" "$1/repo/.env"
+}
 # shellcheck disable=SC2016  # the probe is code for the child shell
 project_loop_splits_accepts_and_stays_local() {
   local sb="${SANDBOX}/project-loop" out
-  rm -rf "${sb}"; mkdir -p "${sb}/repo" "${sb}/home" "${sb}/projects/demo/.lca-project"
-  ( cd "${REPO}" && git ls-files -z --cached --others --exclude-standard | xargs -0 cp --parents -t "${sb}/repo" )
-  cp "${REPO}/.env.example" "${sb}/repo/.env"
+  project_loop_sandbox "${sb}"
   printf 'AGENT_PROJECTS_DIR=%s\nENABLE_AGENT=true\nAGENT_PROJECT_ENGINE=opencode\nAGENT_PROJECT_RETRIES=1\n' "${sb}/projects" >> "${sb}/repo/.env"
   record_configuration "${sb}/repo/.env"
   printf '# Demo\n\n## Definition of Done\n\n- `sh hello.sh` prints hello\n- README.md exists\n' > "${sb}/projects/demo/.lca-project/spec.md"

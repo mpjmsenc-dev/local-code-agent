@@ -19,7 +19,7 @@ jobs:
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)
-        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*
+        run: shellcheck -x -P SCRIPTDIR *.sh scripts/*.sh deploy/*.sh tests/*.sh openclaw/*.sh bin/* .githooks/*
 
   test:
     name: Unit tests + tune dry-run
