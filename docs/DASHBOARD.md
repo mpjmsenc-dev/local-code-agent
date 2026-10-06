@@ -77,7 +77,8 @@ written by `sudo lca dashboard setup`) and its unit, not a prompt, and
 
 What the plugin runs, each with fixed arguments and never through a shell:
 `scripts/agent-project.sh` (start with `--autonomy answerer`, stop, resume,
-status), `lca check`, `docker restart` of the two named containers, and
+status), `lca check`, a restart of the two named containers (the agent app
+and the chat app; neither applies a setting, see `lca apply` for that), and
 `openclaw devices` to approve a browser. A project name becomes a directory
 and a file name only: lower case, letters, digits and dashes.
 
