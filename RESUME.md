@@ -55,6 +55,13 @@ Progress below this line is appended as it happens.
 - 19:26: Part 4.2: a 41,229-character spec saved through the dashboard chat
   (`/project save big-spec`) and through the upload endpoint: byte-identical,
   not started (`~/specs/big-spec.md`).
+- 19:57: gates run 5 green on the deployed tree 2d71c7b (1467 passed, 0
+  failed, 2 not run: aider and systemd are not in the container; netmode 65
+  of 65). **Not pushed: this session was not permitted to push with root's
+  stored GitHub credentials.** To publish, as the owner:
+  `sudo git -C /opt/local-code-agent push origin HEAD:claude/local-code-agent-build-dd13qw`
+  (then push any later commits from `~/work/lca-oc`, branch `openclaw-dashboard`,
+  after their gates pass).
 - Cleanup: toycalc, toycalc2-4, taskd-opencode-run, taskd-openhands-run
   deleted after archiving to `~/lca-eval/archive/test-projects-2026-10-06.tgz`
   (no .venv/node_modules); their two still-enabled system units disabled; the
