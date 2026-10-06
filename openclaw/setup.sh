@@ -140,7 +140,8 @@ openclaw_config() {
       terminal: { enabled: false },
       cliAgents: { enabled: false },
       uploads: { enabled: false },
-      controlUi: { automaticallyFetchFavicons: false, communityInvite: false, sessionObserver: false, embedSandbox: "trusted" }
+      controlUi: { automaticallyFetchFavicons: false, communityInvite: false, sessionObserver: false, embedSandbox: "trusted",
+                   experimental: { customPlugins: true } }
     },
     update: { checkOnStart: false, auto: { enabled: false } },
     telemetry: { enabled: false },
@@ -205,6 +206,10 @@ openclaw_config() {
     }
   }'
 }
+
+# (controlUi: embedSandbox "trusted" lets the Projects tab call its own API on
+# the same origin, and experimental.customPlugins lets the Control UI show a
+# tab from a plugin that is not bundled; the allowlist above means ours.)
 
 # The dashboard model's standing instructions: short, because every word is
 # read again on every message on a CPU.
