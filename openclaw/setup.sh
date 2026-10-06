@@ -280,7 +280,9 @@ cmd_setup() {
   tailscale_ip4 >/dev/null || die "There is no Tailscale address: the dashboard listens there and nowhere else. Run: sudo tailscale up"
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp}"' EXIT
+  # Expanded now: tmp is local to this function, and the trap runs at exit.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" EXIT
   install_node "${tmp}"
   install_openclaw "${tmp}"
 
