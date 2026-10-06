@@ -25024,6 +25024,10 @@ FINDING medium bug crm/forms.py:9 - accepts a negative quantity'
   [[ "${f}" == $'high\tsecurity\ta.py:3\tshell=True on input\nlow\tbug\tb.py:2\toff by one' ]] || {
     printf 'capitalised or colon forms read as %q\n' "${f}" >&2; bad=1; }
   p="$(project_review_payload m:r 'spec' 'Step 3' $'+x = 1')"
+  # A clipped diff is not missing code: a CRM review reported a function as
+  # "cut off at line 395" because the review's own diff was cut there.
+  jq -e '.messages[0].content | test("never report code as missing")' <<<"${p}" >/dev/null \
+    || { echo 'the reviewer is not told a cut diff is not missing code' >&2; bad=1; }
   jq -e '.model == "m:r" and .options.temperature == 0 and (.messages[0].content | test("SECURITY") and test("NO FINDINGS"))' <<<"${p}" >/dev/null \
     || { echo 'the reviewer is not asked for bugs and security in the form it is read in' >&2; bad=1; }
   jq -e '.messages[1].content | test("\\+x = 1")' <<<"${p}" >/dev/null || { echo 'the diff did not reach the reviewer' >&2; bad=1; }

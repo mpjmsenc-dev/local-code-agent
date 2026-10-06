@@ -5609,7 +5609,7 @@ project_review_payload() {
   jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg d "$(project_clip_head "$4" 14000)" '{
     model: $m, stream: false, options: {temperature: 0, num_predict: 1500},
     messages: [
-      {role: "system", content: "You review one change to a project for BUGS and SECURITY problems only: wrong results, crashes, unhandled errors, injection (SQL, shell, HTML/XSS, template), missing escaping, missing authentication or authorization checks, secrets in code, unsafe file paths. Ignore style, naming and missing features. Report each problem on ONE line, exactly:\nFINDING <high|medium|low> <bug|security> <file:line> - <what is wrong, and the fix>\nhigh means wrong results, a crash in normal use, or an exploitable hole. If there is nothing to report, reply with exactly: NO FINDINGS"},
+      {role: "system", content: "You review one change to a project for BUGS and SECURITY problems only: wrong results, crashes, unhandled errors, injection (SQL, shell, HTML/XSS, template), missing escaping, missing authentication or authorization checks, secrets in code, unsafe file paths. Ignore style, naming and missing features. Report each problem on ONE line, exactly:\nFINDING <high|medium|low> <bug|security> <file:line> - <what is wrong, and the fix>\nhigh means wrong results, a crash in normal use, or an exploitable hole. Long files are cut where the diff says so: never report code as missing, incomplete or cut off because the diff you see was cut. If there is nothing to report, reply with exactly: NO FINDINGS"},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe change (git diff):\n" + $d)}
     ]}'
 }
