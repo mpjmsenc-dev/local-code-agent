@@ -5488,6 +5488,14 @@ opencode_session_id() {
   jq -Rrn '[inputs | fromjson? | .sessionID? // empty] | first // empty' 2>/dev/null
 }
 
+# opencode_last_finish — stdin: the same events. Why the last model request
+# ended: stop, tool-calls, length... "length" means the reply hit the cap on
+# one reply and was cut, mid-file as often as not.
+opencode_last_finish() {
+  have jq || return 1
+  jq -Rrn '[inputs | fromjson? | select(.type? == "step_finish") | .part.reason? // empty] | last // empty' 2>/dev/null
+}
+
 # opencode_usage — stdin: the same events. "REQUESTS FIRST_INPUT INPUT OUTPUT":
 # one model request per step_finish, the first request's prompt tokens (the
 # overhead a step pays before it has done anything), and the totals.

@@ -463,7 +463,7 @@ remove_opencode_containers() {
 
 # oc_turn TASK WHAT — the same contract as oh_turn, with OpenCode.
 oc_turn() {
-  local msg="$1" what="$2" session="" out rc kind asked=0 name t0 events
+  local msg="$1" what="$2" session="" out rc kind asked=0 name t0 events finish cut=0
   mkdir -p "${STATE_DIR}/opencode-home"
   while :; do
     out="$(mktemp "${STATE_DIR}/.opencode.XXXXXX")"
@@ -474,6 +474,7 @@ oc_turn() {
     events="$(grep -c '"type"' "${out}" || true)"
     [[ -n "${session}" ]] || session="$(opencode_session_id < "${out}")"
     LAST_TEXT="$(opencode_final_text < "${out}")"
+    finish="$(opencode_last_finish < "${out}")"
     say "${what}: opencode exited ${rc}; requests, first prompt, prompt and output tokens: $(opencode_usage < "${out}")"
     rm -f "${out}"
     if (( rc != 0 && events == 0 )) && [[ -z "${session}" ]]; then
@@ -498,6 +499,16 @@ oc_turn() {
         [[ -n "${LAST_TEXT}" ]] \
           || { TURN_FAIL="opencode exited ${rc} without a word (see .lca-project/opencode.err)"; return 1; } ;;
     esac
+    # A reply cut at the cap ends the run with the work half-written: a CRM
+    # step's tests were typed out as text up to exactly 4,096 tokens, no file
+    # was written, and the step went on without tests (2026-10-06). It is
+    # asked to carry on, in smaller pieces, twice at most.
+    if [[ "${finish}" == "length" && -n "${session}" ]] && (( cut < 2 )); then
+      cut=$(( cut + 1 ))
+      say "${what}: the reply was cut at the cap on one reply ($(agent_max_output_tokens) tokens); asking it to continue in smaller pieces (${cut} of 2)"
+      msg="Your last reply was cut off at the length limit before you finished. Continue from where you stopped. Write every file with the write or edit tool, never as text in your reply, and keep each file or edit under 250 lines: split bigger ones."
+      continue
+    fi
     kind="$(project_turn_kind "${LAST_TEXT}")"
     say "${what}: the agent's turn ended (${kind})"
     [[ "${kind}" == "question" ]] || return 0

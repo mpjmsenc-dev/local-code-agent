@@ -24933,6 +24933,9 @@ opencode_events_are_read() {
   [[ "$(opencode_final_text <<<"${ev}")" == $'Wrote it.\nSTEP DONE' ]] || { echo 'the last word was not the last text part' >&2; bad=1; }
   [[ "$(opencode_session_id <<<"${ev}")" == ses_A1 ]] || { echo 'the session was not found' >&2; bad=1; }
   [[ "$(opencode_usage <<<"${ev}")" == '2 5400 10880 52' ]] || { printf 'usage read as %q\n' "$(opencode_usage <<<"${ev}")" >&2; bad=1; }
+  [[ "$(opencode_last_finish <<<"${ev}")" == stop ]] || { echo 'the last finish reason was not read' >&2; bad=1; }
+  [[ "$(opencode_last_finish <<<'{"type":"step_finish","part":{"reason":"length","tokens":{"output":4096}}}')" == length ]] || {
+    echo 'a reply cut at the cap was not seen as one' >&2; bad=1; }
   [[ -z "$(opencode_final_text <<<'')" ]] || { echo 'no events gave a last word' >&2; bad=1; }
   [[ "$(printf '%s\nA notice that is not JSON\n' "${ev}" | opencode_final_text)" == $'Wrote it.\nSTEP DONE' ]] || {
     echo 'one line that is not JSON lost the whole last word' >&2; bad=1; }
