@@ -380,6 +380,7 @@ stop_for_human() {   # STATUS REASON
   if [[ -n "${TURN_CLEANUP:-}" ]]; then ${TURN_CLEANUP} || true; TURN_CLEANUP=""; fi
   state_set STATUS "$1" REASON "$2"
   say "STOPPED ($1): $2"
+  retire_unit
   write_summary
   local why
   case "$1" in
@@ -1673,6 +1674,7 @@ cmd_run() {
   done
   state_set STATUS "done" STEP "$(plan_step_total)" REASON ""
   say "all $(plan_step_total) steps done, and the acceptance checks pass"
+  retire_unit
   write_summary
   tg_progress "Finished"
   tg_event "🏁 finished. $(tg_summary)"
@@ -1769,6 +1771,14 @@ user_units() {
   [[ "$(id -u)" != "0" ]] || return 1
   [[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" == "yes" ]] || return 1
   systemctl --user show-environment >/dev/null 2>&1
+}
+# retire_unit — a run that has ended (done, or stopped for any reason) no
+# longer starts at boot: its user unit is disabled from inside, which needs no
+# root ('--resume' enables it again). A system unit stays as it is: disabling
+# that needs root, and it only exits at boot with "nothing to do".
+retire_unit() {
+  user_units 2>/dev/null || return 0
+  uctl disable "$(unit_instance)" >/dev/null 2>&1 || true
 }
 user_unit_file() { printf '%s/systemd/user/local-code-agent-project@.service' "${XDG_CONFIG_HOME:-${HOME}/.config}"; }
 uctl() { systemctl --user "$@"; }
