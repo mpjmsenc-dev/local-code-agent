@@ -118,6 +118,13 @@ install_openclaw() {
 # openclaw_config OWNER_HOME — the whole openclaw.json, as JSON (a subset of
 # the JSON5 it reads). Nothing in it is a secret: the password is read from the
 # unit's environment file.
+#
+# The model is asked for exactly as everything else asks for it, so its runner
+# is shared and never reloaded: the same name and window, and shift and
+# truncate at Ollama's defaults. OpenClaw sends shift:false to local servers
+# unless told otherwise, and Ollama starts a second runner without context
+# shift for that: measured, a 51 GB reload of 5.5 minutes for one dashboard
+# message, and another for the project's next request (2026-10-06).
 openclaw_config() {
   local home="$1" model ctx
   model="$(agent_model_name)"
@@ -139,6 +146,7 @@ openclaw_config() {
     telemetry: { enabled: false },
     discovery: { mdns: { mode: "off" } },
     browser: { enabled: false },
+    cron: { enabled: false },
     commands: { bash: false, config: false, plugins: false, mcp: false, debug: false, restart: false },
     skills: {
       allowBundled: ["none"],
@@ -166,7 +174,7 @@ openclaw_config() {
             id: $model, name: $model, reasoning: false, input: ["text"], compat: { supportsTools: true },
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
             contextWindow: $ctx, contextTokens: $ctx, maxTokens: 4096,
-            params: { num_ctx: $ctx, keep_alive: -1 }
+            params: { num_ctx: $ctx, keep_alive: -1, shift: true, truncate: true }
           }]
         }
       }

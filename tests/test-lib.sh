@@ -18,7 +18,7 @@ LCA_TARGETS=( check-system.sh backup.sh restore.sh update.sh update-model.sh
               scripts/ask.sh scripts/logs.sh scripts/speed.sh
               scripts/selftest.sh scripts/ollama-relay.sh
               scripts/agent-selftest.sh scripts/agent-setup.sh
-              scripts/agent-task.sh )
+              scripts/agent-task.sh openclaw/setup.sh )
 
 # Every document that INSTRUCTS a reader. The prose gates further down apply to
 # this set, and it is named here because they used to spell it out one function
@@ -9503,7 +9503,9 @@ script_doc_references_resolve() {
   # Files project mode writes into the USER's project, not documents of this
   # repository. Exact basenames, so a real reference that merely ends the same
   # way (docs/PLAN-B.md, say) is still checked.
-  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md REVIEW.md ACCEPTANCE.md "
+  # AGENTS.md likewise: the file the dashboard's OpenClaw reads from its own
+  # workspace, written there by openclaw/setup.sh.
+  local project_files=" PLAN.md DECISIONS.md SUMMARY.md spec.md spec-summary.md REVIEW.md ACCEPTANCE.md AGENTS.md "
   for f in "${scripts[@]}"; do
     while IFS= read -r ref; do
       [[ -n "${ref}" ]] || continue
@@ -14833,6 +14835,22 @@ check_reports_the_agent_tier() {
 }
 check "'lca check' reports the agent tier, in the configuration that has one" \
   check_reports_the_agent_tier
+# The dashboard, both ways: off is one line that says how to turn it on; on,
+# its port is among the ones the guard must cover, and a dashboard that is not
+# running (there is none in this sandbox) is a failure, not silence.
+dashboard_is_reported_both_ways() {
+  local out bad=0
+  out="$(check_report 'ENABLE_OPENCLAW=false' running)"
+  grep -q 'off (ENABLE_OPENCLAW=false)' <<<"${out}" || { printf 'the dashboard switched off is not said:\n%s\n' "${out}" >&2; bad=1; }
+  ! grep -q 'Dashboard 18789' <<<"${out}" || { echo 'a dashboard that is off was put in the guard' >&2; bad=1; }
+  out="$(check_report $'ENABLE_OPENCLAW=true\nOPENCLAW_PORT=18789' running)"
+  grep -q 'openclaw-gateway.service) is not running' <<<"${out}" || {
+    printf 'a dashboard switched on and not running was not reported:\n%s\n' "${out}" >&2; bad=1; }
+  grep -q 'Dashboard 18789' <<<"${out}" || { printf 'the dashboard port is not among the guarded ones:\n%s\n' "${out}" >&2; bad=1; }
+  return "${bad}"
+}
+check "...and the dashboard: off says how to turn it on; on, its port is guarded and a dead one is a failure" \
+  dashboard_is_reported_both_ways
 relay_is_reported_when_it_is_on() {
   local out bad=0
   out="$(check_report 'ENABLE_OLLAMA_RELAY=true' running)"

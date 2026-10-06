@@ -612,10 +612,118 @@ It builds a project from one spec file with nobody at the keyboard.
    prompt is about 13k tokens before the step says a word.
 3. **Verification, then commit.** The step's command runs in a throwaway
    container from the agent's own image, with the network off and the project
-   at the path the agent saw. Pass: the step is ticked in `PLAN.md` and
-   committed. Fail: the step is retried with the failure output in hand,
-   `AGENT_PROJECT_RETRIES` (2) times. Then the run **stops** instead of
-   building on a broken base.
+   at the path the agent saw, and so does every **project check** that is on
+   (below). Pass: the step is committed, reviewed, and ticked in `PLAN.md`.
+   The agent's "STEP DONE" counts for nothing by itself, and a step that
+   ticks its own box in `PLAN.md` has it put back. Fail: the step is retried
+   with the failure output in hand, `AGENT_PROJECT_RETRIES` (2) times, and
+   then **made smaller** instead of abandoned (below).
+4. **Acceptance.** When every step is done, the whole project is checked:
+   every project check, every step's check again, and every item of the
+   spec's Definition of Done. What fails becomes fix steps, for up to
+   `AGENT_PROJECT_ACCEPT_ROUNDS` (5) rounds.
+
+### Done means verified: the project checks
+
+The plan carries a `## Checks` section besides the steps: an install, build,
+typecheck, lint and test command, each or `none`:
+
+```
+## Checks
+
+- Install: `.venv/bin/python -m pip check`
+- Build: `python3 -m compileall -q .`
+- Typecheck: none
+- Lint: none
+- Test: `python3 -m unittest discover -s tests -q`
+```
+
+They run offline from the project directory after every step, once they are
+**on**: a check switches on the first time it passes (before that, the code
+it checks may not exist yet) and stays on for good (`CHECKS_ON` in the state).
+A step whose own check passes but which breaks a check that is on has failed.
+This is what closes the hole toycalc4 found: a step check that ran only the
+old tests passed a step whose own code did not run at all; the test check
+runs the whole suite, the step's new tests included.
+
+### A step that keeps failing is made smaller
+
+A step that fails all its attempts is not the end of the run:
+
+1. Its failed attempts are kept (`refs/lca/failed/step-N`, nothing is lost),
+   the tree goes back to where the step began, and the model is asked, in one
+   request, for the step as 2 to 4 smaller steps. They replace it in
+   `PLAN.md` as `N.1`, `N.2`... under a `- [-] N.` line, and the **last part
+   keeps N's own check**: a split makes the work smaller, never the bar lower.
+2. A part that fails is split again, once: `N.1.1`, `N.1.2`. Two levels is
+   the limit.
+3. A part two levels down that still fails is **re-planned** once in place: a
+   new approach, and a corrected check only when the failure shows the check
+   itself was wrong. Every split and re-plan is in `DECISIONS.md`.
+4. A re-planned step that fails again stops the run: re-planning made no
+   progress (`failed`).
+
+### Large specs: milestones, the MVP first
+
+A spec over 8,000 characters (`PROJECT_MILESTONE_CHARS`) is planned in
+milestones: `## Milestone 1: MVP` with its steps, and every later milestone as
+a heading and a scope paragraph with no steps yet. When the steps planned so
+far are done, a planning turn writes the next milestone's steps, against the
+code that exists by then; the steps before it must come back unchanged. Each
+step's prompt carries the section of the plan it is in, and points at the
+whole spec in `.lca-project/spec.md` for the parts it needs.
+
+### The acceptance rounds
+
+When nothing is left to do, the runner runs, itself, in the verification
+container:
+
+- every project check, on or not;
+- every done step's check again (a later step may have broken an earlier one);
+- every item of the spec's **Definition of Done**, if it has one (a section
+  under a heading that says so). An agent turn turns the items into
+  `ACCEPTANCE.md`, one item each with the command that proves it, written
+  once and kept, so the bar does not move between rounds; the runner refuses
+  a list with the wrong number of items or a command that proves nothing.
+
+Everything passes: the project is `done`. Something fails: it becomes fix
+steps under `## Acceptance round N: fixes` in `PLAN.md` (ten at most a round),
+built like any step, and the next round runs. After the fifth round with
+something still failing, the run ends `incomplete`, and the summary lists
+what. Each round's results are in `.lca-project/acceptance-round-N.md`.
+
+### Limits, and the only reasons it stops
+
+| stop | why |
+|---|---|
+| `waiting` (credentials) | a real credential in the diff (a private key, a cloud or forge token), or an agent that asks for credentials again after being told there are none |
+| `waiting` (outside) | files under `AGENT_PROJECTS_DIR` but outside this project changed, or the project's `.git` was removed |
+| `stalled` | nothing passed (no step, plan, milestone or acceptance round) for `AGENT_PROJECT_STALL_HOURS` (6); time queued or with the machine off does not count |
+| `limit` | it has run for `AGENT_PROJECT_MAX_DAYS` (7) days in all; resuming gives it a new allowance |
+| `failed` | a re-planned step failed again |
+| `incomplete` | acceptance checks still fail after `AGENT_PROJECT_ACCEPT_ROUNDS` rounds |
+
+Every stop writes `.lca-project/SUMMARY.md` and lets the next queued project
+run. A hard-coded password in the code is not a stop: the attempt is sent
+back to read it from the environment. A deleted tracked file is not a stop
+either: git still has it, and `DECISIONS.md` says which.
+
+### Local only: git is history and rollback, never a remote
+
+On every turn, not once: every git remote is removed, a `pre-push` hook that
+refuses is put back if it was changed, a `core.hooksPath` pointing elsewhere
+is unset, and a nested repository (a base project cloned in) has its `.git`
+moved aside to `.lca-project/nested-git/` (its files stay). A commit, reset
+or branch switch the agent made is undone without touching its files (the
+runner is the only one that commits). The runner never pushes, and no
+sandbox holds a credential to push with.
+
+### One at a time
+
+Projects queue: every runner takes its place in `~/.lca-projects/queue` and
+waits until it is first and holds the lock (`~/.lca-projects/run.lock`), with
+`STATUS=queued` meanwhile. A runner that dies releases the lock with nothing
+to clean up, and a queued project whose runner is gone is skipped.
 
 ### The quality loop, sized for a CPU
 
@@ -728,7 +836,8 @@ by the client did not hold. And llama-server's RAM prompt cache is capped at
 
 ### When the agent asks instead of finishing
 
-`--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`):
+`--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`; the dashboard always
+starts projects with `answerer`):
 
 | mode | what happens |
 |---|---|
@@ -736,20 +845,18 @@ by the client did not hold. And llama-server's RAM prompt cache is capped at
 | `self` | the agent is told: *"Decide yourself using the spec, record the decision and reason in DECISIONS.md, and continue."* |
 | `answerer` | a second model (`AGENT_PROJECT_ANSWERER`, default the chat model) answers as project lead, given the spec summary, `PLAN.md` and `DECISIONS.md`; the answer is logged in `DECISIONS.md` |
 
-**In every mode** the run stops and reports instead of deciding three things:
-credentials or tokens, anything outside the project directory, and deleting
-data. It checks the question, and the answerer's reply (which may only say
-`ESCALATE` to those). It also checks what the step did, before committing
-anything:
+**Unattended** (`self`, `answerer`), nobody is asked anything. A question
+about credentials, anything outside the project directory, or deleting data
+gets the one safe answer instead of a stop: no credentials (a setting the
+owner fills in later, documented in the README, a fake value in tests),
+nothing outside the project, nothing deleted; the question and the answer go
+in `DECISIONS.md`. A lead that does not answer, or answers `ESCALATE`, leaves
+the agent to decide, and that is recorded too. Only an agent that asks for
+credentials again, having been told there are none, stops the run. In `ask`
+mode every such question stops it, as before.
 
-- a file changed under `AGENT_PROJECTS_DIR` but outside this project;
-- a tracked file deleted;
-- something in the diff that looks like a credential (a private key block, a
-  cloud or forge token, a literal password).
-
-Each of those stops the run with nothing committed. The matching is wide on
-purpose: a false stop costs one look, a missed one is the thing this mode must
-never do.
+What the step did is checked before anything is committed; see the table of
+stops above.
 
 ### Where the files are, and why it needs a setting
 
@@ -768,14 +875,18 @@ committed. The runner commits; the agent is told not to run git.
 ### Unattended, and resumable
 
 `lca agent project` installs `local-code-agent-project@<dir>.service`, a
-systemd instance running as you, and enables it. It does not need your SSH
+systemd instance running as you, and enables it: a **user** unit
+(`~/.config/systemd/user/`) when lingering is on for you (`sudo lca dashboard
+setup` turns it on), so starting, stopping and resuming need no root; a system
+unit otherwise. It does not need your SSH
 session, and after a reboot it carries on. The state is all in the project
 directory: `.lca-project/state`, `PLAN.md`'s ticks, and git. An attempt that
 was cut off starts again from the top. A run that ends, by finishing, failing
 or stopping for a person, exits cleanly, so systemd does not retry into the
 same wall.
 
-`--status` shows where it is, `--stop` stops it and stops it resuming at boot,
+`--status` shows where it is (`--json`: the same, for the dashboard), `--stop`
+stops it and stops it resuming at boot,
 and `--resume` carries on, optionally with `--answer`. At the end,
 `.lca-project/SUMMARY.md` says how many steps were done, which one failed,
 which decisions were taken without you, and what to review.

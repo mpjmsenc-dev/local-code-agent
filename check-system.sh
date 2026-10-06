@@ -131,13 +131,13 @@ fi
 #   BACKUP_KEEP=abc            retention refuses to act on a value it cannot
 #     parse, which is the safe direction and means the disk fills quietly.
 #   LCA_ASK_TOKENS=abc         'lca ask' falls back to 512 without a word.
-for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT AGENT_PROJECT_RETRIES; do
+for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAMA_RELAY_PORT AGENT_MODEL_CONTEXT AGENT_MAX_OUTPUT_TOKENS AGENT_REQUEST_TIMEOUT AGENT_MAX_ITERATIONS AGENT_TIMEOUT_MINUTES AGENT_STUCK_STRIKES BACKUP_AGENT_MAX_MB AGENT_SANDBOX_GRACE_SECONDS AGENT_CONTEXT_WARN_PERCENT AGENT_PROJECT_RETRIES AGENT_PROJECT_STALL_HOURS AGENT_PROJECT_MAX_DAYS AGENT_PROJECT_ACCEPT_ROUNDS OPENCLAW_PORT; do
   value="${!setting}"
   case "${setting}" in
     # 0 is a legitimate value for all four of these, not a typo: it means
     # "keep everything" for BACKUP_KEEP and "no limit" for the three agent
     # limits, which is the convention agent_run_verdict already implements.
-    BACKUP_KEEP|AGENT_MAX_ITERATIONS|AGENT_TIMEOUT_MINUTES|AGENT_STUCK_STRIKES|BACKUP_AGENT_MAX_MB|AGENT_PROJECT_RETRIES)
+    BACKUP_KEEP|AGENT_MAX_ITERATIONS|AGENT_TIMEOUT_MINUTES|AGENT_STUCK_STRIKES|BACKUP_AGENT_MAX_MB|AGENT_PROJECT_RETRIES|AGENT_PROJECT_STALL_HOURS|AGENT_PROJECT_MAX_DAYS)
       [[ "${value}" =~ ^[0-9]+$ ]] && continue ;;
     *)           [[ "${value}" =~ ^[0-9]+$ ]] && (( 10#${value} > 0 )) && continue ;;
   esac
@@ -172,6 +172,14 @@ for setting in OLLAMA_CONTEXT_LENGTH LCA_ASK_TOKENS BACKUP_KEEP AGENT_PORT OLLAM
       p_warn "AGENT_REQUEST_TIMEOUT='${value}' is not a positive number, so the agent falls back to 1800 seconds. Too low and every step is discarded mid-generation: at the client default of 300 this hardware, measured at 901 s per reply, threw away every step and sat 'running' having executed nothing. Fix it in ${ENV_FILE}, then: ${SCRIPT_DIR}/bin/lca agent restart" ;;
     AGENT_PROJECT_RETRIES)
       p_warn "AGENT_PROJECT_RETRIES='${value}' is not a whole number, so 'lca agent project' refuses to start at all. Set how many times a failing step is retried (0 for none, on purpose) in ${ENV_FILE}." ;;
+    AGENT_PROJECT_STALL_HOURS)
+      p_warn "AGENT_PROJECT_STALL_HOURS='${value}' is not a whole number, so an unattended project is never stopped for making no progress. Set the hours (0 for no limit, on purpose) in ${ENV_FILE}." ;;
+    AGENT_PROJECT_MAX_DAYS)
+      p_warn "AGENT_PROJECT_MAX_DAYS='${value}' is not a whole number, so an unattended project has no overall time limit. Set the days (0 for no limit, on purpose) in ${ENV_FILE}." ;;
+    AGENT_PROJECT_ACCEPT_ROUNDS)
+      p_warn "AGENT_PROJECT_ACCEPT_ROUNDS='${value}' is not a positive number, so a finished project ends at its first acceptance round with whatever still fails. Fix it in ${ENV_FILE}." ;;
+    OPENCLAW_PORT)
+      p_fail "OPENCLAW_PORT='${value}' is not a port number, so the dashboard cannot listen and the inbound guard has no port to close for it. Fix it in ${ENV_FILE}, then: sudo ${SCRIPT_DIR}/bin/lca dashboard setup" ;;
     # No catch-all arm on purpose: a setting added to the loop above without a
     # message here prints nothing at all, which is the silent failure this whole
     # section exists to remove. The gate that guards this loop checks only that

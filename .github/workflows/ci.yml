@@ -15,7 +15,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n (syntax) on every script
         run: |
-          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh bin/* .githooks/*; do
+          for f in *.sh scripts/*.sh deploy/*.sh tests/*.sh openclaw/*.sh bin/* .githooks/*; do
             bash -n "$f"
           done
       - name: shellcheck (zero findings required)

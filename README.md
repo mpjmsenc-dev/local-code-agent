@@ -335,6 +335,7 @@ lca                 # starts aider on the local model, right here
 | `lca backup` / `lca restore` | take a backup now / put one back |
 | `lca webui <cmd>` | the chat app: `start`, `stop`, `restart`, `status`, `url`, `logs` |
 | `lca agent <cmd>` | the autonomous agent: `start`, `stop`, `restart`, `status`, `url`, `logs`, `watch`, `selftest` |
+| `lca dashboard <cmd>` | the browser dashboard (OpenClaw, locked down to project mode and this server): `setup`, `url`, `status`, `restart` |
 | `lca relay <cmd>` | the Ollama relay containers reach the model through: `status`, `install`, `remove` |
 
 `lca <command> --help` explains any of them — and only explains it. That is
@@ -434,8 +435,13 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PROJECTS_DIR` | *(empty)* | host directory mounted into every agent sandbox at `/workspace/projects`; empty turns project mode off |
 | `AGENT_PROJECT_AUTONOMY` | `ask` | project mode, when the agent asks: `ask` stops, `self` decides and records why, `answerer` has a second model answer |
 | `AGENT_PROJECT_ANSWERER` | *(empty)* | the answerer model; empty means `MODEL_NAME` |
-| `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its verification before the project run stops |
+| `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its checks before it is split into smaller steps |
+| `AGENT_PROJECT_STALL_HOURS` | `6` | an unattended project stops after this many hours with nothing passing (0 = no limit) |
+| `AGENT_PROJECT_MAX_DAYS` | `7` | an unattended project stops, with a summary, after this many days of running (0 = no limit) |
+| `AGENT_PROJECT_ACCEPT_ROUNDS` | `5` | rounds of full checks and Definition-of-Done fixes before a finished project counts as done or incomplete |
 | `AGENT_PROJECT_TELEGRAM` | `false` | project mode's progress to your own Telegram bot (progress text only; token and chat id in `~/.telegram.env`): `lca agent telegram --help` |
+| `ENABLE_OPENCLAW` | `false` | the browser dashboard on the Tailscale address, behind a password: `sudo lca dashboard setup` (docs/DASHBOARD.md) |
+| `OPENCLAW_PORT` | `18789` | the dashboard's port; it is added to the inbound guard |
 | `AGENT_PROJECT_ENGINE` | `openhands` | who does a project's work: `openhands` (the agent app) or `opencode` (OpenCode, MIT, in a container per turn; needs a model whose native tool calls work) |
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |
