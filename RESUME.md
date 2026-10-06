@@ -1,5 +1,48 @@
 # RESUME.md — the agent tier's first run on real hardware
 
+## ⏸ PAUSED 2026-10-06 17:18 UTC at the owner's request — read this first
+
+Every run of this session's is stopped. The owner is running their own
+OpenHands conversation (a time-tracking build) on this box: **do not stop
+it, do not clean or garbage-collect its sandbox (`oh-agent-server-338y…`),
+do not change the agent's model or settings, run nothing CPU-heavy** (that
+includes `make gates-container`), and keep qwen3-coder-next loaded. Resume
+only when the owner says so.
+
+What was running, and where each one stands:
+
+| | state | how to resume |
+|---|---|---|
+| **CRM** (`~/projects/crm`, spec `~/specs/crm.md`) | stopped during step 8's second tests turn; **7 of 15 steps done** (each tested first, verified, reviewed, committed), 34.5 h of its 48-h budget used (33.3 h of model time, 1,071 requests, 1.5M prompt tokens read, 248k written). `tests/test_quotes.py` is uncommitted from the stopped turn. Its systemd unit is disabled. | `lca agent project --dir ~/projects/crm --resume` (re-enables the unit; step 8 starts again with its tests). 13.5 h of the budget are left. |
+| qwen3-coder-next evaluation | **finished**: replaces the 32b (below) | nothing to do |
+| task-D engine comparison | **finished**: OpenCode kept (below) | nothing to do |
+| toycalc4 | stopped on 2026-10-04 (the outside-file guard, caused by this session) | not worth resuming: its result is recorded below |
+| Telegram notifications | built, gated, deployed, **off** | needs the real bot token in `~/.telegram.env` (it holds `your-token-here`), then `lca agent telegram setup`, `AGENT_PROJECT_TELEGRAM=true`, `lca agent telegram test`, then a small project run to see it live |
+
+CRM so far: Flask (BSD-3) written from scratch; the planner chose no base
+project (DECISIONS.md: no mature CRM fits FR/EN, SQLite-only and the taxes).
+Done: setup, models, auth, seed, companies, contacts, deals pipeline. Left:
+quotes, i18n, formatting, deletion guard, routing, integration tests,
+README, final check. Review: 5 findings, all high; 4 fixed, 1 open (a
+hard-coded fallback SECRET_KEY; its fix broke step 2's tests and was
+discarded). Interventions: one operator resume after step 6 failed all three
+attempts (broken tests: an undefined helper; reasons in its DECISIONS.md;
+the failed attempt kept in `git stash`), and four runner restarts to deploy
+fixes found during the run (stream timeouts, cut replies, the broken-tests
+check, its parser, the review prompt). Numbers: `~/lca-eval/crm-report.sh`.
+
+Box settings changed this session (`.env`): `AGENT_MODEL=qwen3-coder-next:q4_K_M`,
+`AGENT_PROJECT_ANSWERER=qwen3-coder-next:q4_K_M-agent`,
+`AGENT_NATIVE_TOOL_CALLING=true`, `AGENT_MAX_OUTPUT_TOKENS=8192`,
+`AGENT_REQUEST_TIMEOUT=3600`, `AGENT_PROJECT_ENGINE=opencode`;
+`vm.swappiness=1` (`/etc/sysctl.d/99-lca-swappiness.conf`). The pre-session
+.env is saved in the session's job directory as `env.before-qcn`.
+
+Open: `/etc/sudoers.d/jmuryn` (passwordless sudo) can be removed once this
+work is over: `sudo rm /etc/sudoers.d/jmuryn`, then `sudo -k; sudo -n true`
+must be refused.
+
+
 ## 2026-10-04: everything local; toycalc4; qwen3-coder-next; OpenCode; the quality loop
 
 **Direction (owner, final):** free and local only. No paid API, no
