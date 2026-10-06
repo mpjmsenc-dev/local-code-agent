@@ -39,7 +39,28 @@ Progress below this line is appended as it happens.
 
 - 2026-10-06 ~19:20 local: gates run 3 in the container on branch
   `openclaw-dashboard` (worktree `~/work/lca-oc`); runs 1 and 2 failed only
-  on repository-convention gates, fixed.
+  on repository-convention gates, fixed. Run 3: 1466 passed, 1 failed (a
+  doc's wording, fixed), 2 not run (as before).
+- 19:20: `/opt` fast-forwarded to 371b111; `sudo lca dashboard setup` run:
+  OpenClaw 2026.9.8 as `openclaw-gateway.service` (User=jmuryn,
+  NoNewPrivileges, outbound only to localhost and the tailnet), on
+  100.114.175.107:18789 and loopback, port in the inbound guard, password in
+  `~/.openclaw-dashboard-password` (600), lingering on for jmuryn.
+- 19:24: a new browser identity over the tailnet got "pairing required";
+  approved through `/lca/panel` with the password (no SSH); then reached the
+  dashboard.
+- 19:25: Part 4.1 started from the dashboard chat: `/project new wcount` with
+  a pasted 3-step spec (`~/specs/wcount.md`), running as the user service
+  `local-code-agent-project@home-jmuryn-projects-wcount.service`.
+- 19:26: Part 4.2: a 41,229-character spec saved through the dashboard chat
+  (`/project save big-spec`) and through the upload endpoint: byte-identical,
+  not started (`~/specs/big-spec.md`).
+- Cleanup: toycalc, toycalc2-4, taskd-opencode-run, taskd-openhands-run
+  deleted after archiving to `~/lca-eval/archive/test-projects-2026-10-06.tgz`
+  (no .venv/node_modules); their two still-enabled system units disabled; the
+  leftover OpenCode test stub (`~/work/octest`, a python server on 18080 for
+  two days) stopped and archived. Kept: crm (stopped at 7/15) and
+  mpjm-timetracking (the owner's).
 
 ## ⏸ PAUSED 2026-10-06 17:18 UTC at the owner's request (superseded by the section above)
 
