@@ -551,6 +551,11 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
       # Reported as skipped, never counted as a pass: "downloaded" is not
       # "works", and this is the only check that proves inference at all.
       p_skip "--quick: the real-generation probe was not run, so 'downloaded' is all that is known — run 'lca check' without it to test inference"
+    elif RUNNING_PROJECT="$(project_running_dir)"; then
+      # Measured: this probe loaded the chat model while a project was
+      # planning, which evicted the 51 GB agent model, and the project's next
+      # request spent minutes loading it back (2026-10-06).
+      p_skip "a project is running (${RUNNING_PROJECT}): asking '${MODEL_NAME}' now could evict the model it is using, so the real-generation probe was not run"
     else
       info "asking '${MODEL_NAME}' for a real generation. If the model is not loaded yet this loads it first, which on a CPU-only box has taken up to 5 minutes here..."
       if model_responds "${MODEL_NAME}"; then

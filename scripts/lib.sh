@@ -5018,6 +5018,19 @@ PROJECT_POINTER_FILE="${HOME}/.lca-agent-project"
 # point of the mode is that nobody had to think about the reply.
 PROJECT_SELF_REPLY="Decide yourself using the spec, record the decision and reason in DECISIONS.md, and continue."
 
+# project_running_dir — the project whose runner holds the one-at-a-time lock
+# (scripts/agent-project.sh, queue_wait) right now, for the person this runs
+# for; rc 1 when none does. Probed with a non-blocking flock that lets go at
+# once, so it never takes the lock from a runner.
+project_running_dir() {
+  local home lock
+  home="$(getent passwd "$(invoking_user)" 2>/dev/null | cut -d: -f6)"
+  lock="${home:-${HOME}}/.lca-projects/run.lock"
+  [[ -e "${lock}" ]] && have flock || return 1
+  flock -n "${lock}" true 2>/dev/null && return 1
+  head -1 "${lock%/*}/running" 2>/dev/null | grep . || printf 'a project'
+}
+
 # project_autonomy_valid MODE — one of the three this runner implements.
 project_autonomy_valid() {
   case "${1:-}" in ask|self|answerer) return 0 ;; *) return 1 ;; esac

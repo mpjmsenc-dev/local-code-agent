@@ -30,7 +30,7 @@ cat ~/.openclaw-dashboard-password
 | `/project status NAME` | one project's plan, step by step |
 | `/project stop NAME` · `/project resume NAME` | stop it (it can be resumed), carry on from where it stopped |
 | `/project summary` · `decisions` · `review` · `plan` · `acceptance` · `log` `NAME` | its files: the summary, DECISIONS.md, REVIEW.md, PLAN.md, ACCEPTANCE.md, the run log |
-| `/server status` · `/server health` · `/server models` | CPU, RAM, disk, models, containers, what runs; `lca check`; the models and which is loaded |
+| `/server status` · `/server health` · `/server models` | CPU, RAM, disk, models, containers, what runs; `lca check --quick` (no generation probe, which could evict a running project's model); the models and which is loaded |
 | `/server restart agent` · `/server restart chat` | the only two things that can be restarted from here |
 | `/lca` | this list |
 

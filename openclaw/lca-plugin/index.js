@@ -254,7 +254,9 @@ function makeServer(api) {
   }
 
   async function health() {
-    const r = await run(path.join(S.lcaDir, "bin", "lca"), ["check"], { timeoutMs: 600_000 });
+    // --quick: no real-generation probe, which would load the chat model and
+    // evict the model a running project is using.
+    const r = await run(path.join(S.lcaDir, "bin", "lca"), ["check", "--quick"], { timeoutMs: 600_000 });
     return tail(plain(`${r.stdout}\n${r.stderr}`).trim(), 9000) + (r.timedOut ? "\n(lca check was stopped after 10 minutes)" : "");
   }
 
