@@ -857,7 +857,7 @@ else
         (if ((.channels // {}) | length) > 0 then "a channel is configured" else empty end),
         (if (.gateway.auth.mode // "") != "password" then "the gateway has no password login" else empty end),
         (if (.gateway.bind // "") != "tailnet" then "it is not bound to the Tailscale address" else empty end),
-        (if (.gateway.terminal.enabled // true) != false then "the browser terminal is on" else empty end),
+        (if .gateway.terminal.enabled != false then "the browser terminal is on" else empty end),
         (if ([.models.providers // {} | keys[]] - ["ollama"] | length) > 0 then "a provider other than Ollama is configured" else empty end)
       ] | join("; ")' "${DASH_CFG}" 2>/dev/null || echo "its config could not be read as JSON")"
     if [[ -z "${DASH_BAD}" ]]; then
