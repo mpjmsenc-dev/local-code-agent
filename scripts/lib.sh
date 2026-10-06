@@ -659,8 +659,17 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   AGENT_PROJECT_AUTONOMY="${AGENT_PROJECT_AUTONOMY:-ask}"
   # The answerer; empty means the chat model.
   AGENT_PROJECT_ANSWERER="${AGENT_PROJECT_ANSWERER:-}"
-  # Retries for a step that fails its verification, before the run stops.
+  # Retries for a step that fails its verification, before it is split into
+  # smaller steps (and, two levels down, re-planned).
   AGENT_PROJECT_RETRIES="${AGENT_PROJECT_RETRIES:-2}"
+  # An unattended project stops when nothing has passed for this many hours,
+  # and when it has run for this many days in all (0 = no limit). See
+  # progress_guard in scripts/agent-project.sh.
+  AGENT_PROJECT_STALL_HOURS="${AGENT_PROJECT_STALL_HOURS:-6}"
+  AGENT_PROJECT_MAX_DAYS="${AGENT_PROJECT_MAX_DAYS:-7}"
+  # Rounds of the final acceptance loop: the full checks, every step's check
+  # again and the spec's Definition of Done, with fix steps for what fails.
+  AGENT_PROJECT_ACCEPT_ROUNDS="${AGENT_PROJECT_ACCEPT_ROUNDS:-5}"
   # Which agent does the work in project mode: openhands (the app, a sandbox
   # per conversation) or opencode (one container per turn). See
   # project_engine_valid.
@@ -5049,16 +5058,21 @@ project_mount_env() {
 #
 # A step with no Verify line is printed with an empty VERIFY, so the caller can
 # refuse the plan rather than run a step nothing can check.
+#
+# A step the runner split because it kept failing is marked "- [-] 3. Title"
+# and is not a step any more: its parts follow it, numbered 3.1, 3.2 (and 3.1.1
+# one level further), and those are what is printed. See project_plan_split.
 project_plan_steps() {
   [[ -r "${1:-}" ]] || return 1
   awk '
     function flush() { if (n != "") printf "%s\t%s\t%s\t%s\n", n, d, t, v; n = ""; v = "" }
-    match($0, /^[[:space:]]*[-*] \[[ xX]\] [0-9]+\.[[:space:]]+/) {
+    match($0, /^[[:space:]]*[-*] \[[ xX-]\] [0-9]+(\.[0-9]+)*\.[[:space:]]+/) {
       flush()
+      if ($0 ~ /^[[:space:]]*[-*] \[-\]/) next
       d = ($0 ~ /^[[:space:]]*[-*] \[[xX]\]/) ? 1 : 0
       s = $0; sub(/^[[:space:]]*[-*] \[[ xX]\] /, "", s)
-      n = s; sub(/\..*/, "", n)
-      t = s; sub(/^[0-9]+\.[[:space:]]+/, "", t); gsub(/\t/, " ", t); sub(/[[:space:]]+$/, "", t)
+      match(s, /^[0-9]+(\.[0-9]+)*/); n = substr(s, 1, RLENGTH)
+      t = s; sub(/^[0-9]+(\.[0-9]+)*\.[[:space:]]+/, "", t); gsub(/\t/, " ", t); sub(/[[:space:]]+$/, "", t)
       next
     }
     n != "" && /^[[:space:]]*(-[[:space:]]*)?[Vv]erify:/ {
@@ -5070,18 +5084,63 @@ project_plan_steps() {
   ' "$1"
 }
 
+# project_step_depth N — how many times step N's line has been split: 0 for
+# "3", 1 for "3.1", 2 for "3.1.2".
+project_step_depth() {
+  local n="${1:-}" dots="${1//[^.]/}"
+  [[ "${n}" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  printf '%s' "${#dots}"
+}
+
+# project_step_number_after A B — true when step number B comes after A in a
+# plan (3 < 3.1 < 3.2 < 3.10 < 4): compared part by part, as numbers.
+project_step_number_after() {
+  local -a num_a num_b
+  local i x y
+  IFS=. read -r -a num_a <<<"${1:-}"
+  IFS=. read -r -a num_b <<<"${2:-}"
+  for (( i = 0; i < ${#num_a[@]} || i < ${#num_b[@]}; i++ )); do
+    x="${num_a[i]:-}" y="${num_b[i]:-}"
+    [[ -n "${x}" ]] || return 0
+    [[ -n "${y}" ]] || return 1
+    (( 10#${y} > 10#${x} )) && return 0
+    (( 10#${y} < 10#${x} )) && return 1
+  done
+  return 1
+}
+
+# project_verify_trivial CMD — true when CMD proves nothing: it passes whatever
+# the project does (true, :, exit 0, an echo, a bare test of a constant).
+project_verify_trivial() {
+  local c="${1:-}"
+  c="$(printf '%s' "${c}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "${c}" ]] && return 0
+  grep -qxE '(true|:|exit( 0)?|echo( .*)?|printf( .*)?|test 1|\[ 1 \]|(true|:)( *(;|&&|\|\|) *(true|:|echo.*))*)' <<<"${c}"
+}
+
 # project_plan_problem PLAN_FILE — why this plan cannot be run, or rc 1 when it
 # can. Checked before the first step, because a step nothing can verify would
 # be committed on the agent's say-so, which is the thing this mode exists to
 # replace.
 project_plan_problem() {
-  local steps n=0 want=1 num title verify spec="${2:-}" wanted
+  local steps n=0 left=0 want=1 num title verify spec="${2:-}" wanted prev="" done_ dotted=false
   steps="$(project_plan_steps "$1" 2>/dev/null)" || { printf 'PLAN.md is missing or unreadable'; return 0; }
   [[ -n "${steps}" ]] || { printf 'PLAN.md has no steps in the "- [ ] 1. Title" form'; return 0; }
-  while IFS=$'\t' read -r num _ title verify; do
+  grep -qE '^[0-9]+\.' <<<"${steps}" && dotted=true
+  while IFS=$'\t' read -r num done_ title verify; do
     n=$(( n + 1 ))
-    [[ "${num}" == "${want}" ]] || { printf 'step numbers are not 1, 2, 3... in order (found %s where %s was due)' "${num}" "${want}"; return 0; }
-    want=$(( want + 1 ))
+    [[ "${done_}" == "1" ]] || left=$(( left + 1 ))
+    if [[ "${dotted}" == "true" ]]; then
+      # A plan the runner has split: parts of a step follow it, so the rule is
+      # order, not 1, 2, 3. Never deeper than two splits.
+      (( $(project_step_depth "${num}") <= 2 )) || { printf 'step %s is split deeper than two levels' "${num}"; return 0; }
+      [[ -z "${prev}" ]] || project_step_number_after "${prev}" "${num}" \
+        || { printf 'step numbers are not in order (found %s after %s)' "${num}" "${prev}"; return 0; }
+      prev="${num}"
+    else
+      [[ "${num}" == "${want}" ]] || { printf 'step numbers are not 1, 2, 3... in order (found %s where %s was due)' "${num}" "${want}"; return 0; }
+      want=$(( want + 1 ))
+    fi
     [[ -n "${title}" ]] || { printf 'step %s has no title' "${num}"; return 0; }
     # shellcheck disable=SC2016  # the backticks are the format being named
     [[ -n "${verify}" ]] || { printf 'step %s (%s) has no "Verify: `command`" line' "${num}" "${title}"; return 0; }
@@ -5093,11 +5152,19 @@ project_plan_problem() {
       printf 'step %s verifies with "test $?" after && or a pipe, where $? is not the status of the command it means; write it as "cmd; test $? -eq N"' "${num}"
       return 0
     fi
+    # A check that passes whatever the project does proves nothing, and a
+    # step "verified" by it is taken on the agent's word.
+    if [[ "${done_}" != "1" ]] && project_verify_trivial "${verify}"; then
+      printf 'step %s verifies with "%s", which passes whatever the project does; write a command that fails until the step works' "${num}" "${verify}"
+      return 0
+    fi
   done <<<"${steps}"
-  (( n <= 40 )) || { printf 'PLAN.md has %s steps; a plan this long is a spec to split, not to run' "${n}"; return 0; }
+  # The steps still to do: a plan grows by milestones and by the fixes the
+  # acceptance rounds add, so what is done does not count against it.
+  (( left <= 40 )) || { printf 'PLAN.md has %s steps left; a plan this long is a spec to split into milestones, not to run' "${left}"; return 0; }
   # A spec that says how many steps it is built in gets that many. Two live
   # plans wrote 10 and 7 for a spec saying "exactly three steps".
-  if [[ -r "${spec}" ]] && wanted="$(project_spec_step_count "${spec}")" && (( n != wanted )); then
+  if [[ "${dotted}" != "true" && -r "${spec}" ]] && wanted="$(project_spec_step_count "${spec}")" && (( n != wanted )); then
     printf 'the spec says it is built in exactly %s steps, and PLAN.md has %s; use the steps the spec names' "${wanted}" "${n}"
     return 0
   fi
@@ -5121,17 +5188,163 @@ project_spec_step_count() {
 # project_plan_mark_done PLAN_FILE N — tick step N, and nothing else.
 project_plan_mark_done() {
   local f="${1:-}" n="${2:-}" tmp
-  [[ -w "${f}" && "${n}" =~ ^[0-9]+$ ]] || return 1
+  [[ -w "${f}" && "${n}" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
   tmp="$(mktemp)" || return 1
   awk -v n="${n}" '
-    !hit && match($0, /^[[:space:]]*[-*] \[ \] [0-9]+\./) {
-      s = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", s); sub(/\..*/, "", s)
-      if (s == n) { sub(/\[ \]/, "[x]"); hit = 1 }
+    !hit && match($0, /^[[:space:]]*[-*] \[ \] [0-9]+(\.[0-9]+)*\./) {
+      s = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", s); match(s, /^[0-9]+(\.[0-9]+)*/)
+      if (substr(s, 1, RLENGTH) == n) { sub(/\[ \]/, "[x]"); hit = 1 }
     }
     { print }
     END { exit !hit }
   ' "${f}" > "${tmp}" || { rm -f "${tmp}"; return 1; }
   cat "${tmp}" > "${f}" && rm -f "${tmp}"
+}
+
+# project_plan_split PLAN_FILE N PARTS_FILE VERIFY — replace step N, which
+# kept failing, by the steps in PARTS_FILE (written in the plan's own form and
+# numbered 1, 2, 3...): N's line becomes "- [-] N. Title (split ...)" and the
+# parts follow it, indented, as N.1, N.2... The LAST part is verified by
+# VERIFY, N's own check: a split makes the work smaller, never the bar lower.
+# rc 1, the plan untouched, when N is not an open step of PLAN_FILE or
+# PARTS_FILE does not hold 2 to 6 parts that each have a check.
+project_plan_split() {
+  local f="${1:-}" n="${2:-}" parts="${3:-}" verify="${4:-}" steps k tmp
+  [[ -w "${f}" && -r "${parts}" && -n "${verify}" && "${n}" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  steps="$(project_plan_steps "${parts}" 2>/dev/null)" || return 1
+  k="$(grep -c . <<<"${steps}" || true)"
+  (( k >= 2 && k <= 6 )) || return 1
+  awk -F'\t' '$4 == "" { bad = 1 } END { exit bad }' <<<"${steps}" || return 1
+  tmp="$(mktemp)" || return 1
+  awk -v n="${n}" -v parts="${steps}" -v verify="${verify}" -v k="${k}" '
+    BEGIN { m = split(parts, line, "\n") }
+    !hit && match($0, /^[[:space:]]*[-*] \[ \] [0-9]+(\.[0-9]+)*\./) {
+      s = $0; sub(/^[[:space:]]*[-*] \[ \] /, "", s); match(s, /^[0-9]+(\.[0-9]+)*/)
+      if (substr(s, 1, RLENGTH) == n) {
+        hit = 1; skip = 1
+        match($0, /^[[:space:]]*/); ind = substr($0, 1, RLENGTH)
+        l = $0; sub(/\[ \]/, "[-]", l); print l " (split into smaller steps)"
+        j = 0
+        for (i = 1; i <= m; i++) {
+          if (line[i] == "") continue
+          split(line[i], c, "\t"); j++
+          v = (j == k) ? verify : c[4]
+          printf "%s  - [ ] %s.%d. %s\n%s    Verify: `%s`\n", ind, n, j, c[3], ind, v
+        }
+        next
+      }
+    }
+    skip && /^[[:space:]]*(-[[:space:]]*)?[Vv]erify:/ { next }
+    skip && /^[[:space:]]*[-*] \[[ xX-]\] [0-9]/ { skip = 0 }
+    skip && /^#/ { skip = 0 }
+    { print }
+    END { exit !hit }
+  ' "${f}" > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  cat "${tmp}" > "${f}" && rm -f "${tmp}"
+}
+
+# project_plan_checks PLAN_FILE — the project-wide checks from PLAN.md's
+# "## Checks" section, NAME<TAB>COMMAND a line, in the order written:
+#
+#   ## Checks
+#
+#   - Install: `.venv/bin/python -m pip check`
+#   - Build: `npm run build`
+#   - Typecheck: none
+#   - Lint: `.venv/bin/ruff check .`
+#   - Test: `python3 -m unittest discover -s tests -q`
+#
+# Only those five names; "none", "n/a" or no command means the project has no
+# such check. Nothing at all for a plan without the section.
+project_plan_checks() {
+  [[ -r "${1:-}" ]] || return 1
+  awk '
+    /^##[[:space:]]+[Cc]hecks[[:space:]]*$/ { inside = 1; next }
+    /^#/ { inside = 0 }
+    inside && match($0, /^[[:space:]]*[-*][[:space:]]*\**(Install|Build|Typecheck|Type check|Lint|Test|Tests)\**[[:space:]]*:/) {
+      name = substr($0, RSTART, RLENGTH); gsub(/[-*:[:space:]]/, "", name)
+      if (name == "Tests") name = "Test"
+      rest = substr($0, RSTART + RLENGTH)
+      if (!match(rest, /`[^`]+`/)) next
+      cmd = substr(rest, RSTART + 1, RLENGTH - 2)
+      if (tolower(cmd) ~ /^(none|n\/a|-)$/) next
+      gsub(/\t/, " ", cmd); printf "%s\t%s\n", name, cmd
+    }
+  ' "$1"
+}
+
+# project_plan_pending_milestone PLAN_FILE — the first "## Milestone ..."
+# heading that has no steps under it yet: the next part of a large spec to
+# plan. rc 1 when every milestone has its steps (or there are none).
+project_plan_pending_milestone() {
+  [[ -r "${1:-}" ]] || return 1
+  awk '
+    function close_ms() { if (ms != "" && !steps) { print ms; found = 1; exit } }
+    /^##[[:space:]]/ {
+      close_ms(); ms = ""; steps = 0
+      if (tolower($0) ~ /^##[[:space:]]+milestone/) { ms = $0; sub(/^##[[:space:]]+/, "", ms) }
+      next
+    }
+    /^#[[:space:]]/ { close_ms(); ms = "" ; next }
+    ms != "" && /^[[:space:]]*[-*] \[[ xX-]\] [0-9]/ { steps = 1 }
+    END { if (!found) { close_ms() } if (!found) exit 1 }
+  ' "$1"
+}
+
+# project_plan_context PLAN_FILE N MAX — what a step's prompt carries of the
+# plan: the whole plan when it fits in MAX characters; otherwise the headings
+# of every section and the whole section step N is in, so the step it is on is
+# never the part that was cut.
+project_plan_context() {
+  local f="${1:-}" n="${2:-}" max="${3:-2500}" all
+  all="$(project_strip_tool_markup < "${f}" 2>/dev/null)" || return 0
+  if (( ${#all} <= max )); then printf '%s' "${all}"; return 0; fi
+  all="$(awk -v n="${n}" '
+    /^#/ { if (buf != "" && mine) out = out buf; else if (head != "") out = out head "\n   [...]\n"
+           head = $0; buf = $0 "\n"; mine = 0; next }
+    { buf = buf $0 "\n" }
+    match($0, /^[[:space:]]*[-*] \[[ xX-]\] [0-9]+(\.[0-9]+)*\./) {
+      s = $0; sub(/^[[:space:]]*[-*] \[[ xX-]\] /, "", s); match(s, /^[0-9]+(\.[0-9]+)*/)
+      if (substr(s, 1, RLENGTH) == n) mine = 1
+    }
+    END { if (buf != "" && mine) out = out buf; else if (head != "") out = out head "\n   [...]\n"; printf "%s", out }
+  ' <<<"${all}")"
+  project_clip_head "${all}" "$(( max * 2 ))"
+}
+
+# project_spec_dod_items SPEC — the items of the spec's Definition of Done, one
+# a line (a bullet's continuation lines joined to it); rc 1 when it has none.
+# The section is the one under a heading (or a bold line, or a line ending in
+# a colon) that says "Definition of Done", up to the next heading.
+project_spec_dod_items() {
+  [[ -r "${1:-}" ]] || return 1
+  awk '
+    function flush() { if (item != "") { gsub(/[[:space:]]+/, " ", item); sub(/ $/, "", item); print item; n++ } item = "" }
+    {
+      l = tolower($0); gsub(/[*_]/, "", l)
+      if (!inside && l ~ /definition of done/ && ($0 ~ /^#/ || $0 ~ /^[[:space:]]*\*\*/ || l ~ /:[[:space:]]*$/)) {
+        inside = 1; if (match($0, /^#+/)) lvl = RLENGTH; else lvl = 99; next
+      }
+      if (!inside) next
+      if (match($0, /^#+[[:space:]]/)) { if (RLENGTH - 1 <= lvl || lvl == 99) { flush(); inside = 0; next } }
+      if ($0 ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/) {
+        flush(); item = $0
+        sub(/^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/, "", item); sub(/^\[[ xX]\][[:space:]]*/, "", item)
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/) { flush(); next }
+      if (item != "" && $0 ~ /^[[:space:]]+/) { item = item " " $0; next }
+      flush()
+    }
+    END { flush(); exit (n == 0) }
+  ' "$1"
+}
+
+# project_spec_is_large SPEC — true when the spec is too big to plan in one go,
+# and so is planned in milestones, the MVP first (PROJECT_MILESTONE_CHARS).
+PROJECT_MILESTONE_CHARS="${PROJECT_MILESTONE_CHARS:-8000}"
+project_spec_is_large() {
+  [[ -r "${1:-}" ]] && (( $(wc -c < "$1") > PROJECT_MILESTONE_CHARS ))
 }
 
 # project_final_text EVENTS_PAYLOAD — what the agent said last: the message of
@@ -5197,14 +5410,22 @@ project_hard_stop() {
 # in tests/test_contacts.py, while the app's real password came from the
 # environment as its spec required (2026-10-05).
 project_diff_has_secret() {
+  project_diff_secret_kind "${1:-}" >/dev/null
+}
+
+# project_diff_secret_kind DIFF — "key" for a real credential format (a
+# private key block, a cloud or forge token): a run stops for that. "literal"
+# for a hard-coded password or secret in the code: the step is sent back to
+# read it from the environment instead. rc 1 for neither.
+project_diff_secret_kind() {
   awk '
     /^\+\+\+ / { f = $2; sub(/^b\//, "", f); next }
     /^\+/ {
-      if ($0 ~ /-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}/) { hit = 1; exit }
+      if ($0 ~ /-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[abpr]-[A-Za-z0-9-]{10,}/) { kind = "key"; exit }
       if (f ~ /(^|\/)(tests?|spec)\// || f ~ /(^|\/)test_[^\/]*$/ || f ~ /_test\.[A-Za-z0-9]+$/) next
-      if (tolower($0) ~ /(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["\047][^"\047]{6,}/) { hit = 1; exit }
+      if (tolower($0) ~ /(password|passwd|secret|api_?key|token)[[:space:]]*[:=][[:space:]]*["\047][^"\047]{6,}/) kind = "literal"
     }
-    END { exit !hit }
+    END { if (kind == "") exit 1; print kind }
   ' <<<"${1:-}"
 }
 
@@ -5241,35 +5462,66 @@ project_clip_head() {
   fi
 }
 
-# project_planning_task SANDBOX_DIR — the task text for the planning step.
+# project_planning_task SANDBOX_DIR [large] — the task text for the planning
+# step. With "large" (project_spec_is_large) the plan is cut into milestones,
+# the MVP first, and only the first milestone gets its steps now: each later
+# one is planned when the one before it is built (project_milestone_task).
 project_planning_task() {
-  local d="${1:-}" tf=" The tests for each step are written before the step, so its Verify must run them."
+  local d="${1:-}" large="${2:-}" words=150
+  local tf=" The tests for each step are written before the step, so its Verify must run them."
+  local steps_rule="- If the spec lists its own steps, the plan has exactly those steps, in that order. Otherwise use as few small steps as the spec needs, at most fifteen."
+  local form
   [[ -n "${d}" ]] || return 1
+  # shellcheck disable=SC2016  # the backticks are PLAN.md's own format
+  form='- [ ] 1. Short title of the first step
+  Verify: `one shell command, run from '"${d}"', that exits 0 only if this step works`
+- [ ] 2. ...'
+  if [[ "${large}" == "large" ]]; then
+    words=400
+    steps_rule="- The spec is large, so the plan is cut into milestones of at most fifteen steps each. Milestone 1 is the MVP: the smallest version that runs end to end and is useful. Later milestones add the rest of the spec in order of importance. Write the steps of milestone 1 only; every later milestone is a heading with a one-paragraph scope under it and NO steps yet (they are planned when the milestones before them are built)."
+    form="## Milestone 1: MVP — one line on its scope
+
+${form}
+
+## Milestone 2: Name — one line on its scope
+
+One paragraph: which parts of the spec this milestone builds.
+
+## Milestone 3: ..."
+  fi
   cat <<EOF
 PROJECT MODE: PLANNING. Do not write any project code in this step.
 
 Read the spec at ${d}/.lca-project/spec.md.
 
-First decide whether to build on an existing project. If a mature open-source project (widely used, maintained for years) already does most of what the spec asks, the plan installs it and customises it instead of writing it from scratch. Prefer permissive licenses (MIT, BSD, Apache-2.0); LGPL and MPL are fine; GPL is acceptable; AGPL only for internal use. It has to run where the steps run: a Debian container with Python 3, pip, uv, Node.js and git, no root, no system services (no PostgreSQL, MySQL, Redis or Docker; use SQLite), network while a step runs but none during verification, so every dependency is installed inside ${d} (.venv, node_modules). Only ${d} survives a step. If nothing fits those limits, the choice is none.
+First decide whether to build on an existing project. If a mature open-source project (widely used, maintained for years) already does most of what the spec asks, the plan installs it and customises it instead of writing it from scratch. Prefer permissive licenses (MIT, BSD, Apache-2.0); LGPL and MPL are fine; GPL is acceptable; AGPL only for internal use. It has to run where the steps run: a Debian container with Python 3, pip, uv, Node.js and git, no root, no system services (no PostgreSQL, MySQL, Redis or Docker; use SQLite), network while a step runs but none during verification, so every dependency is installed inside ${d} (.venv, node_modules). Only ${d} survives a step. If nothing fits those limits, the choice is none. A base project is copied in as files: never add a git remote and never push.
 
 Then write exactly three files:
 
-1. ${d}/.lca-project/spec-summary.md: the spec in at most 150 words, keeping every hard requirement (names, interfaces, file names, versions).
-2. ${d}/PLAN.md: a numbered checklist of small steps, in exactly this form:
+1. ${d}/.lca-project/spec-summary.md: the spec in at most ${words} words, keeping every hard requirement (names, interfaces, file names, versions).
+2. ${d}/PLAN.md, in exactly this form:
 
 # Plan
 
-- [ ] 1. Short title of the first step
-  Verify: \`one shell command, run from ${d}, that exits 0 only if this step works\`
-- [ ] 2. ...
+## Checks
+
+- Install: \`a command that exits 0 when the dependencies are installed\`, or none
+- Build: \`the build command\`, or none
+- Typecheck: \`the type checker\`, or none
+- Lint: \`the linter\`, or none
+- Test: \`the command that runs ALL the tests\`
+
+${form}
+
+Rules for the checks: they run from ${d} with NO network, after every step once they have passed for the first time, and all of them must pass before the project counts as done. Use tools installed inside ${d} by the steps or that come with Python and Node (for Python, \`python3 -m compileall -q .\` is a fair build check). Write none where a kind of check does not apply.
 
 Rules for the steps:
-- If the spec lists its own steps, the plan has exactly those steps, in that order. Otherwise use as few small steps as the spec needs, at most fifteen.
+${steps_rule}
 - Each step touches at most three files of our own and can be finished in under 20 minutes. Order them so each builds on the last. With a base project, step 1 installs it into ${d} and proves it starts.
-- Each Verify is ONE command, run from ${d}, that exits 0 when that step is done correctly and only then. It may only rely on that step and the ones before it.
+- Each Verify is ONE command, run from ${d}, that exits 0 when that step is done correctly and only then. It may only rely on that step and the ones before it. Never \`true\`, \`echo\` or anything that passes whatever the code does.
 - To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
 - Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.${tf} The step's title says its tests check what the spec states, including exit codes and which stream (stdout or stderr) a message goes to.
-- Use the standard library unless the spec requires a dependency or the base project brings it; a step that adds one installs it into ${d}/.venv.
+- Use the standard library unless the spec requires a dependency or the base project brings it; a step that adds one installs it into ${d}/.venv (or ${d}/node_modules).
 - If the spec says to ask the project lead about something, the step that needs the answer says so in its title, e.g. "Add div(a, b): ask the project lead how division by zero behaves first". Never turn that into "decide".
 3. ${d}/DECISIONS.md, in exactly this form:
 
@@ -5283,6 +5535,86 @@ Rules for the steps:
 
 Then check that PLAN.md follows the form exactly, and end your final message with: PLAN DONE
 EOF
+}
+
+# project_milestone_task SANDBOX_DIR MILESTONE NEXT_N — plan the steps of one
+# milestone of a large spec, now that the ones before it are built.
+project_milestone_task() {
+  local d="${1:-}" ms="${2:-}" next="${3:-}"
+  [[ -n "${d}" && -n "${ms}" && "${next}" =~ ^[0-9]+$ ]] || return 1
+  cat <<EOF
+PROJECT MODE: PLANNING THE NEXT MILESTONE. Do not write any project code in this step.
+
+The milestones before it are built and their steps are ticked in ${d}/PLAN.md. Read the spec at ${d}/.lca-project/spec.md, PLAN.md and DECISIONS.md, and look at the code that exists.
+
+Now plan the milestone "${ms}": under its heading in PLAN.md, after its scope paragraph, add its steps in exactly the plan's form, numbered from ${next}:
+
+- [ ] ${next}. Short title of the step
+  Verify: \`one shell command, run from ${d}, that exits 0 only if this step works\`
+
+Rules: at most fifteen steps; each touches at most three files of our own and can be finished in under 20 minutes; each Verify is ONE command that exits 0 only when that step works, never \`true\` or \`echo\`; prefer running the step's tests, which are written before the step. If the milestone needs a check the "## Checks" section does not have yet (build, typecheck, lint, test), add it there. Change NOTHING else in PLAN.md: not the steps that exist, not their ticks, not the other milestones. Record any decision you take in DECISIONS.md. Never add a git remote and never push.
+
+End your final message with: PLAN DONE
+EOF
+}
+
+# project_split_payload MODEL SUMMARY PLAN N TITLE VERIFY FAILURE — the
+# /api/chat body that asks for step N, which failed every attempt, as 2 to 4
+# smaller steps. One request: the parts come back in the plan's own form, and
+# project_plan_split puts them in (its last part keeps N's check).
+project_split_payload() {
+  have jq || return 1
+  jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg p "$(project_clip "$3" 3000)" --arg n "$4" \
+         --arg t "$5" --arg v "$6" --arg f "$(project_clip "$7" 3000)" '{
+    model: $m, stream: false, options: {temperature: 0, num_predict: 1200},
+    messages: [
+      {role: "system", content: "You are the project lead. A step of the plan failed every attempt. Split it into 2 to 4 smaller steps that together do exactly what it asked, each small enough to finish in 15 minutes, ordered so each builds on the last. Reply with ONLY the steps, in exactly this form and nothing else:\n- [ ] 1. Short title\n  Verify: `one shell command, run from the project directory with no network, that exits 0 only when this part works`\n- [ ] 2. ...\nNever use `true`, `echo` or a check that passes whatever the code does. The LAST part is verified by the original step check, so the parts must add up to it. Use what the failure output shows: if a dependency or tool is missing, the first part installs it inside the project; if a test is wrong about the spec, a part corrects that test and says so in its title."},
+      {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nThe step that failed: " + $n + ". " + $t + "\nIts check: " + $v + "\n\nThe output of its last attempt:\n" + $f)}
+    ]}'
+}
+
+# project_acceptance_task SANDBOX_DIR ITEMS — the task that turns the spec's
+# Definition of Done (ITEMS, one a line) into ACCEPTANCE.md: one item for each,
+# with the command that proves it. The runner runs those commands itself, as
+# it does a step's: an item is met when its command passes, not when an agent
+# says so.
+project_acceptance_task() {
+  local d="${1:-}" items="${2:-}" n
+  [[ -n "${d}" && -n "${items}" ]] || return 1
+  n="$(grep -c . <<<"${items}")"
+  cat <<EOF
+PROJECT MODE: ACCEPTANCE CHECKS. Do not change any project code in this step.
+
+The plan is built. The spec's Definition of Done has these ${n} items:
+
+$(awk 'NF { printf "%d. %s\n", ++i, $0 }' <<<"${items}")
+
+Write ${d}/ACCEPTANCE.md with exactly ${n} items, one for each above, in the same order, in exactly this form:
+
+# Acceptance
+
+- [ ] 1. The first item, as the spec words it
+  Verify: \`one shell command, run from ${d} with NO network, that exits 0 only when this item holds\`
+- [ ] 2. ...
+
+Each Verify must really test its item: run the program, its tests or a script, or check a file's content. Never \`true\`, \`echo\` or anything that passes whatever the project does. Look at the code to find the right command and run each one once (it may fail now: the next round fixes what fails). Change nothing else.
+
+End your final message with: STEP DONE
+EOF
+}
+
+# project_question_reply KIND — what an unattended run tells an agent that
+# asked about one of the things nobody unattended may decide (project_hard_stop
+# names them), instead of stopping the run. Always the safe answer: no
+# credentials (a setting the owner fills in later), nothing outside the
+# project, no deleting data.
+project_question_reply() {
+  case "${1:-}" in
+    credentials) printf '%s' "Nobody can give you credentials, and none may be used or created. Where the software needs a secret, read it from an environment variable or a config file the owner fills in later, document it in README.md, use an obviously fake value in tests, record that in DECISIONS.md, and continue." ;;
+    outside)     printf '%s' "You may not touch anything outside the project directory and there is no root: install everything inside the project (.venv, node_modules), choose an approach that needs nothing else, record that in DECISIONS.md, and continue." ;;
+    delete)      printf '%s' "Do not delete data or files you did not create for this step; leave existing files in place (you may stop using them), record that in DECISIONS.md, and continue." ;;
+    *)           printf '%s' "${PROJECT_SELF_REPLY}" ;;
+  esac
 }
 
 # project_step_task SANDBOX_DIR N TOTAL TITLE VERIFY SUMMARY PLAN DECISIONS
@@ -5300,6 +5632,7 @@ project_step_task() {
   printf 'Project directory: %s. It is a git repository: do not run git, the runner commits after verifying.\n\n' "${d}"
   printf 'The spec (summarised when it is long):\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
     "$(project_clip "${summary}" 1500)" "$(project_clip "${plan}" 2500)" "$(project_clip "${decisions}" 1500)"
+  printf 'The whole spec is at %s/.lca-project/spec.md: read the parts this step needs.\n\n' "${d}"
   printf 'Do ONLY step %s: %s\n' "${n}" "${title}"
   printf 'Afterwards the runner verifies it by running, in %s:\n  %s\n' "${d}" "${verify}"
   printf 'Run that command yourself before finishing and make it pass.\n\n'
@@ -5311,7 +5644,7 @@ project_step_task() {
       printf 'Do not edit them: the runner puts them back as they were before verifying.\n\n'
     fi
   fi
-  printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Install any dependency inside ${d}/.venv. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Install any dependency inside ${d}/.venv. Never use credentials and never touch anything outside ${d}. Never add a git remote and never push."
   printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: STEP DONE"
   if [[ -n "${failure}" ]]; then
     # shellcheck disable=SC2016  # the backticks are a Markdown fence for the agent
@@ -5544,6 +5877,7 @@ project_tests_task() {
   printf 'Project directory: %s. It is a git repository: do not run git, the runner commits.\n\n' "${d}"
   printf 'The spec (summarised when it is long):\n%s\n\nPLAN.md:\n%s\n\nDECISIONS.md:\n%s\n\n' \
     "$(project_clip "${summary}" 1500)" "$(project_clip "${plan}" 2500)" "$(project_clip "${decisions}" 1500)"
+  printf 'The whole spec is at %s/.lca-project/spec.md: read the parts this step needs.\n\n' "${d}"
   printf 'Write ONLY the tests for step %s. Do not implement the step and do not write stubs of the code under test: another conversation implements it afterwards and has to make your tests pass without changing them.\n' "${n}"
   printf 'The tests check what the spec and the step title state, including return values, error cases, exit codes and which stream (stdout or stderr) a message goes to. They must be found and run by:\n  %s\n' "${verify}"
   printf 'Run that command once: it is EXPECTED to fail now, because the step is not implemented yet. A failure that is only the missing code is right; fix any error in the tests themselves.\n\n'

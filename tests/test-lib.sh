@@ -24615,15 +24615,15 @@ check "project mode reads PLAN.md's steps, ticks and verify commands as written"
 # shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
 project_plan_problems_are_named() {
   local plan="${PROJECT_SB}/bad-plan.txt" bad=0
-  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n- [ ] 2. Two, unverifiable\n' > "${plan}"
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `test -f ok`\n- [ ] 2. Two, unverifiable\n' > "${plan}"
   [[ "$(project_plan_problem "${plan}")" == *'step 2'*'Verify'* ]] || {
     echo 'a step with no Verify line was not refused' >&2; bad=1; }
-  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n- [ ] 3. Three\n  Verify: `true`\n' > "${plan}"
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `test -f ok`\n- [ ] 3. Three\n  Verify: `test -f ok`\n' > "${plan}"
   [[ "$(project_plan_problem "${plan}")" == *'in order'* ]] || {
     echo 'steps numbered 1, 3 were not refused' >&2; bad=1; }
   printf '# Plan\n\nJust prose, no checklist.\n' > "${plan}"
   [[ -n "$(project_plan_problem "${plan}")" ]] || { echo 'a plan with no steps was accepted' >&2; bad=1; }
-  printf '# Plan\n\n- [ ] 1. One\n  Verify: `true`\n' > "${plan}"
+  printf '# Plan\n\n- [ ] 1. One\n  Verify: `test -f ok`\n' > "${plan}"
   ! project_plan_problem "${plan}" >/dev/null || { echo 'a good one-step plan was refused' >&2; bad=1; }
   return "${bad}"
 }
@@ -24636,13 +24636,13 @@ check "...and refuses a plan with an unverifiable, missing or misnumbered step" 
 project_plan_faults_from_the_live_runs_are_refused() {
   local plan="${PROJECT_SB}/live-plan.txt" spec="${PROJECT_SB}/spec.txt" bad=0
   printf 'A toy. Build it in exactly three steps:\n1. a\n2. b\n3. c\n' > "${spec}"
-  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n' > "${plan}"
+  printf -- '- [ ] 1. A\n  Verify: `test -f ok`\n- [ ] 2. B\n  Verify: `test -f ok`\n' > "${plan}"
   [[ "$(project_plan_problem "${plan}" "${spec}")" == *'exactly 3 steps'*'has 2'* ]] || {
     echo 'a two-step plan for an "exactly three steps" spec was accepted' >&2; bad=1; }
-  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>&1 | grep -q usage && test $? -eq 2`\n' > "${plan}"
+  printf -- '- [ ] 1. A\n  Verify: `test -f ok`\n- [ ] 2. B\n  Verify: `test -f ok`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>&1 | grep -q usage && test $? -eq 2`\n' > "${plan}"
   [[ "$(project_plan_problem "${plan}" "${spec}")" == *'step 3'*'test $?'* ]] || {
     echo 'the live run'"'"'s never-true check was accepted' >&2; bad=1; }
-  printf -- '- [ ] 1. A\n  Verify: `true`\n- [ ] 2. B\n  Verify: `true`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>/dev/null; test $? -eq 2`\n' > "${plan}"
+  printf -- '- [ ] 1. A\n  Verify: `test -f ok`\n- [ ] 2. B\n  Verify: `test -f ok`\n- [ ] 3. C\n  Verify: `python3 -m t bad 1 2 2>/dev/null; test $? -eq 2`\n' > "${plan}"
   ! project_plan_problem "${plan}" "${spec}" >/dev/null || {
     printf 'a correct three-step plan was refused: %s\n' "$(project_plan_problem "${plan}" "${spec}")" >&2; bad=1; }
   printf 'No count here.\n' > "${spec}"
@@ -24657,13 +24657,83 @@ check "...and refuses a plan that ignores the spec's step count or verifies with
 # shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
 project_mark_done_ticks_one_step() {
   local plan="${PROJECT_SB}/tick.txt"
-  printf -- '- [ ] 1. One\n  Verify: `true`\n- [ ] 2. Two\n  Verify: `true`\n- [ ] 12. Twelve\n  Verify: `true`\n' > "${plan}"
+  printf -- '- [ ] 1. One\n  Verify: `test -f ok`\n- [ ] 2. Two\n  Verify: `test -f ok`\n- [ ] 12. Twelve\n  Verify: `test -f ok`\n' > "${plan}"
   project_plan_mark_done "${plan}" 2 || { echo 'ticking step 2 failed' >&2; return 1; }
   [[ "$(project_plan_steps "${plan}" | cut -f1,2 | tr '\t\n' ':,')" == '1:0,2:1,12:0,' ]] || {
     printf 'after ticking step 2 the plan reads: %s\n' "$(project_plan_steps "${plan}" | cut -f1,2 | tr '\t\n' ':,')" >&2; return 1; }
   ! project_plan_mark_done "${plan}" 7 || { echo 'ticking a step that does not exist reported success' >&2; return 1; }
 }
 check "...and ticks exactly the step that passed" project_mark_done_ticks_one_step
+
+# A step that kept failing is split, and the plan says so: its parts follow it
+# as N.1, N.2, two levels at most, and the last part keeps N's own check.
+# shellcheck disable=SC2016  # the backticks are PLAN.md's own format, written literally
+project_split_steps_are_read_and_checked() {
+  local plan="${PROJECT_SB}/split.txt" parts="${PROJECT_SB}/parts.txt" bad=0 got
+  printf -- '# Plan\n\n- [x] 1. One\n  Verify: `test -f one`\n- [ ] 2. Two\n  Verify: `test -f two`\n- [ ] 3. Three\n  Verify: `test -f three`\n' > "${plan}"
+  printf -- '- [ ] 1. Part a\n  Verify: `test -f a`\n- [ ] 2. Part b\n  Verify: `true`\n' > "${parts}"
+  project_plan_split "${plan}" 2 "${parts}" 'test -f two' || { echo 'a usable split was refused' >&2; return 1; }
+  got="$(project_plan_steps "${plan}" | cut -f1,2,4 | tr '\t\n' ':,')"
+  [[ "${got}" == '1:1:test -f one,2.1:0:test -f a,2.2:0:test -f two,3:0:test -f three,' ]] || {
+    printf 'after the split the plan reads: %s\n' "${got}" >&2; bad=1; }
+  grep -qF -- '- [-] 2. Two (split into smaller steps)' "${plan}" || { echo 'the split step was not marked' >&2; bad=1; }
+  ! project_plan_problem "${plan}" >/dev/null || {
+    printf 'a split plan was refused: %s\n' "$(project_plan_problem "${plan}")" >&2; bad=1; }
+  project_plan_mark_done "${plan}" 2.1 || { echo 'ticking step 2.1 failed' >&2; bad=1; }
+  [[ "$(project_plan_steps "${plan}" | awk -F'\t' '$1 == "2.1" { print $2 }')" == 1 ]] || { echo 'step 2.1 was not ticked' >&2; bad=1; }
+  printf -- '- [ ] 1. Only one\n  Verify: `test -f x`\n' > "${parts}"
+  ! project_plan_split "${plan}" 3 "${parts}" 'test -f three' || { echo 'a "split" into one step was accepted' >&2; bad=1; }
+  printf -- '- [ ] 1. A\n  Verify: `test -f a`\n- [ ] 2. B\n' > "${parts}"
+  ! project_plan_split "${plan}" 3 "${parts}" 'test -f three' || { echo 'a split with an unverifiable part was accepted' >&2; bad=1; }
+  ! project_plan_split "${plan}" 1 "${parts}" 'x' || { echo 'a step already done was split' >&2; bad=1; }
+  [[ "$(project_step_depth 2.1.3)" == 2 && "$(project_step_depth 4)" == 0 ]] || { echo 'split depth misread' >&2; bad=1; }
+  if ! project_step_number_after 3.2 3.10 || ! project_step_number_after 3.10 4 || project_step_number_after 4 3.1; then
+    echo 'step numbers are not ordered part by part' >&2; bad=1
+  fi
+  printf -- '- [ ] 1. A\n  Verify: `test -f a`\n- [ ] 1.1.1.1. Too deep\n  Verify: `test -f b`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}")" == *'deeper than two'* ]] || { echo 'a step split three deep was accepted' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and a failing step split into smaller ones is read in order, its last part held to the step's check" \
+  project_split_steps_are_read_and_checked
+
+# shellcheck disable=SC2016  # Markdown and shell text, written literally
+project_checks_milestones_and_done_are_read() {
+  local plan="${PROJECT_SB}/checks.txt" spec="${PROJECT_SB}/dod.txt" bad=0
+  printf '# Plan\n\n## Checks\n\n- Install: none\n- Build: `npm run build`\n- Type check: `npx tsc --noEmit`\n- Test: `python3 -m unittest -q`\n\n## Milestone 1: MVP\n\n- [ ] 1. A\n  Verify: `test -f a`\n\n## Milestone 2: Reports\n\nScope.\n' > "${plan}"
+  [[ "$(project_plan_checks "${plan}" | cut -f1 | tr '\n' ,)" == 'Build,Typecheck,Test,' ]] || {
+    printf 'the checks were read as: %s\n' "$(project_plan_checks "${plan}" | tr '\t\n' ':,')" >&2; bad=1; }
+  [[ "$(project_plan_pending_milestone "${plan}")" == 'Milestone 2: Reports' ]] || { echo 'the unplanned milestone was not found' >&2; bad=1; }
+  printf '\n- [ ] 2. B\n  Verify: `test -f b`\n' >> "${plan}"
+  ! project_plan_pending_milestone "${plan}" >/dev/null || { echo 'a planned milestone was called unplanned' >&2; bad=1; }
+  printf '# App\n\n## Definition of Done\n\n- It starts with `app` and prints\n  a greeting.\n- [ ] Tests pass\n1. README explains install\n\n## Notes\n\n- not an item\n' > "${spec}"
+  [[ "$(project_spec_dod_items "${spec}" | tr '\n' '|')" == 'It starts with `app` and prints a greeting.|Tests pass|README explains install|' ]] || {
+    printf 'the Definition of Done was read as: %s\n' "$(project_spec_dod_items "${spec}" | tr '\n' '|')" >&2; bad=1; }
+  printf '# App\n\nNo such section.\n' > "${spec}"
+  ! project_spec_dod_items "${spec}" >/dev/null || { echo 'a spec with no Definition of Done had items' >&2; bad=1; }
+  for c in true ':' 'exit 0' 'echo ok' 'true && echo done'; do
+    project_verify_trivial "${c}" || { printf 'the check "%s" passed for a real one\n' "${c}" >&2; bad=1; }
+  done
+  ! project_verify_trivial 'python3 -m app; test $? -eq 0' || { echo 'a real check was called trivial' >&2; bad=1; }
+  printf -- '- [ ] 1. A\n  Verify: `true`\n' > "${plan}"
+  [[ "$(project_plan_problem "${plan}")" == *'passes whatever'* ]] || { echo 'a step verified by true was accepted' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and reads the project checks, the milestones still to plan, the spec's Definition of Done, and refuses checks that prove nothing" \
+  project_checks_milestones_and_done_are_read
+
+project_unattended_questions_get_the_safe_answer() {
+  local bad=0
+  [[ "$(project_question_reply credentials)" == *'environment variable'* ]] || { echo 'credentials: no safe answer' >&2; bad=1; }
+  [[ "$(project_question_reply outside)" == *'inside the project'* ]] || { echo 'outside: no safe answer' >&2; bad=1; }
+  [[ "$(project_question_reply delete)" == *'Do not delete'* ]] || { echo 'delete: no safe answer' >&2; bad=1; }
+  [[ "$(project_diff_secret_kind '+password = "hunter22"')" == literal ]] || { echo 'a literal password was not "literal"' >&2; bad=1; }
+  [[ "$(project_diff_secret_kind $'+-----BEGIN OPENSSH PRIVATE KEY-----')" == key ]] || { echo 'a private key was not "key"' >&2; bad=1; }
+  ! project_diff_secret_kind '+x = os.environ["PW"]' >/dev/null || { echo 'an environment read was called a secret' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and an unattended question about credentials, the outside or deleting gets the safe answer; a key stops, a literal password goes back" \
+  project_unattended_questions_get_the_safe_answer
 
 project_turns_are_classified() {
   local bad=0 k
@@ -25222,6 +25292,67 @@ planning_keeps_only_the_plan() {
 }
 check "...and planning may write the plan and the decisions, and anything else it did is put back or kept aside" \
   planning_keeps_only_the_plan
+
+# The whole unattended loop, with a stand-in engine and checks run in place of
+# the verification container: a plan, a step that never passes on its own and
+# is split, the project checks switching on, an agent that adds a git remote
+# and commits by itself, and an acceptance round that turns an unmet item of
+# the spec's Definition of Done into a fix step. Done means all of it passed.
+# shellcheck disable=SC2016  # the probe is code for the child shell
+project_loop_splits_accepts_and_stays_local() {
+  local sb="${SANDBOX}/project-loop" out
+  rm -rf "${sb}"; mkdir -p "${sb}/repo" "${sb}/home" "${sb}/projects/demo/.lca-project"
+  ( cd "${REPO}" && git ls-files -z --cached --others --exclude-standard | xargs -0 cp --parents -t "${sb}/repo" )
+  cp "${REPO}/.env.example" "${sb}/repo/.env"
+  printf 'AGENT_PROJECTS_DIR=%s\nENABLE_AGENT=true\nAGENT_PROJECT_ENGINE=opencode\nAGENT_PROJECT_RETRIES=1\n' "${sb}/projects" >> "${sb}/repo/.env"
+  record_configuration "${sb}/repo/.env"
+  printf '# Demo\n\n## Definition of Done\n\n- `sh hello.sh` prints hello\n- README.md exists\n' > "${sb}/projects/demo/.lca-project/spec.md"
+  out="$(HOME="${sb}/home" bash -c '
+    source "$1" >/dev/null 2>&1
+    DIR="$2"; STATE_DIR="$2/.lca-project"; STATE_FILE="$2/.lca-project/state"; SBX="$2"; FOREGROUND=true
+    : > "${STATE_DIR}/run.log"
+    state_set STATUS planning AUTONOMY self ENGINE opencode STEP 0 ATTEMPT 0 STARTED "$(date -u +%FT%TZ)" LAST_PROGRESS "$(date +%s)"
+    normalize_perms() { :; }; ensure_opencode_image() { :; }; remove_opencode_containers() { :; }
+    agent_container_running() { false; }; ollama_log_hint() { echo none; }; ask_reviewer() { printf "NO FINDINGS"; }
+    verify() { VERIFY_OUT="$(cd "${DIR}" && bash -c "$1" 2>&1 </dev/null)"; }
+    ask_lead() { printf -- "- [ ] 1. Part one\n  Verify: \`test -f part1\`\n- [ ] 2. Part two\n  Verify: \`test -f part2\`\n"; }
+    oc_turn() {
+      case "$1" in
+        *"PROJECT MODE: PLANNING."*)
+          printf "# Plan\n\n## Checks\n\n- Build: \`sh -n hello.sh\`\n- Test: \`sh tests.sh\`\n\n- [ ] 1. hello\n  Verify: \`sh hello.sh | grep -qx hello\`\n- [ ] 2. both parts\n  Verify: \`test -f part1 && test -f part2\`\n- [ ] 3. tests\n  Verify: \`sh tests.sh\`\n" > "${DIR}/PLAN.md"
+          printf "# Decisions\n\n## Base project\n\n- Choice: none\n- License: n/a\n- Why: small\n" > "${DIR}/DECISIONS.md"
+          git -C "${DIR}" remote add origin https://example.invalid/x.git ;;
+        *"step 1 of"*) echo "echo hello" > "${DIR}/hello.sh" ;;
+        *"step 2 of"*) echo attempt >> "${DIR}/attempts" ;;
+        *"step 2.1 of"*) touch "${DIR}/part1" ;;
+        *"step 2.2 of"*) touch "${DIR}/part2" ;;
+        *"step 3 of"*) echo "sh hello.sh | grep -q hello" > "${DIR}/tests.sh"
+                       git -C "${DIR}" add -A && git -C "${DIR}" commit -qm "the agent commits by itself" ;;
+        *"ACCEPTANCE CHECKS"*)
+          printf "# Acceptance\n\n- [ ] 1. hello\n  Verify: \`sh hello.sh | grep -qx hello\`\n- [ ] 2. README\n  Verify: \`test -s README.md\`\n" > "${DIR}/ACCEPTANCE.md" ;;
+        *"Definition of Done: README"*) echo "# Demo" > "${DIR}/README.md" ;;
+      esac
+      LAST_TEXT="STEP DONE"
+    }
+    ( cmd_run ) >/dev/null 2>&1
+    printf "status=%s\n" "$(state_get STATUS)"
+    printf "steps=%s\n" "$(project_plan_steps "${DIR}/PLAN.md" | cut -f1,2 | tr "\t\n" ":,")"
+    printf "accepted=%s\n" "$(project_plan_steps "${DIR}/ACCEPTANCE.md" | cut -f2 | tr -d "\n")"
+    printf "remotes=%s\n" "$(git -C "${DIR}" remote | tr "\n" ,)"
+    printf "hook=%s\n" "$(grep -c "Push refused" "${DIR}/.git/hooks/pre-push")"
+    printf "kept=%s\n" "$(git -C "${DIR}" for-each-ref --format="%(refname)" refs/lca/failed)"
+    printf "checks=%s\n" "$(state_get CHECKS_ON)"
+    grep -c "the agent moved HEAD itself" "${STATE_DIR}/run.log" | sed "s/^/headguard=/"
+    git -C "${DIR}" log --format=%s | grep -c "the agent commits by itself" | sed "s/^/agentcommits=/"
+  ' _ "${sb}/repo/scripts/agent-project.sh" "${sb}/projects/demo" 2>&1)"
+  local want
+  for want in 'status=done' 'steps=1:1,2.1:1,2.2:1,3:1,4:1,' 'accepted=11' 'remotes=' 'hook=1' \
+              'kept=refs/lca/failed/step-2' 'checks=Build Test' 'headguard=1' 'agentcommits=0'; do
+    grep -qxF -- "${want}" <<<"${out}" || { printf 'expected %s, the loop left:\n%s\n' "${want}" "${out}" >&2; return 1; }
+  done
+}
+check "...and the unattended loop splits a failing step, keeps the checks on, removes remotes, undoes the agent's commits and passes acceptance" \
+  project_loop_splits_accepts_and_stays_local
 
 telegram_text_is_progress_only() {
   local t bad=0
