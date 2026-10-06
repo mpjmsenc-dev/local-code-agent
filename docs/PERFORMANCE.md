@@ -167,6 +167,26 @@ and the gaps are big: 0/3 vs 3/3 on first tries, and 2× in time.
 
 ## qwen3-coder-next (80B MoE, 3B active) — measured, and it replaces the 32b
 
+**Status, 2026-10-06: the evaluation is complete and the decision stands.**
+Every part the rule asked for was measured on 2026-10-04, alone in RAM and
+swap-clean (`~/lca-eval/results.tsv` and `swap-verdicts.tsv`): `lca speed`,
+the agent self-test on both tool-call channels, and graded tasks A to D. It
+passes A, B and C like the 32b, in half the time, and fails D like every
+model so far, so it is the agent model and the project lead. qwen3.6:35b-a3b
+(both quantisations and its `-agent`) is no longer on disk; what is: this
+model and its `-agent`, and qwen2.5-coder 32b, 14b, 7b and 3b.
+
+The dashboard (docs/DASHBOARD.md) chats with this same model, by the same
+name and window, so it shares the runner instead of loading a second copy.
+That needed one setting: OpenClaw asks local Ollama for `shift: false`, and
+Ollama starts a separate runner without context shift for that, which
+reloaded the 51 GB model (5 min 29 s) for one dashboard message and would
+have reloaded it again for the project's next request. With `shift` and
+`truncate` left at Ollama's defaults it reuses the runner: a short question
+then takes 49 s (OpenClaw's prompt is about 3,300 tokens, read at 26 tok/s
+the first time and from cache after). The dashboard's `/project` and
+`/server` commands do not use the model at all.
+
 qwen3-coder-next:q4_K_M (Ollama's tag; 51.7 GB on disk, 51.5 GB resident)
 was measured on the same VM and harness, alone in RAM, on 2026-10-04.
 

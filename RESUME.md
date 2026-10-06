@@ -1,6 +1,47 @@
 # RESUME.md — the agent tier's first run on real hardware
 
-## ⏸ PAUSED 2026-10-06 17:18 UTC at the owner's request — read this first
+## 2026-10-06 (evening): the dashboard and unattended project mode — read this first
+
+The owner's brief replaces every earlier queued request (the project web page,
+OpenClaw with Telegram, Telegram notifications): one dashboard, OpenClaw in the
+browser, from which a large spec is built unattended, local and free. No
+Telegram. The project-web work another session had started (uncommitted in
+`~/work/lca-merge`) was stopped and is not used; its `--json` idea is.
+
+**Part 1, the model: done.** The qwen3-coder-next evaluation had in fact
+finished on 2026-10-04 (A, B, C pass, D fails, swap-clean, faster than the
+32b), so it stays the agent model and project lead; qwen3.6 is no longer on
+disk. docs/PERFORMANCE.md, "Status, 2026-10-06".
+
+**Part 2, project mode unattended to the end** (scripts/agent-project.sh,
+the project-mode section of lib.sh; docs/AGENT.md "Project mode"):
+project checks (install, build, typecheck, lint, test) that switch on once
+they pass and must keep passing; a failing step split into smaller steps (two
+levels), then re-planned once, then a stop for no progress; acceptance rounds
+(full checks, every step's check again, the spec's Definition of Done as
+ACCEPTANCE.md, fix steps, five rounds); large specs planned in milestones,
+MVP first; unattended questions answered with the safe rule instead of
+stopping; stops only for credentials, outside the project, no progress for 6
+hours, or 7 days in all; git local only, enforced every turn; one project at
+a time, the rest queued; runners as user services (lingering), so no root.
+Driven by a fake-engine loop test in the suite and three simulations.
+
+**Part 3, the dashboard** (openclaw/, docs/DASHBOARD.md, `lca dashboard`):
+OpenClaw 2026.9.8 locked down to its own plugin. Verified on a dev gateway:
+the model sees exactly the ten lca tools, a 41,229-character spec pasted
+after `/project save` arrives byte-identical, and with shift/truncate at
+Ollama's defaults the dashboard shares the projects' runner (it reloaded the
+51 GB model once before that was found).
+
+Progress below this line is appended as it happens.
+
+### Log
+
+- 2026-10-06 ~19:20 local: gates run 3 in the container on branch
+  `openclaw-dashboard` (worktree `~/work/lca-oc`); runs 1 and 2 failed only
+  on repository-convention gates, fixed.
+
+## ⏸ PAUSED 2026-10-06 17:18 UTC at the owner's request (superseded by the section above)
 
 Every run of this session's is stopped. The owner is running their own
 OpenHands conversation (a time-tracking build) on this box: **do not stop
