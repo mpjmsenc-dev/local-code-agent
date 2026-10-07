@@ -1,6 +1,55 @@
 # RESUME.md — the agent tier's first run on real hardware
 
-## 2026-10-06 (evening): the dashboard and unattended project mode — read this first
+## 2026-10-07 18:10 UTC: planned shutdown for the RAM upgrade (64 → 128 GB) — read this first
+
+**Project stopped for the shutdown:** `mpjm-accounting-plateform`, in
+`~/projects/mpjm-accounting-plateform` (spec `~/specs/mpjm-accounting-plateform.md`,
+engine opencode, autonomy answerer). Plan of 7 steps; **step 1 is done and
+committed** (`56ed168`, reviewed); it was stopped about four minutes into
+**step 2, attempt 1** ("Install dependencies (Fastify, Prisma, SQLite, Vitest,
+React, Vite, Argon2)"), which had written nothing yet: the working tree is
+clean at `56ed168`, no partial `node_modules`. Stopped with `--stop`
+(`STATUS=stopped`, `STEP=2`); its OpenCode container is per-turn and holds no
+state, and was removed with the stop; the workspace and OpenCode's session
+(`.lca-project/opencode-home`) are kept.
+
+**Nothing resumes it at boot:** its user unit is disabled, no project unit
+(user or system) is enabled, the queue is empty. A stale failed unit for a
+`business-management-platform` folder that no longer exists was cleared.
+
+**Resume it, after re-tuning:**
+
+    lca agent project --dir ~/projects/mpjm-accounting-plateform --resume
+
+or `/project resume mpjm-accounting-plateform` in the dashboard. Step 2
+starts again from the top with fresh attempts.
+
+**Enabled at boot (checked):** ollama, docker and containerd (openhands-app
+and open-webui restart with docker: `unless-stopped`), openclaw-gateway,
+tailscaled, local-code-agent-netmode (re-applies the inbound guard, port
+18789 included; last boot: success), local-code-agent-tune, the Ollama relay
+socket, the backup timer; lingering on for jmuryn (project user units).
+
+**Unfinished work of mine:** none. Everything is pushed (origin
+`claude/local-code-agent-build-dd13qw` = `3fd37a2`, the dashboard's Delete
+action included), `/etc/sudoers.d/jmuryn` is gone. The one commit after it
+is this section; `/opt` gets it with the command below. Left as they were:
+the other session's uncommitted project-web changes in `~/work/lca-merge`,
+and the `wcount` and `crm` projects.
+
+**After the reboot, in order:**
+
+1. `lca check` (the dashboard: `/server health`): Ollama, the guard with
+   18789, the dashboard, Tailscale.
+2. Re-tune. `AUTO_TUNE=true`, so `local-code-agent-tune.service` re-runs the
+   RAM ladder at boot and may change `MODEL_NAME` and `OLLAMA_CONTEXT_LENGTH`
+   for chat; `AGENT_MODEL` (qwen3-coder-next) is pinned in `.env` and does not
+   change. With 128 GB the agent model (51.5 GB) and the chat model can both
+   stay resident, so a phone chat would no longer evict a project's model;
+   look at `lca speed` and the agent's slot before relying on it.
+3. Resume the project with the command above.
+
+## 2026-10-06 (evening): the dashboard and unattended project mode
 
 The owner's brief replaces every earlier queued request (the project web page,
 OpenClaw with Telegram, Telegram notifications): one dashboard, OpenClaw in the
