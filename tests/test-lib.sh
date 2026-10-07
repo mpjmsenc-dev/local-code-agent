@@ -25383,6 +25383,8 @@ check "...and the unattended loop splits a failing step, keeps the checks on, re
 project_delete_is_guarded_and_complete() {
   local sb="${SANDBOX}/project-delete" out
   project_loop_sandbox "${sb}"
+  printf 'AGENT_PROJECTS_DIR=%s\nENABLE_AGENT=true\n' "${sb}/projects" >> "${sb}/repo/.env"
+  record_configuration "${sb}/repo/.env"
   mkdir -p "${sb}/elsewhere/stray/.lca-project"
   printf 'STATUS=done\n' > "${sb}/elsewhere/stray/.lca-project/state"
   out="$(HOME="${sb}/home" bash -c '
