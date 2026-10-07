@@ -25377,6 +25377,44 @@ project_loop_splits_accepts_and_stays_local() {
 check "...and the unattended loop splits a failing step, keeps the checks on, removes remotes, undoes the agent's commits and passes acceptance" \
   project_loop_splits_accepts_and_stays_local
 
+# Deleting a project: only one that has ended, only inside the projects
+# directory, only with its name repeated, and then all of it.
+# shellcheck disable=SC2016  # the probe is code for the child shell
+project_delete_is_guarded_and_complete() {
+  local sb="${SANDBOX}/project-delete" out
+  project_loop_sandbox "${sb}"
+  mkdir -p "${sb}/elsewhere/stray/.lca-project"
+  printf 'STATUS=done\n' > "${sb}/elsewhere/stray/.lca-project/state"
+  out="$(HOME="${sb}/home" bash -c '
+    source "$1" >/dev/null 2>&1
+    normalize_perms() { :; }; remove_opencode_containers() { :; }; user_units() { return 1; }
+    systemd_available() { return 1; }; agent_container_running() { return 1; }
+    attempt() {   # DIR STATUS CONFIRM -> "kept" or "gone"
+      DIR="$1"; STATE_DIR="$1/.lca-project"; STATE_FILE="${STATE_DIR}/state"; CONFIRM="$3"
+      mkdir -p "${STATE_DIR}"; printf "STATUS=%s\n" "$2" > "${STATE_FILE}"; touch "$1/code.py"
+      queue_add "$1"
+      ( cmd_delete ) >/dev/null 2>&1 || true
+      if [[ -e "$1" ]]; then printf kept; else printf gone; fi
+    }
+    printf "running=%s\n" "$(attempt "$2/projects/demo" running demo)"
+    printf "queued=%s\n" "$(attempt "$2/projects/demo" queued demo)"
+    printf "wrongname=%s\n" "$(attempt "$2/projects/demo" done other)"
+    printf "outside=%s\n" "$(DIR="$2/elsewhere/stray"; STATE_DIR="${DIR}/.lca-project"; STATE_FILE="${STATE_DIR}/state"; CONFIRM=stray
+                              ( cmd_delete ) >/dev/null 2>&1 || true; if [[ -e "${DIR}" ]]; then printf kept; else printf gone; fi)"
+    printf "done=%s\n" "$(attempt "$2/projects/demo" done demo)"
+    printf "queue=[%s]\n" "$(cat "${HOME}/.lca-projects/queue" 2>/dev/null)"
+    for s in done stopped failed waiting stalled limit incomplete; do project_deletable_status "$s" || printf "refused:%s\n" "$s"; done
+    for s in planning running accepting queued ""; do ! project_deletable_status "$s" || printf "allowed:%s\n" "$s"; done
+  ' _ "${sb}/repo/scripts/agent-project.sh" "${sb}" 2>&1)"
+  local want
+  for want in 'running=kept' 'queued=kept' 'wrongname=kept' 'outside=kept' 'done=gone' 'queue=[]'; do
+    grep -qxF -- "${want}" <<<"${out}" || { printf 'expected %s; got:\n%s\n' "${want}" "${out}" >&2; return 1; }
+  done
+  ! grep -qE '^(refused|allowed):' <<<"${out}" || { printf 'the deletable states are wrong:\n%s\n' "${out}" >&2; return 1; }
+}
+check "...and a project is deleted only when it has ended, is under the projects directory and is named again; then all of it, queue entry included" \
+  project_delete_is_guarded_and_complete
+
 telegram_text_is_progress_only() {
   local t bad=0
   t="$(telegram_safe $'Add `div(a, b)`\n```\nimport os\nos.system(x)\n```')"

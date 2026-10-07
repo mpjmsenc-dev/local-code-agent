@@ -5031,6 +5031,14 @@ project_running_dir() {
   head -1 "${lock%/*}/running" 2>/dev/null | grep . || printf 'a project'
 }
 
+# project_deletable_status STATUS — true when a project in STATUS may be
+# deleted: it has ended (done, or stopped for any reason) and nothing of it is
+# meant to run. Planning, running, accepting and queued are not, nor is a
+# state nobody recognises.
+project_deletable_status() {
+  case "${1:-}" in done|stopped|failed|waiting|stalled|limit|incomplete) return 0 ;; *) return 1 ;; esac
+}
+
 # project_autonomy_valid MODE — one of the three this runner implements.
 project_autonomy_valid() {
   case "${1:-}" in ask|self|answerer) return 0 ;; *) return 1 ;; esac

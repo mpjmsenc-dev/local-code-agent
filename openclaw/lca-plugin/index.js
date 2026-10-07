@@ -31,6 +31,10 @@ const HOME = os.homedir();
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CONTAINER_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_SPEC = 2_000_000;
+// The states a project may be deleted in: it has ended. The runner checks the
+// same list (project_deletable_status in lib.sh); this copy only decides which
+// projects the page offers a Delete button for.
+const DELETABLE = new Set(["done", "stopped", "failed", "waiting", "stalled", "limit", "incomplete"]);
 const FILES = {
   summary: ".lca-project/SUMMARY.md",
   decisions: "DECISIONS.md",
@@ -170,6 +174,26 @@ function makeProjects(api) {
     return tail(msg, 2000);
   }
 
+  // remove NAME CONFIRM — delete a stopped or finished project: the runner
+  // removes its directory, unit and leftover sandboxes (and refuses anything
+  // still running); then the spec the dashboard saved for it goes. CONFIRM
+  // must be the name, typed again.
+  async function remove(name, confirm) {
+    return serial(async () => {
+      name = sanitizeName(name);
+      if (String(confirm ?? "").trim() !== name) throw new Error(`Nothing was deleted. To delete ${name}, type its name exactly: ${name}`);
+      if (!(await exists(name))) throw new Error(`There is no project called ${name}.`);
+      const r = await run(script, ["--dir", dirOf(name), "--delete", "--confirm", name], { timeoutMs: 300_000 });
+      cache.at = 0;
+      const msg = plain(`${r.stdout}\n${r.stderr}`).trim();
+      if (r.code !== 0) throw new Error(tail(msg, 2000) || "the delete failed");
+      const spec = path.join(S.specsDir, `${name}.md`);
+      let specGone = false;
+      try { await fs.rm(spec); specGone = true; } catch { specGone = false; }
+      return `Deleted ${name}: ${dirOf(name)}${specGone ? ` and ${spec}` : ""}, its runner unit and any leftover sandbox.`;
+    });
+  }
+
   async function file(name, which) {
     name = sanitizeName(name);
     const rel = FILES[which];
@@ -179,7 +203,7 @@ function makeProjects(api) {
     return which === "log" ? tail(text, 8000) : clip(text, 20000);
   }
 
-  return { list, start, saveSpec, action, file, exists, S };
+  return { list, start, saveSpec, action, remove, file, exists, S };
 }
 
 function projectLine(p) {
@@ -284,6 +308,7 @@ const HELP = `**Projects** (one runs at a time; the others queue)
 - \`/project new NAME\` and, on the next lines, the whole spec: saves it as ~/specs/NAME.md and builds it in ~/projects/NAME, unattended
 - \`/project save NAME\` + spec: save only, do not start; \`/project start NAME\` starts a saved one
 - \`/project list\` · \`/project status NAME\` · \`/project stop NAME\` · \`/project resume NAME\`
+- \`/project delete NAME\`: a stopped or finished project, its folder, its spec and any leftover sandbox (it asks you to type the name)
 - \`/project summary|decisions|review|plan|acceptance|log NAME\`
 - Upload a spec file, and watch every project live: the **Projects** tab (or /lca/panel)
 
@@ -341,6 +366,17 @@ async function runCommand(cmd, projects, server) {
       const p = l.find((x) => x.name === sanitizeName(name));
       if (!p) throw new Error(`There is no project called ${name}.`);
       return projectDetail(p);
+    }
+    case "delete": {
+      if (!name) throw new Error("Usage: /project delete NAME");
+      const n = sanitizeName(name);
+      if (cmd.args[1] === undefined) {
+        const p = (await projects.list(true)).find((x) => x.name === n);
+        if (!p) throw new Error(`There is no project called ${n}.`);
+        if (!DELETABLE.has(p.status)) return `${n} is ${p.status}: only a stopped or finished project can be deleted. Stop it first: /project stop ${n}`;
+        return `This permanently deletes ${n}: ~/projects/${n}, ~/specs/${n}.md, its runner unit and any leftover sandbox. There is no undo.\nTo confirm, type its name once more:\n/project delete ${n} ${n}`;
+      }
+      return await projects.remove(n, cmd.args[1]);
     }
     case "stop":
     case "resume":
@@ -432,6 +468,7 @@ function registerPage(api, projects, server) {
             return send(res, 200, await projects.start(body.name, body.spec));
           }
           if (route === "stop" || route === "resume") return send(res, 200, { text: await projects.action(body.name, route) });
+          if (route === "delete") return send(res, 200, { text: await projects.remove(body.name, body.confirm) });
           if (route === "approve-browser") return send(res, 200, await approveBrowsers(S));
         }
         return send(res, 404, { error: "no such route" });

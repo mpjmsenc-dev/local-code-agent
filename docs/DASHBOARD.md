@@ -29,6 +29,7 @@ cat ~/.openclaw-dashboard-password
 | `/project list` | every project: status, steps done of total, the step it is on, elapsed time, queue position |
 | `/project status NAME` | one project's plan, step by step |
 | `/project stop NAME` · `/project resume NAME` | stop it (it can be resumed), carry on from where it stopped |
+| `/project delete NAME`, then `/project delete NAME NAME` | delete a stopped or finished project: `~/projects/NAME`, `~/specs/NAME.md`, its runner unit and any leftover sandbox; the second form, with the name typed again, is the confirmation. No undo |
 | `/project summary` · `decisions` · `review` · `plan` · `acceptance` · `log` `NAME` | its files: the summary, DECISIONS.md, REVIEW.md, PLAN.md, ACCEPTANCE.md, the run log |
 | `/server status` · `/server health` · `/server models` | CPU, RAM, disk, models, containers, what runs; `lca check --quick` (no generation probe, which could evict a running project's model); the models and which is loaded |
 | `/server restart agent` · `/server restart chat` | the only two things that can be restarted from here |
@@ -42,7 +43,9 @@ which can use the same operations as tools; it answers when the model is free.
 
 4. The **Projects** tab (in the sidebar, or `<address>/lca/panel`) shows every
    project live, refreshed every five seconds, with a form to paste or upload
-   a spec file and start it, Stop and Resume, and each project's files.
+   a spec file and start it, Stop and Resume, and each project's files. A
+   stopped or finished project also has **Delete…**, which asks you to type
+   its name before it removes anything.
 
 One project runs at a time; the others queue and start by themselves.
 Projects run as you, as user services, without root; they need nothing from
@@ -79,7 +82,8 @@ What the plugin runs, each with fixed arguments and never through a shell:
 `scripts/agent-project.sh` (start with `--autonomy answerer`, stop, resume,
 status), `lca check`, a restart of the two named containers (the agent app
 and the chat app; neither applies a setting, see `lca apply` for that), and
-`openclaw devices` to approve a browser. A project name becomes a directory
+`openclaw devices` to approve a browser. Deleting a project is yours alone:
+it is a command and a button, never one of the model's tools. A project name becomes a directory
 and a file name only: lower case, letters, digits and dashes.
 
 ## Settings

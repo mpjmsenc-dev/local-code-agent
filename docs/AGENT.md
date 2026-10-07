@@ -885,7 +885,10 @@ was cut off starts again from the top. A run that ends, by finishing, failing
 or stopping for a person, exits cleanly, so systemd does not retry into the
 same wall.
 
-`--status` shows where it is (`--json`: the same, for the dashboard), `--stop`
+`--delete --confirm NAME` removes a project that is stopped or finished (its
+directory, its runner unit, its queue entry and any sandbox or container it
+left), only under `AGENT_PROJECTS_DIR` and only with its name repeated; a
+project still running is refused. `--status` shows where it is (`--json`: the same, for the dashboard), `--stop`
 stops it and stops it resuming at boot,
 and `--resume` carries on, optionally with `--answer`. At the end,
 `.lca-project/SUMMARY.md` says how many steps were done, which one failed,

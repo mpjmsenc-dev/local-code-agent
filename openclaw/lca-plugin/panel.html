@@ -51,7 +51,11 @@
       <div class="row" style="margin-top:8px">
         <button data-f="summary">Summary</button><button data-f="decisions">Decisions</button><button data-f="review">Review</button>
         <button data-f="plan">Plan</button><button data-f="acceptance">Acceptance</button><button data-f="log">Log</button>
-        <span class="grow"></span><button id="dstop">Stop</button><button id="dresume">Resume</button>
+        <span class="grow"></span><button id="dstop">Stop</button><button id="dresume">Resume</button><button id="ddel" class="hidden">Delete…</button>
+      </div>
+      <div id="delbox" class="hidden" style="margin-top:10px">
+        <p class="warn" id="delwhat"></p>
+        <div class="row"><input class="grow" type="text" id="delname" autocomplete="off" placeholder="type the project name"><button id="delgo" disabled>Delete permanently</button><button id="delcancel">Cancel</button></div>
       </div>
       <pre id="dfile" class="hidden"></pre>
     </div>
@@ -101,6 +105,8 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const dur = (s) => { s = Math.max(0, s | 0); const d = (s / 86400) | 0, h = ((s % 86400) / 3600) | 0, m = ((s % 3600) / 60) | 0; return d ? `${d}d ${h}h` : h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`; };
   const active = (p) => ["running", "planning", "accepting"].includes(p.status);
+  // Offered for the projects that have ended; the runner checks it again.
+  const deletable = (p) => ["done", "stopped", "failed", "waiting", "stalled", "limit", "incomplete"].includes(p.status);
 
   function showLogin(msg) { $("app").classList.add("hidden"); $("login").classList.remove("hidden"); $("loginerr").textContent = msg || ""; }
   async function refresh() {
@@ -127,12 +133,29 @@
     $("detail").classList.remove("hidden"); $("dname").textContent = `${p.name} — ${p.status}`;
     const steps = (p.steps || []).map((s) => `<div>${s.done ? "☑" : "☐"} ${esc(s.n)}. ${esc(s.title)}</div>`).join("");
     $("dbody").innerHTML = `${steps}<p class="muted">${esc(p.last_log)}</p>${p.reason ? `<p>${esc(p.reason)}</p>` : ""}`;
+    $("ddel").classList.toggle("hidden", !deletable(p));
+    if (!deletable(p)) $("delbox").classList.add("hidden");
   }
+  function closeDelete() { $("delbox").classList.add("hidden"); $("delname").value = ""; $("delgo").disabled = true; }
+  $("ddel").onclick = () => {
+    $("delwhat").textContent = `This permanently deletes ${open}: ~/projects/${open}, ~/specs/${open}.md, its runner unit and any leftover sandbox. There is no undo. Type the project name to confirm.`;
+    $("delbox").classList.remove("hidden"); $("delname").focus();
+  };
+  $("delname").addEventListener("input", () => { $("delgo").disabled = $("delname").value !== open; });
+  $("delcancel").onclick = closeDelete;
+  $("delgo").onclick = async () => {
+    $("delgo").disabled = true;
+    try {
+      const r = await api("delete", { method: "POST", body: JSON.stringify({ name: open, confirm: $("delname").value }) });
+      closeDelete(); open = null; $("detail").classList.add("hidden");
+      $("startmsg").textContent = r.text; refresh();
+    } catch (e) { $("delwhat").textContent = e.message; $("delgo").disabled = false; }
+  };
   $("rows").addEventListener("click", async (ev) => {
     const a = ev.target.closest("[data-open]"); if (!a) return;
-    open = a.dataset.open; $("dfile").classList.add("hidden"); refresh();
+    open = a.dataset.open; closeDelete(); $("dfile").classList.add("hidden"); refresh();
   });
-  $("dclose").onclick = () => { open = null; $("detail").classList.add("hidden"); };
+  $("dclose").onclick = () => { open = null; closeDelete(); $("detail").classList.add("hidden"); };
   document.querySelectorAll("[data-f]").forEach((b) => b.onclick = async () => {
     try { const r = await api(`file?name=${encodeURIComponent(open)}&which=${b.dataset.f}`); $("dfile").textContent = r.text; }
     catch (e) { $("dfile").textContent = e.message; }

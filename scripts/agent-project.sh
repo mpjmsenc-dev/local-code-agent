@@ -64,6 +64,7 @@ usage() {
 Usage: lca agent project SPEC --dir DIR [--autonomy ask|self|answerer]
                                 [--engine openhands|opencode] [--foreground]
        lca agent project --dir DIR --status | --json | --stop | --resume [--answer "text"]
+       lca agent project --dir DIR --delete --confirm NAME
 
 Builds a project from one spec file with no input from you: the agent writes
 PLAN.md (small steps, each with a command that proves it), choosing a mature
@@ -91,6 +92,9 @@ One project runs at a time; the others queue.
   --status          where it is: the plan, the state, the last log lines
   --json            the same, as one JSON object (what the dashboard reads)
   --stop            stop it and stop it resuming at boot
+  --delete          remove a project that is stopped or finished: its directory,
+                    its runner unit, and any sandbox or container it left.
+                    No undo, so --confirm must repeat its name (the directory's)
   --resume          carry on from where it stopped; --answer adds your
                     answer to the open question to DECISIONS.md first
 
@@ -2010,8 +2014,58 @@ cmd_stop() {
   ok "Stopped. Carry on later with: lca agent project --dir ${DIR} --resume"
 }
 
+# cmd_delete — remove a project that has ended: its directory, its runner
+# unit, its place in the queue, and any sandbox or OpenCode container it left.
+# Only a project that is stopped or finished (project_deletable_status), whose
+# runner is not running, inside AGENT_PROJECTS_DIR, and only when --confirm
+# repeats its name: there is no undo. Its spec is not touched here (a spec
+# given on the command line may be any file of yours); the dashboard removes
+# the copy it saved in ~/specs itself.
+cmd_delete() {
+  local name st runner
+  [[ -r "${STATE_FILE}" ]] || die "No project at ${DIR}."
+  project_dir_rel "${DIR}" >/dev/null \
+    || die "${DIR} is not inside AGENT_PROJECTS_DIR (${AGENT_PROJECTS_DIR:-unset}), so it is not deleted from here."
+  name="${DIR##*/}"
+  [[ "${CONFIRM}" == "${name}" ]] \
+    || die "Deleting ${DIR} cannot be undone. To confirm, repeat its name: --confirm ${name}"
+  st="$(state_get STATUS)"
+  project_deletable_status "${st}" \
+    || die "${name} is ${st:-in an unknown state}: only a stopped or finished project can be deleted. Stop it first: lca agent project --dir ${DIR} --stop"
+  runner="$(runner_state)"
+  if [[ "${runner}" == "active" || "${runner}" == "activating" || "$(queue_running)" == "${DIR}" ]]; then
+    die "${name}'s runner is still running: stop it first: lca agent project --dir ${DIR} --stop"
+  fi
+  if user_units && uctl cat "$(unit_instance)" >/dev/null 2>&1; then
+    uctl disable "$(unit_instance)" >/dev/null 2>&1 || true
+  fi
+  if systemd_available && systemctl is-enabled --quiet "$(unit_instance)" 2>/dev/null; then
+    announce_possible_prompt "Disabling the project's system unit"
+    as_root systemctl disable "$(unit_instance)" >/dev/null 2>&1 \
+      || warn "Its system unit $(unit_instance) is still enabled (that needs root); it will exit at boot with nothing to do."
+  fi
+  queue_remove "${DIR}"
+  local cid
+  cid="$(state_get CONVERSATION)"
+  [[ -z "${cid}" ]] || ! agent_container_running || delete_sandbox "${cid}"
+  remove_opencode_containers
+  if [[ "$(head -1 "${PROJECT_POINTER_FILE}" 2>/dev/null || true)" == "${DIR}" ]]; then rm -f "${PROJECT_POINTER_FILE}"; fi
+  # A sandbox writes as uid 10001, whose files the owner may not be able to
+  # remove; made the owner's first, and removed from inside a container (as
+  # root, the directory alone mounted) if anything is still left.
+  normalize_perms || true
+  rm -rf -- "${DIR}" 2>/dev/null || true
+  if [[ -e "${DIR}" ]]; then
+    docker run --rm --network none --user 0 --entrypoint sh -v "${DIR}:/p" "$(runtime_image)" \
+      -c 'find /p -mindepth 1 -delete' >/dev/null 2>&1 || true
+    rmdir -- "${DIR}" 2>/dev/null || true
+  fi
+  [[ ! -e "${DIR}" ]] || die "Could not remove everything in ${DIR}; what is left is still there."
+  ok "Deleted ${DIR}."
+}
+
 main() {
-  SPEC="" DIR="" AUTONOMY_FLAG="" ENGINE_FLAG="" ANSWER="" ACTION=start FOREGROUND=false
+  SPEC="" DIR="" AUTONOMY_FLAG="" ENGINE_FLAG="" ANSWER="" ACTION=start FOREGROUND=false CONFIRM=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir)        DIR="${2:-}"; shift 2 || die "--dir needs a path" ;;
@@ -2021,6 +2075,8 @@ main() {
       --status)     ACTION=status; shift ;;
       --json)       ACTION=json; shift ;;
       --stop)       ACTION=stop; shift ;;
+      --delete)     ACTION=delete; shift ;;
+      --confirm)    CONFIRM="${2:-}"; shift 2 || die "--confirm needs the project's name" ;;
       --resume)     ACTION=resume; shift ;;
       --run)        ACTION=run; shift ;;
       --foreground) FOREGROUND=true; shift ;;
@@ -2047,7 +2103,7 @@ main() {
   # may ask for a password; --run is the unit itself and --status is a report,
   # and neither may stop for one. See LCA_MAY_PROMPT in lib.sh.
   case "${ACTION}" in
-    start|resume|stop) LCA_MAY_PROMPT=true ;;
+    start|resume|stop|delete) LCA_MAY_PROMPT=true ;;
   esac
   case "${ACTION}" in
     start)  [[ -n "${SPEC}" ]] || { usage >&2; die "No spec file given."; }; cmd_start ;;
@@ -2055,6 +2111,7 @@ main() {
     status) cmd_status ;;
     json)   cmd_json ;;
     stop)   cmd_stop ;;
+    delete) cmd_delete ;;
     run)
       SBX="$(project_sandbox_dir "${DIR}")" || die "${DIR} is not inside AGENT_PROJECTS_DIR (${AGENT_PROJECTS_DIR:-unset})."
       cmd_run ;;
