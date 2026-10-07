@@ -62,6 +62,34 @@ Progress below this line is appended as it happens.
   `sudo git -C /opt/local-code-agent push origin HEAD:claude/local-code-agent-build-dd13qw`
   (then push any later commits from `~/work/lca-oc`, branch `openclaw-dashboard`,
   after their gates pass).
+- 22:07: **Part 4.1 passed.** wcount, started from the dashboard at 19:25,
+  finished `done` at 22:07 (2 h 42 min; 2.7 h of model time, 137 requests):
+  plan of 3 steps with a `## Checks` section; step 1's tests had one wrong
+  expectation (`count("a b\nc")` has 5 characters, the test said 6), so
+  attempts 1 and 2 failed verification and the agent's "done" was ignored;
+  attempt 3, the one allowed to correct a test, changed that 6 to 5 and
+  passed; the Install, Build and Test checks switched on; steps 2 and 3
+  passed first time; review 1 finding, nothing to fix; acceptance round 1
+  wrote ACCEPTANCE.md from the 4 Definition-of-Done items and everything
+  passed. Checked by hand afterwards in a network-less container: tests OK,
+  `2 3 6`, exit 1 with the message on stderr only. No remote, the pre-push
+  hook in place, the user unit disabled itself at the end. Progress was live
+  in the dashboard throughout (`/project status`, the Projects tab's API).
+- Found and fixed during the run: OpenClaw's `shift:false` reloaded the 51 GB
+  model (now Ollama's defaults); `lca check`'s generation probe evicted the
+  project's model (now skipped while a project runs; the dashboard runs
+  `--quick`); the Projects tab needed `controlUi.experimental.customPlugins`;
+  `lca check` misread a `false` with jq's `//`; a check ending `|| true` is now
+  refused. Gates run 7 green on the final code (1467 passed, 0 failed).
+- Test devices unpaired from the dashboard (none paired now); dev gateway,
+  downloads, the OpenClaw source clone and scratch files removed; the 40k test
+  spec deleted after the check.
+- **The sudo rule** (`/etc/sudoers.d/jmuryn`, `NOPASSWD:ALL`) can go once the
+  push is done: nothing automated needs it (projects and the dashboard run as
+  jmuryn without sudo, the dashboard under NoNewPrivileges; the backup timer
+  runs as root by itself). jmuryn stays in the sudo group, so `sudo` then asks
+  for the password: `sudo rm /etc/sudoers.d/jmuryn; sudo -k; sudo -n true`
+  must then be refused.
 - Cleanup: toycalc, toycalc2-4, taskd-opencode-run, taskd-openhands-run
   deleted after archiving to `~/lca-eval/archive/test-projects-2026-10-06.tgz`
   (no .venv/node_modules); their two still-enabled system units disabled; the
