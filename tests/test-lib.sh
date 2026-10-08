@@ -24891,17 +24891,82 @@ project_broken_tests_are_told_from_red_ones() {
   # reasoned its way to "Final answer: TESTS OK".
   [[ "$(project_tests_verdict <<<$'TESTS BROKEN? Let me look.\nThe route does not exist yet, so 404 is expected.\nFinal answer: TESTS OK')" == ok ]] || {
     echo 'a reply that ends TESTS OK was read as broken' >&2; bad=1; }
-  [[ "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" == $'broken\tsetUp never creates the tables.' ]] || {
-    printf 'the last verdict, or its one-sentence reason, was misread: %q\n' "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" >&2; bad=1; }
+  [[ "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" == $'broken\tsetUp never creates the tables. More text follows here.' ]] || {
+    printf 'the last verdict, or its reason, was misread: %q\n' "$(project_tests_verdict <<<$'At first TESTS OK, but no:\nTESTS BROKEN: setUp never creates the tables. More text follows here.')" >&2; bad=1; }
+  # The whole reason reaches the agent: not cut at "e.g." or at "factory.js."
+  [[ "$(project_tests_verdict <<<$'TESTS BROKEN: tests/f.test.ts imports `test-data-factory.js`. It expects e.g. createDemo({}) to throw,\nwhich a correct factory never does.')" == $'broken\ttests/f.test.ts imports test-data-factory.js. It expects e.g. createDemo({}) to throw, which a correct factory never does.' ]] || {
+    printf 'a reason of several sentences was cut: %q\n' "$(project_tests_verdict <<<$'TESTS BROKEN: tests/f.test.ts imports `test-data-factory.js`. It expects e.g. createDemo({}) to throw,\nwhich a correct factory never does.')" >&2; bad=1; }
+  # A reply that ran into its token cap is no verdict: measured, two checks
+  # ended at exactly 400 tokens, one reason reading "...factory.js with".
+  [[ "$(project_tests_check_reply <<<'{"message":{"content":"Hmm. TESTS BROKEN: The test imports test-data-factory.js with"},"done_reason":"length"}')" == cut ]] || {
+    echo 'a reply cut off at its token cap was taken as a verdict' >&2; bad=1; }
+  [[ "$(project_tests_check_reply <<<'{"message":{"content":"TESTS BROKEN: setUp never creates the tables."},"done_reason":"stop"}')" == $'broken\tsetUp never creates the tables.' ]] || {
+    echo 'a whole reply was not read as its verdict' >&2; bad=1; }
   p="$(project_tests_check_payload m:r 'spec' 'Step 6' 'def test_x(self): self.login_admin()' 'AttributeError: login_admin')"
   jq -e '.model == "m:r" and .options.temperature == 0 and (.messages[0].content | test("TESTS OK") and test("TESTS BROKEN"))' <<<"${p}" >/dev/null \
     || { echo 'the check is not asked in the form it is read in' >&2; bad=1; }
   jq -e '.messages[1].content | test("login_admin") and test("AttributeError")' <<<"${p}" >/dev/null \
     || { echo 'the tests or their output did not reach the check' >&2; bad=1; }
+  jq -e '.options.num_predict >= 1500' <<<"${p}" >/dev/null \
+    || { echo 'the check has too few tokens to reach its verdict' >&2; bad=1; }
   return "${bad}"
 }
 check "...and tests that are broken, not just red, are told apart by one request" \
   project_broken_tests_are_told_from_red_ones
+
+# Dependencies stay as committed unless a step's title asks for a change:
+# measured, a test-data step moved prisma ^6.1.0 to ^8.0.0-rc.21 and the
+# offline Install check failed every attempt after it (2026-10-08).
+project_dependency_changes_are_seen() {
+  local r="${SANDBOX}/dep-changes" bad=0 got f
+  local -a g=(git -C "${r}" -c user.name=t -c user.email=t@example.invalid)
+  rm -rf "${r}"; mkdir -p "${r}/node_modules/x"
+  git -C "${r}" init -q
+  printf '{"name":"a","scripts":{"test":"vitest"},"dependencies":{"prisma":"6.1.0"}}\n' > "${r}/package.json"
+  printf '{"lockfileVersion":3}\n' > "${r}/package-lock.json"
+  printf 'flask==3.0.0\n' > "${r}/requirements.txt"
+  "${g[@]}" add -A && "${g[@]}" commit -qm base
+  printf '{"name":"a","scripts":{"test":"vitest run","lint":"eslint ."},"dependencies":{"prisma":"6.1.0"}}\n' > "${r}/package.json"
+  printf 'x\n' > "${r}/node_modules/x/package.json"
+  "${g[@]}" add -A
+  got="$(project_dep_changes "${r}")"
+  [[ -z "${got}" ]] || { printf 'a scripts-only package.json change counted as a dependency change: %s\n' "${got}" >&2; bad=1; }
+  "${g[@]}" reset -q
+  printf '{"name":"a","scripts":{"test":"vitest"},"dependencies":{"prisma":"^8.0.0-rc.21"}}\n' > "${r}/package.json"
+  printf '{"lockfileVersion":3,"packages":{}}\n' > "${r}/package-lock.json"
+  printf 'lock\n' > "${r}/yarn.lock"
+  rm "${r}/requirements.txt"
+  "${g[@]}" add -A
+  got="$(project_dep_changes "${r}" | sort | tr '\n' ' ')"
+  [[ "${got}" == "package-lock.json package.json requirements.txt yarn.lock " ]] \
+    || { printf 'the dependency changes were misread: [%s]\n' "${got}" >&2; bad=1; }
+  "${g[@]}" reset -q
+  for f in package.json web/package-lock.json requirements-dev.txt pyproject.toml Cargo.lock go.sum; do
+    project_dep_file "${f}" || { printf '%s was not seen as a dependency file\n' "${f}" >&2; bad=1; }
+  done
+  for f in node_modules/a/package.json .venv/x/pyproject.toml src/package.ts README.md; do
+    ! project_dep_file "${f}" || { printf '%s was taken for a dependency file\n' "${f}" >&2; bad=1; }
+  done
+  for f in "Install dependencies (Fastify, Prisma)" "Add the zod dependency, pinned to 3.23.8" \
+           "Upgrade vite to 6.0.4" "Pin all versions in package.json"; do
+    project_step_allows_deps "${f}" || { printf 'the step "%s" asks for a dependency change, but may not make one\n' "${f}" >&2; bad=1; }
+  done
+  for f in "Create deterministic test data factory for Demo Services Ltd." "Implement vendor payment posting" \
+           "Ping the health endpoint" "Implement money utility module"; do
+    ! project_step_allows_deps "${f}" || { printf 'the step "%s" may change dependencies\n' "${f}" >&2; bad=1; }
+  done
+  got="$(project_dep_rejection $'package.json\npackage-lock.json')"
+  [[ "${got}" == *"(package.json, package-lock.json)"* && "${got}" == *"put back"* ]] \
+    || { printf 'the rejection does not say what was put back: %s\n' "${got}" >&2; bad=1; }
+  jq -e '.messages[0].content | test("stay as committed")' \
+       <<<"$(project_split_payload m 's' 'p' 9 't' 'v' 'npm error EAI_AGAIN')" >/dev/null \
+    || { echo 'the split is not told that a dependency the step changed stays as committed' >&2; bad=1; }
+  [[ "$(project_step_task /w 9 18 't' 'v' s p d)" == *"Dependencies are pinned"* ]] \
+    || { echo 'the step task does not carry the dependency rule' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and a dependency change is told from a script or setting change, and only a step that asks may make one" \
+  project_dependency_changes_are_seen
 
 # shellcheck disable=SC2030,SC2031,SC2034  # each probe sets its own copy, in a subshell, for lib.sh to read
 project_dirs_stay_inside_the_mount() {
@@ -25443,6 +25508,53 @@ project_loop_splits_accepts_and_stays_local() {
 }
 check "...and the unattended loop splits a failing step, keeps the checks on, removes remotes, undoes the agent's commits and passes acceptance" \
   project_loop_splits_accepts_and_stays_local
+
+# The runner's side of the dependency rule: an attempt that changes
+# dependencies its title does not ask for is not accepted, those files are put
+# back and the rest of its work stays; a scripts-only change, or a step that
+# asks for the dependency, passes.
+# shellcheck disable=SC2016  # the probe is code for the child shell
+project_unasked_dependency_change_is_rejected() {
+  local sb="${SANDBOX}/project-deps" out
+  project_loop_sandbox "${sb}"
+  printf 'AGENT_PROJECTS_DIR=%s\nENABLE_AGENT=true\n' "${sb}/projects" >> "${sb}/repo/.env"
+  record_configuration "${sb}/repo/.env"
+  out="$(HOME="${sb}/home" bash -c '
+    source "$1" >/dev/null 2>&1
+    DIR="$2"; STATE_DIR="$2/.lca-project"; STATE_FILE="$2/.lca-project/state"
+    : > "${STATE_DIR}/run.log"
+    g() { git -C "${DIR}" -c user.name=t -c user.email=t@example.invalid "$@"; }
+    g init -q; printf ".lca-project/\n" > "${DIR}/.gitignore"
+    printf "{\"scripts\":{\"test\":\"vitest\"},\"dependencies\":{\"prisma\":\"6.1.0\"}}\n" > "${DIR}/package.json"
+    printf "{\"lockfileVersion\":3}\n" > "${DIR}/package-lock.json"
+    g add -A; g commit -qm base
+    attempt() {   # TITLE PACKAGE_JSON -> the rc of after_step_checks
+      state_set TITLE "$1"; touch "${STATE_DIR}/step-start"
+      printf "%s\n" "$2" > "${DIR}/package.json"
+      printf "{\"lockfileVersion\":3,\"packages\":{}}\n" > "${DIR}/package-lock.json"
+      echo "export const f = 1" > "${DIR}/factory.ts"
+      local rc=0; CHECK_FAIL=""; after_step_checks >/dev/null || rc=$?; printf "%s" "${rc}"
+    }
+    printf "unasked=%s\n" "$(attempt "Create the test data factory" "{\"scripts\":{\"test\":\"vitest\"},\"dependencies\":{\"prisma\":\"^8.0.0-rc.21\"}}")"
+    printf "restored=%s\n" "$(g status --porcelain | tr -d " \n")"
+    attempt "Create the test data factory" "{\"scripts\":{\"test\":\"vitest\"},\"dependencies\":{\"prisma\":\"^8.0.0-rc.21\"}}" >/dev/null
+    printf "told=%s\n" "$(case "${CHECK_FAIL}" in *"package-lock.json, package.json)"*"put back"*) echo yes ;; *) echo no ;; esac)"
+    g checkout -q -- .; rm -f "${DIR}/factory.ts"
+    printf "asked=%s\n" "$(attempt "Add the zod dependency, pinned to 3.23.8" "{\"scripts\":{\"test\":\"vitest\"},\"dependencies\":{\"prisma\":\"6.1.0\",\"zod\":\"3.23.8\"}}")"
+    g checkout -q -- .; rm -f "${DIR}/factory.ts"
+    g checkout -q -- .; printf "{\"lockfileVersion\":3}\n" > "${DIR}/package-lock.json"
+    state_set TITLE "Add npm scripts"; touch "${STATE_DIR}/step-start"
+    printf "{\"scripts\":{\"test\":\"vitest run\",\"lint\":\"eslint .\"},\"dependencies\":{\"prisma\":\"6.1.0\"}}\n" > "${DIR}/package.json"
+    rc=0; after_step_checks >/dev/null || rc=$?; printf "scripts=%s\n" "${rc}"
+    printf "logged=%s\n" "$(grep -c "put back as committed" "${STATE_DIR}/run.log")"
+  ' _ "${sb}/repo/scripts/agent-project.sh" "${sb}/projects/demo" 2>&1)"
+  local want
+  for want in 'unasked=2' 'restored=??factory.ts' 'told=yes' 'asked=0' 'scripts=0' 'logged=2'; do
+    grep -qxF -- "${want}" <<<"${out}" || { printf 'expected %s; got:\n%s\n' "${want}" "${out}" >&2; return 1; }
+  done
+}
+check "...and an attempt that changes dependencies its step does not ask for is not accepted, and those files are put back" \
+  project_unasked_dependency_change_is_rejected
 
 # Deleting a project: only one that has ended, only inside the projects
 # directory, only with its name repeated, and then all of it.

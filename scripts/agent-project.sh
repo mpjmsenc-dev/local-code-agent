@@ -695,10 +695,12 @@ phase_end() {   # PHASE STEP ATTEMPT OUTCOME
 # rc 0: keep it. rc 1, reason in CHECK_FAIL: stop, a person must look (files
 # outside the project changed; a real credential in the tree). rc 2, reason in
 # CHECK_FAIL: the attempt does not count and the step goes on (a hard-coded
-# secret, to be read from the environment instead). Deleting a tracked file is
-# allowed, because git still has it, and recorded in DECISIONS.md.
+# secret, to be read from the environment instead; a dependency change the
+# step's title does not ask for, whose files are put back as committed).
+# Deleting a tracked file is allowed, because git still has it, and recorded
+# in DECISIONS.md.
 after_step_checks() {
-  local outside deleted kind
+  local outside deleted kind deps f
   outside="$(find "${AGENT_PROJECTS_DIR%/}" -mindepth 1 -path "${DIR}" -prune -o \
               -newer "${STATE_DIR}/step-start" -print 2>/dev/null | head -5 || true)"
   if [[ -n "${outside}" ]]; then
@@ -709,10 +711,20 @@ after_step_checks() {
   git_here add -A
   kind="$(project_diff_secret_kind "$(git_here diff --cached)" || true)"
   deleted="$(git_here diff --cached --name-status | awk '$1 == "D" { print $2 }' | head -20)"
+  deps="$(project_dep_changes "${DIR}")"
   git_here reset -q
   if [[ "${kind}" == "key" ]]; then
     CHECK_FAIL="credentials: the step's changes contain what looks like a real credential (a private key or an access token)"
     return 1
+  fi
+  if [[ -n "${deps}" ]] && ! project_step_allows_deps "$(state_get TITLE)"; then
+    while IFS= read -r f; do
+      [[ -n "${f}" ]] || continue
+      if git_here cat-file -e "HEAD:${f}" 2>/dev/null; then git_here checkout -q HEAD -- "${f}"; else rm -f "${DIR:?}/${f}"; fi
+    done <<<"${deps}"
+    say "the step changed dependencies its title does not ask for, which were put back as committed: $(tr '\n' ' ' <<<"${deps}")"
+    CHECK_FAIL="$(project_dep_rejection "${deps}")"
+    return 2
   fi
   if [[ "${kind}" == "literal" ]]; then
     CHECK_FAIL="the change hard-codes a password or secret in the code. Read it from an environment variable (with a clearly fake default only for tests), document the variable in README.md, and never commit a real value."
@@ -1003,9 +1015,9 @@ tests_phase() {
 ask_tests_check() {   # TITLE TESTS OUTPUT — the verdict line
   local reply
   reply="$(curl -fsS --max-time "$(agent_request_timeout)" "$(ollama_url)/api/chat" -H 'Content-Type: application/json' \
-            -d "$(project_tests_check_payload "$(project_reviewer_model)" "$(summary_text)" "$1" "$2" "$3")" 2>/dev/null \
-           | jq -r '.message.content // empty' 2>/dev/null)" || { printf 'unclear'; return 0; }
-  project_tests_verdict <<<"${reply}"
+            -d "$(project_tests_check_payload "$(project_reviewer_model)" "$(summary_text)" "$1" "$2" "$3")" 2>/dev/null)" \
+    || { printf 'unclear'; return 0; }
+  project_tests_check_reply <<<"${reply}"
 }
 check_tests() {
   local n="$1" total="$2" title="$3" check="$4" tests verdict reason f
@@ -1017,9 +1029,10 @@ check_tests() {
   phase_begin
   verdict="$(ask_tests_check "${title}" "${tests}" "${VERIFY_OUT}")"
   phase_end tests-check "${n}" 1 "${verdict%%$'\t'*}"
+  [[ "${verdict}" != cut ]] || say "step ${n}: the tests check ran out of tokens before its verdict; its reply is not used"
   [[ "${verdict}" == broken* ]] || return 0
   reason="${verdict#*$'\t'}"
-  say "step ${n}: the check says its tests are broken, not just red: $(project_clip "${reason}" 300); one more go at the tests"
+  say "step ${n}: the check says its tests are broken, not just red: ${reason} One more go at the tests."
   phase_begin
   run_turn "$(project_tests_task "${SBX}" "${n}" "${total}" "${title}" "${check}" \
               "$(summary_text)" "$(plan_text)" "$(decisions_text)")"$'\n\n'"The tests you wrote are broken, not just failing for the missing feature: ${reason} Fix the tests themselves; still do not implement the step." \

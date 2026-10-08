@@ -5696,6 +5696,7 @@ ${steps_rule}
 - To check that something FAILS on purpose, the command must still exit 0 when it behaves: test the exit code, e.g. \`python3 -m app bad; test \$? -eq 2\`, never \`python3 -m app bad && ...\`.
 - Prefer running the step's tests (for Python, \`python3 -m unittest discover -s tests -q\`; pytest is not installed) over grepping for a name.${tf} The step's title says its tests check what the spec states, including exit codes and which stream (stdout or stderr) a message goes to.
 - Use the standard library unless the spec requires a dependency or the base project brings it; a step that adds one installs it into ${d}/.venv (or ${d}/node_modules).
+- Dependencies are pinned: only a step whose title says "dependency" (e.g. "Add the zod dependency, pinned to 3.23.8") may add, remove or upgrade one, at an exact version (no ^ or ~). Every other step is rejected if it changes package.json's dependency lists, a lockfile or a requirements file.
 - If the spec says to ask the project lead about something, the step that needs the answer says so in its title, e.g. "Add div(a, b): ask the project lead how division by zero behaves first". Never turn that into "decide".
 3. ${d}/DECISIONS.md, in exactly this form:
 
@@ -5726,7 +5727,7 @@ Now plan the milestone "${ms}": under its heading in PLAN.md, after its scope pa
 - [ ] ${next}. Short title of the step
   Verify: \`one shell command, run from ${d}, that exits 0 only if this step works\`
 
-Rules: at most fifteen steps; each touches at most three files of our own and can be finished in under 20 minutes; each Verify is ONE command that exits 0 only when that step works, never \`true\` or \`echo\`; prefer running the step's tests, which are written before the step. If the milestone needs a check the "## Checks" section does not have yet (build, typecheck, lint, test), add it there. Change NOTHING else in PLAN.md: not the steps that exist, not their ticks, not the other milestones. Record any decision you take in DECISIONS.md. Never add a git remote and never push.
+Rules: at most fifteen steps; each touches at most three files of our own and can be finished in under 20 minutes; each Verify is ONE command that exits 0 only when that step works, never \`true\` or \`echo\`; prefer running the step's tests, which are written before the step. Dependencies are pinned: only a step whose title says "dependency" may add, remove or upgrade one, at an exact version. If the milestone needs a check the "## Checks" section does not have yet (build, typecheck, lint, test), add it there. Change NOTHING else in PLAN.md: not the steps that exist, not their ticks, not the other milestones. Record any decision you take in DECISIONS.md. Never add a git remote and never push.
 
 End your final message with: PLAN DONE
 EOF
@@ -5742,7 +5743,7 @@ project_split_payload() {
          --arg t "$5" --arg v "$6" --arg f "$(project_clip "$7" 3000)" '{
     model: $m, stream: false, options: {temperature: 0, num_predict: 1200},
     messages: [
-      {role: "system", content: "You are the project lead. A step of the plan failed every attempt. Split it into 2 to 4 smaller steps that together do exactly what it asked, each small enough to finish in 15 minutes, ordered so each builds on the last. Reply with ONLY the steps, in exactly this form and nothing else:\n- [ ] 1. Short title\n  Verify: `one shell command, run from the project directory with no network, that exits 0 only when this part works`\n- [ ] 2. ...\nNever use `true`, `echo` or a check that passes whatever the code does. The LAST part is verified by the original step check, so the parts must add up to it. Use what the failure output shows: if a dependency or tool is missing, the first part installs it inside the project; if a test is wrong about the spec, a part corrects that test and says so in its title."},
+      {role: "system", content: "You are the project lead. A step of the plan failed every attempt. Split it into 2 to 4 smaller steps that together do exactly what it asked, each small enough to finish in 15 minutes, ordered so each builds on the last. Reply with ONLY the steps, in exactly this form and nothing else:\n- [ ] 1. Short title\n  Verify: `one shell command, run from the project directory with no network, that exits 0 only when this part works`\n- [ ] 2. ...\nNever use `true`, `echo` or a check that passes whatever the code does. The LAST part is verified by the original step check, so the parts must add up to it. Use what the failure output shows: if a dependency the spec needs is missing, the first part adds it, its title says \"dependency\" and names an exact version; if the failure comes from a dependency the step itself changed (an install that needs the network, a version conflict), no part changes dependencies: they stay as committed; if a test is wrong about the spec, a part corrects that test and says so in its title."},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nPLAN.md:\n" + $p + "\n\nThe step that failed: " + $n + ". " + $t + "\nIts check: " + $v + "\n\nThe output of its last attempt:\n" + $f)}
     ]}'
 }
@@ -5818,7 +5819,7 @@ project_step_task() {
       printf 'Do not edit them: the runner puts them back as they were before verifying.\n\n'
     fi
   fi
-  printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Install any dependency inside ${d}/.venv. Never use credentials and never touch anything outside ${d}. Never add a git remote and never push."
+  printf '%s\n' "Rules: do not edit PLAN.md (the runner ticks it). Do not delete or empty existing files. Dependencies are pinned: do not add, remove or upgrade any (the dependency lists in package.json, pyproject.toml and the like, lockfiles, requirements files) unless the step title asks for it; the runner rejects such a change and puts those files back. When it does ask, pin the exact version (no ^ or ~) and install it inside ${d} (.venv, node_modules). Never use credentials and never touch anything outside ${d}. Never add a git remote and never push."
   printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: STEP DONE"
   if [[ -n "${failure}" ]]; then
     # shellcheck disable=SC2016  # the backticks are a Markdown fence for the agent
@@ -6055,7 +6056,7 @@ project_tests_task() {
   printf 'Write ONLY the tests for step %s. Do not implement the step and do not write stubs of the code under test: another conversation implements it afterwards and has to make your tests pass without changing them.\n' "${n}"
   printf 'The tests check what the spec and the step title state, including return values, error cases, exit codes and which stream (stdout or stderr) a message goes to. They must be found and run by:\n  %s\n' "${verify}"
   printf 'Run that command once: it is EXPECTED to fail now, because the step is not implemented yet. A failure that is only the missing code is right; fix any error in the tests themselves.\n\n'
-  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Do not add, remove or upgrade dependencies, or touch package.json's dependency lists, lockfiles or requirements files: use what is installed. Never use credentials and never touch anything outside ${d}."
   printf '%s\n' "If you cannot continue without an answer, ask ONE question as your final message and stop. Otherwise end your final message with: TESTS DONE"
 }
 
@@ -6069,22 +6070,37 @@ project_tests_check_payload() {
   have jq || return 1
   jq -nc --arg m "$1" --arg s "$(project_clip "$2" 1500)" --arg t "$3" --arg c "$(project_clip_head "$4" 9000)" \
          --arg o "$(project_clip "$5" 3000)" '{
-    model: $m, stream: false, options: {temperature: 0, num_predict: 400},
+    model: $m, stream: false, options: {temperature: 0, num_predict: 1500},
     messages: [
-      {role: "system", content: "You check unit tests written BEFORE the feature they test exists. Right now they must fail, because the feature is missing, and that is correct. Decide whether they fail ONLY for that reason, or whether the tests themselves are broken: a helper, fixture or attribute they use but never define, a syntax error, a wrong import of the test framework, or an expectation the spec contradicts. A missing module, class, route or function OF THE FEATURE is expected, not broken. Reply with exactly TESTS OK, or with TESTS BROKEN: followed by one sentence naming what is wrong in the tests."},
+      {role: "system", content: "You check unit tests written BEFORE the feature they test exists. Right now they must fail, because the feature is missing, and that is correct. Decide whether they fail ONLY for that reason, or whether the tests themselves are broken: a helper, fixture or attribute they use but never define, a syntax error, a wrong import of the test framework, or an expectation the spec contradicts. A missing module, class, route or function OF THE FEATURE is expected, not broken. Reply with exactly TESTS OK, or with TESTS BROKEN: followed by what is wrong in the tests, in at most three sentences naming the file and the test. No reasoning before the verdict."},
       {role: "user", content: ("The spec (summarised when it is long):\n" + $s + "\n\nThe step: " + $t + "\n\nThe tests:\n" + $c + "\n\nRunning them now gives:\n" + $o)}
     ]}'
+}
+
+# project_tests_check_reply — stdin: the whole /api/chat response to that
+# payload. "cut" when the reply ran into num_predict (its last verdict may be
+# one it was still reasoning towards, and its reason stops mid-sentence: a
+# 400-token cap ended both of one project's checks at exactly 400 tokens, one
+# reason reading "The test imports test-data-factory.js with", 2026-10-08);
+# otherwise project_tests_verdict of the reply's text.
+project_tests_check_reply() {
+  local r
+  r="$(cat)"
+  if [[ "$(jq -r '.done_reason // empty' <<<"${r}" 2>/dev/null)" == "length" ]]; then printf 'cut'; return 0; fi
+  jq -r '.message.content // empty' <<<"${r}" 2>/dev/null | project_tests_verdict
 }
 
 # project_tests_verdict — stdin: that reply. "ok", or "broken" and a TAB and
 # the reason, or "unclear" for anything else (which counts as ok: the check
 # exists to catch broken tests, not to stop on its own doubt).
 #
-# The LAST verdict in the reply is the one that counts, and the reason is the
-# one sentence after it. Asked for a bare verdict, the model wrote 4,000
-# tokens that opened "TESTS BROKEN" and closed "Final answer: TESTS OK"; read
-# from the front, sound tests were sent back for rewriting with the whole
-# essay as the reason (2026-10-06).
+# The LAST verdict in the reply is the one that counts, and the reason is all
+# that follows it (up to 2,000 characters): the agent that rewrites the tests
+# gets it whole. Asked for a bare verdict, the model wrote 4,000 tokens that
+# opened "TESTS BROKEN" and closed "Final answer: TESTS OK"; read from the
+# front, sound tests were sent back for rewriting with the whole essay as the
+# reason (2026-10-06). Cutting the reason at its first full stop then cut
+# "e.g." and "foo.js." short, so it is no longer cut there.
 project_tests_verdict() {
   sed -E 's/\*\*//g; s/`//g' | tr '\n' ' ' | awk '
     {
@@ -6100,12 +6116,101 @@ project_tests_verdict() {
       if (last == "broken") {
         reason = substr($0, pos + 12)
         sub(/^[[:space:]:.-]*/, "", reason)
-        if (match(reason, /[.!?]( |$)/)) reason = substr(reason, 1, RSTART)
-        if (length(reason) > 400) reason = substr(reason, 1, 400)
+        sub(/[[:space:]]+$/, "", reason)
+        gsub(/[[:space:]][[:space:]]+/, " ", reason)
+        if (length(reason) > 2000) reason = substr(reason, 1, 2000) " [...]"
         printf "broken\t%s", reason; exit
       }
       printf "unclear"
     }'
+}
+
+# --- project mode: dependencies stay as committed ------------------------------
+# A step may not add, remove or upgrade a dependency unless its title asks for
+# one (project_step_allows_deps); the runner rejects the attempt and puts the
+# files back (after_step_checks). Measured: a step about test data moved
+# prisma ^6.1.0 to ^8.0.0-rc.21, whose new transitive packages were not in the
+# offline cache, so the Install check failed every attempt for reasons the
+# step never had to touch, and the split that followed planned a step to
+# "vendor" one of them (2026-10-08).
+
+# project_dep_file PATH — true for a dependency manifest or lockfile, anywhere
+# in the tree except inside installed dependencies.
+project_dep_file() {
+  local p="${1:-}"
+  [[ -n "${p}" ]] || return 1
+  case "/${p}" in */node_modules/*|*/.venv/*|*/venv/*|*/vendor/*|*/.lca-project/*) return 1 ;; esac
+  case "${p##*/}" in
+    package.json|package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb) return 0 ;;
+    requirements*.txt|constraints*.txt|pyproject.toml|poetry.lock|Pipfile|Pipfile.lock|uv.lock) return 0 ;;
+    Cargo.toml|Cargo.lock|go.mod|go.sum|Gemfile|Gemfile.lock|composer.json|composer.lock) return 0 ;;
+  esac
+  return 1
+}
+
+# project_dep_sections NAME — stdin: a dependency file's content; stdout what
+# of it counts as its dependencies. For a manifest that also holds scripts or
+# tool settings (package.json, composer.json, pyproject.toml, Cargo.toml) only
+# its dependency tables, so a step may still add an npm script or configure
+# pytest; for a lockfile or a requirements file, all of it. A manifest that
+# does not parse counts whole.
+project_dep_sections() {
+  local text
+  text="$(cat)"
+  case "${1##*/}" in
+    package.json)
+      jq -S '{dependencies, devDependencies, peerDependencies, optionalDependencies,
+              bundleDependencies, bundledDependencies, overrides, resolutions}' <<<"${text}" 2>/dev/null \
+        || printf '%s' "${text}" ;;
+    composer.json)
+      jq -S '{require, "require-dev", conflict, replace, provide}' <<<"${text}" 2>/dev/null || printf '%s' "${text}" ;;
+    pyproject.toml|Cargo.toml)
+      python3 -I -c '
+import json, sys, tomllib
+d = tomllib.loads(sys.stdin.read())
+keep = {}
+for path in ("project.dependencies", "project.optional-dependencies", "dependency-groups",
+             "build-system.requires", "tool.poetry.dependencies", "tool.poetry.dev-dependencies",
+             "tool.poetry.group", "tool.uv", "dependencies", "dev-dependencies",
+             "build-dependencies", "target", "workspace.dependencies", "patch", "replace"):
+    v = d
+    for k in path.split("."):
+        v = v.get(k) if isinstance(v, dict) else None
+    if v is not None:
+        keep[path] = v
+print(json.dumps(keep, sort_keys=True, default=str))' <<<"${text}" 2>/dev/null || printf '%s' "${text}" ;;
+    *) printf '%s' "${text}" ;;
+  esac
+}
+
+# project_dep_changes DIR — the dependency files whose dependencies differ
+# between HEAD and the index (the runner stages the step's work first), one a
+# line. Nothing before the first commit.
+project_dep_changes() {
+  local d="${1:-}" f
+  [[ -n "${d}" ]] && git -C "${d}" rev-parse -q --verify HEAD >/dev/null 2>&1 || return 0
+  while IFS= read -r -d '' f; do
+    project_dep_file "${f}" || continue
+    if [[ "$(git -C "${d}" show "HEAD:${f}" 2>/dev/null | project_dep_sections "${f}")" \
+       != "$(git -C "${d}" show ":${f}" 2>/dev/null | project_dep_sections "${f}")" ]]; then
+      printf '%s\n' "${f}"
+    fi
+  done < <(git -C "${d}" -c core.quotePath=false diff --cached --name-only -z HEAD 2>/dev/null || true)
+}
+
+# project_step_allows_deps TITLE — true when the step's title asks for a
+# dependency change: it names a dependency, an install, an upgrade or
+# downgrade, pinning, a lockfile or a manifest. The planner is told to word
+# such a step that way (project_planning_task).
+project_step_allows_deps() {
+  grep -qiE '(dependenc|(^|[^[:alpha:]])(install(s|ed|ing|ation)?|(up|down)grad(e|es|ed|ing)|(un)?pin(s|ned|ning)?)([^[:alpha:]]|$)|lock ?file|package\.json|requirements[[:alnum:]_.-]*\.txt|pyproject\.toml)' <<<"${1:-}"
+}
+
+# project_dep_rejection FILES — why an attempt that changed FILES (one a line)
+# without asking for it is not accepted, for the agent's next attempt.
+project_dep_rejection() {
+  printf 'the step changed the project'"'"'s dependencies (%s), and this step does not ask for that. Project rule: dependencies are pinned, with no upgrades, additions or removals unless the step'"'"'s title asks for one. Those files were put back as they were committed. Do the step with the dependencies already installed, and do not run npm install, pip install or the like for new or newer packages. If it truly cannot be done without a dependency change, ask ONE question saying which dependency, which exact version and why.' \
+    "$(tr '\n' ' ' <<<"${1:-}" | sed 's/ *$//; s/ /, /g')"
 }
 
 # project_review_payload MODEL SUMMARY TITLE DIFF — the /api/chat body for the
@@ -6163,7 +6268,7 @@ project_fix_task() {
   printf 'Project directory: %s. It is a git repository: do not run git, the runner commits.\n\n' "${d}"
   printf 'The review found (severity, kind, where, what):\n%s\n\n' "$(project_clip "${findings}" 3000)"
   printf 'Fix each one in the code, and add a test for it where one can be written. Then run, in %s:\n  %s\nand make it pass. Do not weaken or delete existing tests.\n\n' "${d}" "${verify}"
-  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Never use credentials and never touch anything outside ${d}."
+  printf '%s\n' "Rules: do not edit PLAN.md. Do not delete or empty existing files. Do not add, remove or upgrade dependencies, or touch package.json's dependency lists, lockfiles or requirements files: use what is installed. Never use credentials and never touch anything outside ${d}."
   printf '%s\n' "End your final message with: STEP DONE"
 }
 
