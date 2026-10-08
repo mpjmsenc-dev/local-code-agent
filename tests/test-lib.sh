@@ -25509,6 +25509,54 @@ project_loop_splits_accepts_and_stays_local() {
 check "...and the unattended loop splits a failing step, keeps the checks on, removes remotes, undoes the agent's commits and passes acceptance" \
   project_loop_splits_accepts_and_stays_local
 
+# The stall rule waits while the step at hand still has a way forward: hours
+# of failed attempts are followed by the split, not a stop (measured on
+# mpjm-accounting-plateform: stalled at step 9.1 attempt 2 of 3, split unused).
+# Outside a step the rule still stops the run.
+# shellcheck disable=SC2016  # the probe is code for the child shell
+project_stall_waits_for_retries_and_split() {
+  local sb="${SANDBOX}/project-stall" out
+  project_loop_sandbox "${sb}"
+  printf 'AGENT_PROJECTS_DIR=%s\nENABLE_AGENT=true\nAGENT_PROJECT_ENGINE=opencode\nAGENT_PROJECT_RETRIES=1\nAGENT_PROJECT_STALL_HOURS=6\n' "${sb}/projects" >> "${sb}/repo/.env"
+  record_configuration "${sb}/repo/.env"
+  printf '# Demo\n\n## Definition of Done\n\n- part1 and part2 exist\n' > "${sb}/projects/demo/.lca-project/spec.md"
+  out="$(HOME="${sb}/home" bash -c '
+    source "$1" >/dev/null 2>&1
+    DIR="$2"; STATE_DIR="$2/.lca-project"; STATE_FILE="$2/.lca-project/state"; SBX="$2"; FOREGROUND=true
+    : > "${STATE_DIR}/run.log"
+    state_set STATUS planning AUTONOMY self ENGINE opencode STEP 0 ATTEMPT 0 STARTED "$(date -u +%FT%TZ)" LAST_PROGRESS "$(date +%s)"
+    normalize_perms() { :; }; ensure_opencode_image() { :; }; remove_opencode_containers() { :; }
+    agent_container_running() { false; }; ollama_log_hint() { echo none; }; ask_reviewer() { printf "NO FINDINGS"; }
+    verify() { VERIFY_OUT="$(cd "${DIR}" && bash -c "$1" 2>&1 </dev/null)"; }
+    ask_lead() { printf -- "- [ ] 1. Part one\n  Verify: \`test -f part1\`\n- [ ] 2. Part two\n  Verify: \`test -f part2\`\n"; }
+    oc_turn() {
+      case "$1" in
+        *"PROJECT MODE: PLANNING."*)
+          printf "# Plan\n\n- [ ] 1. both parts\n  Verify: \`test -f part1 && test -f part2\`\n" > "${DIR}/PLAN.md"
+          printf "# Decisions\n\n## Base project\n\n- Choice: none\n- License: n/a\n- Why: small\n" > "${DIR}/DECISIONS.md" ;;
+        *"step 1 of"*) state_set LAST_PROGRESS "$(( $(date +%s) - 7 * 3600 ))" ;;
+        *"step 1.1 of"*) touch "${DIR}/part1" ;;
+        *"step 1.2 of"*) touch "${DIR}/part2" ;;
+        *"ACCEPTANCE CHECKS"*)
+          printf "# Acceptance\n\n- [ ] 1. parts\n  Verify: \`test -f part1 && test -f part2\`\n" > "${DIR}/ACCEPTANCE.md" ;;
+      esac
+      LAST_TEXT="STEP DONE"
+    }
+    ( cmd_run ) >/dev/null 2>&1
+    printf "status=%s\n" "$(state_get STATUS)"
+    printf "steps=%s\n" "$(project_plan_steps "${DIR}/PLAN.md" | cut -f1,2 | tr "\t\n" ":,")"
+    state_set STATUS running LAST_PROGRESS "$(( $(date +%s) - 7 * 3600 ))"
+    ( STEP_OPEN=false; progress_guard ) >/dev/null 2>&1
+    printf "outside=%s\n" "$(state_get STATUS)"
+  ' _ "${sb}/repo/scripts/agent-project.sh" "${sb}/projects/demo" 2>&1)"
+  local want
+  for want in 'status=done' 'steps=1.1:1,1.2:1,' 'outside=stalled'; do
+    grep -qxF -- "${want}" <<<"${out}" || { printf 'expected %s; got:\n%s\n' "${want}" "${out}" >&2; return 1; }
+  done
+}
+check "...and the stall rule waits while a step has an attempt or a split left, and stops the run outside one" \
+  project_stall_waits_for_retries_and_split
+
 # The runner's side of the dependency rule: an attempt that changes
 # dependencies its title does not ask for is not accepted, those files are put
 # back and the rest of its work stays; a scripts-only change, or a step that

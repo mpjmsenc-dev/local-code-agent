@@ -698,7 +698,7 @@ what. Each round's results are in `.lca-project/acceptance-round-N.md`.
 |---|---|
 | `waiting` (credentials) | a real credential in the diff (a private key, a cloud or forge token), or an agent that asks for credentials again after being told there are none |
 | `waiting` (outside) | files under `AGENT_PROJECTS_DIR` but outside this project changed, or the project's `.git` was removed |
-| `stalled` | nothing passed (no step, plan, milestone or acceptance round) for `AGENT_PROJECT_STALL_HOURS` (6); time queued or with the machine off does not count |
+| `stalled` | nothing passed (no step, plan, milestone or acceptance round) for `AGENT_PROJECT_STALL_HOURS` (6), outside a step that still has an attempt, a split or its re-plan left; time queued or with the machine off does not count |
 | `limit` | it has run for `AGENT_PROJECT_MAX_DAYS` (7) days in all; resuming gives it a new allowance |
 | `failed` | a re-planned step failed again |
 | `incomplete` | acceptance checks still fail after `AGENT_PROJECT_ACCEPT_ROUNDS` rounds |

@@ -641,8 +641,12 @@ guard_history() {
 # Progress is a plan accepted, a step that passed, a milestone planned or an
 # acceptance round passed: note_progress. Days are counted while the runner
 # runs (ACTIVE_SECONDS, plus this run since RUN_T0), so time spent queued or
-# stopped by a person does not count.
+# stopped by a person does not count. While a step still has a way forward
+# (another attempt, a split, its one re-plan) the stall rule waits: STEP_OPEN,
+# set by cmd_run around step_phase. Those are bounded, and when they run out
+# the step stops the run itself (replan_step: failed). The day limit holds.
 RUN_T0="$(date +%s)"
+STEP_OPEN=false
 note_progress() { state_set LAST_PROGRESS "$(date +%s)"; }
 active_seconds() {
   local total
@@ -659,7 +663,8 @@ progress_guard() {
   now="$(date +%s)"
   last="$(state_get LAST_PROGRESS)"
   [[ "${last}" =~ ^[0-9]+$ ]] || { last="${now}"; state_set LAST_PROGRESS "${now}"; }
-  if [[ "${AGENT_PROJECT_STALL_HOURS}" =~ ^[0-9]+$ ]] && (( AGENT_PROJECT_STALL_HOURS > 0 )) \
+  if [[ "${STEP_OPEN}" != "true" ]] \
+     && [[ "${AGENT_PROJECT_STALL_HOURS}" =~ ^[0-9]+$ ]] && (( AGENT_PROJECT_STALL_HOURS > 0 )) \
      && (( now - last >= AGENT_PROJECT_STALL_HOURS * 3600 )); then
     stop_for_human stalled "no progress for ${AGENT_PROJECT_STALL_HOURS} hours: nothing passed since $(lca_date -d "@${last}" '+%F %H:%M %Z')"
   fi
@@ -1685,7 +1690,9 @@ cmd_run() {
   while :; do
     if line="$(next_open_step)"; then
       IFS=$'\t' read -r n _ title check <<<"${line}"
+      STEP_OPEN=true
       step_phase "${n}" "$(plan_step_total)" "${title}" "${check}" </dev/null
+      STEP_OPEN=false
       continue
     fi
     milestone_phase </dev/null && continue

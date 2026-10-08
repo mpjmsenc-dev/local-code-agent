@@ -436,7 +436,7 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PROJECT_AUTONOMY` | `ask` | project mode, when the agent asks: `ask` stops, `self` decides and records why, `answerer` has a second model answer |
 | `AGENT_PROJECT_ANSWERER` | *(empty)* | the answerer model; empty means `MODEL_NAME` |
 | `AGENT_PROJECT_RETRIES` | `2` | retries for a step that fails its checks before it is split into smaller steps |
-| `AGENT_PROJECT_STALL_HOURS` | `6` | an unattended project stops after this many hours with nothing passing (0 = no limit) |
+| `AGENT_PROJECT_STALL_HOURS` | `6` | an unattended project stops after this many hours with nothing passing, once the step at hand has no attempt, split or re-plan left (0 = no limit) |
 | `AGENT_PROJECT_MAX_DAYS` | `7` | an unattended project stops, with a summary, after this many days of running (0 = no limit) |
 | `AGENT_PROJECT_ACCEPT_ROUNDS` | `5` | rounds of full checks and Definition-of-Done fixes before a finished project counts as done or incomplete |
 | `AGENT_PROJECT_TELEGRAM` | `false` | project mode's progress to your own Telegram bot (progress text only; token and chat id in `~/.telegram.env`): `lca agent telegram --help` |
