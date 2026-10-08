@@ -24620,6 +24620,29 @@ project_times_are_in_the_chosen_zone() {
 check "...and project times are shown in LCA_TIMEZONE, an unknown or unsafe zone falling back to the machine's" \
   project_times_are_in_the_chosen_zone
 
+# The coder's sampling lives in its derived model, like its window and its
+# reply cap: read from AGENT_SAMPLING, refused whole when any part is not a
+# known key with a number, and a model that does not carry it is drift.
+# shellcheck disable=SC2016  # the stubs are code for the child shell
+agent_sampling_is_read_strictly_and_checked() {
+  local bad=0 got
+  got="$(lib_probe "AGENT_SAMPLING='temperature=0.7 top_p=0.8 top_k=20 repeat_penalty=1.05'" 'agent_sampling_params | tr "\t\n" "=,"')"
+  [[ "${got}" == 'temperature=0.7,top_p=0.8,top_k=20,repeat_penalty=1.05,' ]] || { printf 'sampling read as %s\n' "${got}" >&2; bad=1; }
+  ! lib_probe "AGENT_SAMPLING='temperature=0.7 seed=x'" 'agent_sampling_params' >/dev/null || { echo 'a bad part was accepted' >&2; bad=1; }
+  ! lib_probe "AGENT_SAMPLING='temprature=0.7'" 'agent_sampling_params' >/dev/null || { echo 'an unknown key was accepted' >&2; bad=1; }
+  [[ -z "$(lib_probe "AGENT_SAMPLING=" 'agent_sampling_params')" ]] || { echo 'empty sampling produced parameters' >&2; bad=1; }
+  local stub='have() { return 0; }; ollama() { printf "num_ctx 131072\ntemperature 0.7\ntop_p 0.8\ntop_k 20\nrepeat_penalty 1.05\n"; }'
+  ! lib_probe "AGENT_SAMPLING='temperature=0.70 top_k=20'; ${stub}" 'agent_model_sampling_stale m' || {
+    echo 'a model carrying the sampling was called stale' >&2; bad=1; }
+  lib_probe "AGENT_SAMPLING='temperature=1'; ${stub}" 'agent_model_sampling_stale m' || {
+    echo 'a model with another temperature was not stale' >&2; bad=1; }
+  lib_probe "AGENT_SAMPLING='min_p=0.05'; ${stub}" 'agent_model_sampling_stale m' || {
+    echo 'a model missing a sampling key was not stale' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and the coder's sampling is read strictly from AGENT_SAMPLING and a model without it is drift" \
+  agent_sampling_is_read_strictly_and_checked
+
 # The event list pages at 100 on this build, and a limit above that is refused
 # with nothing at all: every reader here asked for 10000, so the live view went
 # blank and project mode never saw a question. Driven with a stub app that

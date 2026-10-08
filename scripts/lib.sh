@@ -683,6 +683,11 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # Project mode's progress to Telegram (scripts/telegram.sh). Off by default:
   # it is the one thing in this stack that talks to a service on the internet.
   AGENT_PROJECT_TELEGRAM="${AGENT_PROJECT_TELEGRAM:-false}"
+  # The coder's sampling, written into its derived model: space-separated
+  # KEY=VALUE in Ollama's names (temperature, top_p, top_k, repeat_penalty,
+  # min_p, presence_penalty, frequency_penalty). Empty, the default: the base
+  # model's own.
+  AGENT_SAMPLING="${AGENT_SAMPLING:-}"
   # A small embedding model kept loaded beside the others, for search over the
   # house knowledge base. Empty, the default: none.
   EMBED_MODEL="${EMBED_MODEL:-}"
@@ -4502,6 +4507,41 @@ agent_model_predict_stale() {
   [[ "${have_p}" != "$(agent_max_output_tokens)" ]]
 }
 
+# agent_sampling_params — AGENT_SAMPLING ("temperature=0.7 top_p=0.8 ...") as
+# KEY<TAB>VALUE lines, in Ollama's parameter names. Nothing when it is empty
+# (the base model's own sampling stands); rc 1, and nothing, when any part of
+# it is not a known key with a plain number, so a typo never reaches a model.
+agent_sampling_params() {
+  local item key val out=""
+  [[ -n "${AGENT_SAMPLING:-}" ]] || return 0
+  for item in ${AGENT_SAMPLING}; do
+    key="${item%%=*}" val="${item#*=}"
+    case "${key}" in
+      temperature|top_p|top_k|repeat_penalty|min_p|presence_penalty|frequency_penalty) ;;
+      *) return 1 ;;
+    esac
+    [[ "${item}" == *=* && "${val}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    out+="${key}"$'\t'"${val}"$'\n'
+  done
+  printf '%s' "${out}"
+}
+
+# agent_model_sampling_stale MODEL — true when MODEL's parameters can be read
+# and a value AGENT_SAMPLING sets is missing or different (compared as
+# numbers: Ollama prints 0.7 back as 0.7, 20 as 20). Unreadable is not stale.
+agent_model_sampling_stale() {
+  local out key val have
+  have ollama || return 1
+  out="$(ollama show "${1:-}" --parameters 2>/dev/null)" || return 1
+  while IFS=$'\t' read -r key val; do
+    [[ -n "${key}" ]] || continue
+    have="$(awk -v k="${key}" '$1 == k { print $2; exit }' <<<"${out}")"
+    [[ -n "${have}" ]] || return 0
+    awk -v a="${have}" -v b="${val}" 'BEGIN { exit !(a + 0 != b + 0) }' && return 0
+  done < <(agent_sampling_params 2>/dev/null)
+  return 1
+}
+
 # agent_model_drift — why the derived model is not what it should be, or
 # non-zero when it is fine.
 #
@@ -4514,6 +4554,7 @@ agent_model_drift() {
   derived="$(agent_model_name "$(agent_base_model)")"
   model_present "${derived}" || { printf 'absent'; return 0; }
   if agent_model_predict_stale "${derived}"; then printf 'predict'; return 0; fi
+  if agent_model_sampling_stale "${derived}"; then printf 'sampling'; return 0; fi
   want="$(agent_model_context)"
   got="$(agent_model_loaded_context "${derived}" 2>/dev/null || true)"
   [[ -n "${got}" ]] || return 1
@@ -4536,6 +4577,10 @@ ensure_agent_model() {
   # minutes (2026-10-05). A model parameter is applied whatever the client
   # sends or leaves out, OpenCode included.
   printf 'FROM %s\nPARAMETER num_ctx %s\nPARAMETER num_predict %s\n' "${base}" "${want}" "$(agent_max_output_tokens)" > "${tmp}"
+  # The sampling too, when AGENT_SAMPLING sets it: in the model, it applies to
+  # every client that sends none of its own (OpenCode, and OpenHands, whose
+  # stored temperature, top_p and top_k are null).
+  agent_sampling_params 2>/dev/null | awk -F'\t' '{ printf "PARAMETER %s %s\n", $1, $2 }' >> "${tmp}"
   # 'ollama create' over the same weights: the blob is shared on disk, so this
   # costs a manifest rather than another copy of the model.
   if ! ollama create "${derived}" -f "${tmp}" >/dev/null 2>&1; then
@@ -4647,7 +4692,7 @@ refresh_agent_model_after_tune() {
   derived="$(agent_model_name "${base}")"
   if have_ctx="$(agent_model_declared_context "${derived}")" \
      && [[ "${have_ctx}" == "$(agent_model_context)" ]] \
-     && ! agent_model_predict_stale "${derived}"; then
+     && ! agent_model_predict_stale "${derived}" && ! agent_model_sampling_stale "${derived}"; then
     return 0
   fi
   info "Building the agent's ${derived} at context $(agent_model_context)..."

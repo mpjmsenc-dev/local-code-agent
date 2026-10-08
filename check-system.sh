@@ -264,6 +264,9 @@ fi
 # model answers, the agent runs, and it silently truncates in the middle of a
 # long task at the server default instead. Creating a model proves nothing;
 # loading it is the only evidence, so that is what this asks.
+if [[ -n "${AGENT_SAMPLING}" ]] && ! agent_sampling_params >/dev/null; then
+  p_warn "AGENT_SAMPLING='${AGENT_SAMPLING}' is not KEY=NUMBER pairs of temperature, top_p, top_k, repeat_penalty, min_p, presence_penalty or frequency_penalty, so none of it is applied. Fix it in ${ENV_FILE}."
+fi
 if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
   AGENT_DERIVED="$(agent_model_name "$(agent_base_model)")"
   case "$(agent_model_drift 2>/dev/null || printf ok)" in
@@ -271,8 +274,12 @@ if [[ "${ENABLE_AGENT}" == "true" ]] && have ollama; then
       p_warn "the agent is on but '${AGENT_DERIVED}' does not exist, so the agent runs at the server-wide context (${OLLAMA_CONTEXT_LENGTH}) instead of $(agent_model_context) — its first prompt on a real run was 13,796 tokens, and at the server-wide context it would not fit. Build it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
     context)
       p_warn "'${AGENT_DERIVED}' exists but Ollama loads it at a different context than $(agent_model_context), so the agent is silently working in a smaller window than it was given. Rebuild it: sudo ${SCRIPT_DIR}/scripts/tune.sh" ;;
+    predict)
+      p_warn "'${AGENT_DERIVED}' does not carry the cap on one reply ($(agent_max_output_tokens) tokens), so a reply can run on for many minutes. Rebuild it: sudo ${SCRIPT_DIR}/bin/lca agent setup" ;;
+    sampling)
+      p_warn "'${AGENT_DERIVED}' does not carry the sampling AGENT_SAMPLING sets (${AGENT_SAMPLING}), so the coder samples differently than configured. Rebuild it: sudo ${SCRIPT_DIR}/bin/lca agent setup" ;;
     *)
-      p_pass "agent model ${AGENT_DERIVED} loads at $(agent_model_context) tokens" ;;
+      p_pass "agent model ${AGENT_DERIVED} loads at $(agent_model_context) tokens${AGENT_SAMPLING:+, sampling ${AGENT_SAMPLING}}" ;;
   esac
   AGENT_STALE="$(stale_agent_models 2>/dev/null | tr '\n' ' ' || true)"
   [[ -z "${AGENT_STALE// /}" ]] \

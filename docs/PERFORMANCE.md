@@ -165,6 +165,25 @@ Three tasks and one run each (two for 14b on A) is a small sample, and every
 task here was well specified. The ranking was the same on every task, though,
 and the gaps are big: 0/3 vs 3/3 on first tries, and 2× in time.
 
+## 128 GB (2026-10-07): the agent's window, its sampling, what stays loaded
+
+The VM went from 64 to 128 GB (125.9 GiB usable). The settings on this box:
+
+| | value | why |
+|---|---|---|
+| `AGENT_MODEL_CONTEXT` | **131072** | at 32768, real project turns ran into the limit: 31 requests above 30k tokens, 12 truncated, and llama.cpp's context shifts that each discarded 16,381 tokens of the conversation, the start of the agent's own instructions included. Speed does not depend on the window: on the same 13k-token prompt, reading was 26.3 / 27.8 / 27.7 / 27.8 tok/s and writing 5.49 / 5.65 / 5.78 / 5.48 tok/s at 32k / 64k / 128k / 256k (one run each, swap-clean). The window costs memory: 52.9 / 54.1 / 55.9 / 59.7 GB resident. 128k is four times the most any turn has needed; 256k would cost 3.8 GB more for room nothing has used |
+| `AGENT_SAMPLING` | `temperature=0.7 top_p=0.8 top_k=20 repeat_penalty=1.05` | the owner's choice: Qwen3-Coder's recommended sampling, from its model card (Qwen/Qwen3-Coder-30B-A3B-Instruct). The Qwen3-Coder-Next card recommends temperature 1.0, top_p 0.95, top_k 40, which is what the model ran at before |
+| `EMBED_MODEL` | `nomic-embed-text` | the knowledge base's search (137M parameters, 274 MB, Apache-2.0) |
+| resident together | chat's 14b, the agent's model, the embedding model | `OLLAMA_MAX_LOADED_MODELS` follows `ollama_slots`: every model in use, where the RAM holds them all with 16 GiB to spare. The project lead, the reviewer and the dashboard's chat use the agent's model by name, so they are that one model |
+| `LCA_TIMEZONE` | `America/Toronto` | project logs, status, summaries and the dashboard |
+
+The window and the sampling live in the derived model
+(`qwen3-coder-next:q4_K_M-agent`), so they apply to OpenCode, OpenHands
+(whose stored temperature, top_p and top_k are null) and project mode alike;
+OpenCode's own limit and the dashboard's `num_ctx` are written from the same
+`AGENT_MODEL_CONTEXT`. Single runs at temperature 1 were too noisy to compare
+the windows on pass or fail, so the choice rests on speed and on fit only.
+
 ## qwen3-coder-next (80B MoE, 3B active) — measured, and it replaces the 32b
 
 **Status, 2026-10-06: the evaluation is complete and the decision stands.**
