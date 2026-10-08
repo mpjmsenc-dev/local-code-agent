@@ -442,9 +442,9 @@ Created from `.env.example` on first run. All keys:
 | `AGENT_PROJECT_TELEGRAM` | `false` | project mode's progress to your own Telegram bot (progress text only; token and chat id in `~/.telegram.env`): `lca agent telegram --help` |
 | `ENABLE_OPENCLAW` | `false` | the browser dashboard on the Tailscale address, behind a password: `sudo lca dashboard setup` (docs/DASHBOARD.md) |
 | `OPENCLAW_PORT` | `18789` | the dashboard's port; it is added to the inbound guard |
-| `AGENT_SAMPLING` | (empty) | the coder's sampling, written into its derived model (e.g. `temperature=0.7 top_p=0.8 top_k=20 repeat_penalty=1.05`); empty keeps the base model's own |
-| `EMBED_MODEL` | (empty) | a small embedding model kept loaded beside the others, for the knowledge base's search |
-| `LCA_TIMEZONE` | (empty) | the time zone project logs, status, summaries and the dashboard show times in; empty is the machine's own |
+| `AGENT_SAMPLING` | *(empty)* | the coder's sampling, written into its derived model (e.g. `temperature=0.7 top_p=0.8 top_k=20 repeat_penalty=1.05`); empty keeps the base model's own |
+| `EMBED_MODEL` | *(empty)* | a small embedding model kept loaded beside the others, for the knowledge base's search |
+| `LCA_TIMEZONE` | *(empty)* | the time zone project logs, status, summaries and the dashboard show times in; empty is the machine's own |
 | `AGENT_PROJECT_ENGINE` | `openhands` | who does a project's work: `openhands` (the agent app) or `opencode` (OpenCode, MIT, in a container per turn; needs a model whose native tool calls work) |
 | `AGENT_MAX_OUTPUT_TOKENS` | `2048` | a cap on how long **one** agent reply may be. It does *not* buy room in the prompt — that was an earlier reading and it is retracted; what decides whether the prompt fits is its size against the context window (docs/PROMPT-WINDOW.md) |
 | `AGENT_REQUEST_TIMEOUT` | `1800` | seconds to wait for one reply; the client default of 300 discarded steps this hardware takes 901s to produce |

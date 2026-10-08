@@ -24609,11 +24609,11 @@ check "...and every model in use stays loaded together where the RAM holds them 
 project_times_are_in_the_chosen_zone() {
   local zi="${SANDBOX}/zoneinfo" bad=0
   mkdir -p "${zi}/America"; : > "${zi}/America/Toronto"
-  lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid America/Toronto' || { echo 'a known zone was refused' >&2; bad=1; }
-  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid Mars/Olympus' || { echo 'an unknown zone was accepted' >&2; bad=1; }
-  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ../zoneinfo/America/Toronto' || { echo 'a path climbing out was accepted' >&2; bad=1; }
-  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ""' || { echo 'an empty zone was accepted' >&2; bad=1; }
-  [[ "$(lib_probe "LCA_TIMEZONE=Mars/Olympus; LCA_ZONEINFO_DIR='${zi}'" 'lca_date -d @0 +%s')" == 0 ]] || {
+  lib_probe "ZONEINFO_DIR='${zi}'" 'lca_timezone_valid America/Toronto' || { echo 'a known zone was refused' >&2; bad=1; }
+  ! lib_probe "ZONEINFO_DIR='${zi}'" 'lca_timezone_valid Mars/Olympus' || { echo 'an unknown zone was accepted' >&2; bad=1; }
+  ! lib_probe "ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ../zoneinfo/America/Toronto' || { echo 'a path climbing out was accepted' >&2; bad=1; }
+  ! lib_probe "ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ""' || { echo 'an empty zone was accepted' >&2; bad=1; }
+  [[ "$(lib_probe "LCA_TIMEZONE=Mars/Olympus; ZONEINFO_DIR='${zi}'" 'lca_date -d @0 +%s')" == 0 ]] || {
     echo 'an unknown zone broke the date instead of falling back' >&2; bad=1; }
   return "${bad}"
 }

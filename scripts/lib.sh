@@ -90,6 +90,9 @@ PROJECT_SERVICE="${SYSTEMD_UNIT_DIR}/local-code-agent-project@.service"
 OPENCLAW_SERVICE="${SYSTEMD_UNIT_DIR}/openclaw-gateway.service"
 # shellcheck disable=SC2034
 OPENCLAW_DIR="${LCA_HOST_ROOT:-}/opt/openclaw"
+# The tz database lca_timezone_valid reads (never writes).
+# shellcheck disable=SC2034
+ZONEINFO_DIR="${LCA_HOST_ROOT:-}/usr/share/zoneinfo"
 # The 'lca' command setup.sh links onto PATH, and the directory it lives in.
 # shellcheck disable=SC2034
 LCA_LINK="${LCA_HOST_ROOT:-}/usr/local/bin/lca"
@@ -144,7 +147,7 @@ MOTD_FILE="${LCA_MOTD_FILE:-${LCA_HOST_ROOT:-}/etc/update-motd.d/99-local-code-a
 lca_host_paths() {
   printf '%s\n' \
     "${TUNE_SERVICE}" "${NETMODE_SERVICE}" "${BACKUP_SERVICE}" "${BACKUP_TIMER}" \
-    "${PROJECT_SERVICE}" "${OPENCLAW_SERVICE}" "${OPENCLAW_DIR}" \
+    "${PROJECT_SERVICE}" "${OPENCLAW_SERVICE}" "${OPENCLAW_DIR}" "${ZONEINFO_DIR}" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.socket" \
     "${SYSTEMD_UNIT_DIR}/local-code-agent-ollama-relay.service" \
     "${SYSTEMD_UNIT_DIR}/multi-user.target.wants" \
@@ -5143,8 +5146,7 @@ project_running_dir() {
 # lca_timezone_valid ZONE — ZONE is a time zone this machine knows (a file in
 # its tz database), and nothing that could climb out of it.
 lca_timezone_valid() {
-  local zi="${LCA_ZONEINFO_DIR:-/usr/share/zoneinfo}"
-  [[ -n "${1:-}" && "$1" != *..* && "$1" != /* && -f "${zi}/$1" ]]
+  [[ -n "${1:-}" && "$1" != *..* && "$1" != /* && -f "${ZONEINFO_DIR}/$1" ]]
 }
 
 # lca_date [DATE ARGS] — date(1) in LCA_TIMEZONE, or the machine's zone when it

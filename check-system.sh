@@ -593,9 +593,9 @@ if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
     [[ -n "${res_m}" ]] || continue
     model_present "${res_m}" || RES_MISSING+=" ${res_m}"
   done <<<"${RES_LIST}"
-  if [[ -n "${RES_MISSING}" ]]; then
-    p_fail "kept loaded, but not downloaded:${RES_MISSING}. Pull it: ollama pull${RES_MISSING}"
-  fi
+  for res_m in ${RES_MISSING}; do
+    p_fail "${res_m} is meant to stay loaded but is not downloaded. $(pull_advice "${res_m}")"
+  done
   if (( RES_N <= 1 )); then
     p_pass "one model serves everything (${MODEL_NAME}): nothing to evict"
   elif (( RES_SLOTS >= RES_N )); then
