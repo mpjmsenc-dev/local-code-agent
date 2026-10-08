@@ -571,6 +571,45 @@ else
   p_fail "cannot check the model — ollama binary or API unavailable"
 fi
 
+# --- Models kept loaded -----------------------------------------------------
+# Chat's model, the agent's own when it is pinned (the project lead, the
+# reviewer and the dashboard's chat use it by name), and the embedding model:
+# on a box with the RAM for all of them they stay loaded together, so no
+# request ever waits for another model to be evicted and loaded back.
+step "Models kept loaded"
+if have ollama && [[ "${OLLAMA_API_UP}" == "true" ]]; then
+  RES_LIST="$(ollama_resident_models)"
+  RES_N="$(grep -c . <<<"${RES_LIST}")"
+  RES_SLOTS="$(ollama_slots)"
+  RES_MISSING=""
+  while IFS= read -r res_m; do
+    [[ -n "${res_m}" ]] || continue
+    model_present "${res_m}" || RES_MISSING+=" ${res_m}"
+  done <<<"${RES_LIST}"
+  if [[ -n "${RES_MISSING}" ]]; then
+    p_fail "kept loaded, but not downloaded:${RES_MISSING}. Pull it: ollama pull${RES_MISSING}"
+  fi
+  if (( RES_N <= 1 )); then
+    p_pass "one model serves everything (${MODEL_NAME}): nothing to evict"
+  elif (( RES_SLOTS >= RES_N )); then
+    p_pass "all ${RES_N} stay loaded together ($(tr '\n' ' ' <<<"${RES_LIST}" | sed 's/ $//')): nothing evicts anything"
+  else
+    p_warn "${RES_N} models are in use ($(tr '\n' ' ' <<<"${RES_LIST}" | sed 's/ $//')) and this box's RAM keeps ${RES_SLOTS} loaded, so moving between them reloads one"
+  fi
+  if [[ "${ENABLE_AGENT}" == "true" ]]; then
+    info "the agent's window: $(agent_model_context) tokens (AGENT_MODEL_CONTEXT)"
+  fi
+else
+  p_skip "Ollama is not answering, so which models stay loaded could not be checked"
+fi
+if [[ -n "${LCA_TIMEZONE}" ]]; then
+  if lca_timezone_valid "${LCA_TIMEZONE}"; then
+    p_pass "project times are shown in ${LCA_TIMEZONE} (now $(lca_date '+%H:%M %Z'))"
+  else
+    p_warn "LCA_TIMEZONE='${LCA_TIMEZONE}' is not a time zone this machine knows, so project times use the machine's own zone. Use a tz database name, e.g. America/Toronto, in ${ENV_FILE}."
+  fi
+fi
+
 # --- Auto-tune drift --------------------------------------------------------
 step "Auto-tune"
 RAM_GIB="$(detect_ram_gib)"

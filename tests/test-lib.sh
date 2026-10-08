@@ -24576,6 +24576,50 @@ two_slots_only_for_a_pinned_agent_that_fits() {
 check "Ollama keeps two models resident only for a pinned agent model that fits beside chat's" \
   two_slots_only_for_a_pinned_agent_that_fits
 
+# On a box with the RAM, every model in use stays loaded: chat's, the pinned
+# agent's (the lead, the reviewer and the dashboard use it) and the embedding
+# model. Measured on 126 GiB: a single slot evicted the 51 GB agent model for
+# one chat message. Fewer slots only where they do not all fit.
+# shellcheck disable=SC2016  # the stubs are code for the child shell
+every_model_in_use_stays_loaded_where_it_fits() {
+  local w='ENABLE_AGENT=true; MODEL_NAME=m:14b; AGENT_MODEL=m:32b; EMBED_MODEL=e:1b' bad=0 got
+  got="$(lib_probe "${w}"'; detect_ram_gib() { echo 126; }' 'ollama_slots')"
+  [[ "${got}" == 3 ]] || { printf 'three models on 126 GiB got %s slots\n' "${got}" >&2; bad=1; }
+  grep -qx 'OLLAMA_MAX_LOADED_MODELS=3' <<<"$(lib_probe "${w}"'; detect_ram_gib() { echo 126; }' 'ollama_extra_env')" || {
+    echo 'three slots were decided and ollama_extra_env says otherwise' >&2; bad=1; }
+  got="$(lib_probe "${w}"'; detect_ram_gib() { echo 46; }' 'ollama_slots')"
+  [[ "${got}" == 2 ]] || { printf 'on 46 GiB (chat and agent fit, not the third) got %s slots\n' "${got}" >&2; bad=1; }
+  got="$(lib_probe "${w}"'; detect_ram_gib() { echo 30; }' 'ollama_slots')"
+  [[ "${got}" == 1 ]] || { printf 'on 30 GiB got %s slots\n' "${got}" >&2; bad=1; }
+  got="$(lib_probe 'ENABLE_AGENT=true; MODEL_NAME=m:14b; AGENT_MODEL=m:14b; EMBED_MODEL=' 'ollama_resident_models | tr "\n" ,')"
+  [[ "${got}" == 'm:14b,' ]] || { printf 'one model named twice was counted as %s\n' "${got}" >&2; bad=1; }
+  # A tag with no size in it is sized by what Ollama stores it at.
+  got="$(lib_probe 'model_disk_bytes() { echo 55834574848; }' 'model_ram_gb qwen3-coder-next:q4_K_M')"
+  [[ "${got}" == 53 ]] || { printf 'a 52 GiB model without a size in its tag was sized %s\n' "${got}" >&2; bad=1; }
+  ! lib_probe 'model_disk_bytes() { return 1; }' 'model_ram_gb x:q4_K_M' >/dev/null || {
+    echo 'a model of unknown size was given a size' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and every model in use stays loaded together where the RAM holds them all, a tag with no size sized from Ollama" \
+  every_model_in_use_stays_loaded_where_it_fits
+
+# Times people read are in LCA_TIMEZONE; a name this machine does not know, or
+# one that climbs out of the tz database, is the machine's own zone instead.
+# shellcheck disable=SC2016  # the stubs are code for the child shell
+project_times_are_in_the_chosen_zone() {
+  local zi="${SANDBOX}/zoneinfo" bad=0
+  mkdir -p "${zi}/America"; : > "${zi}/America/Toronto"
+  lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid America/Toronto' || { echo 'a known zone was refused' >&2; bad=1; }
+  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid Mars/Olympus' || { echo 'an unknown zone was accepted' >&2; bad=1; }
+  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ../zoneinfo/America/Toronto' || { echo 'a path climbing out was accepted' >&2; bad=1; }
+  ! lib_probe "LCA_ZONEINFO_DIR='${zi}'" 'lca_timezone_valid ""' || { echo 'an empty zone was accepted' >&2; bad=1; }
+  [[ "$(lib_probe "LCA_TIMEZONE=Mars/Olympus; LCA_ZONEINFO_DIR='${zi}'" 'lca_date -d @0 +%s')" == 0 ]] || {
+    echo 'an unknown zone broke the date instead of falling back' >&2; bad=1; }
+  return "${bad}"
+}
+check "...and project times are shown in LCA_TIMEZONE, an unknown or unsafe zone falling back to the machine's" \
+  project_times_are_in_the_chosen_zone
+
 # The event list pages at 100 on this build, and a limit above that is refused
 # with nothing at all: every reader here asked for 10000, so the live view went
 # blank and project mode never saw a question. Driven with a stub app that

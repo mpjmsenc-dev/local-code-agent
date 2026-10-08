@@ -219,7 +219,7 @@ function projectLine(p) {
 }
 
 function projectDetail(p) {
-  const lines = [projectLine(p), ""];
+  const lines = [projectLine(p), `  started ${p.started_local ?? "?"} · last update ${p.updated_local ?? "?"}`, ""];
   for (const s of p.steps ?? []) lines.push(`  [${s.done ? "x" : " "}] ${s.n}. ${s.title}`);
   if (p.checks_on?.length) lines.push("", `Project checks on: ${p.checks_on.join(", ")}`);
   if (p.acceptance_round) lines.push(`Acceptance round: ${p.acceptance_round}`);

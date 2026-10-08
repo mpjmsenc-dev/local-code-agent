@@ -683,6 +683,13 @@ A .env holds KEY=value lines only, and this is not one — sourcing it would run
   # Project mode's progress to Telegram (scripts/telegram.sh). Off by default:
   # it is the one thing in this stack that talks to a service on the internet.
   AGENT_PROJECT_TELEGRAM="${AGENT_PROJECT_TELEGRAM:-false}"
+  # A small embedding model kept loaded beside the others, for search over the
+  # house knowledge base. Empty, the default: none.
+  EMBED_MODEL="${EMBED_MODEL:-}"
+  # The time zone project mode's logs, status, summaries and the dashboard
+  # show times in (a tz database name, e.g. America/Toronto). Empty, the
+  # default: the machine's own. Machine-read fields stay in UTC.
+  LCA_TIMEZONE="${LCA_TIMEZONE:-}"
   # The dashboard: OpenClaw, locked down to this repo's own plugin, on this
   # machine's Tailscale address behind a password (openclaw/setup.sh). Off by
   # default: it is a page that starts projects, so it is opt-in like the agent.
@@ -1539,10 +1546,28 @@ model_fits_ram() {
 # can parse has at most one decimal place, so the value is exact either way,
 # and this one also prints 2.8 rather than 2.80.
 model_ram_gb() {
-  local tag="${1##*:}" params
+  local tag="${1##*:}" params bytes
   params="${tag%[bB]}"
-  [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
-  awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
+  if [[ "${params}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    awk -v p="${params}" 'BEGIN { printf "%.10g\n", p * 0.6 + 1 }'
+    return 0
+  fi
+  # A tag with no size in it (qwen3-coder-next:q4_K_M, nomic-embed-text):
+  # the size Ollama stores it at, which is what its weights take loaded, plus
+  # 1 for the rest. Without this every such model was "unknown", and the
+  # slots below fell back to one, which on 126 GiB evicted a 51 GB model for
+  # every chat message.
+  bytes="$(model_disk_bytes "$1")" || return 1
+  awk -v b="${bytes}" 'BEGIN { printf "%.10g\n", b / 1073741824 + 1 }'
+}
+
+# model_disk_bytes MODEL — the size Ollama reports for MODEL, or rc 1 when
+# Ollama does not answer or does not have it.
+model_disk_bytes() {
+  have curl && have jq || return 1
+  curl -fsS --max-time 5 "$(ollama_url)/api/tags" 2>/dev/null \
+    | jq -r --arg m "$1" '[.models[]? | select(.name == $m or .model == $m) | .size][0] // empty' 2>/dev/null \
+    | grep -E '^[0-9]+$'
 }
 
 # MODELS_HEADROOM_GB — free disk, in GB, that this project wants where models
@@ -2266,10 +2291,49 @@ ollama_extra_env() {
   # The one value this computes rather than copies, and it is computed HERE so
   # the drop-in and the systemd-less start still read one answer. See
   # ollama_two_models_fit.
-  if ollama_two_models_fit; then
-    lines="$(awk -F= '$1 == "OLLAMA_MAX_LOADED_MODELS" { $0 = "OLLAMA_MAX_LOADED_MODELS=2" } { print }' <<<"${lines}")"
+  local slots
+  slots="$(ollama_slots)"
+  if (( slots > 1 )); then
+    lines="$(awk -F= -v n="${slots}" '$1 == "OLLAMA_MAX_LOADED_MODELS" { $0 = "OLLAMA_MAX_LOADED_MODELS=" n } { print }' <<<"${lines}")"
   fi
   [[ -z "${lines}" ]] || printf '%s\n' "${lines}"
+}
+
+# ollama_resident_models — the models this box keeps loaded together, one a
+# line, no repeats: chat's (MODEL_NAME), the agent's own when it is pinned to
+# another (AGENT_MODEL, with the agent tier on), and the embedding model when
+# one is set (EMBED_MODEL). The project lead, the reviewer and the dashboard's
+# chat all use the agent's model by name, so they are that one model.
+ollama_resident_models() {
+  {
+    printf '%s\n' "${MODEL_NAME}"
+    if [[ "${ENABLE_AGENT:-false}" == "true" && -n "${AGENT_MODEL:-}" ]]; then agent_base_model; echo; fi
+    [[ -z "${EMBED_MODEL:-}" ]] || printf '%s\n' "${EMBED_MODEL}"
+  } | awk 'NF && !seen[$0]++'
+}
+
+# ollama_all_models_fit — true when RAM holds every resident model with
+# TWO_MODEL_HEADROOM_GB to spare (each model's size as model_ram_gb has it);
+# rc 1 when any size is unknown, which keeps the shipped single slot.
+ollama_all_models_fit() {
+  local ram m g total=0
+  ram="$(detect_ram_gib 2>/dev/null)" || return 1
+  while IFS= read -r m; do
+    g="$(model_ram_gb "${m}" 2>/dev/null)" || return 1
+    total="$(awk -v t="${total}" -v g="${g}" 'BEGIN { printf "%.10g", t + g }')"
+  done < <(ollama_resident_models)
+  awk -v r="${ram}" -v t="${total}" -v h="${TWO_MODEL_HEADROOM_GB}" 'BEGIN { exit !(r - t >= h) }'
+}
+
+# ollama_slots — how many models Ollama keeps loaded at once: every resident
+# model when they all fit; else two, for a pinned agent beside chat (see
+# ollama_two_models_fit); else the shipped one.
+ollama_slots() {
+  local n
+  n="$(ollama_resident_models | grep -c .)"
+  if (( n > 1 )) && ollama_all_models_fit; then printf '%s' "${n}"; return 0; fi
+  if ollama_two_models_fit; then printf 2; return 0; fi
+  printf 1
 }
 
 # TWO_MODEL_HEADROOM_GB — RAM, in GiB, that must be left over once both models'
@@ -5029,6 +5093,24 @@ project_running_dir() {
   [[ -e "${lock}" ]] && have flock || return 1
   flock -n "${lock}" true 2>/dev/null && return 1
   head -1 "${lock%/*}/running" 2>/dev/null | grep . || printf 'a project'
+}
+
+# lca_timezone_valid ZONE — ZONE is a time zone this machine knows (a file in
+# its tz database), and nothing that could climb out of it.
+lca_timezone_valid() {
+  local zi="${LCA_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  [[ -n "${1:-}" && "$1" != *..* && "$1" != /* && -f "${zi}/$1" ]]
+}
+
+# lca_date [DATE ARGS] — date(1) in LCA_TIMEZONE, or the machine's zone when it
+# is empty or not a zone this machine knows (TZ set to an unknown name would
+# silently mean UTC). For what people read; machine-read stamps stay UTC.
+lca_date() {
+  if lca_timezone_valid "${LCA_TIMEZONE:-}"; then
+    TZ="${LCA_TIMEZONE}" date "$@"
+  else
+    date "$@"
+  fi
 }
 
 # project_deletable_status STATUS — true when a project in STATUS may be

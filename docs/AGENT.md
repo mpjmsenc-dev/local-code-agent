@@ -885,6 +885,8 @@ was cut off starts again from the top. A run that ends, by finishing, failing
 or stopping for a person, exits cleanly, so systemd does not retry into the
 same wall.
 
+Times people read (the run log, `--status`, `SUMMARY.md`, the dashboard) are
+in `LCA_TIMEZONE`, with the zone named; the state file keeps UTC.
 `--delete --confirm NAME` removes a project that is stopped or finished (its
 directory, its runner unit, its queue entry and any sandbox or container it
 left), only under `AGENT_PROJECTS_DIR` and only with its name repeated; a

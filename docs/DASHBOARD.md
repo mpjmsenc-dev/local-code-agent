@@ -47,6 +47,9 @@ which can use the same operations as tools; it answers when the model is free.
    stopped or finished project also has **Delete…**, which asks you to type
    its name before it removes anything.
 
+Times (a project's start, its last update, every log line) are shown in
+`LCA_TIMEZONE` (America/Toronto on the reference box), with the zone named.
+
 One project runs at a time; the others queue and start by themselves.
 Projects run as you, as user services, without root; they need nothing from
 your session and resume after a reboot.

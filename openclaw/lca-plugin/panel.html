@@ -122,7 +122,11 @@
           <td>${now}</td><td>${dur(p.elapsed_seconds)}</td><td></td></tr>`;
       }).join("");
       $("empty").textContent = projects.length ? "" : "No projects yet.";
-      $("when").textContent = `· updated ${new Date().toLocaleTimeString()}`;
+      const tz = projects.find((p) => p.timezone_name)?.timezone_name;
+      let now;
+      try { now = new Date().toLocaleTimeString([], tz ? { timeZone: tz, timeZoneName: "short" } : { timeZoneName: "short" }); }
+      catch { now = new Date().toLocaleTimeString(); }
+      $("when").textContent = `· updated ${now}`;
       if (open) { const p = projects.find((x) => x.name === open); if (p) renderDetail(p); }
       api("server").then((s) => { $("server").textContent = s.text; }).catch(() => {});
     } catch (e) {
@@ -132,7 +136,7 @@
   function renderDetail(p) {
     $("detail").classList.remove("hidden"); $("dname").textContent = `${p.name} — ${p.status}`;
     const steps = (p.steps || []).map((s) => `<div>${s.done ? "☑" : "☐"} ${esc(s.n)}. ${esc(s.title)}</div>`).join("");
-    $("dbody").innerHTML = `${steps}<p class="muted">${esc(p.last_log)}</p>${p.reason ? `<p>${esc(p.reason)}</p>` : ""}`;
+    $("dbody").innerHTML = `<p class="muted">Started ${esc(p.started_local)} · last update ${esc(p.updated_local)}</p>${steps}<p class="muted">${esc(p.last_log)}</p>${p.reason ? `<p>${esc(p.reason)}</p>` : ""}`;
     $("ddel").classList.toggle("hidden", !deletable(p));
     if (!deletable(p)) $("delbox").classList.add("hidden");
   }

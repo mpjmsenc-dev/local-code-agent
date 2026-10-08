@@ -124,7 +124,8 @@ state_set() {   # KEY VALUE... — replaces each KEY, keeps the rest, stamps UPD
 
 say() {   # MESSAGE — to the project log and to stdout (the journal, under systemd)
   local line
-  line="$(date -u '+%F %T') $*"
+  # In LCA_TIMEZONE, with the zone named: the log is read by people.
+  line="$(lca_date '+%F %T %Z') $*"
   printf '%s\n' "${line}" >> "${STATE_DIR}/run.log" 2>/dev/null || true
   printf '%s\n' "${line}"
 }
@@ -660,7 +661,7 @@ progress_guard() {
   [[ "${last}" =~ ^[0-9]+$ ]] || { last="${now}"; state_set LAST_PROGRESS "${now}"; }
   if [[ "${AGENT_PROJECT_STALL_HOURS}" =~ ^[0-9]+$ ]] && (( AGENT_PROJECT_STALL_HOURS > 0 )) \
      && (( now - last >= AGENT_PROJECT_STALL_HOURS * 3600 )); then
-    stop_for_human stalled "no progress for ${AGENT_PROJECT_STALL_HOURS} hours: nothing passed since $(date -u -d "@${last}" '+%F %H:%M') UTC"
+    stop_for_human stalled "no progress for ${AGENT_PROJECT_STALL_HOURS} hours: nothing passed since $(lca_date -d "@${last}" '+%F %H:%M %Z')"
   fi
   if [[ "${AGENT_PROJECT_MAX_DAYS}" =~ ^[0-9]+$ ]] && (( AGENT_PROJECT_MAX_DAYS > 0 )) \
      && (( $(active_seconds) >= AGENT_PROJECT_MAX_DAYS * 86400 )); then
@@ -1580,6 +1581,7 @@ write_summary() {
   {
     printf '# Project summary\n\n'
     printf -- '- Directory: %s\n- Status: %s%s\n' "${DIR}" "${status}" "$( [[ -n "$(state_get REASON)" ]] && printf ' (%s)' "$(state_get REASON)")"
+    printf -- '- Started: %s; last update: %s\n' "$(local_time "$(state_get STARTED)")" "$(local_time "$(state_get UPDATED)")"
     printf -- '- Steps done: %s of %s\n' "${done_:-0}" "${total:-0}"
     [[ -z "${failed_line}" ]] || printf '%s\n' "${failed_line}"
     printf -- '- Decisions recorded in DECISIONS.md: %s\n' "${decisions:-0}"
@@ -1932,12 +1934,19 @@ cmd_resume() {
   start_runner
 }
 
+# local_time ISO — a UTC stamp from the state, as people read it (lca_date).
+local_time() {
+  [[ -n "${1:-}" ]] || { printf '-'; return 0; }
+  lca_date -d "$1" '+%F %T %Z' 2>/dev/null || printf '%s' "$1"
+}
+
 cmd_status() {
   [[ -r "${STATE_FILE}" ]] || die "No project at ${DIR}."
   local steps
   printf 'Project:  %s\nStatus:   %s%s\nStep:     %s (attempt %s)  %s\nAutonomy: %s\nEngine:   %s\n' \
     "${DIR}" "$(state_get STATUS)" "$( [[ -n "$(state_get REASON)" ]] && printf ' — %s' "$(state_get REASON)")" \
     "$(state_get STEP)" "$(state_get ATTEMPT)" "$(state_get TITLE)" "$(state_get AUTONOMY)" "$(state_get ENGINE)"
+  printf 'Started:  %s\nUpdated:  %s\n' "$(local_time "$(state_get STARTED)")" "$(local_time "$(state_get UPDATED)")"
   if systemd_available; then
     printf 'Service:  %s (%s)\n' "$(unit_instance)" "$(runner_state)"
   fi
@@ -1982,6 +1991,8 @@ cmd_json() {
     --arg active "$(state_get ACTIVE_SECONDS)" --arg round "$(state_get ACCEPT_ROUND)" --arg checks "$(state_get CHECKS_ON)" \
     --arg queue "$(queue_position "${DIR}")" --arg runner "$(runner_state)" \
     --arg last "$(tail -n 1 "${STATE_DIR}/run.log" 2>/dev/null || true)" \
+    --arg started_local "$(local_time "$(state_get STARTED)")" --arg updated_local "$(local_time "$(state_get UPDATED)")" \
+    --arg tz "$(lca_date +%Z)" --arg tzname "${LCA_TIMEZONE:-}" \
     --arg steps "${steps}" --arg files "${files[*]+${files[*]}}" '
     ($steps | split("\n") | map(select(length > 0) | split("\t")
       | {n: .[0], done: (.[1] == "1"), title: .[2]})) as $plan
@@ -1990,7 +2001,8 @@ cmd_json() {
        started: $started, updated: $updated, elapsed_seconds: ($elapsed | tonumber? // 0),
        active_seconds: ($active | tonumber? // 0), acceptance_round: ($round | tonumber? // 0),
        checks_on: ($checks | split(" ") | map(select(length > 0))), queue_position: ($queue | tonumber? // null),
-       runner: $runner, last_log: $last,
+       runner: $runner, last_log: $last, started_local: $started_local, updated_local: $updated_local,
+       timezone: $tz, timezone_name: $tzname,
        done: ($plan | map(select(.done)) | length), total: ($plan | length),
        steps: $plan, files: ($files | split(" ") | map(select(length > 0) | ascii_downcase))}'
 }
