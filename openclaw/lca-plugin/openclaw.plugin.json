@@ -1,0 +1,28 @@
+{
+  "id": "lca",
+  "name": "local-code-agent",
+  "description": "Project mode and this server, from the dashboard: start a project from a spec, follow it, stop and resume it; health, models and two safe restarts. Nothing else: no shell, no files, no browser.",
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": [
+      "lca_projects", "lca_project_status", "lca_project_file", "lca_project_start",
+      "lca_project_stop", "lca_project_resume", "lca_server_status", "lca_server_health",
+      "lca_server_models", "lca_restart"
+    ]
+  },
+  "commandAliases": [
+    { "name": "project", "kind": "runtime-slash" },
+    { "name": "server", "kind": "runtime-slash" }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "lcaDir": { "type": "string" },
+      "projectsDir": { "type": "string" },
+      "specsDir": { "type": "string" },
+      "openclawBin": { "type": "string" },
+      "dashboardUrl": { "type": "string" }
+    }
+  }
+}

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e2dc; --accent:#2f6f4f; --warn:#a64b1c; --bar:#dfe9e3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#171716; --card:#20201e; --ink:#ecebe6; --muted:#a3a29b; --line:#34332f; --accent:#7fc19c; --warn:#e39a6f; --bar:#2c3a32; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 4px 0 12px; } h2 { font-size: 15px; margin: 0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .muted { color:var(--muted); } .warn { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; } td, th { text-align:left; padding:6px 8px; border-top:1px solid var(--line); vertical-align:top; }
+  th { font-weight:600; color:var(--muted); border-top:0; }
+  .bar { height:8px; background:var(--bar); border-radius:4px; overflow:hidden; min-width:80px; } .bar > div { height:100%; background:var(--accent); }
+  button, input, textarea { font:inherit; color:inherit; }
+  button { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 10px; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  input[type=text], input[type=password], textarea { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:7px; }
+  textarea { min-height:160px; font-family: ui-monospace, monospace; font-size:12px; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; max-height:420px; overflow:auto; font-size:12px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; } .grow { flex:1; min-width:200px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:9px; border:1px solid var(--line); font-size:12px; }
+  .hidden { display:none; } a { color:var(--accent); cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Projects <span class="muted" id="when"></span></h1>
+
+  <div class="card hidden" id="login">
+    <h2>Dashboard password</h2>
+    <p class="muted">This page asks for the same password as the dashboard. It is kept for this tab only.</p>
+    <div class="row"><input class="grow" type="password" id="pw" autocomplete="current-password"><button class="primary" id="pwgo">Continue</button></div>
+    <p class="warn" id="loginerr"></p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <h2>All projects</h2>
+      <table><thead><tr><th>Project</th><th>Status</th><th>Progress</th><th>Now</th><th>Elapsed</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+      <p class="muted" id="empty"></p>
+    </div>
+
+    <div class="card hidden" id="detail">
+      <div class="row"><h2 class="grow" id="dname"></h2><button id="dclose">Close</button></div>
+      <div id="dbody"></div>
+      <div class="row" style="margin-top:8px">
+        <button data-f="summary">Summary</button><button data-f="decisions">Decisions</button><button data-f="review">Review</button>
+        <button data-f="plan">Plan</button><button data-f="acceptance">Acceptance</button><button data-f="log">Log</button>
+        <span class="grow"></span><button id="dstop">Stop</button><button id="dresume">Resume</button><button id="ddel" class="hidden">Delete…</button>
+      </div>
+      <div id="delbox" class="hidden" style="margin-top:10px">
+        <p class="warn" id="delwhat"></p>
+        <div class="row"><input class="grow" type="text" id="delname" autocomplete="off" placeholder="type the project name"><button id="delgo" disabled>Delete permanently</button><button id="delcancel">Cancel</button></div>
+      </div>
+      <pre id="dfile" class="hidden"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Start a project</h2>
+      <div class="row" style="margin-bottom:8px">
+        <input class="grow" type="text" id="name" placeholder="project name: letters, digits, dashes">
+        <input type="file" id="file" accept=".md,.txt,.markdown,text/*">
+      </div>
+      <textarea id="spec" placeholder="Paste the spec here, or choose a file above."></textarea>
+      <div class="row" style="margin-top:8px">
+        <span class="muted grow" id="count">0 characters</span>
+        <button id="save">Save only</button><button class="primary" id="start">Start</button>
+      </div>
+      <p id="startmsg"></p>
+    </div>
+
+    <div class="card">
+      <h2>Server</h2>
+      <pre id="server">…</pre>
+    </div>
+  </div>
+
+  <div class="card hidden" id="pair">
+    <h2>This browser is not approved yet</h2>
+    <p class="muted">The dashboard shows "pairing required" the first time a browser connects. After entering the password above, approve the browser here, then reload the dashboard.</p>
+    <button id="approve">Approve the browser waiting for approval</button> <span id="pairmsg"></span>
+  </div>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = { get() { try { return sessionStorage.getItem("lca-pw") || ""; } catch { return ""; } },
+                  set(v) { try { sessionStorage.setItem("lca-pw", v); } catch {} } };
+  let pw = store.get(), open = null, timer = null;
+  const embedded = window.top !== window.self;
+  if (!embedded) $("pair").classList.remove("hidden");
+
+  async function api(path, opts = {}) {
+    const r = await fetch(`/lca/api/${path}`, { ...opts, headers: { "Authorization": `Bearer ${pw}`, "Content-Type": "application/json", ...(opts.headers || {}) } });
+    if (r.status === 401 || r.status === 403) { throw Object.assign(new Error("The password was not accepted."), { auth: true }); }
+    const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    return j;
+  }
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const dur = (s) => { s = Math.max(0, s | 0); const d = (s / 86400) | 0, h = ((s % 86400) / 3600) | 0, m = ((s % 3600) / 60) | 0; return d ? `${d}d ${h}h` : h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`; };
+  const active = (p) => ["running", "planning", "accepting"].includes(p.status);
+  // Offered for the projects that have ended; the runner checks it again.
+  const deletable = (p) => ["done", "stopped", "failed", "waiting", "stalled", "limit", "incomplete"].includes(p.status);
+
+  function showLogin(msg) { $("app").classList.add("hidden"); $("login").classList.remove("hidden"); $("loginerr").textContent = msg || ""; }
+  async function refresh() {
+    try {
+      const { projects } = await api("projects");
+      $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+      $("rows").innerHTML = projects.map((p) => {
+        const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+        const now = active(p) ? `${p.step && p.step !== "0" ? `step ${esc(p.step)}: ` : ""}${esc(p.title)}${p.attempt ? ` <span class="muted">(${esc(p.attempt)})</span>` : ""}`
+                  : p.status === "queued" ? `queued #${p.queue_position ?? "?"}` : `<span class="muted">${esc(p.reason)}</span>`;
+        return `<tr><td><a data-open="${esc(p.name)}">${esc(p.name)}</a></td><td><span class="pill">${esc(p.status)}</span></td>
+          <td><div class="bar"><div style="width:${pct}%"></div></div><span class="muted">${p.done}/${p.total}</span></td>
+          <td>${now}</td><td>${dur(p.elapsed_seconds)}</td><td></td></tr>`;
+      }).join("");
+      $("empty").textContent = projects.length ? "" : "No projects yet.";
+      const tz = projects.find((p) => p.timezone_name)?.timezone_name;
+      let now;
+      try { now = new Date().toLocaleTimeString([], tz ? { timeZone: tz, timeZoneName: "short" } : { timeZoneName: "short" }); }
+      catch { now = new Date().toLocaleTimeString(); }
+      $("when").textContent = `· updated ${now}`;
+      if (open) { const p = projects.find((x) => x.name === open); if (p) renderDetail(p); }
+      api("server").then((s) => { $("server").textContent = s.text; }).catch(() => {});
+    } catch (e) {
+      if (e.auth) showLogin(pw ? e.message : ""); else $("when").textContent = `· ${e.message}`;
+    }
+  }
+  function renderDetail(p) {
+    $("detail").classList.remove("hidden"); $("dname").textContent = `${p.name} — ${p.status}`;
+    const steps = (p.steps || []).map((s) => `<div>${s.done ? "☑" : "☐"} ${esc(s.n)}. ${esc(s.title)}</div>`).join("");
+    $("dbody").innerHTML = `<p class="muted">Started ${esc(p.started_local)} · last update ${esc(p.updated_local)}</p>${steps}<p class="muted">${esc(p.last_log)}</p>${p.reason ? `<p>${esc(p.reason)}</p>` : ""}`;
+    $("ddel").classList.toggle("hidden", !deletable(p));
+    if (!deletable(p)) $("delbox").classList.add("hidden");
+  }
+  function closeDelete() { $("delbox").classList.add("hidden"); $("delname").value = ""; $("delgo").disabled = true; }
+  $("ddel").onclick = () => {
+    $("delwhat").textContent = `This permanently deletes ${open}: ~/projects/${open}, ~/specs/${open}.md, its runner unit and any leftover sandbox. There is no undo. Type the project name to confirm.`;
+    $("delbox").classList.remove("hidden"); $("delname").focus();
+  };
+  $("delname").addEventListener("input", () => { $("delgo").disabled = $("delname").value !== open; });
+  $("delcancel").onclick = closeDelete;
+  $("delgo").onclick = async () => {
+    $("delgo").disabled = true;
+    try {
+      const r = await api("delete", { method: "POST", body: JSON.stringify({ name: open, confirm: $("delname").value }) });
+      closeDelete(); open = null; $("detail").classList.add("hidden");
+      $("startmsg").textContent = r.text; refresh();
+    } catch (e) { $("delwhat").textContent = e.message; $("delgo").disabled = false; }
+  };
+  $("rows").addEventListener("click", async (ev) => {
+    const a = ev.target.closest("[data-open]"); if (!a) return;
+    open = a.dataset.open; closeDelete(); $("dfile").classList.add("hidden"); refresh();
+  });
+  $("dclose").onclick = () => { open = null; closeDelete(); $("detail").classList.add("hidden"); };
+  document.querySelectorAll("[data-f]").forEach((b) => b.onclick = async () => {
+    try { const r = await api(`file?name=${encodeURIComponent(open)}&which=${b.dataset.f}`); $("dfile").textContent = r.text; }
+    catch (e) { $("dfile").textContent = e.message; }
+    $("dfile").classList.remove("hidden");
+  });
+  for (const v of ["stop", "resume"]) $(`d${v}`).onclick = async () => {
+    try { const r = await api(v, { method: "POST", body: JSON.stringify({ name: open }) }); $("dfile").textContent = r.text; }
+    catch (e) { $("dfile").textContent = e.message; }
+    $("dfile").classList.remove("hidden"); refresh();
+  };
+  $("spec").addEventListener("input", () => { $("count").textContent = `${$("spec").value.length} characters`; });
+  $("file").addEventListener("change", async () => {
+    const f = $("file").files[0]; if (!f) return;
+    $("spec").value = await f.text(); $("count").textContent = `${$("spec").value.length} characters (from ${f.name})`;
+    if (!$("name").value) $("name").value = f.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  });
+  async function submit(start) {
+    $("startmsg").textContent = start ? "Starting…" : "Saving…";
+    try {
+      const r = await api("projects", { method: "POST", body: JSON.stringify({ name: $("name").value, spec: $("spec").value, start }) });
+      $("startmsg").textContent = start ? `Started ${r.name}: spec saved as ${r.file} (${r.chars} characters, sha256 ${r.sha256.slice(0, 16)}…).`
+                                        : `Saved ${r.file}: ${r.chars} characters, ${r.lines} lines, sha256 ${r.sha256}.`;
+      refresh();
+    } catch (e) { $("startmsg").textContent = e.message; }
+  }
+  $("start").onclick = () => submit(true); $("save").onclick = () => submit(false);
+  $("pwgo").onclick = () => { pw = $("pw").value; store.set(pw); refresh(); };
+  $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pwgo").click(); });
+  $("approve").onclick = async () => {
+    $("pairmsg").textContent = "…";
+    try { const r = await api("approve-browser", { method: "POST", body: "{}" });
+      $("pairmsg").textContent = r.approved.length ? `Approved ${r.approved.length}. Reload the dashboard.` : `Nothing waiting for approval (${r.pending} pending). Open the dashboard first, then come back.`; }
+    catch (e) { $("pairmsg").textContent = e.message; }
+  };
+  if (pw) refresh(); else showLogin();
+  timer = setInterval(() => { if (pw) refresh(); }, 5000);
+})();
+</script>
+</body>
+</html>

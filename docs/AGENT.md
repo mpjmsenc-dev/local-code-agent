@@ -1,0 +1,1839 @@
+# AGENT.md — the autonomous tier
+
+`lca` runs aider: it edits files in the directory you are standing in, one
+request at a time, and you read the diff. This is the tier above it. You give
+it a task in a browser, and it plans the work and carries it out — writing
+files, installing packages, running builds, starting services — inside its own
+Docker sandbox, without stopping to confirm each step.
+
+That is the point of it and it is also the whole of its risk. It is **off by
+default**.
+
+## Does it work? Yes — and there is one command that proves it here
+
+For most of this project's history that question had no honest answer. The tier
+started every time while being silently incapable of executing a single tool
+call: runs finished, reported success, and left an empty workspace with no error
+anywhere to find. It now completes real tasks — the first one it ever finished
+wrote a correct `fizzbuzz.py` to disk, on a 3b model, on CPU, in about ten
+minutes.
+
+Rather than ask you to take that on trust for *your* box:
+
+```bash
+lca agent selftest
+```
+
+One small real task, end to end, with the wall clock and this machine's
+measured reading and writing speeds at the end. It checks six links in the
+order they break — relay, model, container, settings, tool-call channel, and
+whether a file actually appeared — and each failure names the remedy. Every one
+of those six produced the sentence "the agent does not work" at least once
+while this tier was being built.
+
+## Turning it on
+
+```bash
+# in .env
+ENABLE_AGENT=true
+ENABLE_OLLAMA_RELAY=true    # required: see "How the agent reaches the model"
+```
+
+```bash
+lca agent setup            # do all of the below, in order, and say what changed
+lca agent selftest         # proves the whole chain on this machine
+lca agent url              # the address to open on your phone, over Tailscale
+```
+
+`lca agent setup` exists because the six commands it replaces have to be run in
+the right order, and getting it wrong is silent every single time.
+
+### The six stops, and why the first run took an hour
+
+Measured on a real machine, bringing this tier up for the first time. Six things
+were wrong, in a chain. None of them printed an error:
+
+| # | what was wrong | what it looked like |
+|---|---|---|
+| 1 | `ENABLE_AGENT=false` | the selftest failing on a tier that is off |
+| 2 | no derived model | `tune` says *"Already tuned. Nothing to do."* — it only builds the agent's model when the tier is **on**, and it was not |
+| 3 | relay not installed | the model is never contacted |
+| 4 | relay installed, `ENABLE_OLLAMA_RELAY` still `false` | identical to 3 |
+| 5 | settings hold the **base** model, not the `-agent` one | runs, at the wrong context window |
+| 6 | port not published on Tailscale | works on the server, refuses on the phone |
+
+Each fix reveals the next failure, which looks the same as the last one. That is
+what turns six small problems into an hour: no message anywhere names the thing
+that is actually wrong.
+
+So `lca agent setup` walks the same chain in dependency order, fixes what it can,
+and stops on what it cannot **with the exact command that clears it**. It is
+idempotent — on a healthy machine it changes nothing and says so — and
+`--dry-run` reports what it would change. The order is not cosmetic and a gate
+holds it: the tier switch must come before the model build, because that is stop
+2 above.
+
+The individual commands still exist and still work:
+
+```bash
+sudo lca apply             # closes its port in the inbound guard
+sudo lca relay install     # the docker-bridge -> loopback forwarder
+sudo lca tune              # builds the agent's own wide-context model
+lca agent start            # creates and starts the container
+```
+
+### Who owns a sandbox container
+
+The app creates one `oh-agent-server-*` container per conversation, and until
+now **nothing ever removed them**. Measured on a 7.8 GiB box: three alive at
+once, the oldest thirteen hours old, none of them reachable by anything.
+
+The rule, decided and enforced:
+
+- A sandbox belongs to a **conversation inside the app container**. The app is
+  the only thing that can send it a message.
+- **When the app is not running, every sandbox is an orphan** — there is no way
+  left to reach it, and it goes on holding memory. `lca agent stop` now removes
+  them and says how many it took. A restart is a stop, so restarting collects
+  them too, which is the case that used to accumulate.
+- **While the app is running, nothing is removed automatically.** Deciding that
+  a particular sandbox is idle means trusting a mapping between a container name
+  and a conversation's `sandbox_id`, and being wrong there kills a task somebody
+  is waiting on. That case is *reported* instead — `lca agent watch` warns when
+  more than one run is alive — and never acted on.
+
+`lca agent start` also writes the agent's LLM settings for you. That is not a
+convenience: on a fresh container `GET /api/v1/settings` answers
+`{"error":"Settings not found"}`, and the first task submitted dies inside the
+app on `assert settings is not None`. Without it the stack looks perfectly
+healthy — container up, UI answering, `lca agent status` green — and cannot run
+a single task until somebody opens the settings screen in a desktop browser,
+which is not much use from a phone.
+
+## What it is
+
+[OpenHands](https://docs.openhands.dev), pinned to a specific image, pointed at
+the Ollama already running on this machine. No API key, no cloud, nothing
+leaves the box — the same claim the rest of this project makes, for the same
+reason: the model is local.
+
+| | |
+|---|---|
+| Image | `AGENT_IMAGE` (`docker.openhands.dev/openhands/openhands:1.8`) |
+| Sandbox image | `AGENT_RUNTIME_IMAGE`:`AGENT_RUNTIME_TAG` |
+| UI port | `AGENT_PORT` (3001) |
+| Model | your `MODEL_NAME`, addressed as `openai/<model>` through Ollama's OpenAI-compatible endpoint |
+| Workspace and settings | `~/.openhands` on this machine |
+
+**Why 3001 and not 3000.** OpenHands' own documentation uses 3000, and so does
+this project's chat app (`WEBUI_PORT`). The chat app runs with `--network=host`,
+so the two would fight over one socket. `lca agent start` refuses to start if
+the two ports are equal, rather than letting docker fail obscurely.
+
+**And why moving the port is not enough on its own.** The traffic runs both
+ways. The app publishes a UI for you, but every sandbox it starts must also
+call *back* into it — to list its tools over MCP, and to report its events —
+and OpenHands builds that callback address from a port it merely assumes,
+`http://host.docker.internal:3000`, knowing nothing about the `-p` mapping. On
+this stack host port 3000 is Open WebUI, which accepts the connection and then
+never speaks MCP: not a refusal, a **hang**, ending in `MCPTimeoutError` after
+30 seconds, in agent init, before the model is asked for a single token.
+
+Three environment variables are therefore set for you, and each fixes a
+different half of the same mistake:
+
+| Variable | What it corrects |
+|---|---|
+| `OH_WEB_URL` | the MCP URL the sandbox is given |
+| `OH_SANDBOX_HOST_PORT` | the webhook URL the sandbox reports events to |
+| `OH_SANDBOX_KIND` | makes the line above take effect at all |
+
+That third one is not padding. `sandbox` is a discriminated union whose env
+parser reads `OH_SANDBOX_KIND` **first**, and with three candidate kinds and no
+kind named it discards every `OH_SANDBOX_*` variable with it. Measured inside
+the container: with `OH_SANDBOX_HOST_PORT=3001` set on its own,
+`config_from_env()` still reported `host_port 3000`, and the webhooks still
+went to Open WebUI — which answers `405` rather than refusing, so they failed
+four times per event and the app's UI stayed empty while the agent worked.
+
+## Where it is weak here, honestly
+
+**The model is smaller than this agent wants, and the window is the hard
+floor.** OpenHands' own local-LLM guide asks for a context window of at least
+~22k tokens and suggests `OLLAMA_CONTEXT_LENGTH=32768`. This project's RAM
+ladder gives **8192** on a 16 GiB box and **4096** on an 8 GiB one, because
+that is what leaves room for the model itself.
+
+This is not a "loses the thread sooner" problem, it is a "cannot start"
+problem. Measured on a real run with the model's own tokenizer: the agent's
+first request was **18,353 tokens** — 10,280 of tool JSON for 26 tools, 4,871
+of dynamic context, 3,037 of system prompt, and 165 for the task itself. At the
+4096 rung Ollama silently truncates that, and there is no window in which the
+agent can work at all. Raise `OLLAMA_CONTEXT_LENGTH` to at least 16384, and
+32768 if the RAM is there, or do not enable this tier.
+
+And going over the window is punished out of proportion: Ollama does not trim
+an over-long prompt to fit, it **cuts it to `num_ctx/2 + 2`, keeping the first
+4 tokens and then the tail**. At 16384 that meant an 18,353-token prompt lost
+10,159 tokens — the role, the security policy and the filesystem rules — to
+overshoot by 1,969. Cutting the skills catalogue brought it to 13,975, which
+fits. Every number, the truncation rule and what was cut are in
+docs/PROMPT-WINDOW.md.
+
+**The 3b model finishes the loop without doing the work.** This is the one to
+read before enabling the tier on a small droplet. Measured end to end: the
+agent started, thought for 26m48s, answered — and OpenHands marked the
+conversation `finished` with an empty workspace. What the model returned was:
+
+````
+```
+{
+    "name": "file_editor",
+    "arguments": {"file_text": "def fizzbuzz(n): ...", "path": "/workspace/project/fizzbuzz.py"}
+}
+```
+````
+
+The code in it was **correct**. It is just prose — a fabricated tool call
+inside a markdown fence, not a tool call — so nothing executed, and an
+assistant message with no tool calls is how the agent says it is done. The run
+therefore *succeeds* and produces nothing, which is worse than failing.
+
+This is the same pathology this project already documented for the phone chat
+("the chat invented a tool call rather than admit it has no filesystem"), and
+it is not a configuration problem: `native_tool_calling` is on, and Ollama
+reports this model as `tools`-capable. A 3B model is simply not reliable at
+emitting one. Give the agent tier the largest model your RAM allows, and do not
+judge it by a run on the small rung.
+
+**It is slower than the client's own patience.** That 18,353-token prompt is
+processed at roughly **17 tokens/second** on 4 CPU cores — about fifteen
+minutes for the first call. The LLM client gives up at its `timeout` (300 s by
+default) and cancels, which Ollama logs as a `500`, and the run makes no
+progress. Raise the LLM timeout in the agent's settings before handing it a
+task on CPU. Each retry does resume from Ollama's prompt cache rather than
+starting over, so it inches forward — but it inches.
+
+**It is slow.** Every step is a full model round trip on a CPU. `lca speed`
+prices one aider edit; an agent task is many of those in a row. This is a tool
+for handing something over and walking away, not for watching.
+
+**It is a large download.** Several GB across two images, on a box whose free
+disk `lca check` already watches. Check before you start it.
+
+## The limits, and whose they are
+
+An agent left alone overnight goes wrong in three ways, and none of them
+announce themselves. All three limits are enforced by **this project**, from
+outside the container:
+
+```bash
+lca agent watch              # supervise a run
+lca agent watch --dry-run    # report what it would stop, stop nothing
+```
+
+| Setting | Default | What it stops |
+|---|---|---|
+| `AGENT_MAX_ITERATIONS` | 100 | it taking thousands of tiny steps |
+| `AGENT_TIMEOUT_MINUTES` | 180 | it running for ever |
+| `AGENT_STUCK_STRIKES` | 3 | it retrying one broken idea until the clock runs out |
+| `AGENT_STEP_SOURCE` | `auto` | where the ceiling counts steps from — see below |
+
+`0` means "no limit" for all three — the same convention `BACKUP_KEEP=0`
+already uses in this project for "keep everything". A value that is not a
+number also means no limit rather than an error: a typo in `.env` must not kill
+a run that is going fine. `lca check` warns about either.
+
+**Why they are ours and not the agent's.** OpenHands' V1 documentation
+publishes no environment variable for an iteration ceiling or for confirmation
+mode. This project does not ship settings that might quietly do nothing, so
+these are enforced here, where they can be — and are — tested.
+
+**What the stuck detector actually compares.** Not the raw log line: the same
+failure arrives with a new timestamp, pid and temp path every round, so raw
+comparison sees a novel error each time and never fires. Any word containing a
+digit is collapsed first, so
+
+```
+ERROR build failed in /tmp/x7f3a9b2 after 12 retries
+ERROR build failed in /tmp/c1d0e5f8 after 47 retries
+```
+
+are one signature, while `build failed` and `tests failed` stay two.
+
+**What has been proved, and against what.** All three limits were run against
+real `docker logs -f` streams, not only unit-tested: the wall clock fires at
+exactly 60s on a container that logs *nothing* (silence is the shape of a hung
+run, and a loop that only judges on output would never notice), the step
+ceiling stops at exactly `AGENT_MAX_ITERATIONS` lines, and the stuck detector
+fires on three repeats of one failure whose id and timestamp differ every
+round. `--dry-run` left the container running in each case.
+
+**Where the steps actually are.** The container you start is not the one that
+does the work. It spawns a **sandbox** per conversation, named
+`oh-agent-server-<random>`, and every `openhands.sdk` / `openhands.tools` line
+is logged there — the app container's own log contains no step line at all. So
+`watch` follows both, and rediscovers sandboxes as they appear, because one
+started after the run began would otherwise never be read.
+
+That sandbox logs **JSON**, one object per line:
+
+```json
+{"asctime": "...", "levelname": "INFO", "name": "openhands.tools.terminal.impl", "message": "..."}
+```
+
+`AGENT_STEP_PATTERN` therefore matches the logger `name`, which is the stable
+part. The first version of it was written for plain text against the app
+container and matched **zero** lines of a real run — which is exactly why the
+next paragraph exists.
+
+**Verified against the real log shape.** A container emitting the JSON above was
+followed end to end: three step lines counted, the ceiling fired at exactly
+three, and no `docker logs -f` follower was left behind afterwards. The
+rediscovery was tested too — the app container emitted only non-matching lines
+while a sandbox appeared **twelve seconds after** the watcher started, and its
+lines are what drove the ceiling. A list of containers resolved once at launch
+would have counted nothing.
+
+**What the step ceiling cannot do, measured on real hardware.** The pattern
+matches, and what it matches is not steps.
+
+A live run was followed end to end on a machine where the agent genuinely
+worked — MCP tools created, 22 tools loaded, the conversation started, real
+traffic to the model. Against that sandbox's whole log:
+
+```
+lines: 65   step matches: 6   failure matches: 0
+     2  openhands.tools.browser_use.impl
+     1  openhands.tools.terminal.terminal.tmux_pane_pool
+     1  openhands.tools.terminal.impl
+     1  openhands.sdk.conversation.impl.local_conversation
+     1  openhands.sdk.agent.base
+```
+
+All six are emitted **once**, while the sandbox starts its tools. The log then
+stayed at exactly 65 lines while the model was called over and over: at its
+default level (`ENV_LOG_LEVEL=20`) the sandbox writes **nothing per reasoning
+step**.
+
+So counting log lines gives about six per sandbox and then nothing, and a
+ceiling of 100 **cannot fire**. No regex fixes this, because the information is
+not in the log.
+
+`AGENT_TIMEOUT_MINUTES` and `AGENT_STUCK_STRIKES` are unaffected — neither
+depends on step lines, and both were proved against real log streams.
+
+**So the ceiling reads from the event API instead.** The stream OpenHands does
+publish, one entry per event, is the conversation's own event log, and
+`AGENT_STEP_SOURCE` says which stream the ceiling counts:
+
+| Value | Counts |
+|---|---|
+| `auto` (default) | the event API, falling back to the container log |
+| `events` | the event API only |
+| `log` | the container log only |
+
+On `auto` the supervisor asks the app for its conversation at start and every
+third tick until it gets one, then polls the event count every tick — on a
+clock, not on a log line, because a step that writes nothing to the log is the
+entire reason this source exists. `watch` says which arm is live in its first
+line and again in every stop message, so a ceiling that is not armed is visible
+in the first minute rather than in the morning.
+
+Two things are deliberately blunt about it:
+
+- **An event is finer-grained than a reasoning turn.** The one measured turn
+  here produced five events (system prompt, task, `running`, the reply,
+  `finished`). The ceiling counts events *from the moment watching starts*, so
+  the prologue is not charged to the run, but `AGENT_MAX_ITERATIONS=100` is
+  still a bound on events rather than on turns.
+- **An unreadable answer is `unknown`, never `0`.** OpenHands publishes the
+  event routes but no schema this project could pin to, so several plausible
+  response envelopes are accepted and anything else yields nothing at all. A
+  ceiling handed `0` every tick would never fire and would then report a clean
+  run — which is exactly the failure the log arm turned out to be, and it is
+  not worth reproducing in a new place.
+
+If a run ends with **no** line having matched, `watch` says so and exits
+non-zero rather than reporting a clean run — a limit that silently never fires
+is worse than no limit, because it was believed. That guard is what made this
+visible instead of comfortable.
+
+## Your instructions reach it too
+
+`config/CONVENTIONS.md` steers **two** of this stack's three surfaces directly,
+and the third gets a distilled subset by a different route. That distinction was
+wrong here for months and is worth stating plainly.
+
+| surface | how the file reaches it | verified |
+|---|---|---|
+| aider | `--read config/CONVENTIONS.md` on the command line | yes — a real aider flag |
+| the chat app | appended to `lca_system_prompt` | yes — its keyed phrases are in the assembled prompt |
+| **the agent** | **it does not** | the mount and the env var are both inert |
+
+**What this section used to say, and why it was wrong.** It claimed the agent
+got the file two ways, and that the bind mount was "certain". The mount *is*
+certain — the file is genuinely at `/.openhands/lca-instructions.txt` inside the
+container, exactly as described. **Nothing reads it.** `grep -rn
+lca-instructions /app/openhands` is empty, and none of the file's five keyed
+phrases appear anywhere in the agent's first prompt. The mechanism was verified
+and the effect never was, which is the same mistake as `agent_settings.tools`
+and `SANDBOX_STARTUP_GRACE_SECONDS` — see the settings audit below.
+
+**How the rules actually reach the agent:** `agent_task_prompt` writes three
+prohibitions into the task text, and that channel is measured — the submitted
+and received `sha256` match, and all three are present in the `MessageEvent` the
+agent received.
+
+**Why the whole file is not sent that way**, since the channel exists and works.
+Tokenized with the model's own tokenizer:
+
+| | tokens |
+|---|---:|
+| `config/CONVENTIONS.md`, editor note stripped | **680** |
+| the three prohibitions actually sent | **96** |
+| the margin a whole conversation has | **2,601** |
+
+Sending the file would spend **26% of everything a conversation has** on text
+whose agent-relevant part is 96 tokens — and it would be spent on every
+conversation, permanently, against a window this project just built a ceiling
+for. The file is written for humans editing code with aider; the agent needs
+three sentences out of it. So the agent gets the subset, and the subset is
+gated: `tests/test-lib.sh` holds `agent_task_prompt` to the same keyed phrases
+`config/CONVENTIONS.md` is held to, so the two cannot drift apart silently.
+
+`AIDER_CONVENTIONS=false` switches the file off for aider and the chat app. It
+does **not** change what the agent receives, because the agent never had it.
+
+## Security
+
+This is the most dangerous port this project opens. A browser session on it can
+run commands on your machine, and the container is given the Docker socket so
+it can start its own sandboxes.
+
+Two things protect it, and both are checked:
+
+1. **It is published on private addresses only** — never `0.0.0.0`. There are
+   **three**, and each one exists because something could not reach it:
+
+   | address | who needs it |
+   |---|---|
+   | `127.0.0.1:AGENT_PORT` | you, and `lca agent status` |
+   | `<docker-bridge-gateway>:AGENT_PORT` | the agent's own sandbox containers |
+   | `<tailscale-ip>:AGENT_PORT` | your phone |
+
+   Measured for the second: with the loopback publish alone, a live sandbox got
+   `000` — connection refused — for both the MCP URL it must list its tools
+   from and the app's own root, and the run died in init.
+
+   The third was missing for the entire life of this tier. `lca agent url`
+   printed `http://<tailscale-ip>:AGENT_PORT`, this file called it the address
+   to open on your phone, and **nothing was ever published there** — so the
+   documented phone path had never once worked. It was invisible from the
+   server: loopback answered, the guard reported the port covered, `lca check`
+   was green. The only way to see it was to be holding the phone. `lca check`
+   now compares what the docs promise against what is actually listening, and
+   fails when they disagree.
+
+   **Why three specific addresses and not one `0.0.0.0`.** Two reasons, and the
+   first is mechanical: you cannot add `0.0.0.0` alongside them. It already
+   covers the bridge address, so docker refuses the pair with *address already
+   in use*. The second is the point of this section — `0.0.0.0` would put the
+   most dangerous port this project opens on every interface, including a public
+   one, and then rely on the inbound guard to take it back. Naming the three
+   addresses that should reach it needs no such argument.
+
+   What the bridge publication widens, stated plainly: **any container on the
+   default docker bridge can reach the agent's UI.** What none of the three do
+   is put it on a public interface.
+
+   One operational consequence, worth knowing before it surprises you: a
+   container started **before** Tailscale is up has no Tailscale address to
+   publish on. `lca agent start` says so at the time, and `lca check` reports it
+   afterwards. The fix is `lca agent restart`.
+2. **The inbound guard covers its port**, by exactly the rule the chat app
+   taught this project: `ENABLE_AGENT` is a statement of intent, a listening
+   socket is a fact. A container still running after you set `ENABLE_AGENT=false`
+   is still listed and still guarded — turning a feature off in `.env` must
+   never make this box more exposed.
+
+   The guard **accepts the docker bridge**, alongside `lo` and `tailscale0`,
+   and that is what makes 1 and 2 able to coexist. Traffic from this machine's
+   own containers arrives on `docker0`, which is not loopback, so the guard used
+   to drop it: measured, 626 packets from the agent's sandbox to Ollama were
+   dropped by the guard's own counter, and the tier could not work at all. A
+   bridge is local traffic for the same reason `lo` is.
+
+`sudo lca status` shows what the guard covers. `lca check` reports the agent's
+port among the rest.
+
+`sudo lca apply` **reports** the agent rather than acting on it — that is the
+one applier that does not recreate its container. The chat app is stateless
+between messages; this may be halfway through a task you left running
+overnight, and tearing that down because a config line changed would destroy
+exactly the work the tier exists for. It names the drift and the one-line fix
+(`lca agent restart`) and leaves the timing to you. It also says so, loudly, if
+`ENABLE_AGENT=false` while the container is still running.
+
+## What it does not do
+
+It does not replace `lca`. For a change you can describe in a sentence, aider
+in your project directory is faster, cheaper and easier to review — and `git
+diff HEAD~1` still works exactly the same way afterwards. Reach for the agent
+when the work is genuinely multi-step and you want to hand it over.
+
+---
+
+## How the agent reaches the model
+
+A container's loopback is the container. Ollama is bound to `127.0.0.1` on
+purpose, so the agent — which runs in its own network namespace — sees this
+machine only as the docker bridge gateway, where nothing is listening. Every
+task it is given then fails without producing a single token, and nothing else
+in the stack looks wrong.
+
+There were two ways out and they are not equal.
+
+**Not chosen: `OLLAMA_HOST=0.0.0.0`.** That puts an unauthenticated model API on
+every interface this box has, leaving the inbound guard as the only thing
+between it and the internet. One misapplied ruleset and the model server is
+public.
+
+**Shipped: a relay.** Ollama stays exactly where it is. A socket-activated
+forwarder binds the bridge gateway **alone** — an address that is not routable
+from outside the machine — and forwards to loopback.
+
+```bash
+ENABLE_OLLAMA_RELAY=true        # in .env
+OLLAMA_RELAY_PORT=11435
+sudo lca relay install          # writes and enables the boot units
+lca relay status                # is it bound, and does Ollama answer through it
+```
+
+It uses **`systemd-socket-proxyd`**, which ships inside systemd. Not socat,
+which would be a new package on every install; not a proxy of our own, which
+would put a new HTTP parser on the path every token travels. `FreeBind=true` on
+the socket is what makes it survive a reboot on a machine where docker starts
+after it — the gateway address does not exist until the bridge does.
+
+`lca check` reports it, `guarded_ports` knows the port, `uninstall.sh` removes
+both units and releases the bind.
+
+### Why it is not also a context injector
+
+The relay was going to be a small HTTP proxy so it could inject
+`options.num_ctx` per client — giving the agent a large window without raising
+`OLLAMA_CONTEXT_LENGTH` for aider and the chat app. **Measured, and it cannot
+work that way.** Ollama's OpenAI-compatible endpoint — the one OpenHands speaks
+— ignores it:
+
+| Request | Loaded `context_length` |
+|---|---|
+| `POST /v1/chat/completions` `{"options":{"num_ctx":8192}}` | 4096 |
+| `POST /v1/chat/completions` `{"num_ctx":8192}` | 4096 |
+| `POST /api/chat` `{"options":{"num_ctx":8192}}` | **8192** |
+
+(read back from `/api/ps`, server default 4096). A proxy could only have
+delivered it by rewriting `/v1` requests onto `/api` — reimplementing the
+translation Ollama already does, on the hot path.
+
+**A derived model does it properly**, and `/v1` honours that:
+
+```bash
+printf 'FROM qwen2.5-coder:3b\nPARAMETER num_ctx 16384\n' > agent.Modelfile
+ollama create qwen2.5-coder:3b-agent -f agent.Modelfile
+```
+
+Asked through `/v1`, that model loads at `context_length: 16384` while the
+server default stays 4096 for everything else. The cost is honest and worth
+knowing: it is a second entry in Ollama's loader, so if both are hot at once
+the box holds two copies of the weights.
+
+### A different model for the agent: `AGENT_MODEL`
+
+By default the derived model is built over the ladder's `MODEL_NAME`, so chat,
+`lca` and the agent run one model. `AGENT_MODEL` in `.env` pins the agent
+alone to another one:
+
+```bash
+ollama pull qwen2.5-coder:32b          # it must be on disk first
+sudo sed -i 's/^AGENT_MODEL=.*/AGENT_MODEL=qwen2.5-coder:32b/' /opt/local-code-agent/.env
+sudo lca agent setup                   # builds qwen2.5-coder:32b-agent and proves its window
+sudo lca apply                         # re-renders Ollama's settings: two models resident
+lca agent restart && lca agent status
+```
+
+`sudo lca apply` matters. `config/ollama.env` ships
+`OLLAMA_MAX_LOADED_MODELS=1`, and with one slot a pinned agent and chat evict
+each other on every switch. With a pin set, the agent tier on, and RAM for both
+models' weights plus `TWO_MODEL_HEADROOM_GB` (16), the rendered value is 2
+(`ollama_two_models_fit`).
+
+Emptying it puts the agent back on the ladder. A pin is not a second ladder:
+`tune` never moves it. It also gives up what the shared model buys, which is
+measured in docs/PERFORMANCE.md. That means two sets of weights resident, two
+runners competing for the CPU when chat and the agent are both busy, and a
+chat message no longer warming the agent's prompt cache. On the 16-vCPU VM the
+32b passed `lca agent selftest` in 50 minutes against the 14b's 24. One step
+ran past the 1800-second `AGENT_REQUEST_TIMEOUT`, so raise that with it.
+
+---
+
+## Project mode: a spec in, a built project out
+
+```bash
+lca agent project ~/specs/myapp.md --dir ~/projects/myapp --autonomy answerer
+lca agent project ~/specs/myapp.md --dir ~/projects/myapp2 --engine opencode
+lca agent watch --live                        # follows each step's conversation
+lca agent project --dir ~/projects/myapp --status
+```
+
+It builds a project from one spec file with nobody at the keyboard.
+
+1. **Planning.** The agent reads the spec (copied to `.lca-project/spec.md`)
+   and first decides whether to **build on an existing project**: if a mature
+   open-source project already does most of what the spec asks, and runs
+   where the steps run (no root, no system services, SQLite, every dependency
+   inside the project), the plan installs and customises it. The choice goes
+   into `DECISIONS.md` under `## Base project` (`Choice:`, `License:`,
+   `Why:`), and the runner writes under it what the license means: permissive
+   is free to use, GPL is fine internally, **AGPL is for internal use only**.
+   A plan naming a base project without a recognisable open-source license is
+   sent back. Then it writes `PLAN.md`: a numbered checklist of small steps,
+   each with a `Verify:` command that exits 0 only when the step works, and a
+   short summary of the spec. A plan with a step nothing can verify, or with
+   misnumbered steps, is sent back.
+2. **Execution.** Each unticked step runs as its own fresh conversation through
+   `lca agent task`, with the directory named. The task text carries the spec
+   (verbatim up to 3000 characters, its summary beyond that), `PLAN.md`,
+   `DECISIONS.md` and that one step. The first live run showed why: its
+   summary dropped "to stderr", and the CLI printed usage to stdout. A fresh conversation
+   per step is what keeps a long project inside the window: the agent's own
+   prompt is about 13k tokens before the step says a word.
+3. **Verification, then commit.** The step's command runs in a throwaway
+   container from the agent's own image, with the network off and the project
+   at the path the agent saw, and so does every **project check** that is on
+   (below). Pass: the step is committed, reviewed, and ticked in `PLAN.md`.
+   The agent's "STEP DONE" counts for nothing by itself, and a step that
+   ticks its own box in `PLAN.md` has it put back. Fail: the step is retried
+   with the failure output in hand, `AGENT_PROJECT_RETRIES` (2) times, and
+   then **made smaller** instead of abandoned (below).
+4. **Acceptance.** When every step is done, the whole project is checked:
+   every project check, every step's check again, and every item of the
+   spec's Definition of Done. What fails becomes fix steps, for up to
+   `AGENT_PROJECT_ACCEPT_ROUNDS` (5) rounds.
+
+### Done means verified: the project checks
+
+The plan carries a `## Checks` section besides the steps: an install, build,
+typecheck, lint and test command, each or `none`:
+
+```
+## Checks
+
+- Install: `.venv/bin/python -m pip check`
+- Build: `python3 -m compileall -q .`
+- Typecheck: none
+- Lint: none
+- Test: `python3 -m unittest discover -s tests -q`
+```
+
+They run offline from the project directory after every step, once they are
+**on**: a check switches on the first time it passes (before that, the code
+it checks may not exist yet) and stays on for good (`CHECKS_ON` in the state).
+A step whose own check passes but which breaks a check that is on has failed.
+This is what closes the hole toycalc4 found: a step check that ran only the
+old tests passed a step whose own code did not run at all; the test check
+runs the whole suite, the step's new tests included.
+
+### A step that keeps failing is made smaller
+
+A step that fails all its attempts is not the end of the run:
+
+1. Its failed attempts are kept (`refs/lca/failed/step-N`, nothing is lost),
+   the tree goes back to where the step began, and the model is asked, in one
+   request, for the step as 2 to 4 smaller steps. They replace it in
+   `PLAN.md` as `N.1`, `N.2`... under a `- [-] N.` line, and the **last part
+   keeps N's own check**: a split makes the work smaller, never the bar lower.
+2. A part that fails is split again, once: `N.1.1`, `N.1.2`. Two levels is
+   the limit.
+3. A part two levels down that still fails is **re-planned** once in place: a
+   new approach, and a corrected check only when the failure shows the check
+   itself was wrong. Every split and re-plan is in `DECISIONS.md`.
+4. A re-planned step that fails again stops the run: re-planning made no
+   progress (`failed`).
+
+### Large specs: milestones, the MVP first
+
+A spec over 8,000 characters (`PROJECT_MILESTONE_CHARS`) is planned in
+milestones: `## Milestone 1: MVP` with its steps, and every later milestone as
+a heading and a scope paragraph with no steps yet. When the steps planned so
+far are done, a planning turn writes the next milestone's steps, against the
+code that exists by then; the steps before it must come back unchanged. Each
+step's prompt carries the section of the plan it is in, and points at the
+whole spec in `.lca-project/spec.md` for the parts it needs.
+
+### The acceptance rounds
+
+When nothing is left to do, the runner runs, itself, in the verification
+container:
+
+- every project check, on or not;
+- every done step's check again (a later step may have broken an earlier one);
+- every item of the spec's **Definition of Done**, if it has one (a section
+  under a heading that says so). An agent turn turns the items into
+  `ACCEPTANCE.md`, one item each with the command that proves it, written
+  once and kept, so the bar does not move between rounds; the runner refuses
+  a list with the wrong number of items or a command that proves nothing.
+
+Everything passes: the project is `done`. Something fails: it becomes fix
+steps under `## Acceptance round N: fixes` in `PLAN.md` (ten at most a round),
+built like any step, and the next round runs. After the fifth round with
+something still failing, the run ends `incomplete`, and the summary lists
+what. Each round's results are in `.lca-project/acceptance-round-N.md`.
+
+### Limits, and the only reasons it stops
+
+| stop | why |
+|---|---|
+| `waiting` (credentials) | a real credential in the diff (a private key, a cloud or forge token), or an agent that asks for credentials again after being told there are none |
+| `waiting` (outside) | files under `AGENT_PROJECTS_DIR` but outside this project changed, or the project's `.git` was removed |
+| `stalled` | nothing passed (no step, plan, milestone or acceptance round) for `AGENT_PROJECT_STALL_HOURS` (6), outside a step that still has an attempt, a split or its re-plan left; time queued or with the machine off does not count |
+| `limit` | it has run for `AGENT_PROJECT_MAX_DAYS` (7) days in all; resuming gives it a new allowance |
+| `failed` | a re-planned step failed again |
+| `incomplete` | acceptance checks still fail after `AGENT_PROJECT_ACCEPT_ROUNDS` rounds |
+
+Every stop writes `.lca-project/SUMMARY.md` and lets the next queued project
+run. A hard-coded password in the code is not a stop: the attempt is sent
+back to read it from the environment. A deleted tracked file is not a stop
+either: git still has it, and `DECISIONS.md` says which.
+
+### Local only: git is history and rollback, never a remote
+
+On every turn, not once: every git remote is removed, a `pre-push` hook that
+refuses is put back if it was changed, a `core.hooksPath` pointing elsewhere
+is unset, and a nested repository (a base project cloned in) has its `.git`
+moved aside to `.lca-project/nested-git/` (its files stay). A commit, reset
+or branch switch the agent made is undone without touching its files (the
+runner is the only one that commits). The runner never pushes, and no
+sandbox holds a credential to push with.
+
+### One at a time
+
+Projects queue: every runner takes its place in `~/.lca-projects/queue` and
+waits until it is first and holds the lock (`~/.lca-projects/run.lock`), with
+`STATUS=queued` meanwhile. A runner that dies releases the lock with nothing
+to clean up, and a queued project whose runner is gone is skipped.
+
+### The quality loop, sized for a CPU
+
+On this hardware every conversation costs minutes before its first word, so
+the loop spends conversations only where they buy something:
+
+| | what | costs |
+|---|---|---|
+| **tests first** | before a step, a conversation of its own writes the step's tests, which should fail (the step does not exist yet); they are committed as `Step N tests: …` | one conversation, only for steps whose `Verify:` runs a test suite |
+| **one attempt** | the step is implemented against those tests; it may not change them (they are put back before verifying), except on its last attempt, when it may correct a test that contradicts the spec and must say so | one conversation |
+| **retry on red only** | a retry happens only when the tests fail, with their output, at most `AGENT_PROJECT_RETRIES` (2) times. A turn that ends badly (a timeout, the step cap) is not a retry by itself: the tests run on what it left | one conversation per retry |
+| **review** | every accepted step's diff (tests included; lockfiles and minified files left out; each file at most 3,500 characters, our code before its tests) goes to the agent's model, as one request, for bugs and security only. Findings go to `REVIEW.md`. High ones, and security ones of medium, get one fix conversation, kept only if the step's check still passes; otherwise discarded and left open. Only then is the step ticked in `PLAN.md` (`Step N done`); a restart in the middle of a review reviews the step again from its accepted commit | one request, plus one conversation when something must be fixed |
+| **fresh context** | every phase above is a new conversation; nothing carries over but the files, `PLAN.md`, `DECISIONS.md` and the spec | |
+
+The tests are protected against HEAD, not against the commit that wrote them:
+if a step stops on a test that is wrong, correct it, **commit it**, and
+`--resume`; an uncommitted correction is put back like any other change.
+
+The loop has no off switch: tests-first already applies only where a step's
+check runs a test suite, and the review is one request. What each phase cost, in seconds and in tokens read
+and written, is in `.lca-project/metrics.tsv`, counted from Ollama's own
+journal (readable by members of `adm` or `systemd-journal`; otherwise the
+token columns are 0) so both engines are measured by the same meter.
+
+### Two engines: OpenHands and OpenCode
+
+`--engine` (or `AGENT_PROJECT_ENGINE`) picks who does the work; everything
+around it is the same code.
+
+- **`openhands`** (default): a conversation in the agent app, a sandbox per
+  conversation, as above. It works with text-format tool calls, so it runs
+  qwen2.5-coder too.
+- **`opencode`**: [OpenCode](https://github.com/anomalyco/opencode) (MIT),
+  `opencode run --format json`, in a throwaway container per turn: the
+  agent's own runtime image plus the pinned OpenCode release (the "baseline"
+  build: the regular one needs AVX2), checked against its sha256 and built
+  locally the first time it is needed. It runs as you with the sandbox group,
+  sees only the project directory, and talks to the same model through the
+  same relay. Its whole configuration is passed in the environment: the local
+  model and no other provider, no update check, no model catalogue, no
+  language-server downloads, no sharing, the web tools denied, every other
+  permission decided so a run never waits. Its subagent, skill and to-do
+  tools are off, which takes its first request from 29.1k characters to
+  21.2k. A question is answered in the same session by the next run. It calls
+  tools natively only, so it needs a model whose native tool calls work.
+
+### On your phone: Telegram
+
+Off by default (`AGENT_PROJECT_TELEGRAM=false`): it is the only thing in the
+stack that talks to a service on the internet. Switched on, a project keeps
+**one message, edited in place**: a progress bar, steps done of total, the
+step it is on, and the time since it started. Separate messages say when a
+step passed, when the project lead answered a question, when a step failed
+its tests and is retried (or failed for good), when the plan was accepted,
+and when the run finished or stopped, with the counts (steps, time,
+decisions, review findings fixed and open, base project).
+
+Progress text only, by construction: every message is composed from the
+runner's own bookkeeping. Step titles are cut to one line without backticks;
+questions, answers, code, diffs, file contents and data are never sent.
+
+```bash
+# 1. a bot from @BotFather; its token in ~/.telegram.env (chmod 600):
+#      TELEGRAM_BOT_TOKEN=123456789:AA...
+# 2. message the bot once from your own account
+lca agent telegram setup      # finds your chat id, stores it in the same file
+# 3. AGENT_PROJECT_TELEGRAM=true in .env
+lca agent telegram test       # one test message
+lca agent telegram status     # what is configured, never the token itself
+```
+
+The token is read from that file (never sourced), reaches curl on its
+standard input rather than its command line, and is never printed or
+committed. Nothing reads what is sent to the bot except `setup`, once, and
+it takes only a private chat: every message goes to that one chat id. A
+failure to reach Telegram (offline, `lca offline`) is logged and never
+touches the run.
+
+### OpenHands against OpenCode, measured: task D, same model, same runner
+
+Task D (calendar-month billing over three modules, the graded task every
+model has failed under aider) as a project spec in two steps, with
+qwen3-coder-next as agent, project lead and reviewer, autonomy `answerer`,
+on the 64 GB box, each engine alone in RAM with nothing swapping, and the
+same 8-hour budget declared for both (2026-10-04/05).
+
+| | OpenHands 1.8 | OpenCode 1.18.34 |
+|---|---|---|
+| prompt before the agent's first word, per conversation | 13.4–13.5k tokens (+ a 0.5k request naming the conversation) | 5.8k tokens |
+| planning | 3 attempts, 3 h 58 min: two hit the 100-event cap while revising a PLAN.md already in form, the third was accepted | 2 attempts, 11 min: the first had 3 steps for a spec that says 2 |
+| step 1 | tests turn: 180 min, timed out having written nothing; context full at 32k; one reply 6,244 tokens | tests 6 min (red, as they should be), step 7 min, passed first try, review 1 min, no findings |
+| step 2 | not reached | tests 14 min (red); 3 attempts, 26 + 9 + 9 min, all failing the one test that contradicts the spec (full price for a period the cancellation falls inside); the last attempt, allowed to correct it, did not |
+| result | **did not finish** (stopped after 7 h) | **stopped at step 2** after 82 min |
+| hidden grader (12 tests) | 9 pass, from code the **planning** turn wrote against its own instructions (models, schedule, both test files), which the runner committed with the plan | **10 pass**: the drift trap handled; rounding half-up (500 for 501) and a float interval (TypeError, not ValueError) wrong |
+| model requests, prompt tokens read, written | 93, 130k, 37.5k | 64, 49k, 18k |
+
+**OpenCode is kept on this box** (`AGENT_PROJECT_ENGINE=opencode`): faster by
+far, and at better quality, not merely equal. The shipped default stays
+`openhands`, because a fresh install runs qwen2.5-coder, whose native tool
+calls do not work, and OpenCode has no text-format fallback.
+
+Four runner fixes came out of these two runs. Planning may change PLAN.md and
+DECISIONS.md and nothing else: anything more is put back, and what it
+created is kept aside in `.lca-project/planning-discarded/`. A planning turn
+that ends on a limit has its plan checked instead of thrown away. The cap on one reply is a
+parameter of the agent's derived model (`num_predict`), because the one sent
+by the client did not hold. And llama-server's RAM prompt cache is capped at
+2 GiB (`config/ollama.env`), because at its 8 GiB default it grew the
+51.5 GB model's server to 59.7 GB.
+
+### When the agent asks instead of finishing
+
+`--autonomy`, or `AGENT_PROJECT_AUTONOMY` (default `ask`; the dashboard always
+starts projects with `answerer`):
+
+| mode | what happens |
+|---|---|
+| `ask` | the run stops and reports the question; answer it with `--resume --answer "..."` |
+| `self` | the agent is told: *"Decide yourself using the spec, record the decision and reason in DECISIONS.md, and continue."* |
+| `answerer` | a second model (`AGENT_PROJECT_ANSWERER`, default the chat model) answers as project lead, given the spec summary, `PLAN.md` and `DECISIONS.md`; the answer is logged in `DECISIONS.md` |
+
+**Unattended** (`self`, `answerer`), nobody is asked anything. A question
+about credentials, anything outside the project directory, or deleting data
+gets the one safe answer instead of a stop: no credentials (a setting the
+owner fills in later, documented in the README, a fake value in tests),
+nothing outside the project, nothing deleted; the question and the answer go
+in `DECISIONS.md`. A lead that does not answer, or answers `ESCALATE`, leaves
+the agent to decide, and that is recorded too. Only an agent that asks for
+credentials again, having been told there are none, stops the run. In `ask`
+mode every such question stops it, as before.
+
+What the step did is checked before anything is committed; see the table of
+stops above.
+
+### Where the files are, and why it needs a setting
+
+An agent sandbox has no host mount (see above), so a step's work would die with
+its sandbox. `AGENT_PROJECTS_DIR` is mounted into **every** sandbox at
+`/workspace/projects`, through `OH_SANDBOX_MOUNTS_0_*`, and a project directory
+must be inside it. It is empty by default, which keeps the old behaviour of no
+host mount at all. Set it, then `lca agent restart`: the mount is fixed when the
+app container starts.
+
+The sandbox writes as uid 10001. Before and after every step the runner makes
+the project yours and group 10001's, group-writable, so you can edit and git
+can commit what the sandbox wrote, and the next sandbox can edit what was
+committed. The runner commits; the agent is told not to run git.
+
+### Unattended, and resumable
+
+`lca agent project` installs `local-code-agent-project@<dir>.service`, a
+systemd instance running as you, and enables it: a **user** unit
+(`~/.config/systemd/user/`) when lingering is on for you (`sudo lca dashboard
+setup` turns it on), so starting, stopping and resuming need no root; a system
+unit otherwise. It does not need your SSH
+session, and after a reboot it carries on. The state is all in the project
+directory: `.lca-project/state`, `PLAN.md`'s ticks, and git. An attempt that
+was cut off starts again from the top. A run that ends, by finishing, failing
+or stopping for a person, exits cleanly, so systemd does not retry into the
+same wall.
+
+Times people read (the run log, `--status`, `SUMMARY.md`, the dashboard) are
+in `LCA_TIMEZONE`, with the zone named; the state file keeps UTC.
+`--delete --confirm NAME` removes a project that is stopped or finished (its
+directory, its runner unit, its queue entry and any sandbox or container it
+left), only under `AGENT_PROJECTS_DIR` and only with its name repeated; a
+project still running is refused. `--status` shows where it is (`--json`: the same, for the dashboard), `--stop`
+stops it and stops it resuming at boot,
+and `--resume` carries on, optionally with `--answer`. At the end,
+`.lca-project/SUMMARY.md` says how many steps were done, which one failed,
+which decisions were taken without you, and what to review.
+
+Limits that apply per step: `AGENT_TIMEOUT_MINUTES` and `AGENT_MAX_ITERATIONS`.
+The step's sandbox is removed when it ends, because the app allows five at once
+and a project would otherwise fill them.
+
+---
+
+## The tool-call channel, and why the default is `false`
+
+The first live run of this tier produced correct FizzBuzz and an empty
+workspace. No error, anywhere. The conversation was marked `finished`, which is
+what OpenHands does when the assistant replies without any tool calls.
+
+The cause, isolated in a single request and reproduced on demand:
+
+```
+POST /v1/chat/completions  (tools: [file_editor])   ->  tool_calls: 0
+content: {"name":"file_editor","arguments":{"path":"/workspace/project/fizzbuzz.py",
+          "file_text":"def fizzbuzz(n):\n    if n % 15 == 0:\n ..."}}
+```
+
+The model wrote a **correct, parseable tool call into the message body**. Its
+own chat template tells it not to — *"return a json object ... within
+`<tool_call></tool_call>` ... Do not include any backticks"* — and it ignores
+that instruction. Ollama looks for the tags, finds none, and reports zero tool
+calls. The content is then thrown away by the native path.
+
+Measured across both models and both endpoints:
+
+| Model | Endpoint | `tool_calls` | The body it wrote |
+|---|---|---|---|
+| `qwen2.5-coder:3b` | `/api/chat` | 0 | valid JSON, correct, runs |
+| `qwen2.5-coder:7b` | `/api/chat` | 0 | valid JSON, correct, runs |
+| `qwen2.5-coder:7b` | `/v1/chat/completions` | 0 | valid JSON, correct, runs |
+| `qwen2.5:3b` (instruct) | `/v1/chat/completions` | **1** | a real native call |
+
+So this is a **channel** failure, not a capability failure, and **not a size
+problem** — the 7b fails exactly as the 3b does. The plain `qwen2.5` instruct
+model uses the native channel correctly and writes worse code, which is the
+wrong trade.
+
+`AGENT_NATIVE_TOOL_CALLING=false` makes OpenHands parse the tool call out of
+the text the model actually writes. With it, on this stack:
+
+```
+ActionEvent  agent  {"command":"view","kind":"TaskTrackerAction"}
+ActionEvent  agent  {"kind":"FinishAction","message":"The task has been completed..."}
+$ cat /workspace/project/fizzbuzz.py        # 180 bytes, on disk
+fizzbuzz(3,5,15,7) == ['Fizz','Buzz','FizzBuzz','7']
+```
+
+A `qwen2.5-coder:3b` on CPU, start to finished file, in about ten minutes. The
+run also shows the loop correcting itself — OpenHands rejected two malformed
+calls (`Missing required parameters for function 'think'`, `Parameter
+'security_risk' is expected to be one of [...]`) and the model fixed both.
+
+Set it `true` only for a model that genuinely uses the native channel.
+
+---
+
+## What one task costs, and whether this tier is honest to switch on
+
+Measured with `lca agent selftest` — one task ("create a file with a function
+that returns `ok`"), start to file-on-disk, all six links green:
+
+| Box | Model | Task |
+|---|---|---|
+| 4 vCPU / 16 GB | `qwen2.5-coder:7b-agent` @ 16384 | **11 min** — reading 50.2 tok/s, writing 6.2 tok/s |
+| 4 vCPU / 16 GB | `qwen2.5-coder:3b-agent` @ 16384 | ~10 min (an earlier run of the same shape) |
+| **4 vCPU / 7.8 GiB** | `qwen2.5-coder:3b-agent` @ 16384 | **12 min** — reading 19.6 tok/s, writing 8.5 tok/s |
+
+Two things in that table are worth internalising.
+
+**Model size barely moves the number**, because an agent step is dominated by
+**reading**, not writing: OpenHands' prompt is 18,353 tokens before the model
+produces its first one. A two-line function and a two-hundred-line refactor
+cost nearly the same on the way in.
+
+**Neither does halving the machine.** The 7.8 GiB droplet is the box this
+project targets, and one task there costs 12 minutes against 11 on a box with
+twice the RAM. It reads 2.6× slower and writes 1.4× *faster* — the second
+because it is running the smaller rung. Reading is where the hardware shows.
+
+### On the target box, measured — and the projection that was wrong
+
+The row below used to be a projection, derived by applying `docs/PERFORMANCE.md`'s
+6.9× "writing" conversion to this box's numbers. It said 35–60 minutes. It has
+now been replaced by a measurement on the real hardware, and **the projection was
+wrong by a factor of three**:
+
+| | model | reading | writing | one task like the above |
+|---|---|---|---|---|
+| 4 vCPU / 16 GB | `7b-agent` @ 16384 | 50.2 tok/s | 6.2 tok/s | 11 min |
+| **4 vCPU / 7.8 GiB droplet** | `3b-agent` @ 16384 | **19.6 tok/s** | **8.5 tok/s** | **12 min** |
+
+Both rows are `lca agent selftest`, all six links green, exit 0, with a file
+actually written. The droplet ran its own ladder rung (3b) through the relay.
+
+Why the projection missed by so much is worth knowing, because it is the same
+mistake anyone reasoning from this project's numbers can make. The 6.9× figure
+came from a *32768-context run with a ~16k-token prompt*, where the droplet
+generated at 0.59 tok/s. At 16384 with the selftest's much smaller prompt, the
+**same droplet** generates at 8.5 tok/s — fourteen times faster. That difference
+is not the machine; it is the configuration. Generation on CPU slows down with
+the number of tokens already in the window, and a 3.4 GB KV allocation on a
+7.8 GiB box is near its limit besides.
+
+**Reading converts across machines; writing does not convert across
+configurations.** See `docs/PERFORMANCE.md`, where the ratios are now scoped to
+the run they came from.
+
+The practical rule: the only trustworthy answer for a box is that box's own
+`lca agent selftest`.
+
+### What the 3b actually produces
+
+**This section's conclusion has been wrong three times, and the sequence is the
+most useful thing on this page.** Nothing below is deleted, because each
+superseded reading is what the evidence honestly supported at the time, and the
+shape of how they fell is worth more than any one of them:
+
+| | what it said | what overturned it |
+|---|---|---|
+| 1 | **the model is bad** — it declares completion without executing its own work | the prompt was being truncated: 18,353 tokens cut to 8,194, keeping the tail, which deleted the definition of `terminal` outright and severed `file_editor` mid-schema. **A model cannot call a tool whose description was cut out of its prompt.** |
+| 2 | **the plumbing is bad** — `max_output_tokens` was unset, so the client reserved half the window | the arithmetic was a coincidence. `16384−8190` and `16384/2+2` are both 8194. Ollama truncates on *prompt > window* whatever the client asks for, and halves rather than trims. A run carrying `max_output_tokens=2048` was still cut to 8194 |
+| 3 | **the plumbing was bad for a different reason** — and the fix is a smaller prompt, not a reserved reply | this is where it stands. `AGENT_EXTENSIONS_REF` drops a 4,232-token catalogue of skills this tier cannot run, and the prompt fits |
+
+There is a fourth entry in the same spirit, about the *size* rather than the
+cause: the 15,225-token decomposition this file carried was an estimate that
+under-counted the same run by 17.1%, and Ollama's own journal settles it at
+17,820. See the note above "It is one system message".
+
+**The lesson each time was the same and it took three rounds to learn:** on a
+small local model it is always tempting to blame the model, and the first
+correction — "it is the plumbing" — is only half the work, because the
+mechanism has to be measured too. Two of the three wrong answers here were
+confident, arithmetically consistent, and wrong.
+
+---
+
+**Superseded, kept:** this section used to say the 3b declares completion
+without executing its own work, and that conclusion was drawn against a prompt
+that was being truncated.
+Ollama was cutting the agent's 18,353-token prompt down to 8,194 and keeping the
+*tail*, which deleted the definition of `terminal` outright and severed
+`file_editor` halfway through its schema. The model was being asked to execute
+with the description of the tool that executes removed from its context. See
+docs/PROMPT-WINDOW.md for the measurement and the boundary arithmetic.
+
+The prompt now fits (13,796 tokens, nothing truncated). The tasks were re-run.
+Both the old and the new results are kept below, because the difference is the
+point.
+
+#### What it did before, with a truncated prompt
+
+| | task | what it did | verdict |
+|---|---|---|---|
+| run 1 | create a README | `touch README.md`, then *"successfully created"* | empty file, reported as done |
+| run 2 | a `wordcount.py` CLI with a stated output format, error handling, a test file, run it, show the output | one write, then 25 minutes later a message quoting the code back and *"You can now use this script"*, `execution_status: finished` | code that cannot run, in the wrong directory, none of the three requested steps done |
+
+Run 2's code used `os`, `sys` and `re` **with no imports at all**, so
+`python wordcount.py t.txt` died on its first executed line with
+`NameError: name 'sys' is not defined`. It indexed `sys.argv[1]` with no guard.
+It never ran the file, never created the test file, never showed output. And it
+wrote to `/workspace/wordcount.py` while working in
+`/workspace/project/TestAppOllama1Coding` — outside its directory entirely.
+
+#### What it does now, with the whole prompt
+
+Same `wordcount.py` task, same rung, prompt verified intact first — all three
+prohibitions present, no truncation:
+
+| | |
+|---|---|
+| created `/workspace/project/wordcount.py` | **inside** the directory it was given |
+| created `/workspace/project/test.txt` | the test file the task asked for |
+| ran `python3 wordcount.py test.txt` | **executed its own work** |
+| got `IndentationError` back | and reported the failure rather than success |
+
+Every named defect above is gone. `import sys` is present. `sys.argv[1]` is
+guarded, with usage on stderr and `exit 1`, exactly as asked. The test file
+exists. The program was executed. Both files landed inside the working
+directory. What remains is **one wrong space on line 15** — seven where eight
+were needed.
+
+**The failure mode has moved, and it is now a smaller one: it cannot repair
+what it wrote.** Four attempts, all malformed — `str_replace` with a quoted
+string literal as `old_str` so it never matched, then `create` on a path that
+already existed, three times — and then it claimed it could not "interact
+directly with a file system", on a run where it had already created two files
+and executed one.
+
+**Superseded at `n = 2`, kept:** the reading after this sample was that it
+"does not claim success it has not earned". The third sample below is where
+that broke — it claimed exactly that, about a requirement it had never
+exercised. Two samples were not enough to see the difference between *running
+your work* and *checking your work*.
+
+**A third sample, 2026-08-22**, with the task text captured on both sides this
+time rather than assumed — the earlier "it read the rule three times" was an
+inference, because nothing recorded which text the run received. It wrote both
+files inside its directory, executed the program, and quoted its real output.
+It then reported that the behaviour "matches the specified requirements" while
+the error-handling requirement was never exercised and does not work:
+`except FileNotFoundError or PermissionError:` catches only the first of the
+two. **So it executes its work but does not check it** — the third prohibition
+is the one it fails. Prompt 13,783 tokens, no truncation, four turns, 24.5
+minutes; the SystemPromptEvent, the byte-identical task text, and all three
+error paths tested are in docs/PROMPT-WINDOW.md.
+
+#### Where it stands, after three samples
+
+**It executes its work. It does not check its work.** That is the finding, and
+it is a narrower one than this section has ever carried before:
+
+| the three prohibitions it is given | at `n = 3` |
+|---|---|
+| never write outside the working directory | **honoured** — both files inside it, every sample since the cut |
+| never report complete without executing what you built | **honoured** — it ran the program and quoted the real output |
+| re-read the task and check each stated requirement | **failed** — it closed with *"matches the specified requirements"* having never run the error path it was asked for |
+
+The failure that used to define this tier — a confident report over code that
+had never run — is gone. What replaced it is smaller and harder to see: the
+program runs, the output is real, and the claim covering it is still broader
+than what was tested. **Treat its output as a first draft that has been
+executed once, on the happy path.** Read the requirement list yourself.
+
+There is a second, separate weakness visible at `n = 2` and not contradicted
+since: **it cannot repair what it wrote.** Four malformed edit attempts in a
+row, and then a claim that it could not "interact directly with a file system"
+on a run where it had already created two files and executed one.
+
+**On evidence strength, honestly:** this is `n = 3` on `wordcount` and `n = 1`
+on the selftest shape, at 20–40 minutes a run. The other `wordcount` sample
+derailed differently — it emitted a tool call with a bad enum, ran `pwd`, then
+asked to be told the task, and wrote nothing. So the *rate* is unmeasured and
+this section does not claim one. What is not in doubt is the mechanism: a model
+cannot call a tool whose description was cut out of its prompt, and that is what
+was happening.
+
+Three things changed because of these runs:
+
+1. **The three prohibitions live in `agent_task_prompt`, not in
+   `config/CONVENTIONS.md`.** That correction matters and it was made the hard
+   way: `config/CONVENTIONS.md` is read by aider and the chat app and **has
+   never reached the agent**. The channel that was supposed to carry it there
+   is `system_message_suffix`, which this build overwrites with its own
+   `<HOST>` value. Coaching the agent through that file alone would have
+   changed nothing at all. The rules are mirrored there for the other two
+   surfaces; the agent gets them in the task text, verified present in the
+   `MessageEvent` it received.
+2. **Naming the absolute path works, and this project's own selftest is the
+   evidence.** Its task text says *"Create a file
+   `/workspace/project/lca_selftest.py`"* — and the file lands there, every run.
+   The two failing runs named no path and the file went to the sandbox root.
+3. **`lca agent task` exists**, because the web UI cannot be reached but this
+   can. It is the answer to "could the working directory be stated at
+   submission time rather than hoped for" — for tasks submitted through the
+   OpenHands web UI it still cannot, since that directory is chosen in the UI
+   per conversation and never passes through this project. So this project
+   grew its own way in.
+
+```bash
+lca agent task --dir /workspace/project/myrepo "add a --json flag to the CLI"
+lca agent task --watch --dir /workspace/project/myrepo "..."   # and supervise it
+```
+
+What it does that the web UI does not:
+
+- **Names the working directory in the prompt text**, which is the only place
+  that reaches the model — see the note on `system_message_suffix` below. And it
+  names it as an *instruction* — *"create and edit files ONLY under `<dir>`… do
+  not write to /workspace or any directory above"* — because stating a working
+  directory is demonstrably not enough on its own; forbidding the alternative is
+  the part that was missing.
+- **Carries the two rules with the task**, the same two `config/CONVENTIONS.md`
+  holds, from one function so the three surfaces cannot drift apart.
+- **Returns the conversation id**, found by listing conversations before and
+  after and taking the difference — not by picking the newest sandbox, which is
+  the guess that once attached a watcher to a stale run for an entire night. It
+  records the id, and `lca agent watch` prefers it over any inference.
+- **Refuses to submit into a stack that cannot run the task**: tier off,
+  container down, API not answering, or settings holding the wrong model each
+  stop it *before* the task is posted, with the command that fixes them. A task
+  accepted by a broken stack looks fine and produces nothing for half an hour.
+
+**`system_message_suffix` is not available on this build. Settled, not
+suspected.** It was carried here as "unverified" for a while; the droplet
+answered it. The app **overwrites the field with its own `<HOST>` value**, and
+our text appears nowhere in 390 KB of conversation state. It is not that the
+field is ignored — it is that the field is not ours to set.
+
+So there are **not two homes** for these rules, and any wording suggesting there
+are is wrong: `agent_task_prompt` is the only one that works, and it is the only
+one the code relies on. This is the second field on this build that accepts a
+value and does not use it — `agent_settings.tools` round-trips and 22 tools
+still load — which is why nothing here is believed until a run shows it.
+
+**That question is now settled and the answer is no**, so the experiment that
+used to be written out here has been removed rather than left for somebody to
+run: the field is overwritten by the app before it reaches the model. See the
+paragraph above.
+
+### The open question, and the experiment that would answer it
+
+None of this says a bigger model fixes the root cause. Nobody has run these two
+tasks at a larger rung, so **"the 3b is too small" is a hypothesis, not a
+measurement** — and it is the most tempting wrong conclusion available here.
+
+A straight swap is *not* the experiment, because the 7b fails the tool-call
+channel exactly as the 3b does — measured, through both `/api/chat` and
+`/v1/chat/completions`. The real experiment is **the same two tasks at a larger
+rung with the prompt-parsed channel** (`AGENT_NATIVE_TOOL_CALLING=false`), which
+is what makes this tier work at all here.
+
+That needs a bigger box than the droplet: the agent runs at a 16384 window, where
+a 7b needs 5.9 GB and leaves under 2 GiB for everything else on 7.8 GiB. So it is
+recorded here as the open question rather than guessed at. Anyone with the
+hardware can settle it in an afternoon and bring the numbers.
+
+### So: is `ENABLE_AGENT=true` an honest default now?
+
+This file used to answer **no, and the reason is time** — that on the hardware
+this project targets, "write me a small function" plausibly cost the better part
+of an hour. That was the wrong answer, and it was wrong because it was a
+projection rather than a measurement. On the real droplet the task takes **12
+minutes**, which clears the 15-minute bar this section itself set.
+
+So the time objection is answered. The default stays `false` anyway, and the
+reason is now a different and more honest one: **consent and disk, not
+viability.**
+
+- It costs about **7 GB of images** on first start. A default that downloads
+  that much is a default that fails on a small disk.
+- It can **run anything on the machine** — installs, services, deletions —
+  inside a sandbox that shares the host's docker daemon. That is the point of
+  the tier and it is not something to inherit without choosing it.
+
+Neither of those gets fixed by being faster, and neither is a reason to call the
+tier unusable. It is usable on the hardware this project targets; it is opt-in
+because of what it can do and what it costs to fetch, which is the same reason
+`lca offline` is a command rather than a default.
+
+What would still improve it, in order:
+
+1. **A smaller first prompt.** This was listed here as upstream and out of
+   reach. **Partly wrong, and it has since been done:** the prompt was 18,353
+   tokens, 4,232 of them a catalogue of OpenHands skills fetched from GitHub
+   that this tier cannot use, and cutting it brought the prompt to 13,796 —
+   under the window for the first time, so it is no longer truncated. That was
+   in this project's gift all along. See `AGENT_EXTENSIONS_REF` and
+   docs/PROMPT-WINDOW.md.
+2. **A smaller tool set.** What remains genuinely *is* upstream, and this has
+   been checked route by route rather than assumed: 72.5% of the prompt is tool
+   JSON, 19 of the 24 tools are a headless browser and forge integrations this
+   tier does not use, and OpenHands exposes no supported way to decline them —
+   the `tools` setting is overwritten at conversation creation, `enable_browser`
+   is hardcoded, and `filter_tools_regex` is never forwarded. Exactly one tool
+   can be declined (`enable_switch_llm_tool`, worth 254 tokens, now off).
+3. **Images that are not 7 GB.**
+
+2 and 3 are upstream. Neither blocks anyone today: turn it on, run
+`lca agent selftest`, and you get your own box's number in about a quarter of an
+hour.
+
+---
+
+## The prompt: one baseline, and an estimate that never described it
+
+**Every token count here now names what produced it.** Two decompositions of
+"the agent's prompt" sat in this file with nothing attached to either, which is
+how they came to look like a contradiction. They are not one, and the
+resolution is not the comfortable one: this was **not two configurations**.
+
+The earlier 15,225 was an *estimate*, and Ollama counted the very same run and
+logged `prompt=17820`. It under-counted by 17.1%, mostly by never counting
+`dynamic_context` at all. Every agent prompt in the journal from 08-09 to the
+skills cut sits between 17,820 and 18,742, so **~15k never described a real
+prompt on this box**. `docs/PROMPT-WINDOW.md` has it term by term.
+
+That is worth stating plainly rather than filed as a discrepancy, because the
+first attempt at reconciling it — mine — assumed the two numbers were both
+right about different setups, and looked for the difference in the task text.
+Checking the recorded state of both runs is what showed the window, the
+extensions state, the agent-server version, the tool spec and the 57-skill
+catalogue were **identical on both dates**. An estimate and a measurement do
+not need a configuration difference to disagree; they need one of them to have
+been counted.
+
+> **Superseded as a total, 2026-08-17.** The whole-request figure below is
+> **15,225 and the measured baseline is 18,353** — the difference is almost
+> entirely `dynamic_context`, which this decomposition never counted, plus a
+> task that was 2,041 tokens here and 165 in the later run. It is not a
+> configuration difference: window, extensions state, agent-server version,
+> tool spec and the 57-skill catalogue were all identical on both dates, and
+> that was checked against the state each run recorded rather than assumed.
+> These figures were also estimated. What settles it: **Ollama counted this
+> very run and logged `prompt=17820`** — the 15,225 estimate under-counted the
+> same afternoon's prompt by 17.1%, and every agent prompt in the journal from
+> 08-09 to the cut sits between 17,820 and 18,742. The ~15k figure never
+> described a real prompt on this box. The full reconciliation, term by term,
+> is in docs/PROMPT-WINDOW.md.
+>
+> **What survives unchanged** is everything this section is actually about: the
+> browser share, the dead `agent_settings.tools` knob, and prefix caching. The
+> system message is the one part the two measurements agree on — 12,898 against
+> 13,317, 3.2% apart — so the browser block below is a share of a figure that
+> held up.
+
+### It is one system message, and it is mostly the browser
+
+They are not in conflict. Most of the 3,128-token gap is accounted for by the
+task text alone (2,041 against 165 is 1,876 of it), and the rest by a different
+build counting tool schemas differently. **`docs/PROMPT-WINDOW.md` is the
+current measurement**; the numbers below are the older one and are labelled as
+such wherever they appear.
+
+The one thing that carries forward unchanged is the *finding* in "The knob for
+that exists" — that `agent_settings.tools` round-trips and does nothing. That
+was re-checked route by route on the newer build and it still holds.
+
+### The older decomposition: one system message, mostly the browser
+
+Measured on the earlier build, with a 2,041-token hand-written task:
+
+| | ~tokens | |
+|---|---|---|
+| whole request | 15,225 *(superseded: 18,353)* | |
+| **system message** | **12,898** | **86% of it** |
+| the user's task | 2,041 | a long hand-written task, not `agent_task_prompt`'s 165 |
+| `tools` array | 0 | with `AGENT_NATIVE_TOOL_CALLING=false` the schemas are prose inside the system message |
+
+And inside that system message, the biggest single block is **~5,985 tokens**
+— 46% of it — documenting the **browser tool**: 46 mentions of "browser", 41 of
+"tab", plus clicking, scrolling and screenshots. A coding agent on a private
+CPU box never opens a browser.
+
+### The knob for that exists, and OpenHands 1.8 ignores it
+
+`agent_settings.tools` takes an explicit tool list, and it round-trips —
+`POST` it, `GET` it back, and it is there:
+
+```
+[{"name":"TerminalTool","params":{}},{"name":"FileEditorTool","params":{}},…]
+```
+
+The sandbox then logs `Loaded 22 tools from spec` and sends a byte-identical
+prompt. Measured before and after: **0 tokens saved, 57 browser
+mentions either way.** `filter_tools_regex` and `include_default_tools` exist on
+the `Agent` schema and are not on the settings diff at all — posting
+`filter_tools_regex` stores `null`.
+
+> **Re-tested 2026-08-22, post-cut, and it still holds** — the settings still
+> round-trip, the two filters still store `null`, and the `SystemPromptEvent`
+> still carries a tool array byte-identical to a run without the setting.
+>
+> **One correction.** The `Loaded 22 tools from spec` line is written here as
+> something the explicit list *caused*. It is not: 22 is logged with the setting
+> and without it, on both sandboxes measured that day. The gap between it and
+> the 24 in the prompt is `finish` and `think`, appended by the framework after
+> the spec loads — they are the last two entries in the array. So the counts in
+> this repository (22, 24, 25, 26) are four different things and not drift;
+> docs/PROMPT-WINDOW.md tabulates which is which, along with the turn ceiling
+> the surviving tool JSON leaves.
+
+Nothing this project can do closes that; it is upstream. It is written down here
+so nobody spends another evening discovering the setting works and does nothing.
+
+### What DOES help, and it is large
+
+This part is configuration-independent: it is about the cache, not the size.
+The prompt — whichever of the two numbers above applies to your build — is paid
+**once per conversation, not once per step.** That
+system message is identical every time, and Ollama caches the prefix. One
+conversation, two consecutive calls:
+
+```
+first call    13,430 tokens of prompt eval   543 s
+next call        171 tokens of prompt eval     3.6 s
+```
+
+The cache lives with the **loaded model**. Same prompt twice with it resident:
+**50.2 s, then 0.1 s.** So when `OLLAMA_KEEP_ALIVE` expires while you are
+thinking, the next step pays the whole prompt again *and* a model load.
+
+Two things follow, and both are yours to choose:
+
+- **Stay in one conversation.** A new conversation re-pays the whole prompt. The
+  second question you ask in a thread is dramatically cheaper than the first.
+- **Set `OLLAMA_KEEP_ALIVE=-1` while you use this tier**, if you can spare the
+  RAM — it keeps the model, and its cache, resident. `lca check` warns when the
+  agent is on and this is finite, with the numbers above.
+
+---
+
+## Watching a run: `lca agent watch --live`
+
+The supervisor below and this are two different jobs, and they are two different
+processes on purpose. `lca agent watch` **enforces** — it can stop your run.
+`lca agent watch --live` **shows** — and it cannot do anything at all to the run
+it is looking at. `--live` hands over to `scripts/agent-view.sh` with `exec`
+before the supervisor opens so much as a pipe, so "read-only" is a property of
+which program is running rather than a promise in a comment. A gate in
+`tests/test-lib.sh` fails if that file ever grows a way to stop, restart, exec
+into or POST at anything.
+
+```
+14:32:05  > bash · ls -la /workspace/project
+            Look at the directory first so I write the file in the right place.
+            thought for 2 min
+
+14:33:41  < bash returned
+            total 8
+            drwxr-xr-x 2 root root 4096 Aug 12 14:20 .
+            (7 more line(s) — --full shows them)
+            ran for 2 min
+
+14:33:44  > edit · create /workspace/project/wordcount.py
+            thought for 3s
+
+14:41:20  < edit returned
+            File created successfully.
+            ran for 8 min
+
+- thinking · waiting for the model · step 8 · 4 min on this step · 47 min total
+```
+
+Everything on that screen already existed in the conversation event stream —
+the same stream the step ceiling counts. Nothing rendered it, so following a run
+meant `cat`-ing raw JSON out of a container.
+
+**Why the clock is on every line.** A step here takes ten to twenty-five
+minutes. A display that has not moved for four minutes is normal; the same
+display frozen for forty is a dead run, and nothing else on screen tells those
+apart. So the elapsed time on the current step ticks every second — live, on its
+own one-second timer rather than on the poll, because a clock that only moves
+when the network answers stops exactly when it matters. And the gap between two
+events is labelled by which way round they are: an action arriving after a
+result is **the model thinking**, a result arriving after an action is **the
+tool running**. On this box one of those is twenty minutes and the other is a
+second.
+
+**The status word answers the only question anyone has:**
+
+| | |
+|---|---|
+| `running` | a tool is running |
+| `thinking` | waiting for the model — normal here for 10–25 minutes |
+| `stalled` | nothing at all for 25 minutes; worth looking at. Not called an error, because it is not one — it is a fact about the clock |
+| `finished` | the agent says it is done. On this tier that is a claim, not a result — see the measured re-run above |
+| `error` | the last event was a failure. It stays on screen, and the spinner stops |
+
+The spinner only spins while something is genuinely expected to move. A spinning
+cursor over a dead run is the thing this was written against: the 300-second
+timeout failure looked exactly like working.
+
+**What it cannot see, and why that is said out loud.** The event format is
+OpenHands', not ours, and not a documented interface. Every field is read
+through accessors that try the spellings that have been seen — and when none of
+them match, **the event is printed raw rather than dropped**. That fallback is
+the design. A view that silently rendered nothing would be indistinguishable
+from an agent quietly working, which is the confusion it replaces. The same goes
+for a payload with no events in it: it says so, rather than drawing an empty
+screen.
+
+| flag | |
+|---|---|
+| `--once` | print everything so far and exit |
+| `--from FILE` | render a saved payload — `-` reads stdin. How you look at a run after it is over, and how the suite tests the renderer without a container |
+| `--dump` | the raw event JSON, which is what you would otherwise be extracting by hand |
+| `--full` | do not fold long tool output |
+| `--interval N` | seconds between polls (default 3) |
+
+Piped to a file it drops the ANSI status line and prints a plain state change
+per line, so a log of a run is readable rather than a screenful of carriage
+returns.
+
+## Is the supervisor real? Yes, and here is exactly how far that goes
+
+`lca agent watch` is what stops a run while you sleep. `tests/test-agent-watch.sh`
+drives the real script against real containers, over a real `docker logs -f`
+stream, and asserts on what it *did* — not on what it would have decided:
+
+| limit | provoked by | result |
+|---|---|---|
+| wall clock | a container that says **nothing** | fires at 60s, container really stopped |
+| stuck detector | one failure repeated with a new id each round | fires in 3s, signature collapsed to `ERROR build failed in /tmp/N after N retries` |
+| step ceiling | an event endpoint whose count rises | fires at 3, and says it counted *events*, not log lines |
+| `--dry-run` | the same world | reaches a verdict, stops nothing, says so |
+
+It found a bug doing it: the watcher backgrounds `docker logs -f` followers, and
+they outlived it holding its stdout open — so `lca agent watch | tee run.log`
+never returned on a run that had already reached its verdict. Measured before
+the fix: indefinite. After: 60s.
+
+**One thing that harness does not prove**, and it is now closed. Its event
+endpoint is a fixture, so the watcher's discovery, polling, verdict and stop are
+real code on a real socket, but the counts are not OpenHands'. Run on the
+droplet against a real agent:
+
+```
+==> Supervising the agent
+[info] Step ceiling: 3   wall clock: 180 min   stuck after: 3 identical failures
+[info] Steps come from the agent's event API (conversation f786c0e9...; 5 event(s)
+       already recorded, and the ceiling counts what happens from here).
+[warn] Stopping the agent: the step ceiling (AGENT_MAX_ITERATIONS) was reached
+[info] Steps seen: 4 (events on the agent API) · failures seen: 0 · run time: 2 min
+[ ok ] Agent stopped. Its workspace is intact in ~/.openhands
+EXIT: 1
+```
+
+Four real OpenHands events in two minutes, ceiling of three, stopped. Every
+limit in this tier has now fired against the thing it is meant to stop.
+
+To repeat it on your own box:
+
+```bash
+sed -i 's/^AGENT_MAX_ITERATIONS=.*/AGENT_MAX_ITERATIONS=3/' .env \
+  && lca agent start \
+  && (lca agent selftest --keep >/tmp/lca-task.log 2>&1 &) \
+  && sleep 90 && lca agent watch
+```
+
+Put `AGENT_MAX_ITERATIONS` back afterwards.
+
+### If it sits at a number that never moves, this is why
+
+The first attempt at that run did not fire, and the reason is worth knowing
+because nothing announced it. An earlier `selftest --keep` had left a **second
+sandbox alive**. The watcher attached to the *stale* conversation while the new
+task stepped on a different one, so the count sat at 5 for as long as it was
+left running — no error, no warning, just a number that never moved.
+
+Two things changed because of that run:
+
+- **The conversation is now chosen deterministically**, by the **newest running
+  sandbox** rather than by whatever the listing happened to return first.
+  `docker ps` orders by creation time and each conversation carries its
+  `sandbox_id`, so the watcher attaches to the run you just started.
+- **`watch` says when there was a choice to get wrong**, up front:
+
+  ```
+  [warn] More than one run is alive here — this machine has 2 running sandbox(es)
+         and 2 conversation(s). This is watching the one belonging to the NEWEST
+         sandbox (f786c0e9...). If that is not the run you meant, stop the others
+         first: lca agent stop, then remove any leftover oh-agent-server-*
+         containers.
+  ```
+
+It reports rather than resolves: two sandboxes may both be legitimate, and a
+supervisor is not the thing that should decide which of your runs to kill.
+
+### The follower that kept getting away
+
+When the container outlived the watcher, exactly one `docker logs -f` was left
+behind after every run. It no longer held the pipe open — that part was fixed
+earlier — but a supervisor that leaks a process per run is still a supervisor
+you have to clean up after.
+
+Killing them one pid at a time could not close it, and the reason is a race that
+sweep cannot win: killing a follower's parent first **reparents its child to
+init**, so the survivor disappears from every pid the watcher recorded. What
+does close it is that a reparented process **keeps its process group**. Measured,
+outside docker, before any of this was relied on:
+
+| | follower loop | its subshells | `docker logs -f` | the watcher |
+|---|---|---|---|---|
+| plain `&` | pgid 21127 | 21127 | 21127 | **21127** |
+| under `set -m` | pgid 21929 | 21929 | 21929 | 21922 |
+
+So the followers now run in a group of their own — `set -m`, a FIFO instead of
+`< <(...)`, and one `kill -- -PGID` on the way out. The first row is why that
+needed proving rather than assuming: without `set -m` the group kill would have
+taken the watcher down with the followers, mid-report.
+
+Measured in the same harness, on the run where the container is still up when
+the watcher returns: **before, 1 survivor (reparented to init); after, 0**.
+`tests/test-agent-watch.sh` counts them and fails if one comes back — and also
+fails if the count is clean for the *wrong* reason, because the watcher says out
+loud when it has fallen back to the old pid-by-pid sweep.
+
+---
+
+## `lca agent task` submitted nothing, 5 times out of 23, and said it worked
+
+This is the project's own submission path, and it had the failure shape this
+whole week has been about: it produced nothing, left a container running, and
+exited 0.
+
+### What it looked like
+
+    ==> Submitting the task
+    [info] Working directory: /workspace/project
+    [warn] The task was submitted but its conversation id could not be
+           identified, so 'lca agent watch' will fall back to picking the
+           newest sandbox.
+    [info] Follow it: lca agent watch
+
+Every word of that is wrong except the first line. The task was not submitted,
+there was no conversation to identify, nothing was running, and a sandbox
+container was left up holding about 3 GB on a 7.8 GiB box. Exit status 0.
+
+### What actually happened
+
+The `POST /api/v1/app-conversations` does not return a conversation. It returns
+a **start-task**, and the conversation is created afterwards, asynchronously, by
+a path that can fail. Ours did:
+
+    19:00:31 docker_sandbox_service: Sandbox server not running:
+             http://host.docker.internal:56971 :
+    19:00:31 live_status_app_conversation_service: ERROR Error starting conversation
+    SandboxError: 500: Sandbox entered error state: oh-agent-server-3WNdhl65MHR9ATJhCj9d0p
+
+A race, and a close one. Two sandboxes six minutes apart on this box:
+
+| | container start → "ready to serve" | outcome |
+|---|---:|---|
+| the failed one | **16.55s** | app gave up at 15s |
+| the next one | 12.40s | fine |
+
+OpenHands allows 15 seconds. The sandbox answered 1.55 seconds late, the app
+marked it `ERROR`, and `wait_for_sandbox_running` raises on `ERROR` immediately
+— the 120-second timeout next to it never gets a chance.
+
+**It was not a one-off.** The app keeps every outcome at
+`/api/v1/app-conversations/start-tasks`, and this project had never once asked:
+
+    23 start-tasks:  18 READY, 5 ERROR
+    ERROR on 08-12 (three), 08-17, 08-22 — all "Sandbox entered error state"
+
+**21.7%, silent, for at least ten days.**
+
+### The setting that fixes it is not the one OpenHands documents
+
+`config.py` reads a plain `SANDBOX_STARTUP_GRACE_SECONDS` — but only inside
+`if config.sandbox is None`, the legacy fallback. This stack sets
+`OH_SANDBOX_KIND`, so `config.sandbox` is not `None` and that branch never runs.
+
+Established by experiment, not by reading:
+
+| set to 1 | result |
+|---|---|
+| `SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **succeeded** — the value was never read |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS=1` | submit **failed exactly like 08-22** |
+
+This is the same shape as `agent_settings.tools`: a documented setting that is
+silently inert on the path this project actually uses. `AGENT_SANDBOX_GRACE_SECONDS`
+(default **120**) now travels as `OH_SANDBOX_STARTUP_GRACE_SECONDS`.
+
+### And the failure is loud now
+
+`lca agent task` reads the start-task id out of the POST reply instead of
+discarding it, and asks the app how the submission ended. `READY` gives the
+conversation id directly — no set-difference, no three-minute wait. `ERROR`
+gives this, with exit status 1:
+
+    [warn] The sandbox it gave up on is still running: oh-agent-server-4ShlhJFN…
+           Stop it: docker stop oh-agent-server-4ShlhJFN…
+    [FAIL] Your task was NOT submitted. The app failed to start a conversation
+           for it, and said why:
+
+             500: Sandbox entered error state: oh-agent-server-4ShlhJFN…
+
+           Nothing is running it and nothing will. This is almost always the
+           sandbox answering later than the app was willing to wait — OpenHands
+           allows 15 seconds by default and this box has needed 17. Raise the
+           margin and try again:
+
+             AGENT_SANDBOX_GRACE_SECONDS=120   in /opt/local-code-agent/.env
+             /opt/local-code-agent/bin/lca agent restart
+
+Verified end to end: forced the failure with a 1-second grace and got exactly
+that, exit 1; restored 120 and the next submit named its conversation on the
+first poll. The old set-difference path is kept as a fallback for a reply this
+cannot parse.
+
+---
+
+## Which settings actually do anything: the whole list, checked one by one
+
+Three settings turned out to be inert in three separate investigations —
+`agent_settings.tools`, `system_message_suffix`, and
+`SANDBOX_STARTUP_GRACE_SECONDS`. Three is a pattern, so everything this project
+sends into OpenHands was audited the same way: **by changing it and observing
+the result**, never by whether the API accepted it.
+
+### The rule that explains all of them
+
+| how it is spelled | verdict |
+|---|---|
+| `OH_<FIELD>`, `OH_SANDBOX_<FIELD>` | nested config — **works** |
+| bare `SANDBOX_<FIELD>` | read only inside `if config.sandbox is None`, and `OH_SANDBOX_KIND` makes that false — **dead here** |
+| a settings-API field | stored faithfully; honoured **selectively**, and the API cannot tell you which |
+| a name this project invented | nothing reads it, ever |
+
+The second row is the trap: `SANDBOX_STARTUP_GRACE_SECONDS` and
+`SANDBOX_VOLUMES` are both documented, both sit in that branch, and both are
+silently ignored on any stack that configures a sandbox kind — which is every
+stack that works.
+
+### Verified working
+
+| what | how it was proven |
+|---|---|
+| `AGENT_SERVER_IMAGE_REPOSITORY` / `_TAG` | the sandbox runs that exact image |
+| `OH_SANDBOX_KIND` | it is *why* `config.sandbox` is not `None` — the grace experiment proves it |
+| `OH_SANDBOX_HOST_PORT` | arrives in the sandbox as `OH_WEBHOOKS_0_BASE_URL=…:3001/api/v1/webhooks` |
+| `OH_SANDBOX_STARTUP_GRACE_SECONDS` | set to 1, the failure reproduced on demand; at 120 it stopped |
+| `OH_WEB_URL` | arrives as `OH_ALLOW_CORS_ORIGINS_0` |
+| `OH_AGENT_SERVER_ENV` → `EXTENSIONS_REF` | present in sandbox env; the 4,232-token catalogue is gone from the prompt |
+| `LOG_ALL_EVENTS` | read at `app_server/utils/logger.py:62` |
+| `llm.model`, `.base_url`, `.native_tool_calling`, `.max_output_tokens`, `.timeout` | all five in the sandbox's own `base_state.json` |
+| `enable_switch_llm_tool` | `switch_llm` is absent from the 24 tools |
+| `initial_message` | byte-identical `sha256` between what was sent and the `MessageEvent` |
+
+### Inert — sent, accepted, and doing nothing
+
+| what | what actually happens |
+|---|---|
+| `agent_settings.tools` | stores verbatim; the prompt's tool array is byte-identical either way |
+| `filter_tools_regex` | posted, stored as `null` |
+| `include_default_tools` | posted, stored as `null` |
+| `agent: "CodeActAgent"` | stored verbatim — but the name appears nowhere in the image except as this field's own default. The SDK ships `Agent` and `ACPAgent`, and `base_state.json` records `agent.kind = "Agent"` regardless |
+| `LCA_USER_INSTRUCTIONS` | a name this project invented; `grep -rn` over `/app/openhands` is empty |
+| `config/CONVENTIONS.md` mounted at `/.openhands/lca-instructions.txt` | never read. None of its five load-bearing phrases appear anywhere in event 0 |
+| `agent.system_message_suffix` | overwritten by the app with its own `<HOST>` value |
+
+**Seven of roughly twenty.** All seven are left in place on purpose — each costs
+one field and would be the natural hook if OpenHands ever honoured it — but each
+is now annotated at the point it is sent, so nobody reasons from its presence.
+
+### The one that matters most
+
+The two rules this project cares about — run what you built, stay in your
+directory — do **not** travel on the instructions mount or the suffix, both of
+which are inert. They reach the model through the **task text** and through
+nothing else. That channel is measured: submitted and received `sha256` match,
+and all three prohibitions are present in the `MessageEvent` the agent got.
+
+If a second channel is ever wanted, `.openhands/microagents/` is what this
+build actually reads (alongside `hooks.json`, `skills`, `setup.sh` and
+`pre-commit.sh`) — and it would cost prompt tokens in `dynamic_context`, which
+after the cut is exactly what there is least of.
+
+---
+
+## The worst bug this project has had: the agent's work was deleted by the command that told you to read it
+
+It ran for weeks, against real work, and every part of it looked fine from the
+outside. It is written up at length because the shape is more useful than the
+fix.
+
+### What the messages claimed
+
+Three of them, in the order a user meets them:
+
+| where | what it said |
+|---|---|
+| `lca agent watch`, on stopping a run | *"Agent stopped. Its workspace is intact in `~/.openhands` — read it, then start again."* |
+| `lca agent stop` | *"Its workspace and settings are kept in `~/.openhands`."* |
+| `lca agent gc` | warned that removing a sandbox *"deletes anything the agent built inside it that you have not copied out"* — and then removed it |
+
+### What actually happened
+
+**The sandbox has no mounts.** Not a misconfigured mount — none:
+
+    docker inspect <sandbox> --format '{{.Mounts}}'   ->   (empty)
+
+Everything the agent writes lives in that container's writable layer and
+nowhere else. `~/.openhands` held settings, a sqlite database and conversation
+event logs, and never a single file the agent produced — confirmed by searching
+the whole host for the deliverables of earlier runs and finding none.
+
+Then the sequence composes:
+
+1. The watcher stops the **app** container. It does not stop the sandbox, so at
+   that moment the agent's files still exist.
+2. It tells you to read them in `~/.openhands`, where they are not, and to
+   *start again*.
+3. `lca agent start` runs `remove_orphan_sandboxes`, which `docker rm -f`s every
+   sandbox.
+
+**Following the advice destroyed the work the advice had just pointed at.** The
+one instruction the message gave was the one action that made recovery
+impossible.
+
+### Why the fix is preservation and not rewording
+
+Rewording was the cheaper fix and it was the wrong one. The message was not
+merely inaccurate — it was answering a real need. Someone stops a run precisely
+*because* they want to look at what it produced. A corrected message that said
+"your work is in a container that is about to be deleted, extract it yourself
+with `docker cp`" would have been honest and would still have left every user
+one forgotten step away from losing everything.
+
+So `agent_preserve_workspace` copies `/workspace` out **before** the container is
+destroyed, at all three moments where that happens: when the watcher stops a run,
+when `lca agent start` collects orphans, and when `lca agent gc` reclaims. The
+promise the messages were making is now a promise the code keeps, which is the
+only version of "fixed" worth having.
+
+### Three follow-on bugs, and the second is the instructive one
+
+**1. The gate found the second removal path.** Written as "preserve, then
+remove", the new gate passed while `lca agent gc` — a completely separate
+removal site — still deleted work outright. It now checks *every* site that
+destroys a sandbox against the lines above it, and fails if fewer than two exist.
+
+**2. Fixing stopped-sandbox collection alone would have made things worse.**
+`agent_orphan_sandboxes` asked `docker ps`, which lists running containers only,
+so an *exited* sandbox was reclaimed by nothing this project ships and held its
+layer for the life of the box. The obvious fix is to look at `docker ps -a`.
+
+That fix, on its own, is a data-loss bug. `agent_preserve_workspace` did its
+work through `docker exec`, and Docker refuses that on a stopped container —
+`container … is not running`. So widening collection would have reached exactly
+the sandboxes whose work could not be saved, and deleted them unread. **The
+tidy-up would have caused the very loss the preservation was written to
+prevent.**
+
+It was caught by calling the preserve function against a stopped container
+rather than assuming it behaved the same as against a running one. Preservation
+now has a `docker cp` fallback, which needs nothing from inside the container.
+
+**3. The fast path failed silently on a different image.** The
+`find -quit` + GNU `tar` route is not universal; a busybox image answers
+neither, and the first version reported *"nothing to save"* about a workspace
+full of work. It now falls through to the fallback instead of returning, because
+**silence about an empty sandbox and silence about an unreadable one must not
+look the same.**
+
+### The lesson, which is the same one as everywhere else in this file
+
+Every one of these was a mechanism that had been verified and an effect that had
+not. The bind mount really was mounted. `docker ps` really did list sandboxes.
+`docker exec` really did copy files. Each check passed, and none of them was a
+check of the thing that mattered.
+
+The question that finds these is never *"is it configured?"* — it is **"what
+would I observe if this did nothing at all, and have I observed otherwise?"**
+For the workspace the answer took one command: look on the host for a file the
+agent wrote. There was never one.

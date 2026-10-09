@@ -1,0 +1,8 @@
+{
+  "name": "openclaw-plugin-lca",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "local-code-agent's own OpenClaw plugin: the only tools the dashboard's agent has.",
+  "openclaw": { "extensions": ["./index.js"] }
+}

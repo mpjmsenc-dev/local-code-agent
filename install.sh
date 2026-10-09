@@ -13,6 +13,14 @@
 # All this script does is install git, clone the repository, and hand over to
 # setup.sh — which is the same thing docs/INSTALL.md asks you to do by hand.
 #
+# Usage:
+#   curl -fsSL <url>/install.sh | bash    install straight from the web
+#   bash install.sh                       install from a downloaded copy
+#   bash install.sh --help                this text; changes nothing
+#
+# Root is required (it writes ${LCA_DIR} and installs packages); the script
+# uses sudo itself when you are not already root.
+#
 # Environment overrides:
 #   LCA_DIR=/opt/local-code-agent   where to install
 #   LCA_BRANCH=main                 branch to check out
@@ -29,66 +37,171 @@ say()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 fail() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
 
+# usage — this file's header comment block, which IS the help text.
+#
+# Except that reading it needs a file, and this is the one script in the
+# project that often has none: it is advertised as 'curl -fsSL ... | bash',
+# where bash reads from stdin. Inside a function BASH_SOURCE[0] is then the
+# literal string 'main' — bash's placeholder for a stdin script, measured on
+# 5.2.21 — so asking the documented installer for help through the documented
+# pipe answered:
+#
+#   $ curl -fsSL <url>/install.sh | bash -s -- --help
+#   sed: can't read main: No such file or directory
+#   exit=1
+#
+# ...as the very first thing anyone runs. The stream is consumed by the time
+# this could look at it, so there is nothing to print instead. Say that, and
+# point at the download-first route the header already recommends.
+#
+# 'main' is excluded by name as well as by -r, because a file called 'main' in
+# the working directory would otherwise be read and printed as this script's
+# own help.
+usage() {
+  local self="${BASH_SOURCE[0]:-}"
+  if [[ "${self}" != "main" && -r "${self}" ]]; then
+    sed -n '2,/^[^#]/p' "${self}" | grep '^#' | sed 's/^# \{0,1\}//'
+    return 0
+  fi
+  cat <<EOF
+install.sh — one-command installer for local-code-agent.
+
+This copy was piped into bash, so there is no file here to read the help out
+of. Fetch it first — which is the safer way to run it anyway, and what the
+header of this script recommends:
+
+  curl -fsSL ${REPO_URL%.git}/raw/${BRANCH}/install.sh -o install.sh
+  less install.sh          # read it
+  bash install.sh --help   # the full help, from the file
+EOF
+}
+
 # Root without assuming sudo exists (containers often lack it) and without
 # assuming we are not already root (cloud-init, Docker).
-if [[ "${EUID}" -eq 0 ]]; then
-  SUDO=()
-elif command -v sudo >/dev/null 2>&1; then
-  SUDO=(sudo)
-else
-  fail "This installer needs root to write ${INSTALL_DIR} and install packages, but you are not root and 'sudo' is not installed. Re-run as root."
-fi
-
-say "local-code-agent installer"
-info "repository : ${REPO_URL} (branch ${BRANCH})"
-info "install to : ${INSTALL_DIR}"
-
-# --- 1. git ------------------------------------------------------------------
-if ! command -v git >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    say "Installing git"
-    # DPkg::Lock::Timeout waits out apt-daily/unattended-upgrades, which
-    # routinely holds the dpkg lock in the first minutes of a fresh boot.
-    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
-      apt-get -o DPkg::Lock::Timeout=600 update -y
-    "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
-      apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates curl
+# Everything below runs inside main(), called on the very last line.
+#
+# This file is advertised as 'curl -fsSL ... | bash', which streams the
+# script into bash and executes each statement as it arrives. A connection
+# that drops part-way through would otherwise run a PARTIAL installer — far
+# enough to apt-get install git and create the directory, not far enough to
+# clone or hand over to setup.sh — and it would exit 0 having done so.
+#
+# Wrapped, a truncated download simply never reaches the call at the bottom,
+# so nothing happens at all. That is the difference between a failed install
+# and a half-done one nobody knows about.
+main() {
+  # First statement in the function, above every side effect. Asking this
+  # script what it does used to be answered by installing packages and cloning
+  # into ${INSTALL_DIR} — measured, not theorised: './install.sh --help' had to
+  # be killed by a timeout, and left a checkout behind.
+  case "${1:-}" in
+    "") ;;
+    -h|--help) usage; exit 0 ;;
+    # Everything else, refused here — above every side effect, for the same
+    # reason --help is answered here. This script takes NO arguments: every
+    # knob is an environment variable, and there is no $1 anywhere below. So
+    # 'install.sh --dry-run', 'install.sh --branch main' and 'install.sh -n'
+    # each fell straight through this case and performed a full system
+    # install — apt-get, a clone into ${INSTALL_DIR}, and setup.sh — while
+    # appearing to have been told not to. The comment above records --help
+    # being fixed for exactly that; the rest of the option space was left.
+    #
+    # The env-var names are in the message because wanting a different branch
+    # or directory is the likeliest reason to have typed an argument at all.
+    *)
+      usage >&2
+      fail "This installer takes no arguments, so '${1}' would have been ignored and the install would have gone ahead anyway. Use the environment overrides instead: LCA_BRANCH, LCA_REPO_URL, LCA_DIR, LCA_RUN_SETUP."
+      ;;
+  esac
+  if [[ "${EUID}" -eq 0 ]]; then
+    SUDO=()
+  elif command -v sudo >/dev/null 2>&1; then
+    SUDO=(sudo)
   else
-    fail "git is not installed and this system has no apt-get. Install git, then re-run."
+    fail "This installer needs root to write ${INSTALL_DIR} and install packages, but you are not root and 'sudo' is not installed. Re-run as root."
   fi
-fi
 
-# --- 2. clone (or update an existing checkout) --------------------------------
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-  say "Updating the existing checkout in ${INSTALL_DIR}"
-  "${SUDO[@]}" git -C "${INSTALL_DIR}" fetch --depth 1 origin "${BRANCH}" \
-    || fail "Could not fetch ${BRANCH} from origin. Check connectivity, or that ${INSTALL_DIR} points at the right remote."
-  # Hard reset rather than pull: a half-applied local edit must never leave the
-  # installer wedged on a merge conflict during an unattended run.
-  "${SUDO[@]}" git -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
-else
-  say "Cloning into ${INSTALL_DIR}"
-  "${SUDO[@]}" mkdir -p "$(dirname "${INSTALL_DIR}")"
-  "${SUDO[@]}" git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${INSTALL_DIR}" \
-    || fail "Clone failed. Check connectivity and that ${REPO_URL} is reachable."
-fi
+  say "local-code-agent installer"
+  info "repository : ${REPO_URL} (branch ${BRANCH})"
+  info "install to : ${INSTALL_DIR}"
 
-"${SUDO[@]}" chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh 2>/dev/null || true
+  # --- 1. git ------------------------------------------------------------------
+  if ! command -v git >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      say "Installing git"
+      # DPkg::Lock::Timeout waits out apt-daily/unattended-upgrades, which
+      # routinely holds the dpkg lock in the first minutes of a fresh boot.
+      "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
+        apt-get -o DPkg::Lock::Timeout=600 update -y
+      "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive \
+        apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates curl
+    else
+      fail "git is not installed and this system has no apt-get. Install git, then re-run."
+    fi
+  fi
 
-if [[ "${RUN_SETUP}" != "true" ]]; then
-  say "Clone complete (LCA_RUN_SETUP=${RUN_SETUP} — setup was NOT run)"
-  info "Run it yourself with: sudo ${INSTALL_DIR}/setup.sh"
-  exit 0
-fi
+  # --- 2. clone (or update an existing checkout) --------------------------------
+  if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    say "Updating the existing checkout in ${INSTALL_DIR}"
+    "${SUDO[@]}" git -C "${INSTALL_DIR}" fetch --depth 1 origin "${BRANCH}" \
+      || fail "Could not fetch ${BRANCH} from origin. Check connectivity, or that ${INSTALL_DIR} points at the right remote."
+    # Hard reset rather than pull: a half-applied local edit must never leave the
+    # installer wedged on a merge conflict during an unattended run.
+    "${SUDO[@]}" git -C "${INSTALL_DIR}" reset --hard "origin/${BRANCH}"
+  else
+    say "Cloning into ${INSTALL_DIR}"
+    "${SUDO[@]}" mkdir -p "$(dirname "${INSTALL_DIR}")"
+    "${SUDO[@]}" git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${INSTALL_DIR}" \
+      || fail "Clone failed. Check connectivity and that ${REPO_URL} is reachable."
+  fi
 
-# --- 3. setup ----------------------------------------------------------------
-say "Running setup (first install downloads a model — expect 20-30 minutes)"
-# </dev/null matters: when this script is itself piped into bash, stdin is the
-# script text, and setup.sh's prompts would otherwise eat it.
-"${SUDO[@]}" "${INSTALL_DIR}/setup.sh" </dev/null
+  # A clone can succeed and still leave you without the project. Point
+  # LCA_REPO_URL at the wrong fork, or LCA_BRANCH at a branch that predates the
+  # code, and git exits 0 having checked out a tree with no setup.sh in it —
+  # observed here by accident, cloning a stale local 'main' that held only a
+  # README. Without this the installer says "Clone complete", chmod quietly
+  # matches nothing, and the failure surfaces later as a confusing missing-file
+  # error with no hint that the branch or URL was wrong.
+  #
+  # Check the outcome, not the exit status.
+  [[ -f "${INSTALL_DIR}/setup.sh" ]] \
+    || fail "Cloned ${REPO_URL} (branch ${BRANCH}) but it contains no setup.sh — that is not a local-code-agent checkout. Check LCA_BRANCH / LCA_REPO_URL."
 
-say "Done"
-info "Health check   : ${INSTALL_DIR}/check-system.sh"
-info "Prove it works : ${INSTALL_DIR}/scripts/selftest.sh"
-info "Code with it   : cd <your-project> && ${INSTALL_DIR}/run-agent.sh"
-info "Phone access   : sudo tailscale up   (then see ${INSTALL_DIR}/docs/PHONE.md)"
+  # bin/ included, like setup.sh, update.sh and deploy/do-user-data.sh: that is
+  # where the 'lca' command lives. This was the only one of the four that left
+  # it out, which matters exactly on the path where nothing else re-applies it —
+  # LCA_RUN_SETUP=false hands over to a setup.sh the user runs by hand, on a
+  # checkout made under whatever umask or filesystem dropped the bit.
+  "${SUDO[@]}" chmod +x "${INSTALL_DIR}"/*.sh "${INSTALL_DIR}"/scripts/*.sh "${INSTALL_DIR}"/bin/* 2>/dev/null || true
+
+  if [[ "${RUN_SETUP}" != "true" ]]; then
+    say "Clone complete (LCA_RUN_SETUP=${RUN_SETUP} — setup was NOT run)"
+    info "Run it yourself with: sudo ${INSTALL_DIR}/setup.sh"
+    exit 0
+  fi
+
+  # --- 3. setup ----------------------------------------------------------------
+  say "Running setup (first install downloads a model — expect 20-30 minutes)"
+  # </dev/null matters: when this script is itself piped into bash, stdin is the
+  # script text, and setup.sh's prompts would otherwise eat it.
+  "${SUDO[@]}" "${INSTALL_DIR}/setup.sh" </dev/null
+
+  # Deliberately NOT a second next-steps list.
+  #
+  # This is only reached after a setup.sh that exited 0, and setup.sh has just
+  # printed nine numbered next steps in the 'lca' vocabulary. Four more lines
+  # here, in the vocabulary of repo script paths, were a second and different
+  # answer to the same question, immediately below the first — in the very
+  # first thing a new user ever reads. The last of them, "cd <your-project> &&
+  # run-agent.sh", also contradicted the handover recipe the assistant is gated
+  # to emit ('cd ~/my-project && lca'), so the installer and the chat app
+  # taught different commands for the same job.
+  say "Done — the numbered next steps are just above, from setup"
+}
+
+# Same one-line exit as update.sh, for the same reason: re-running this
+# installer against an existing checkout does 'git reset --hard', and if you
+# ran it as ${INSTALL_DIR}/install.sh that rewrites the file bash is still
+# reading. Piped from curl there is no file to rewrite, but the on-disk case
+# is the one people reach for when re-installing.
+main "$@"; exit $?
